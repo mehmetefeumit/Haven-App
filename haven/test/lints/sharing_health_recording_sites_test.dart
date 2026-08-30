@@ -7,12 +7,10 @@
 // execution in `test/services/location_sharing_health_recording_test.dart`,
 // against the real service and a recording fake.
 //
-// What CANNOT be executed is the Android foreground service's publish cycle.
-// `BackgroundLocationTaskHandler._publishCycle` drives `CircleManagerFfi`
-// directly, so reaching it needs the Rust bridge and a live foreground service
-// — the same reason the disclosure gate and the decorrelation wiring in that
-// file are guarded this way
-// (`test/lints/publish_decorrelation_wiring_test.dart`). And what a unit test
+// The Android foreground service's publish cycle is executed too, over
+// `test/mocks/background_task_fakes.dart`
+// (`test/services/background_location_task_publish_cycle_test.dart` proves
+// the stamp lands only on an affirmative ack). What a unit test
 // cannot notice at all is a FOURTH publish site being added later without a
 // recording, which is precisely how the pipeline became silent in the first
 // place: three call sites each dropped their outcome into a `debugPrint`.

@@ -1,23 +1,17 @@
 #!/usr/bin/env bash
-# CI guard: the iOS app-switcher privacy blur — the iOS half of
-# `privacyWhatOthersSeeScreenshots`.
+# CI guard: the iOS app-switcher privacy blur.
 #
-# That string ships in thirteen languages and tells the user that "On iPhone it
-# cannot [block screenshots]: Haven blurs the app-switcher preview". Its
-# `@description` forbids flattening the two platforms into one claim. What this
-# guard checks of that sentence is split deliberately between all thirteen
-# locales and English alone; link 8 below says which is which, and means it.
-#
-# Android's half is a WINDOW flag pinned by `check_flag_secure_app_wide.sh`; the
-# iOS half is six lines of `AppDelegate.swift` — a `UIVisualEffectView` added on
-# resign and removed on become-active — and until this guard existed it was
-# backed by nothing at all. Delete those six lines and every gate in the repo
-# stays green while thirteen translations keep promising the blur.
+# iPhone cannot block screenshots, so what Haven does there is blur the
+# app-switcher preview: six lines of `AppDelegate.swift` — a `UIVisualEffectView`
+# added on resign and removed on become-active. Android's half is a WINDOW flag
+# pinned by `check_flag_secure_app_wide.sh`. Until this guard existed the iOS
+# half was backed by nothing at all: delete those six lines and every other gate
+# in the repo stays green.
 #
 # There is no runtime proof available here: the repo-guards job has no Xcode, no
 # Simulator, and the OS-captured snapshot is not observable from inside the
 # process even when there is one. So this pins, statically, every link the
-# promise rests on. It is a UNION — each link can be removed on its own, each
+# blur rests on. It is a UNION — each link can be removed on its own, each
 # such edit reads locally reasonable in a diff, and each leaves the others
 # looking correct:
 #
@@ -106,30 +100,6 @@
 #      Android guard's `android:name` link. Read with xmllint, so a key inside
 #      an XML comment is not mistaken for a live one.
 #
-#   8. THE PROMISE IS STILL MADE. Two halves, on purpose, and they cover
-#      different ground — read them as such, because a guard that claims the
-#      wider one and performs the narrower is worse than no guard at all:
-#
-#      ACROSS ALL THIRTEEN LOCALE ARBs, the key must exist and be non-empty, and
-#      there must still be thirteen of them. That is what makes "in thirteen
-#      languages" a checked statement rather than a remembered one: a clause
-#      dropped, emptied or whitespaced out in a translation nobody on the
-#      English review reads is the stale-translation shape this project has been
-#      bitten by before, and `arb_parity_check.dart` would not object either —
-#      it compares keys, placeholders and plural categories, not whether the
-#      sentence is still there in a locale whose file was deleted outright.
-#
-#      IN app_en.arb ALONE, the value must still name Android, iPhone/iOS and
-#      the blur, so the two platforms cannot be flattened into one claim (which
-#      the key's own @description forbids). English-only, deliberately: the
-#      translations re-word all three ("unscharf", "difumina", "ぼかします"),
-#      and a guard that demanded English tokens in Persian would be a guard
-#      against translating.
-#
-#      Together with links 2-6 this closes the loop in both directions: the code
-#      cannot be deleted while the sentence stands, and the sentence cannot be
-#      deleted or flattened while the code stands.
-#
 # THE SLICING HAZARD, DELIBERATELY HANDLED. Checks 2-6 are bound to ONE method
 # body each, not to the file, because "somewhere in AppDelegate.swift" is not
 # where any of them has to be. The Android twin was written first and its first
@@ -147,7 +117,7 @@
 # A stray `}` inside a string truncates instead of widening, which fails closed
 # through the presence checks.
 #
-# Pure bash + coreutils + xmllint + jq. No Xcode, no toolchain.
+# Pure bash + coreutils + xmllint. No Xcode, no toolchain.
 #
 # Usage:
 #   check_ios_privacy_blur.sh              # check the tree
@@ -158,25 +128,12 @@
 #   1  an invariant is violated (including "the anchor is gone" — a moved or
 #      renamed subject scans nothing, which is a failure, not a pass)
 #   2  the guard itself is broken (a body that never closes, an unparsable
-#      Info.plist or ARB, a missing input file, a failed self-test)
+#      Info.plist, a missing input file, a failed self-test)
 
 set -Eeuo pipefail
 
 SCRIPT_NAME="check_ios_privacy_blur"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-
-# How many locale ARBs Haven ships. A FLOOR, not an equality: adding a fourteenth
-# language passes untouched, deleting one fails. It is pinned because this file
-# says "thirteen languages" in its own prose and in two failure messages, and a
-# number a guard asserts but does not check is the overclaim this workstream
-# exists to remove. Dropping a locale is a decision; make it here and in the
-# wording this pins, in the same commit.
-LOCALE_ARB_FLOOR=13
-
-# How many locale ARBs were actually read, set by check_promise_still_made. The
-# success line reports THIS, not the floor: printing the floor would announce
-# "all 13 locales" on the day a fourteenth language ships and is scanned.
-LOCALE_ARB_COUNT=0
 
 log() { printf '\033[1;34m[%s]\033[0m %s\n' "${SCRIPT_NAME}" "$*"; }
 fail_msg() { printf '\033[1;31m[%s] FAIL:\033[0m %s\n' "${SCRIPT_NAME}" "$*" >&2; }
@@ -291,9 +248,8 @@ this guard with it — a guard with no subject certifies nothing."
     "${code}" | head -1 | cut -d: -f1)"
   if [[ -z "${decl_line}" ]]; then
     fail_msg "${swift##*/} has no \`privacyBlurView: UIVisualEffectView?\` property. \
-privacyWhatOthersSeeScreenshots promises, in thirteen languages, that Haven blurs \
-the iPhone app-switcher preview; nothing else in this app does that. Remove the \
-promise first, in every locale, if the blur is really going."
+Nothing else in this app blurs the iPhone app-switcher preview; if the blur is \
+really going, retire this guard in the same commit."
     return 1
   fi
 
@@ -608,93 +564,6 @@ delegate and re-point this guard at it."
 }
 
 # ---------------------------------------------------------------------------
-# check_promise_still_made <l10n-dir>          — link 8
-#
-# Two halves that cover different ground; see link 8 in the header for why.
-#
-#   ALL THIRTEEN LOCALE ARBs: the key exists and is non-empty, and the set is
-#   still thirteen strong. Presence, not wording — a translation SOFTENED is not
-#   detectable here and is not claimed to be; a translation deleted, emptied or
-#   whitespaced out is.
-#
-#   app_en.arb ALONE: the value still names Android, iPhone/iOS and the blur.
-#   English-only, because every translation legitimately re-words all three.
-# ---------------------------------------------------------------------------
-check_promise_still_made() {
-  local dir="$1" fail=0 broken=0
-  local arbs=() f
-
-  for f in "${dir}"/app_*.arb; do
-    [[ -f "${f}" ]] && arbs+=("${f}")
-  done
-  LOCALE_ARB_COUNT="${#arbs[@]}"
-
-  local en_seen=0 en_value='' locale value empty=()
-  for f in "${arbs[@]}"; do
-    if ! jq -e . "${f}" >/dev/null 2>&1; then
-      broken_msg "${f##*/} is not valid JSON; this guard cannot read it."
-      broken=1
-      continue
-    fi
-    value="$(jq -r '.privacyWhatOthersSeeScreenshots // ""' "${f}")"
-    locale="${f##*/app_}"
-    if [[ "${f##*/}" == 'app_en.arb' ]]; then
-      en_seen=1
-      en_value="${value}"
-    fi
-    [[ -n "${value//[[:space:]]/}" ]] || empty+=("${locale%.arb}")
-  done
-  (( broken == 0 )) || return 2
-
-  if (( ${#arbs[@]} < LOCALE_ARB_FLOOR )); then
-    fail_msg "only ${#arbs[@]} locale ARBs under ${dir}, and this guard says — \
-in its own header and in the failure messages above — that the app-switcher blur \
-is promised in ${LOCALE_ARB_FLOOR} languages. A locale file deleted outright \
-takes its copy of the promise with it and leaves every key-parity check happy. \
-If a language is really being dropped, drop it in LOCALE_ARB_FLOOR and in the \
-wording that constant pins, in the same commit."
-    fail=1
-  fi
-  if (( ${#empty[@]} > 0 )); then
-    fail_msg "privacyWhatOthersSeeScreenshots is missing or empty in: \
-${empty[*]}. Haven tells users in every language it ships that the iPhone \
-app-switcher preview is blurred; a locale where that sentence has quietly gone \
-is a locale where the iOS half of this promise is no longer made at all, and no \
-English review would ever see it."
-    fail=1
-  fi
-
-  # The one anti-vacuity floor, covering both ways of arriving with nothing to
-  # read: a directory with no ARBs at all reaches it too, since an empty set
-  # contains no app_en.arb either. An earlier draft had a separate refusal for
-  # the empty set; it returned the same verdict on the same input, so no
-  # fixture could tell the two apart and the second one was deleted.
-  if (( en_seen == 0 )); then
-    broken_msg "no app_en.arb under ${dir} (${#arbs[@]} locale ARB(s) found), so \
-the structural half of this check — Android + iPhone/iOS + blur — has nothing to \
-read. A check with no subject certifies nothing: refusing to report a verdict."
-    return 2
-  fi
-  # Skipped when English is empty: that is already reported above, and the token
-  # list would otherwise repeat it as three separate missing words.
-  if [[ -n "${en_value//[[:space:]]/}" ]]; then
-    local missing=()
-    grep -qi 'android' <<<"${en_value}" || missing+=('Android')
-    grep -qiE 'iphone|ios' <<<"${en_value}" || missing+=('iPhone/iOS')
-    grep -qi 'blur' <<<"${en_value}" || missing+=('the blur')
-    if (( ${#missing[@]} > 0 )); then
-      fail_msg "app_en.arb's privacyWhatOthersSeeScreenshots no longer mentions: \
-${missing[*]}. The claim is asymmetric on purpose — Android blocks capture \
-everywhere, iPhone only blurs the switcher preview — and its @description forbids \
-flattening the two platforms into one sentence. Value now: \"${en_value}\""
-      fail=1
-    fi
-  fi
-
-  (( fail == 0 ))
-}
-
-# ---------------------------------------------------------------------------
 # Self-test — hermetic fixtures, no repo state, no toolchain.
 #
 # One mutation per CHECK — not per link, which is coarser than the checks are
@@ -702,8 +571,8 @@ flattening the two platforms into one sentence. Value now: \"${en_value}\""
 # one's reason — each of them an edit that leaves the file compiling and
 # reading correctly, plus both false-positive directions (prose that names every
 # token is not code; code that happens to contain a brace in a string literal is
-# still one method) and the anti-vacuity floors (a missing anchor, either
-# runaway slice, and an ARB set with nothing in it are failures, never passes).
+# still one method) and the anti-vacuity floors (a missing anchor and either
+# runaway slice are failures, never passes).
 #
 # Each fixture must trip the check it is NAMED after. That is not bookkeeping: a
 # fixture that fails for the neighbouring link's reason reports coverage of a
@@ -719,17 +588,16 @@ self_test() {
   # Bump this in the SAME commit that adds or removes a fixture. Equality, not a
   # floor: a floor lets deletions hide under the slack, which is exactly how the
   # previous version of this suite could lose cases silently.
-  local -r SELF_TEST_FIXTURES=50
+  local -r SELF_TEST_FIXTURES=39
   local tmp fails=0 checked=0
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
   trap "rm -rf '${tmp}'" RETURN
 
-  # The same preconditions main() enforces. Without them the plist and ARB
-  # fixtures report "want rc=0, got rc=2" and read as a broken guard, when what
-  # is actually missing is a package.
+  # The same precondition main() enforces. Without it the plist fixtures
+  # report "want rc=0, got rc=2" and read as a broken guard, when what is
+  # actually missing is a package.
   command -v xmllint >/dev/null 2>&1 || misconfig "xmllint (libxml2-utils) is required to run the self-test"
-  command -v jq >/dev/null 2>&1 || misconfig "jq is required to run the self-test"
 
   _record() {
     local label="$1" want="$2" got="$3"
@@ -766,46 +634,6 @@ ${rem}"
       "$3" >"${tmp}/Info.plist"
     ( check_no_scene_lifecycle "${tmp}/Info.plist" ) >/dev/null 2>&1 || got=$?
     _record "$1" "$2" "${got}"
-  }
-
-  # The thirteen locales Haven ships. The ARB fixtures write a full set every
-  # time, so the floor is live in all of them rather than resting on one
-  # fixture that could rot on its own.
-  local locales=(ar de en es fa fr hi ja ne pt ru tr ur)
-  # A stand-in translation carrying NONE of the three English tokens. That is
-  # the point of it: the fixtures that pass with this in twelve files are what
-  # prove the token half is English-only and not a tax on translators.
-  local translated='{"privacyWhatOthersSeeScreenshots": "これは端末によって異なります。アンドロイドでは全面的に禁止し、アイフォーンでは切替画面の見本をぼかします。"}'
-  local claim_en='{"privacyWhatOthersSeeScreenshots": "This depends on your phone. On Android, Haven blocks screenshots and screen recording everywhere in the app. On iPhone it cannot: Haven blurs the app-switcher preview, but a member can still capture what is on screen."}'
-
-  _write_l10n() { # _write_l10n <en-json> <locale>... — writes a whole ARB set
-    local en="$1" loc
-    shift
-    rm -rf "${tmp}/l10n"
-    mkdir -p "${tmp}/l10n"
-    for loc in "$@"; do
-      if [[ "${loc}" == 'en' ]]; then
-        printf '%s' "${en}" >"${tmp}/l10n/app_en.arb"
-      else
-        printf '%s' "${translated}" >"${tmp}/l10n/app_${loc}.arb"
-      fi
-    done
-  }
-
-  _arb() { # _arb <label> <want-rc> <en-json> [<locale> <that-locale's-json>]
-    local got=0
-    _write_l10n "$3" "${locales[@]}"
-    (( $# < 5 )) || printf '%s' "$5" >"${tmp}/l10n/app_$4.arb"
-    ( check_promise_still_made "${tmp}/l10n" ) >/dev/null 2>&1 || got=$?
-    _record "$1" "$2" "${got}"
-  }
-
-  _arb_set() { # _arb_set <label> <want-rc> <locale>... — a set of another size
-    local label="$1" want="$2" got=0
-    shift 2
-    _write_l10n "${claim_en}" "$@"
-    ( check_promise_still_made "${tmp}/l10n" ) >/dev/null 2>&1 || got=$?
-    _record "${label}" "${want}" "${got}"
   }
 
   # The committed shape, reused as the base for every mutation below.
@@ -1107,51 +935,6 @@ ${rem}"
   _plist 'an unparsable Info.plist is broken, not a violation' 2 \
 '<key>UIMainStoryboardFile</key><string>Main'
 
-  # -- link 8, the English half ---------------------------------------------
-  # The first fixture carries a full set of twelve translations that contain
-  # none of "Android", "iPhone" or "blur" in ASCII, so it also pins the half
-  # that is deliberately NOT checked across locales: a translated wording must
-  # never be a failure.
-  _arb 'the shipped asymmetric claim, with translations that share no English token, passes' 0 \
-"${claim_en}"
-  _arb 'the iOS clause deleted from English FAILS' 1 \
-'{"privacyWhatOthersSeeScreenshots": "On Android, Haven blocks screenshots and screen recording everywhere in the app."}'
-  _arb 'the two platforms flattened into one claim FAILS' 1 \
-'{"privacyWhatOthersSeeScreenshots": "Haven blurs the preview of the app whenever you switch away from it."}'
-  _arb 'an unparsable English ARB is broken, not a violation' 2 \
-'{"privacyWhatOthersSeeScreenshots": '
-
-  # -- link 8, the thirteen-locale half -------------------------------------
-  # This is the half the header claims and the half that was, until now, read
-  # off app_en.arb alone. Each of these is a stale-translation shape: the
-  # English sentence is intact and correct in the three that follow.
-  #
-  # The first one is English's own, and it belongs HERE rather than above:
-  # app_en.arb is one of the thirteen, so a key deleted from it is caught by the
-  # presence branch and never reaches the Android/iPhone/blur token branch at
-  # all. Filed under the English half, it reported coverage of a check it does
-  # not exercise.
-  _arb 'the claim deleted from English FAILS on the presence half' 1 \
-'{"privacyTitle": "Privacy"}'
-  _arb 'the claim deleted from ONE translation FAILS' 1 \
-"${claim_en}" fa '{"privacyTitle": "حریم خصوصی"}'
-  _arb 'a translation blanked to whitespace FAILS' 1 \
-"${claim_en}" tr '{"privacyWhatOthersSeeScreenshots": "   "}'
-  _arb 'an unparsable TRANSLATION is broken, not a violation' 2 \
-"${claim_en}" ru '{"privacyWhatOthersSeeScreenshots": '
-  # A locale file deleted outright takes its copy of the promise with it, and
-  # leaves nothing behind for a per-key check to notice.
-  _arb_set 'a dropped locale FAILS' 1 ar de en es fa fr hi ja ne pt ru tr
-  # Anti-vacuity. Both of these land on the SAME refusal — an empty directory
-  # has no app_en.arb either — and they are both kept because they are two
-  # different mistakes a caller makes: pointing this guard at the wrong
-  # directory, and deleting the template. Neither may report a clean tree. The
-  # second set is thirteen strong on purpose, so it clears the floor and fails
-  # only on the missing template.
-  _arb_set 'an l10n directory with no ARBs at all is BROKEN' 2
-  _arb_set 'a set with no app_en.arb is BROKEN, not a pass' 2 \
-    ar de es fa fr hi ja ne pt ru tr ur zh
-
   if (( checked != SELF_TEST_FIXTURES )); then
     fail_msg "the self-test ran ${checked} fixtures; SELF_TEST_FIXTURES pins \
 ${SELF_TEST_FIXTURES}. Every check in this guard is backed by exactly one \
@@ -1176,13 +959,11 @@ main() {
   (( $# == 0 )) || misconfig "usage: ${SCRIPT_NAME}.sh [--self-test]"
 
   command -v xmllint >/dev/null 2>&1 || misconfig "xmllint (libxml2-utils) is required"
-  command -v jq >/dev/null 2>&1 || misconfig "jq is required"
 
   local swift="${REPO_ROOT}/haven/ios/Runner/AppDelegate.swift"
   local plist="${REPO_ROOT}/haven/ios/Runner/Info.plist"
-  local l10n="${REPO_ROOT}/haven/lib/l10n"
   local path
-  for path in "${swift}" "${plist}" "${l10n}/app_en.arb"; do
+  for path in "${swift}" "${plist}"; do
     [[ -f "${path}" ]] || misconfig "${path} not found"
   done
 
@@ -1197,21 +978,17 @@ main() {
   }
   run_check check_blur_lifecycle "${swift}"
   run_check check_no_scene_lifecycle "${plist}"
-  run_check check_promise_still_made "${l10n}"
 
   if (( broken )); then
     exit 2
   fi
   if (( status != 0 )); then
-    fail_msg "the iOS app-switcher blur no longer backs \
-privacyWhatOthersSeeScreenshots (see above)."
+    fail_msg "the iOS app-switcher blur is no longer intact (see above)."
     exit 1
   fi
   log "OK: the app-switcher blur is installed on applicationWillResignActive, \
 covers the window with a real blur, is removed and re-armed only on \
-applicationDidBecomeActive, the app still uses the application lifecycle, the \
-promise is still made in all ${LOCALE_ARB_COUNT} locales scanned, and the \
-English wording still names both platforms and the blur."
+applicationDidBecomeActive, and the app still uses the application lifecycle."
   exit 0
 }
 

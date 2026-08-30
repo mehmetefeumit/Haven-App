@@ -1,9 +1,9 @@
 /// Widget tests for [AboutPage].
 ///
-/// After the Privacy consolidation, About carries only identity, attribution
-/// and legal content. The negative assertions below are the guard that the
-/// privacy material does not creep back in: two copies of a claim across 13
-/// locales is how the copy drifted out of sync with the code in the first place.
+/// About carries only identity, attribution and legal content. The negative
+/// assertions below are the guard that the removed privacy explainer does not
+/// creep back in: copy across 13 locales is how the claims drifted out of sync
+/// with the code in the first place.
 library;
 
 import 'package:flutter/material.dart';
@@ -62,8 +62,8 @@ void main() {
   testWidgets('no longer carries the privacy disclosures', (tester) async {
     await pumpLocalized(tester, const AboutPage());
 
-    // These moved to the Privacy section. If any reappears here, the app has
-    // two divergent answers to the same question again.
+    // The explainer was removed from the app outright; if any of it reappears
+    // here it has to be kept accurate again in thirteen languages.
     expect(find.text('Who can see what'), findsNothing);
     expect(find.textContaining('Relay operators'), findsNothing);
     expect(find.textContaining('FLAG_SECURE'), findsNothing);

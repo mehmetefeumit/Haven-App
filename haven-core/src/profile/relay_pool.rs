@@ -334,12 +334,11 @@ mod tests {
 
     #[test]
     fn pool_size_is_exactly_eight() {
-        // The size is quoted verbatim to the user — `privacyRelaysDetailIndexers`
-        // says "eight for looking up other people's names and photos" and
-        // `privacyRelaysDetailProfileLookups` says a saved profile "goes to all
-        // eight" — so resizing this pool is a copy change in every locale, not
-        // just a config change; `tests/privacy_copy_ties.rs` holds the
-        // constant and the English copy together.
+        // This size used to be quoted verbatim to the user (twice: the pool
+        // count, and "a saved profile goes to all eight"), so a resize was a
+        // copy change in every locale; both sentences went with the Privacy
+        // page (2026-08-29) and the copy-tie in `tests/privacy_copy_ties.rs`
+        // went with them. Nothing outside this assertion notices a resize now.
         assert_eq!(PRODUCTION_PROFILE_RELAYS.len(), 8);
     }
 

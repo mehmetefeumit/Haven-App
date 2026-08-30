@@ -220,8 +220,6 @@ void main() {
         l10n.sharingHealthRepairNotOwner,
         l10n.sharingHealthRepairNeedsNewCircle,
         l10n.sharingHealthRepairHint,
-        l10n.privacyEncryptionKeysChangeOnMembership,
-        l10n.privacyEncryptionDetailEpochs,
       ];
       for (final s in strings) {
         for (final needle in forbidden) {

@@ -12,17 +12,14 @@ import 'package:haven/src/pages/settings/about_page.dart';
 import 'package:haven/src/pages/settings/appearance_settings_page.dart';
 import 'package:haven/src/pages/settings/location_settings_page.dart';
 import 'package:haven/src/pages/settings/map_style_settings_page.dart';
-import 'package:haven/src/pages/settings/privacy_page.dart';
 import 'package:haven/src/pages/settings/relay_settings_page.dart';
 import 'package:haven/src/providers/debug_log_provider.dart';
-import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/widgets/widgets.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Page displaying app settings.
 ///
-/// Provides navigation to sub-settings pages for identity, privacy,
-/// notifications, and about information.
+/// Provides navigation to the sub-settings pages.
 class SettingsPage extends StatelessWidget {
   /// Creates the settings page.
   const SettingsPage({super.key});
@@ -91,19 +88,6 @@ class SettingsPage extends StatelessWidget {
                 context,
                 MaterialPageRoute<void>(
                   builder: (context) => const AppearanceSettingsPage(),
-                ),
-              );
-            },
-          ),
-          HavenSettingsTile(
-            key: WidgetKeys.privacyTile,
-            icon: LucideIcons.shieldCheck,
-            title: l10n.privacyTitle,
-            onTap: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute<void>(
-                  builder: (context) => const PrivacyPage(),
                 ),
               );
             },

@@ -234,7 +234,7 @@ rust|src/tiles/|94                           # measured 96.11% (642/668)
 # percentage point is 36 lines, so a single new uncovered file still moves this
 # row several points. That is exactly what the two points of headroom are for,
 # and why this row must never be pinned tight.
-flutter|lib/src/services/|58                 # measured 60.06% (1830/3047); was 46 (48.96%) before the
+flutter|lib/src/services/|65                 # measured 67.08% (2411/3594); was 46 (48.96%) before the
                                              # location-access gate, clock-skew detector and
                                              # session/cursor work brought their own tests
 
@@ -258,11 +258,14 @@ flutter|lib/src/services/subscription_service.dart|100      # measured 100.00% (
 # --- Background publishing and catch-up -------------------------------------
 # background_location_task.dart is the foreground-service isolate — the file
 # P0-1 lives in. First pinned at 1.69% (floor 0 by arithmetic) so a near-zero
-# stayed VISIBLE in a reviewed file instead of hidden inside a green aggregate.
-# It has since reached ~28%, but the background-wedge fixes of 2026-08-29
-# landed 62 new lines with 13 covered, leaving under a point of headroom: the
-# next uncovered line here reddens CI.
-flutter|lib/src/services/background_location_task.dart|27   # measured 29.30% (80/273)
+# stayed VISIBLE in a reviewed file instead of hidden inside a green aggregate;
+# it sat at ~28% until 2026-08-29, when the publish cycle became host-testable
+# (`test/mocks/background_task_fakes.dart` stands in for the FFI handles) and
+# the cycle's gates, Rule-13 ladder, fetch throttle and prune cadence got
+# behavioural tests. What remains uncovered is `onStart`'s bridge-bound
+# prologue (RustLib init, keyring, data dir, identity load) and
+# `backgroundCallback`.
+flutter|lib/src/services/background_location_task.dart|80   # measured 82.95% (287/346)
 flutter|lib/src/services/background_location_manager.dart|52 # measured 54.08% (53/98)
 flutter|lib/src/services/background_catchup_worker.dart|26  # measured 28.40% (23/81)
 
@@ -272,7 +275,7 @@ flutter|lib/src/services/background_catchup_worker.dart|26  # measured 28.40% (2
 # nostr_relay_preferences_service.dart sat at literal 0.00% when first pinned
 # — 88 instrumented lines, none executed by any test, invisible to the 50%
 # gate — and has since been fully covered, so it is pinned exactly at 100.
-flutter|lib/src/services/nostr_circle_service.dart|12       # measured 14.43% (87/603)
+flutter|lib/src/services/nostr_circle_service.dart|19       # measured 21.23% (128/603)
 flutter|lib/src/services/nostr_identity_service.dart|52     # measured 54.62% (65/119)
 flutter|lib/src/services/nostr_profile_service.dart|41      # measured 43.61% (58/133)
 flutter|lib/src/services/nostr_relay_service.dart|18        # measured 20.31% (39/192); was 0 (0.63%, 1/158)
@@ -300,7 +303,7 @@ flutter|lib/src/network/pinned_tile_client.dart|59|10       # measured 61.54% (8
 # --- Riverpod state and validators ------------------------------------------
 # The providers layer is where service results become UI state; the validators
 # are the input filters on relay URLs and npubs.
-flutter|lib/src/providers/|83                # measured 85.43% (1577/1846)
+flutter|lib/src/providers/|84                # measured 86.13% (1590/1846)
 flutter|lib/src/utils/|90                    # measured 92.37% (218/236)
 flutter|lib/src/utils/relay_url_validator.dart|93           # measured 95.83% (23/24)
 flutter|lib/src/utils/npub_validator.dart|82                # measured 84.38% (27/32)

@@ -8,6 +8,33 @@ enforces it in the toolchain-free `repo-guards` job.
 This document is the authoritative description of the contract. The schema is
 the file; this is the argument for it.
 
+## The explanatory Privacy page was removed (owner directive, 2026-08-29)
+
+Settings → Privacy, its topic pages, and all 85 `privacy*` ARB strings in 13
+locales were deleted. Keeping that prose true had become the single largest
+maintenance cost in the repository, and an explanation the app cannot keep
+accurate is worse than none. A different way to inform the user may be built
+later; nothing here reserves this one.
+
+What that changes, precisely:
+
+* **No `privacy*` ARB key exists.** Rule 12 still classifies every user-visible
+  claim, but the claim surface is now the consent dialog, the settings pages,
+  the notifications and the banners — the strings that carry a promise *while
+  the user acts*, not a page that explains the system.
+* **An invariant or accepted deviation may carry ZERO disclosure keys.** That is
+  a permitted, non-weakening state: the disclosure column shrank because the
+  surface was deleted, not because a promise was withdrawn. Every invariant's
+  `tests`, `guards` and `symbols` citations still bind, and the ratchet still
+  fails on a dropped disclosure key **that still exists**.
+* **No open "write this disclosure" decision survives.** Where a residual below
+  says a behaviour is disclosed nowhere, that is now a statement of fact about
+  the manifest, not a task. A behaviour that needs a user-visible warning gets
+  one at the surface where the user acts.
+* **Every mention of a `privacy*` key or of the Privacy page in the rest of this
+  document is historical** — the record of what the audits found while the page
+  existed. Do not treat any of it as an obligation to check or update.
+
 ## Why it exists
 
 Workstream F audited every user-facing privacy claim in the app and corrected
@@ -36,19 +63,26 @@ no longer wired fails.
   **non-removable**: the ratchet rejects a diff that drops one.
 * **`attributed_arb_keys`** — the string reports a THIRD PARTY's claim that
   Haven cannot enforce, and must never be collapsed into an unattributed
-  assertion. Exactly one ARB key is attributed: the VPN paragraph. The other
-  attributed claim is not an ARB string at all — the Stadia Maps policy sentence
-  inside the Play consent dialog is a `non_arb_claims` entry with
-  `kind: "attributed"`, which is why the label exists on both sides of the ARB
-  boundary. Each of the two invariants carrying one also carries an
+  assertion. **No ARB key is attributed any more**: the one that was — the VPN
+  paragraph — went with the Privacy page on 2026-08-29. The remaining attributed
+  claim is not an ARB string at all: the Stadia Maps policy sentence inside the
+  Play consent dialog is a `non_arb_claims` entry with `kind: "attributed"`,
+  which is why the label still exists on both sides of the ARB boundary. The
+  invariant carrying it also carries an
   `attribution` block with a provenance date, because an attributed claim's
   truth is "they said this, on this date", and that is what must be
   re-checkable.
 
 **The load-bearing rule is E3's:** an invariant whose `status` is
-`accepted_deviation` MUST carry zero assertion keys and at least one disclosure.
-You may not promise what you have accepted deviating from, and you may not
-record a deviation the user was never told about.
+`accepted_deviation` MUST carry zero assertion keys. You may not promise what
+you have accepted deviating from. The second half of that rule — *and at least
+one disclosure*, so that no deviation is recorded which the user was never told
+about — was dropped on 2026-08-29 when the surface that carried every
+deviation's disclosure was deleted; 9 of the accepted-deviation invariants now
+carry none. What that rule bought is not recoverable by CI while there is no
+explanation surface: the honest statement is that these costs are recorded here
+and in `SECURITY.md`, and are not told to the user. Restoring the requirement is
+the first thing to do if an explanation surface returns.
 
 Each declared deviation mirrors a section of some document in this repository,
 and rule 15 checks that the citation resolves — but **not that the document is

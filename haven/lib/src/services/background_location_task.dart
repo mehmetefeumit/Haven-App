@@ -171,6 +171,13 @@ SessionReclaimDecision evaluateSessionReclaimGates({
 }
 
 class BackgroundLocationTaskHandler extends TaskHandler {
+  /// [stagger] is injected only by tests, where a CSPRNG gap would turn every
+  /// multi-circle cycle into seconds of sleep; production takes the default,
+  /// and `publish_decorrelation_wiring_test.dart` pins that `lib/` never
+  /// builds the zero-gap sampler.
+  BackgroundLocationTaskHandler({PublishStagger? stagger})
+    : _stagger = stagger ?? PublishStagger();
+
   CircleManagerFfi? _circleManager;
   NostrIdentityManager? _identityManager;
   NostrRelayService? _relayService;
@@ -222,7 +229,7 @@ class BackgroundLocationTaskHandler extends TaskHandler {
   /// The isolate builds its own rather than reading a provider: there is no
   /// Riverpod container here. Both planes share the same bounds via the
   /// constants in `publish_stagger.dart`.
-  final PublishStagger _stagger = PublishStagger();
+  final PublishStagger _stagger;
 
   /// Completed the moment [onDestroy] begins, so a decorrelation wait inside
   /// [_publishCycle] aborts instead of holding teardown open.
@@ -272,9 +279,17 @@ class BackgroundLocationTaskHandler extends TaskHandler {
   @visibleForTesting
   GeolocatorLocationService? overrideLocationService;
 
-  /// Test-only override for the location-sharing service.
+  /// Test-only override for the location-sharing service. Applied by
+  /// [_wireSharingServices] AFTER the circle service is built over the real
+  /// manager seam, so a host test drives the publish cycle against a real
+  /// circle roster while the receive plane is a stand-in.
   @visibleForTesting
   LocationSharingService? overrideLocationSharingService;
+
+  /// Test-only override for the jitter sampler (`LocationEventService` is an
+  /// FFI opaque handle whose constructor needs the bridge).
+  @visibleForTesting
+  LocationEventService? overrideLocationEventService;
 
   /// Test-only override for the Rule-14 liveness query (`isSessionLive`).
   ///
@@ -326,11 +341,9 @@ class BackgroundLocationTaskHandler extends TaskHandler {
   /// [evaluateSessionReclaimGates].
   ///
   /// Production leaves this `null` and reads the real
-  /// `_identityManager?.hasIdentity()`. [NostrIdentityManager] is an FFI
-  /// opaque handle with no fake construction available outside the Rust
-  /// bridge, so a host test that wants to exercise the gates AFTER the
-  /// identity check — the guard/backoff/probe machinery this file exists
-  /// for — has no other way to make that check pass.
+  /// `_identityManager?.hasIdentity()`. Lets a reclaim test pass the identity
+  /// gate — and reach the guard/backoff/probe machinery behind it — without
+  /// adopting an identity through [startWithoutBridgeForTest].
   @visibleForTesting
   bool? overrideHasIdentity;
 
@@ -356,12 +369,7 @@ class BackgroundLocationTaskHandler extends TaskHandler {
     debugPrint('[BackgroundTask] onStart (starter=$starter)');
 
     // Clear the idle flag — the background isolate is now active.
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setBool(kBackgroundIdleKey, false);
-    } on Object catch (_) {
-      // Non-fatal — the flag is a best-effort coordination mechanism.
-    }
+    await _setIdle(false);
 
     try {
       // 1. Initialize Rust FFI in this isolate.
@@ -375,7 +383,8 @@ class BackgroundLocationTaskHandler extends TaskHandler {
           .getDataDirectory();
 
       // 4. Create identity manager and load from secure storage. MUST run
-      //    BEFORE the circle manager (step 5, below): Dark Matter's
+      //    BEFORE the circle manager (opened in `_bringUpSession`): Dark
+      //    Matter's
       //    `CircleManagerFfi.newInstance` hard-requires the identity secret
       //    bytes at construction time (it binds the account identity, the
       //    NIP-59 welcome signer, and the account-identity-proof signer).
@@ -397,34 +406,10 @@ class BackgroundLocationTaskHandler extends TaskHandler {
         }
       }
 
-      // 5. Create the circle manager (opens the same SQLCipher DB), only if
-      //    an identity was loaded (Dark Matter identity gating — see step 4).
-      //    Tests inject a pre-built instance via [overrideCircleManager];
-      //    only one CircleManagerFfi may exist per isolate or MLS state
-      //    will diverge across two in-memory engine sessions. With no
-      //    identity, `_circleManager` stays null — every downstream call
-      //    site already gates on it and no-ops, matching the pre-migration
-      //    no-identity behaviour.
-      //
-      //    The failure is caught INSIDE `_openCircleManager` on purpose. This
-      //    open is the one step that fails routinely for a recoverable reason
-      //    (the Rule-14 guard held by a session whose isolate is gone), and
-      //    letting it throw here would skip steps 6 and 7 as well — leaving the
-      //    isolate with no relay service and no location-sharing service, so a
-      //    later recovery that rebuilt only the manager could not publish.
-      _dataDir = dataDir;
-      await _openCircleManager();
-
-      // 6. Create relay, location, and jitter services.
-      await _ensureAuxServices();
-
-      // 7. Construct circle + location-sharing services so the background
-      //    isolate can fetch peer locations alongside publishing. The
-      //    circle service shares the existing CircleManagerFfi to avoid
-      //    spawning a second MLS state cache over the same DB. The
-      //    identity adapter only exposes pubkey hex — secret material
-      //    stays inside the underlying NostrIdentityManager.
-      _wireSharingServices();
+      // 5-7. Every step past the identity load has an `override*` seam, so
+      //    they live in `_bringUpSession`, which a host test can drive end to
+      //    end (see [startWithoutBridgeForTest]).
+      await _bringUpSession(dataDir);
 
       // 8. Per-circle publish scheduling (privacy: decorrelation) is seeded
       //    lazily in `_publishCycle` — each circle is registered "due now" the
@@ -442,6 +427,30 @@ class BackgroundLocationTaskHandler extends TaskHandler {
     } on Object catch (e) {
       debugPrint('[BackgroundTask] onStart FAILED: ${e.runtimeType}');
     }
+  }
+
+  /// [onStart] steps 5-7: the manager, the relay/location/jitter services and
+  /// the sharing services over them, in that order.
+  ///
+  /// The manager open comes first and its failure is caught INSIDE
+  /// `_openCircleManager` on purpose. It is the one step that fails routinely
+  /// for a recoverable reason (the Rule-14 guard held by a session whose
+  /// isolate is gone), and letting it throw here would skip the services too —
+  /// leaving the isolate with no relay service and no location-sharing service,
+  /// so a later recovery that rebuilt only the manager could not publish.
+  /// Tests inject a pre-built manager via [overrideCircleManager]; only one
+  /// `CircleManagerFfi` may exist per isolate or MLS state diverges across two
+  /// in-memory engine sessions. With no identity the manager stays null and
+  /// every downstream call site no-ops.
+  ///
+  /// The circle service shares that one manager rather than opening a second
+  /// MLS state cache over the same DB, and the identity adapter exposes only
+  /// the pubkey hex — secret material stays inside the identity manager.
+  Future<void> _bringUpSession(String dataDir) async {
+    _dataDir = dataDir;
+    await _openCircleManager();
+    await _ensureAuxServices();
+    _wireSharingServices();
   }
 
   @override
@@ -657,7 +666,8 @@ class BackgroundLocationTaskHandler extends TaskHandler {
       _relayService = relay;
     }
     _locationService ??= overrideLocationService ?? GeolocatorLocationService();
-    _locationEventService ??= LocationEventService();
+    _locationEventService ??=
+        overrideLocationEventService ?? LocationEventService();
   }
 
   /// Repairs an isolate that holds a manager but never finished wiring.
@@ -680,10 +690,6 @@ class BackgroundLocationTaskHandler extends TaskHandler {
   /// No-op when the manager is absent, so it is safe to call both from
   /// [onStart] and after a recovery.
   void _wireSharingServices() {
-    if (overrideLocationSharingService != null) {
-      _locationSharingService = overrideLocationSharingService;
-      return;
-    }
     if (_identityManager == null ||
         _circleManager == null ||
         _relayService == null) {
@@ -693,6 +699,11 @@ class BackgroundLocationTaskHandler extends TaskHandler {
       relayService: _relayService!,
       injectedManager: _circleManager!,
     );
+    final overrideSharing = overrideLocationSharingService;
+    if (overrideSharing != null) {
+      _locationSharingService = overrideSharing;
+      return;
+    }
     _locationSharingService = LocationSharingService(
       circleService: _circleService!,
       relayService: _relayService!,
@@ -763,15 +774,13 @@ class BackgroundLocationTaskHandler extends TaskHandler {
       return _attemptSessionReclaim();
     }
 
-    // Free — the post-handoff steady state. Just take it.
+    // Free — the post-handoff steady state. Just take it. The repair helper
+    // is the wiring step: it also rebuilds any service bring-up lost.
     await _openCircleManager();
     if (_circleManager == null) return false;
-    _wireSharingServices();
-    if (_locationSharingService != null) {
-      debugPrint('[BackgroundTask] session acquired');
-      return true;
-    }
-    return _repairSharingServices();
+    if (!await _repairSharingServices()) return false;
+    debugPrint('[BackgroundTask] session acquired');
+    return true;
   }
 
   /// Tries to recover from "the MLS session is held by an isolate that is
@@ -1523,10 +1532,10 @@ class BackgroundLocationTaskHandler extends TaskHandler {
 
   /// Test seam for [_sleepUnlessShuttingDown].
   ///
-  /// The publish cycle it lives in is bridge-bound (it drives `CircleManagerFfi`
-  /// directly, so `flutter test` cannot reach it), but the cancellability of
-  /// the wait is exactly the property that keeps a decorrelation gap from
-  /// becoming a teardown stall — so it is reachable on its own.
+  /// The cycle around it is reachable through [startWithoutBridgeForTest], but
+  /// the cancellability of the wait is exactly the property that keeps a
+  /// decorrelation gap from becoming a teardown stall — so it is provable on
+  /// its own, without a roster or a fix.
   @visibleForTesting
   Future<void> staggerWaitForTest(Duration d) => _sleepUnlessShuttingDown(d);
 
@@ -1539,13 +1548,22 @@ class BackgroundLocationTaskHandler extends TaskHandler {
 
   /// Test seam for the in-flight cycle [onDestroy] drains.
   ///
-  /// `_publishCycle` drives `CircleManagerFfi` directly, so `flutter test`
-  /// cannot produce a real one — but "teardown does not wait past the publish
-  /// already in flight" is exactly the bound the UI isolate's
-  /// `handoverTimeout` is derived from, so it is proven here rather than
-  /// assumed.
+  /// A bare future stands in for a cycle: "teardown does not wait past the
+  /// publish already in flight" is exactly the bound the UI isolate's
+  /// `handoverTimeout` is derived from, so it is proven on its own rather
+  /// than assumed.
   @visibleForTesting
   set inFlightPublishForTest(Future<void> cycle) => _inFlightPublish = cycle;
+
+  /// The cycle a preceding [onRepeatEvent] started, so a test can await the
+  /// real entry point instead of pumping the event queue and hoping.
+  @visibleForTesting
+  Future<void>? get inFlightPublishForTest => _inFlightPublish;
+
+  /// The per-circle schedule (keyed by hex `nostrGroupId`): what the cycle
+  /// seeded, re-armed, or cleared.
+  @visibleForTesting
+  PerCircleDueTracker get dueTrackerForTest => _dueTracker;
 
   /// Test seam for [_inFlightCommitCritical]. Same reason as
   /// [inFlightPublishForTest], and the property is the opposite one: this
@@ -1563,16 +1581,30 @@ class BackgroundLocationTaskHandler extends TaskHandler {
 
   /// Test seam for [_ensureSession].
   ///
-  /// `_ensureSession` and `_attemptSessionReclaim` are otherwise reachable
-  /// only through [onRepeatEvent], which is gated behind the FFI-bound
-  /// identity load in [onStart] — unreachable under `flutter test`. Setting
-  /// [_dataDir] here (never reachable from a test otherwise, since it is
-  /// private) is what lets the guard/backoff/probe machinery run against the
-  /// `override*` seams above without a device.
+  /// Reaches `_ensureSession` and `_attemptSessionReclaim` directly, without
+  /// the foreground-ownership gate a real cycle puts in front of them. Setting
+  /// [_dataDir] here is what lets the guard/backoff/probe machinery run
+  /// against the `override*` seams above without a device.
   @visibleForTesting
   Future<bool> ensureSessionForTest({required String dataDir}) {
     _dataDir = dataDir;
     return _ensureSession();
+  }
+
+  /// [onStart] past its bridge-bound steps (FFI init, keyring, data directory,
+  /// the identity load), which `flutter test` cannot run: adopts an identity
+  /// the way step 4 does, then runs the same bring-up. Unlike [onStart] it does
+  /// not swallow a failure, so a test sees exactly where bring-up stopped.
+  @visibleForTesting
+  Future<void> startWithoutBridgeForTest({
+    required NostrIdentityManager identityManager,
+    required String dataDir,
+  }) {
+    _identityManager = identityManager;
+    if (identityManager.hasIdentity()) {
+      _pubkeyHex = identityManager.pubkeyHex();
+    }
+    return _bringUpSession(dataDir);
   }
 
   /// Samples a jittered publish interval via the Rust CSPRNG.

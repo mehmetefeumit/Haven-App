@@ -18,15 +18,15 @@
 /// identity load `onStart` requires — mirroring the existing
 /// `staggerWaitForTest` seam for the same reason.
 ///
-/// # What this still cannot prove
+/// # What this file leaves to others
 ///
-/// [BackgroundLocationTaskHandler.overrideCircleManager] takes a real
-/// `CircleManagerFfi` — an FFI opaque handle with no fake construction
-/// available in a host test — so with no identity manager and no overridden
-/// manager, a "successful" reclaim in these tests still ends with no session
-/// to publish through; every test here observes the DECISION machinery
-/// (whether the destructive call runs, and in what order), not a publish. The
-/// full "reclaims and then genuinely publishes" claim is proven at the FFI
+/// Every test here runs with no identity manager and no overridden manager,
+/// so a "successful" reclaim ends with no session to publish through: the
+/// subject is the DECISION machinery (whether the destructive call runs, and
+/// in what order), not a publish. That a reclaim from a genuinely dead
+/// foreground ends in a PUBLISH in the same cycle is proven on the host by
+/// `background_location_task_cycle_gates_test.dart`, over a fake
+/// `CircleManagerFfi` (`test/mocks/background_task_fakes.dart`); at the FFI
 /// boundary by `force_release_does_not_release_while_a_manager_handle_is_alive`
 /// and `a_live_manager_is_visible_to_the_session_liveness_query`
 /// (`rust_builder/src/api.rs`) — a released guard IS re-acquirable — and at

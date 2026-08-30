@@ -307,9 +307,10 @@ void main() {
         reason: 'query first — it is cheap and decides which path applies',
       );
       expect(
-        ensureBody.contains('_wireSharingServices()'),
+        ensureBody.contains('_repairSharingServices()'),
         isTrue,
-        reason: 'an opened manager with no services still cannot publish',
+        reason: 'an opened manager with no services still cannot publish; the '
+            'repair helper wires them and rebuilds any that bring-up lost',
       );
     });
 

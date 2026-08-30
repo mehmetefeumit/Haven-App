@@ -8,11 +8,12 @@
 //!
 //! That union is deliberate and is a recorded privacy invariant
 //! (`docs/privacy/privacy_invariants.json`, "The eight profile relays and six
-//! discovery relays never overlap, and the user cannot remove them"), which the
-//! user-facing copy states in as many words: "You can add your own servers to
-//! the profile group, but you cannot take these eight out of it"
-//! (`privacyRelaysDetailIndexers`). So the divergence is resolved on the UI
-//! side — the Profile section offers no remove control for a curated entry
+//! discovery relays never overlap, and the user cannot remove them"). The
+//! user-facing sentence that stated this in as many words ("you cannot take
+//! these eight out of it") went with the Privacy page (2026-08-29), so the
+//! manifest and this test are now the whole record. The divergence is still
+//! resolved on the UI side — the Profile section offers no remove control for a
+//! curated entry
 //! (`haven/lib/src/pages/settings/relay_settings_page.dart`) — and this test is
 //! the premise that decision rests on.
 //!

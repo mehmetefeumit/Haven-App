@@ -236,31 +236,19 @@ List<(String, String)> _repairStrings(AppLocalizations l) => [
     'sharingHealthRepairUnresolvedAnnouncement',
     l.sharingHealthRepairUnresolvedAnnouncement,
   ),
-  // The Privacy section makes the SAME two claims about what changes a key and
-  // who can do it, in prose the user is far more likely to read carefully than
-  // a banner line. Leaving it out is how the creator-vs-admin error survived a
-  // round that had already corrected the banner.
-  (
-    'privacyEncryptionKeysChangeOnMembership',
-    l.privacyEncryptionKeysChangeOnMembership,
-  ),
-  ('privacyEncryptionDetailEpochs', l.privacyEncryptionDetailEpochs),
 ];
 
 /// The keys that must name the ADMIN role rather than the circle's creator.
 const _mustNotNameCreator = [
   'sharingHealthRepairNotOwner',
   'sharingHealthRepairHint',
-  'privacyEncryptionKeysChangeOnMembership',
-  'privacyEncryptionDetailEpochs',
 ];
 
 /// The keys whose claim is scoped to the circle's ADMIN.
 ///
 /// `sharingHealthRepairHint` needs it because the key clause is conditional on
 /// the role; `sharingHealthRepairNotOwner` needs it because naming who CAN
-/// repair is the whole message. The two privacy paragraphs are covered by the
-/// creator check instead: they state the trigger rather than address a user.
+/// repair is the whole message.
 const _mustNameTheRole = [
   'sharingHealthRepairHint',
   'sharingHealthRepairNotOwner',
@@ -362,8 +350,8 @@ void main() {
         // get, and a spot check of one locale cannot see it.
         //
         // Asserted against this locale's OWN badge term rather than a
-        // transliteration, so the two screens are also proved to agree — the
-        // banner and the Privacy section must not name the role differently.
+        // transliteration, so the banner and the member list are proved to
+        // name the role the same way.
         for (final key in _mustNameTheRole) {
           final value = _repairStrings(l).firstWhere((e) => e.$1 == key).$2;
           expect(

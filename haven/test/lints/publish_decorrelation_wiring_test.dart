@@ -16,14 +16,14 @@
 //     slow-publish case;
 //   * the stagger's own bounds: `test/services/publish_stagger_test.dart`.
 //
-// What CANNOT be executed is the background publish CYCLE that calls those
-// pieces. `BackgroundLocationTaskHandler._publishCycle` drives
-// `CircleManagerFfi` directly, so reaching it needs the Rust bridge and a live
-// foreground service — `flutter test` cannot get there, which is why the
-// disclosure gate in that same file is guarded the same way
-// (`test/services/background_location_disclosure_gate_test.dart`).
+// The background publish CYCLE that calls those pieces runs on the host too,
+// over `test/mocks/background_task_fakes.dart`
+// (`test/services/background_location_task_publish_cycle_test.dart` drives
+// two due circles through a real stagger). A behavioural run proves the gap
+// held for the circles it scheduled; it cannot see a later rewrite that
+// bypasses the stagger for some other path.
 //
-// So this file pins WIRING only: that the cycle still routes through the
+// So this file pins WIRING as well: that the cycle still routes through the
 // decorrelating helpers instead of the shapes it used to have. It matches
 // identifiers, never prose, so a comment rewrite cannot satisfy or break it.
 
@@ -160,6 +160,33 @@ void main() {
         code,
         contains('rng ?? Random.secure()'),
         reason: 'the default randomness source is no longer a CSPRNG',
+      );
+    });
+
+    test('production never constructs the zero-gap sampler', () {
+      // `PublishStagger.none()` collapses every gap to zero — the identical
+      // `created_at` linkage the stagger exists to prevent — and its own doc
+      // reserves it for tests. The handler takes its sampler by constructor,
+      // so building this in `lib/` is the one way to lose the CSPRNG.
+      final lib = Directory('lib').existsSync()
+          ? Directory('lib')
+          : Directory('haven/lib');
+      final offenders = lib
+          .listSync(recursive: true)
+          .whereType<File>()
+          .where((f) => f.path.endsWith('.dart'))
+          // The declaration itself lives here; every other match is a call.
+          .where((f) => !f.path.endsWith('publish_stagger.dart'))
+          .where(
+            (f) => _codeOnly(f.readAsStringSync())
+                .contains('PublishStagger.none('),
+          )
+          .map((f) => f.path)
+          .toList();
+      expect(
+        offenders,
+        isEmpty,
+        reason: 'a zero-gap stagger reached production code',
       );
     });
   });

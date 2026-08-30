@@ -23,10 +23,10 @@
 /// on a blank map — which is why the two numbers are defined together in
 /// `mls_session_handover.dart` and pinned against each other below.
 ///
-/// The publish cycle itself is bridge-bound (it drives `CircleManagerFfi`
-/// directly, so `flutter test` cannot reach it); the cancellable wait, the
+/// The publish cycle is reachable on the host (see
+/// `test/mocks/background_task_fakes.dart`), but the cancellable wait, the
 /// shutdown race and the in-flight cycle are exposed on their own so these
-/// properties are provable without a device.
+/// properties are provable in isolation, without a roster or a fix.
 library;
 
 import 'dart:async';

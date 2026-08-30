@@ -22,9 +22,9 @@
 #
 # CHECK 9b — THE DEPENDENCY SURFACE — is the one check documented here rather
 # than beside its code, because what it does NOT reach matters as much as what
-# it does. `privacyWhatHavenIsDetailNoTelemetry` promises, in thirteen
-# languages, that "the app contains no analytics, crash reporting, or
-# advertising code" and that this "can be checked rather than taken on trust".
+# it does. Haven ships no analytics, crash-reporting or advertising code — a
+# Security-Rule-10 posture, not a setting — and that has to be checkable rather
+# than taken on trust.
 # Check 9 already refuses a PUSH plugin; 9b is its sibling and shares its idiom.
 # It scans every place such a dependency can ARRIVE that this repo owns:
 #
@@ -34,8 +34,7 @@
 #     builds, which is exactly why haven/android/app/build.gradle.kts carries a
 #     `compileOnly(project(":integration_test"))` workaround. A reporting SDK
 #     in dev_dependencies is also live on every developer and CI device, and it
-#     is indistinguishable from a shipped one to the reader that the claim's
-#     second sentence invites to check the source.
+#     is indistinguishable from a shipped one to a reader checking the source.
 #   * `haven/pubspec.lock` — the TRANSITIVE graph, which the pubspec cannot
 #     show. An SDK pulled in by an innocent-looking package arrives here and
 #     nowhere else.
@@ -61,9 +60,6 @@
 #   * files whose mere PRESENCE is an SDK: google-services.json,
 #     GoogleService-Info.plist, agconnect-services.json, sentry.properties.
 #
-# It then reads the promise itself out of `haven/lib/l10n/app_*.arb`; see THE
-# COPY HALF below for what that does and does not establish.
-#
 # WHAT 9b CANNOT REACH, stated plainly so a green run is not read as more than
 # it is: (a) a HAND-ROLLED report — an http.post of usage data from Dart, Rust,
 # Kotlin or Swift — is not a dependency, and no name scan can see one; (b) a
@@ -87,8 +83,8 @@
 # or acquired) and WHO ships it (a hand-maintained vendor roster, which lags by
 # construction). Even both layers together only raise the cost of adding one of
 # the SDKs people actually reach for. A name scan is not, and is not claimed to
-# be, a proof that no telemetry is present; the claim's own second sentence —
-# that this can be CHECKED rather than taken on trust — is what carries the rest.
+# be, a proof that no telemetry is present; it raises the cost of the ordinary
+# case, no more.
 #
 # What 9b does make impossible is the failure mode a name scan usually dies of:
 # quietly examining nothing. Every manifest must exist AND yield the positions
@@ -99,17 +95,6 @@
 # executable build code (a file truncated to nothing still counts toward a file
 # TOTAL, so the count of files was never a floor), the AndroidManifest at least
 # one component and the Info.plist at least one key. The run prints what it read.
-#
-# THE COPY HALF IS SPLIT, the way check_ios_privacy_blur.sh splits it and for
-# the same reason. This file says "in thirteen languages" in its own prose and
-# in a failure message, and a number a guard asserts but does not check is the
-# overclaim this workstream exists to remove — so all thirteen locale ARBs are
-# checked here for the key's PRESENCE and non-emptiness. A locale file deleted,
-# or a translation emptied, takes the promise with it and no English review
-# would ever see it. The ENGLISH WORDING is checked by rule 10 of
-# check_privacy_invariants.sh, which reads app_en.arb and only app_en.arb. A
-# translation SOFTENED — reworded to promise less, in a language most reviewers
-# of this repo cannot read — is not detectable here and is not claimed to be.
 #
 # Checks 1-13 are milestone-independent (true whether the feature is inert or
 # live). Checks 14a-14i pin the RELEASED state so a regression cannot silently
@@ -285,13 +270,6 @@ TELEMETRY_MARKER_FILES=(
   haven/ios/sentry.properties
 )
 
-# How many locale ARBs must still carry the promise. Pinned because this file
-# says "thirteen languages" in its own header and in a failure message below,
-# and a number a guard asserts but does not check is exactly the overclaim it
-# is here to prevent. Dropping a language is a decision: make it here and in
-# the wording this constant pins, in the same commit.
-LOCALE_ARB_FLOOR=13
-
 # Gradle/Kotlin-DSL comment view. NOT the shared `code_view`: that one strips
 # from any `//` to end of line, which eats the tail of every `https://` URL —
 # and a custom Maven repo URL (`uri("https://sentry.io/maven")`) is precisely
@@ -383,16 +361,15 @@ telemetry_dependency_scan() {
   local root="$1" fail=0
   local n_files=0 n_dep=0 n_dep_main=0 n_dep_dev=0 n_lock=0 n_rust=0
   local n_gradle=0 n_gradle_lines=0
-  local n_plist=0 n_manifest=0 n_pods=0 n_arb=0
+  local n_plist=0 n_manifest=0 n_pods=0
 
   t_fail() { echo "FAIL: 9b: $*" >&2; fail=1; }
 
   # -- Dart, direct and dev --------------------------------------------------
   local pubspec="${root}/haven/pubspec.yaml"
   if [[ ! -f "${pubspec}" ]]; then
-    t_fail "haven/pubspec.yaml is missing. The dependency scan behind \
-privacyWhatHavenIsDetailNoTelemetry has nothing to read, which is a guard \
-failure — if the app moved, move this scan with it."
+    t_fail "haven/pubspec.yaml is missing. The dependency scan has nothing to \
+read, which is a guard failure — if the app moved, move this scan with it."
   else
     n_files=$(( n_files + 1 ))
     local deps ln sec name
@@ -427,9 +404,8 @@ claim invites the reader to check the source — where it is indistinguishable \
 from a shipped one."
       else
         t_fail "haven/pubspec.yaml:${ln} declares '${name}' under ${sec}. \
-privacyWhatHavenIsDetailNoTelemetry promises, in thirteen languages, that the \
-app contains no analytics, crash-reporting or advertising code. Remove the \
-promise in every locale first if that is really changing."
+Haven ships no analytics, crash-reporting or advertising code; that is a \
+Rule-10 decision, not a dependency to add quietly."
       fi
     done <<<"${deps}"
   fi
@@ -663,52 +639,12 @@ an analytics/crash-reporting SDK — so its presence is the SDK, whatever the \
 build files say."
   done
 
-  # -- the promise itself, in every locale that ships it ---------------------
-  # Presence and non-emptiness only. This is the half rule 10 of
-  # check_privacy_invariants.sh cannot cover: it reads app_en.arb alone, so the
-  # twelve translations of a claim this file calls a thirteen-language promise
-  # were checked by nothing. A softened translation is still invisible to both;
-  # see the header.
-  local l10n_dir="${root}/haven/lib/l10n"
-  local arbs=() af locale value arb_missing=()
-  for af in "${l10n_dir}"/app_*.arb; do
-    [[ -f "${af}" ]] && arbs+=("${af}")
-  done
-  n_arb="${#arbs[@]}"
-  for af in "${arbs[@]}"; do
-    n_files=$(( n_files + 1 ))
-    if ! jq -e . "${af}" >/dev/null 2>&1; then
-      t_fail "${af#"${root}/"} is not valid JSON, so this scan cannot tell \
-whether the no-telemetry promise is still made in that language."
-      continue
-    fi
-    value="$(jq -r '.privacyWhatHavenIsDetailNoTelemetry // ""' "${af}")"
-    locale="${af##*/app_}"
-    [[ -n "${value//[[:space:]]/}" ]] || arb_missing+=("${locale%.arb}")
-  done
-  if (( n_arb < LOCALE_ARB_FLOOR )); then
-    t_fail "only ${n_arb} locale ARB(s) under haven/lib/l10n, and this check \
-says — in its own header and in the failure message it prints when a telemetry \
-package is found — that the no-telemetry promise is made in \
-${LOCALE_ARB_FLOOR} languages. A locale file deleted outright takes its copy of \
-the promise with it and leaves every key-parity check happy. If a language is \
-really being dropped, drop it in LOCALE_ARB_FLOOR and in the wording that \
-constant pins, in the same commit."
-  fi
-  if (( ${#arb_missing[@]} > 0 )); then
-    t_fail "privacyWhatHavenIsDetailNoTelemetry is missing or empty in: \
-${arb_missing[*]}. Haven tells users in every language it ships that the app \
-contains no analytics, crash-reporting or advertising code; a locale where that \
-sentence has quietly gone is a locale where the promise is no longer made at \
-all, and no English-language review would ever see it."
-  fi
-
   # The anti-vacuity report: a moved manifest must never read as a clean tree,
   # so what was actually examined is printed on every run, pass or fail.
-  printf '  9b: dependency surface examined %d file(s) — %d pubspec position(s) (%d dependencies / %d dev_dependencies), %d locked package(s), %d Rust dependency name(s), %d Gradle file(s)/%d code line(s), %d Info.plist key(s), %d manifest component(s), %d Podfile(s), %d locale ARB(s).\n' \
+  printf '  9b: dependency surface examined %d file(s) — %d pubspec position(s) (%d dependencies / %d dev_dependencies), %d locked package(s), %d Rust dependency name(s), %d Gradle file(s)/%d code line(s), %d Info.plist key(s), %d manifest component(s), %d Podfile(s).\n' \
     "${n_files}" "${n_dep}" "${n_dep_main}" "${n_dep_dev}" "${n_lock}" \
     "${n_rust}" "${n_gradle}" "${n_gradle_lines}" "${n_plist}" \
-    "${n_manifest}" "${n_pods}" "${n_arb}"
+    "${n_manifest}" "${n_pods}"
 
   (( fail == 0 ))
 }
@@ -730,7 +666,7 @@ all, and no English-language review would ever see it."
 # silence — the failure this repo has already seen once, where MIN_CASES sat ten
 # below the real count and ten cases could have gone without a red run. Equality
 # turns every deletion into a visible one-line diff here.
-EXPECTED_FIXTURES=67
+EXPECTED_FIXTURES=61
 
 telemetry_self_test() {
   local tmp root fails=0 checked=0
@@ -747,7 +683,7 @@ telemetry_self_test() {
   # loud.
   _seed() {
     mkdir -p "${root}/haven/android/app/src/main" "${root}/haven/ios/Runner" \
-      "${root}/haven-core" "${root}/haven/rust_builder" "${root}/haven/lib/l10n"
+      "${root}/haven-core" "${root}/haven/rust_builder"
     cat > "${root}/haven/pubspec.yaml" <<'YAML'
 name: haven
 description: Private, end-to-end encrypted family location sharing.
@@ -768,11 +704,6 @@ dev_dependencies:
 flutter:
   uses-material-design: true
 YAML
-    local loc
-    for loc in en ar de es fa fr hi ja ne pt ru tr ur; do
-      printf '{\n  "privacyWhatHavenIsDetailNoTelemetry": "no-telemetry promise, %s"\n}\n' \
-        "${loc}" > "${root}/haven/lib/l10n/app_${loc}.arb"
-    done
     cat > "${root}/haven/pubspec.lock" <<'YAML'
 packages:
   archive:
@@ -1053,23 +984,6 @@ XML
   _case 'an unparsable AndroidManifest FAILS' 1 \
     'printf "<manifest><application" > "${root}/haven/android/app/src/main/AndroidManifest.xml"'
 
-  # -- the copy half: the promise is made in all thirteen languages ----------
-  _case 'the promise deleted from ONE non-English locale FAILS' 1 \
-    'printf "{}\n" > "${root}/haven/lib/l10n/app_ja.arb"'
-  _case 'the promise whitespaced out in one locale FAILS' 1 \
-    'printf "{\n  \"privacyWhatHavenIsDetailNoTelemetry\": \"   \"\n}\n" > "${root}/haven/lib/l10n/app_tr.arb"'
-  _case 'a deleted locale ARB (twelve left) FAILS' 1 \
-    'rm -f "${root}/haven/lib/l10n/app_ur.arb"'
-  _case 'no locale ARBs at all FAILS' 1 'rm -rf "${root}/haven/lib/l10n"'
-  _case 'an unparsable locale ARB FAILS' 1 \
-    'printf "{\"privacyWhatHavenIsDetailNoTelemetry\": " > "${root}/haven/lib/l10n/app_de.arb"'
-  # The honest limit, pinned so nobody later reads the check as more than it is:
-  # a translation REWRITTEN to promise less is still a non-empty string, and
-  # this scan passes it. English wording is rule 10's job; the other twelve
-  # languages are nobody's.
-  _case 'a SOFTENED translation still passes (not detectable, not claimed)' 0 \
-    'printf "{\n  \"privacyWhatHavenIsDetailNoTelemetry\": \"We collect only a little.\"\n}\n" > "${root}/haven/lib/l10n/app_es.arb"'
-
   if (( checked != EXPECTED_FIXTURES )); then
     printf '\033[1;31m[check_m7_native_wake_guards] FAIL:\033[0m the 9b self-test ran %d fixture(s) and EXPECTED_FIXTURES pins %d. A count that is only PRINTED lets fixtures be deleted silently, which is how a sibling guard lost ten cases with a green banner. Adding or removing a fixture is a deliberate act: change it here in the same commit.\n' \
       "${checked}" "${EXPECTED_FIXTURES}" >&2
@@ -1230,11 +1144,9 @@ fi
 
 # ---------------------------------------------------------------------------
 # 9b. NO analytics / crash-reporting / advertising dependency surface — the
-#     sibling of check 9, backing privacyWhatHavenIsDetailNoTelemetry. Scans
-#     the Dart, Rust, Gradle, AndroidManifest and iOS plist layers, and reads
-#     the promise out of all thirteen locale ARBs; see the header for the
-#     arrival paths covered, the four it cannot reach, the copy split it shares
-#     with check_privacy_invariants.sh rule 10, and why a dev_dependency fails.
+#     sibling of check 9. Scans the Dart, Rust, Gradle, AndroidManifest and iOS
+#     plist layers; see the header for the arrival paths covered, the four it
+#     cannot reach, and why a dev_dependency fails.
 # ---------------------------------------------------------------------------
 telemetry_dependency_scan "$REPO_ROOT" || FAILED=1
 

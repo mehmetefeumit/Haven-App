@@ -2,15 +2,13 @@
 ///
 /// Shows three independent relay categories — Inbox (kind 10050), KeyPackage
 /// (kind 10002), and Profile (kind-0, local-only policy — never published)
-/// — with add/remove/restore controls, plus a short caption linking to
-/// Privacy ▸ Relays for the full explanation.
+/// — with add/remove/restore controls, plus a short framing caption.
 ///
 /// The Profile section's remove control is deliberately absent on the curated
 /// pool entries — `usable_profile_relays()` unions
 /// `profile_relay_pool_default()` back in on every resolution (pinned by
 /// `haven-core/tests/profile_curated_pool_removal.rs`), so deleting one would
 /// shorten the list on screen without shortening what Haven actually dials.
-/// Privacy ▸ Relays already discloses this to the user.
 ///
 /// The Profile section also shows an advisory, non-blocking warning on any row
 /// whose relay already carries this account's location-plane traffic — circle,
@@ -29,8 +27,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/constants/relays.dart';
 import 'package:haven/src/pages/settings/add_relay_sheet.dart';
-import 'package:haven/src/pages/settings/privacy_content.dart';
-import 'package:haven/src/pages/settings/privacy_topic_page.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/legacy_retraction_provider.dart';
 import 'package:haven/src/providers/relay_preferences_provider.dart';
@@ -440,7 +436,7 @@ class _EditableRelayRow extends StatelessWidget {
 
   /// Removes this relay, or `null` to suppress the control — the curated
   /// profile-pool rows, which Haven dials regardless of whether a remove
-  /// button exists for them (Privacy ▸ Relays states the rule).
+  /// button exists for them.
   final VoidCallback? onRemove;
 
   /// Advisory-only: `true` when this relay also carries the account's
@@ -674,14 +670,11 @@ class _EmptyCategoryState extends ConsumerWidget {
   }
 }
 
-/// Short caption below the two relay sections, with a link into the Privacy
-/// section for the full explanation.
+/// Short caption below the two relay sections.
 ///
 /// This page is a *control* surface, so it keeps only enough framing to make
-/// the abstract "Inbox" / "KeyPackage" headers meaningful. The long-form
-/// explanation of what a relay is, which lists Haven keeps, and what a relay
-/// operator can observe now lives in Privacy ▸ Relays — one place, not two, so
-/// the two copies cannot drift apart.
+/// the abstract "Inbox" / "KeyPackage" headers meaningful — no long-form
+/// explainer, which is what let two copies of it drift apart before.
 class _BackendCaption extends StatelessWidget {
   const _BackendCaption();
 
@@ -691,26 +684,11 @@ class _BackendCaption extends StatelessWidget {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          l10n.relaySettingsBackendCaption,
-          style: theme.textTheme.bodySmall?.copyWith(
-            color: scheme.onSurfaceVariant,
-          ),
-        ),
-        Align(
-          alignment: AlignmentDirectional.centerStart,
-          child: TextButton(
-            onPressed: () => Navigator.push(
-              context,
-              PrivacyTopicPage.route(PrivacyTopic.relays),
-            ),
-            child: Text(l10n.commonLearnMore),
-          ),
-        ),
-      ],
+    return Text(
+      l10n.relaySettingsBackendCaption,
+      style: theme.textTheme.bodySmall?.copyWith(
+        color: scheme.onSurfaceVariant,
+      ),
     );
   }
 }

@@ -405,3 +405,27 @@ flutter doctor --android-licenses
 # Update Flutter
 flutter upgrade
 ```
+
+### `Unsupported runtime stages format version` after switching Flutter SDKs
+
+Dozens of widget tests fail at once with:
+
+```
+Asset 'shaders/ink_sparkle.frag' manifest could not be decoded:
+INVALID_ARGUMENT: Unsupported runtime stages format version. Expected 1, got 2.
+```
+
+Nothing is wrong with the tests. `flutter test` compiles the framework's
+shaders with its own `impellerc` and caches them in `build/unit_test_assets`,
+and it decides whether to rebuild that bundle from file mtimes alone — the SDK
+that compiled it is not an input (flutter/flutter#128563). Switch SDKs (which
+re-pinning the coverage floors requires) and the old bundle survives, so the
+new engine is handed shader binaries it cannot read. Every Material ink splash
+then throws.
+
+`scripts/ci/check_coverage.sh` clears the bundle automatically when the SDK
+changes. For a bare `flutter test` run:
+
+```bash
+rm -rf build/unit_test_assets    # or: flutter clean
+```

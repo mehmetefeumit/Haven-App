@@ -1,9 +1,9 @@
 /// Shared settings-row tile.
 ///
-/// Extracted from `settings_page.dart` so the Settings menu and the pages that
-/// present their own menu of sub-destinations (Privacy) render identical rows.
-/// Keeping one implementation is what stops a second menu from drifting
-/// visually against the Settings rows it sits beside.
+/// Extracted from `settings_page.dart` so the Settings menu and any page that
+/// presents its own menu of sub-destinations render identical rows. Keeping
+/// one implementation is what stops a second menu from drifting visually
+/// against the Settings rows it sits beside.
 library;
 
 import 'package:flutter/material.dart';

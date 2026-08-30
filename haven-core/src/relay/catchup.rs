@@ -69,7 +69,10 @@
 //! applying any applied NOTHING whenever the deadline landed mid-chase — and,
 //! with the cursor rightly held, did the same on the next wake and the one after
 //! it. Paying per page costs the engine out-of-order delivery (pages descend)
-//! and buys forward progress on every wake.
+//! and buys forward progress on every wake — with one floor to make that
+//! unconditional: the opening fetch can spend the WHOLE budget on its own, so a
+//! sweep that ENTERED with budget applies one event of what it fetched before
+//! the deadline binds again ([`CircleSweep::ingest_page`]).
 //!
 //! A boundary is followed only while it DESCENDS, and the first page's `until`
 //! is the window's own open second — so that second is the one the chase cannot
@@ -329,6 +332,7 @@ const CATCHUP_MAX_EVENTS_PER_CIRCLE: usize =
 const CATCHUP_MAX_CUTOFF_HOLDS: i64 = 3;
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use nostr::{Event, EventId, PublicKey, Timestamp};
@@ -1192,6 +1196,8 @@ async fn sweep_one_circle(
         relays,
         own_hex,
         deadline,
+        started_out_of_time: Instant::now() >= deadline,
+        ingested_any: AtomicBool::new(false),
         tolerate_cut_offs,
     };
 
@@ -1372,6 +1378,14 @@ struct CircleSweep<'a> {
     relays: &'a [String],
     own_hex: &'a str,
     deadline: Instant,
+    /// The wake budget was ALREADY gone when this circle was entered, so this
+    /// sweep never had time to spend and the progress floor in [`ingest_page`]
+    /// does not apply to it.
+    started_out_of_time: bool,
+    /// Whether any event of this circle has been through `ingest_one` yet.
+    /// Atomic rather than `Cell` so the sweep stays `Sync` and the futures
+    /// holding `&self` across an await stay `Send`.
+    ingested_any: AtomicBool,
     /// This circle has been held on cut-off deliveries alone for
     /// [`CATCHUP_MAX_CUTOFF_HOLDS`] sweeps running, so this one treats a relay
     /// that hands over events without finishing as UNREACHED instead.
@@ -1584,7 +1598,25 @@ impl CircleSweep<'_> {
     ) {
         page.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
         for (idx, ev) in page.iter().enumerate() {
-            if Instant::now() >= self.deadline {
+            // THE PROGRESS FLOOR. A sweep that entered with budget must apply
+            // at least ONE of the events it spent that budget fetching. Bailing
+            // at index 0 leaves the cursor exactly where the next wake starts,
+            // so that wake re-fetches the same page and bails in the same place:
+            // zero events applied, for as many wakes as it takes to never
+            // converge. Whether any budget survives the opening fetch is a
+            // property of the network and the machine, so without this floor the
+            // guarantee holds by luck rather than by construction.
+            //
+            // The overrun it buys is one `ingest_one` — the deadline binds again
+            // for event two onwards, including the rest of THIS page. A sweep
+            // that was already out of time before it began gets no floor: it has
+            // no spent budget to redeem, and staying a clean no-op is the
+            // contract `an_expired_deadline_sweeps_nothing_and_reports_it` and
+            // `a_deadline_that_cuts_the_batch_short_holds_the_cursor_at_the_unreached_tail`
+            // pin.
+            let owes_progress =
+                !self.started_out_of_time && !self.ingested_any.load(Ordering::Relaxed);
+            if !owes_progress && Instant::now() >= self.deadline {
                 out.deadline_hit = true;
                 // Everything from here on was FETCHED but never ingested. The
                 // window is therefore not fully applied, and without this the
@@ -1609,6 +1641,7 @@ impl CircleSweep<'_> {
                 self.own_hex,
             )
             .await;
+            self.ingested_any.store(true, Ordering::Relaxed);
             match outcome {
                 ReceiveOnlyOutcome::Applied => out.events_applied += 1,
                 ReceiveOnlyOutcome::Deferred => out.events_deferred += 1,

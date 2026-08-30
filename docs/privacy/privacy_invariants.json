@@ -74,7 +74,7 @@
       "id": "IOS-BACKUP",
       "source": "docs/MEMBER_PICKER_PLAN.md#10-decisions-taken-owner-2026-08-24",
       "summary": "Owner decision D8 (2026-08-28) accepts the iOS backup posture UNCHANGED now that circles.db carries the member directory — the payload change D5 said would deserve its own decision on its own timeline. The Haven data directory is getApplicationDocumentsDirectory() + '/haven' with no platform branch (haven/lib/src/services/data_directory_provider.dart:44-47), so on iOS circles.db, its -journal sidecar and session.sqlite sit in Documents/, the most-backed-up location the OS offers, and NSURLIsExcludedFromBackupKey appears NOWHERE in the tree — not in haven/ios/Runner/, not in any Dart or Rust path, not in a checked-in plugin. Android is unaffected: allowBackup=\"false\" with no dataExtractionRules and no fullBackupContent (haven/android/app/src/main/AndroidManifest.xml:48), so the posture is asymmetric and one-sided. What travels into a backup is ciphertext whose key is a ThisDeviceOnly Keychain item (see IOS-KEYCHAIN), so a restore onto a DIFFERENT device cannot open it; a SAME-DEVICE restore can, and reinstates a snapshot taken before a logout or a Delete Identity. wipe_all_mls_state deletes circles.db and session.sqlite with their sidecars and destroys both keyring entries (haven/rust_builder/src/api.rs:877, :983-986), but that destruction is DEVICE-LOCAL rather than absolute and no code Haven can write reaches into a backup to finish it.",
-      "forbidden_claim": "Copy must not claim that logging out or deleting your identity IRREVERSIBLY destroys the on-device member directory — nor anything else living in circles.db — because a same-device restore from an iOS backup can bring the encrypted file back. The claim that IS true is bounded: the deletion removes the file set from this device, and what a backup carries cannot be opened on a different device. Copy must equally not present the backup as harmless because it is encrypted — 'another device cannot read it' is the true half; 'a backup holds nothing of yours' is not. NOTE: no user-facing string discloses this today. identityAdvancedDeleteBody stays inside the line by describing the act ('deletes your identity and all circle data from this phone') and asserting no permanence; the member-directory disclosure (owner decision D6) is deferred with the Settings privacy page, so no invariant carries status accepted_deviation against this entry — filing one would require inventing a disclosure that does not exist, the same reason P4 is referenced by no invariant. INV-D-DIRECTORY-NEVER-LEAVES-SQLCIPHER stays 'enforced' and names this deviation in its statement and its note."
+      "forbidden_claim": "Copy must not claim that logging out or deleting your identity IRREVERSIBLY destroys the on-device member directory — nor anything else living in circles.db — because a same-device restore from an iOS backup can bring the encrypted file back. The claim that IS true is bounded: the deletion removes the file set from this device, and what a backup carries cannot be opened on a different device. Copy must equally not present the backup as harmless because it is encrypted — 'another device cannot read it' is the true half; 'a backup holds nothing of yours' is not. NOTE: no user-facing string discloses this today. identityAdvancedDeleteBody stays inside the line by describing the act ('deletes your identity and all circle data from this phone') and asserting no permanence; the member-directory disclosure (owner decision D6) has had no surface since the Settings → Privacy page was removed on 2026-08-29, and no invariant carries status accepted_deviation against this entry yet; since that date a zero-disclosure accepted deviation is a permitted state (docs/privacy/README.md), so filing one is a deliberate act rather than an impossibility — the same holds for P4. INV-D-DIRECTORY-NEVER-LEAVES-SQLCIPHER stays 'enforced' and names this deviation in its statement and its note."
     },
     {
       "id": "CONV-BUFFER",
@@ -92,7 +92,7 @@
       "id": "LEAVE-GHOST",
       "source": "haven-core/SECURITY.md#bounded-leave-removal-window-under-live-sync-rev-1",
       "summary": "The corroboration gate deliberately keeps NO admin-side record of a departing member's intent, so there is no automatic admin-side backstop. In the conjunction of: the leaver crashes mid-leave, AND its SelfRemove was deferred or lost the order race, AND it never re-opens the app — no removal commit is ever produced and a stale roster ghost stays authorized until an admin manually removes it. SECURITY.md labels this 'Precisely-bounded residual (accepted)'.",
-      "forbidden_claim": "Copy must not state that leaving always re-keys the circle within a bounded time. The automatically-unconverged case needs a manual admin removal and there is no admin-visible signal one is owed. NOTE: no user-facing string discloses this, and privacyEncryptionWhenSomeoneLeaves currently ASSERTS the bounded form ('usually within a few minutes') — an owner decision."
+      "forbidden_claim": "Copy must not state that leaving always re-keys the circle within a bounded time. The automatically-unconverged case needs a manual admin removal and there is no admin-visible signal one is owed. NOTE: no user-facing string discloses this. The Privacy-page sentence that ASSERTED the bounded form ('usually within a few minutes') was removed with the page on 2026-08-29, so no shipped copy contradicts this record any more."
     },
     {
       "id": "KP-SLOT-WIDTH",
@@ -102,32 +102,6 @@
     }
   ],
   "non_claim_arb_keys": {
-    "privacyTitle": "Page title on the Privacy hub; no factual claim.",
-    "privacyGroupBasicsHeading": "Section grouping heading; no factual claim.",
-    "privacyGroupHowLocationTravelsHeading": "Section grouping heading; no factual claim.",
-    "privacyGroupTheLimitsHeading": "Section grouping heading; no factual claim.",
-    "privacyMeansForYouLabel": "Structural label introducing each topic's consequence paragraph; the claim lives in the paragraph it labels.",
-    "privacyMoreDetailLabel": "Structural label for the expandable technical detail; the claims live in the detail strings.",
-    "privacyMoreDetailExpandHint": "Accessibility hint for the expand affordance; describes the control, not the app's behaviour.",
-    "privacyMoreDetailCollapseHint": "Accessibility hint for the collapse affordance; describes the control, not the app's behaviour.",
-    "privacyMoreDetailExpandedAnnouncement": "Screen-reader announcement of a UI state change; no factual claim about privacy.",
-    "privacyMoreDetailCollapsedAnnouncement": "Screen-reader announcement of a UI state change; no factual claim about privacy.",
-    "privacyWhatHavenIsTitle": "Topic title. Presupposes the no-account fact, but the checkable claim is asserted by privacyWhatHavenIsNoAccount, which carries the proof.",
-    "privacyYourKeysTitle": "Topic title on the Privacy hub; no factual claim.",
-    "privacyYourKeysSubtitle": "One-line topic preview; no factual claim.",
-    "privacyYourKeysWhatTheyAre": "Explanatory username/password analogy introducing the keypair. The clause 'the public key is what others use to find and invite you' describes the invitation flow rather than promising a privacy property; the checkable halves are asserted by privacyYourKeysSecretStaysHere and privacyYourKeysPublicIsSafe.",
-    "privacyRelaysTitle": "Topic title on the Privacy hub; no factual claim.",
-    "privacyRelaysSubtitle": "One-line topic preview; no factual claim.",
-    "privacyEncryptionTitle": "Topic title on the Privacy hub; no factual claim.",
-    "privacyWhatOthersSeeTitle": "Topic title on the Privacy hub; no factual claim.",
-    "privacyWhatOthersSeeSubtitle": "One-line topic preview; no factual claim.",
-    "privacyWhatOthersSeeMembersHeading": "Sub-section heading naming the audience; no factual claim.",
-    "privacyWhatOthersSeeRelaysHeading": "Sub-section heading naming the audience; no factual claim.",
-    "privacyInferenceTitle": "Topic title on the Privacy hub; no factual claim.",
-    "privacyInferenceSubtitle": "One-line topic preview; no factual claim.",
-    "privacyInferenceIpHeading": "Sub-section heading; no factual claim.",
-    "privacyInferenceMapTilesHeading": "Sub-section heading; no factual claim.",
-    "privacyInferenceVpnHeading": "Sub-section heading; no factual claim.",
     "relaySettingsKeyPackageSubtitle": {
       "reason": "Section subtitle naming where KeyPackage relays live. Correct only by omission: the profile plane moved to the separate local-only Profile list, so this line must stay silent about the public profile.",
       "forbidden_additions": [
@@ -160,12 +134,7 @@
       "title": "Location leaves the device only as MLS ciphertext",
       "statement": "Every coordinate that crosses the network boundary does so inside an MLS application message sealed by the group's exporter-derived key and framed as a kind-445 event; adding any publish path that writes a coordinate (or a geohash derived from one) into event content, a tag, or an HTTP body falsifies this.",
       "status": "enforced",
-      "assertion_arb_keys": [
-        "privacyRelaysMeansForYou",
-        "privacyWhatHavenIsMeansForYou",
-        "privacyWhatOthersSeeRelaysCannot",
-        "privacyHubSummary"
-      ],
+      "assertion_arb_keys": [],
       "disclosure_arb_keys": [],
       "non_arb_claims": [
         {
@@ -238,9 +207,7 @@
       "statement": "The serialized LocationMessage contains no device_id, altitude, speed, heading or raw_accuracy field even when those fields are populated in memory, and coordinates are full precision with no obfuscation tier to select; removing a serde(skip) or reintroducing a coarsening mode falsifies this.",
       "status": "enforced",
       "assertion_arb_keys": [],
-      "disclosure_arb_keys": [
-        "privacyWhatOthersSeeMembersExact"
-      ],
+      "disclosure_arb_keys": [],
       "non_arb_claims": [
         {
           "carrier": "dart_source",
@@ -420,7 +387,6 @@
       "residual": "No test asserts the ABSENCE of a foreground pause control. The disclosure gate tests prove publishing is refused before consent, and check_ios_background_publish.sh pins that the pause decision routes through shouldKeepPublishingWhilePaused, but nothing fails if a pause affordance is added — the copy would silently become false in the reassuring direction.",
       "assertion_arb_keys": [],
       "disclosure_arb_keys": [
-        "privacyWhatOthersSeeCannotPause",
         "leaveCircleDialogBody"
       ],
       "non_arb_claims": [
@@ -582,8 +548,7 @@
       "disclosure_arb_keys": [
         "fgsChannelDescription",
         "fgsNotificationSharing",
-        "locationSettingsIntro",
-        "privacyWhatOthersSeeCannotPause"
+        "locationSettingsIntro"
       ],
       "non_arb_claims": [
         {
@@ -620,7 +585,6 @@
       "residual": "Nothing pins the ABSENCE of android:stopWithTask. check_m7_native_wake_guards.sh covers RebootReceiver/RestartReceiver/autoRunOnBoot but not this attribute, and the e2e-fgs-publish (b1) lane exercises a BACKGROUNDED app, not a swiped-out one — its go_cold helper kills the process outright. The claim is true in the tree and unproven by CI.",
       "assertion_arb_keys": [],
       "disclosure_arb_keys": [
-        "privacyWhatOthersSeeCannotPause",
         "locationSettingsIntro"
       ],
       "non_arb_claims": [
@@ -645,9 +609,7 @@
       "statement": "The extra motion-triggered publish exists only in the Flutter UI isolate, fires no sooner than kMotionTriggerDistanceMeters = 100 m of travel, and is suppressed within kLocationPublishOverlapGuard = 60 s of the previous publish, so the activity-level leak is at most one extra event per minute; lowering either constant, or adding a motion trigger to the Android background service, widens the disclosed leak.",
       "status": "enforced",
       "assertion_arb_keys": [],
-      "disclosure_arb_keys": [
-        "privacyInferenceActivityPattern"
-      ],
+      "disclosure_arb_keys": [],
       "non_arb_claims": [],
       "symbols": [
         {
@@ -678,7 +640,6 @@
       "status": "enforced",
       "assertion_arb_keys": [],
       "disclosure_arb_keys": [
-        "privacyWhatOthersSeeDetailOnDevice",
         "leaveCircleDialogBody"
       ],
       "non_arb_claims": [],
@@ -777,9 +738,7 @@
       "statement": "Two circles never share key material or a group identifier, and ciphertext produced in one circle is undecryptable by a member of another even when that member is in both; deriving any circle's keys from a shared or account-level secret falsifies this.",
       "status": "enforced",
       "assertion_arb_keys": [
-        "privacyEncryptionPerCircle",
-        "nameCircleSharingInfo",
-        "privacyEncryptionSubtitle"
+        "nameCircleSharingInfo"
       ],
       "disclosure_arb_keys": [],
       "non_arb_claims": [],
@@ -817,9 +776,7 @@
       "title": "MLS signing keys are never the Nostr identity key",
       "statement": "The MLS leaf signature key and the Nostr identity key can never be the same key, structurally: ciphersuite 0x0001 fixes the leaf signature scheme to Ed25519 while the Nostr identity is secp256k1 Schnorr. The account-identity proof does NOT enforce inequality — validate_leaf_account_identity_proof authenticates the binding (a proof binding a key to itself would verify) — so the engine rejecting an unverifiable proof is not what makes this true.",
       "status": "enforced",
-      "assertion_arb_keys": [
-        "privacyEncryptionDetailMls"
-      ],
+      "assertion_arb_keys": [],
       "disclosure_arb_keys": [],
       "non_arb_claims": [],
       "event_kinds": [
@@ -852,10 +809,7 @@
       "title": "Every kind-445 carries a fresh, single-use author key",
       "statement": "Each group message is signed by a newly generated keypair, so no two location events share an author pubkey and none of them is the sender's identity key; reusing a keypair across messages, or letting the exporter-derived ChaCha20-Poly1305 nonce repeat under one epoch key, falsifies this.",
       "status": "enforced",
-      "assertion_arb_keys": [
-        "privacyWhatOthersSeeRelaysCannot",
-        "privacyYourKeysPublicIsSafe"
-      ],
+      "assertion_arb_keys": [],
       "disclosure_arb_keys": [],
       "non_arb_claims": [],
       "event_kinds": [
@@ -893,14 +847,11 @@
     {
       "id": "INV-E-NO-PERIODIC-REKEY",
       "title": "Keys change on membership change or an explicit repair, never on a timer",
-      "statement": "Both periodic (MIP-03 SHOULD) and post-join 24 h (MIP-02 MUST) leaf-key self-update are disabled, so one epoch key can cover weeks of messages and a former member keeps whatever they saved during their epochs. At code level several admin commits advance an epoch (a membership change, a relay-list update via update_circle_relays, and each half of an admin handoff). What a USER can reach today is two: changing who is in a circle, and - if they are its sole admin - tapping Repair on a circle whose delivery has broken (Unit E, docs/EPOCH_ROTATION_REPAIR_PLAN.md), which is rate-limited to once per circle per 24 h and reachable only from the foreground service layer. That user-reachable scoping is what the disclosure copy describes; a screen that lets a user edit a circle's relays would add a third and MUST revisit privacyEncryptionKeysChangeOnMembership and privacyEncryptionDetailEpochs. The absolute half of this invariant is unchanged and is what the copy promises: NOTHING re-keys on a timer. Re-introducing a production self-update timer, or making the repair schedulable, would change the property the copy describes; scripts/ci/check_epoch_repair_isolation.sh and haven/test/lints/self_update_disabled_test.dart both enforce that it stays user-triggered and foreground-only.",
+      "statement": "Both periodic (MIP-03 SHOULD) and post-join 24 h (MIP-02 MUST) leaf-key self-update are disabled, so one epoch key can cover weeks of messages and a former member keeps whatever they saved during their epochs. At code level several admin commits advance an epoch (a membership change, a relay-list update via update_circle_relays, and each half of an admin handoff). What a USER can reach today is two: changing who is in a circle, and - if they are its sole admin - tapping Repair on a circle whose delivery has broken (Unit E, docs/EPOCH_ROTATION_REPAIR_PLAN.md), which is rate-limited to once per circle per 24 h and reachable only from the foreground service layer. That user-reachable scoping was what the Privacy-page copy described until the page was removed on 2026-08-29; it is now recorded here and in SECURITY.md (M5) only, and a screen that lets a user edit a circle's relays would add a third and MUST revisit this statement. The absolute half of this invariant is unchanged: NOTHING re-keys on a timer. Re-introducing a production self-update timer, or making the repair schedulable, would change that property; scripts/ci/check_epoch_repair_isolation.sh and haven/test/lints/self_update_disabled_test.dart both enforce that it stays user-triggered and foreground-only.",
       "status": "accepted_deviation",
       "accepted_deviation_id": "M5",
       "assertion_arb_keys": [],
-      "disclosure_arb_keys": [
-        "privacyEncryptionKeysChangeOnMembership",
-        "privacyEncryptionMeansForYou"
-      ],
+      "disclosure_arb_keys": [],
       "non_arb_claims": [],
       "doc_anchors": [
         "haven-core/SECURITY.md#self-update-disabled-m5--accepted-mip-02mip-03-deviation"
@@ -930,7 +881,6 @@
       "statement": "An ADMIN removal is a commit that advances the group epoch, and a member removed at epoch N cannot decrypt a location published at epoch N+1; the commit is applied only after at least one relay acked it, so a member is never treated as removed on a commit nobody received.",
       "status": "ratcheted",
       "assertion_arb_keys": [
-        "privacyEncryptionWhenSomeoneLeaves",
         "circleMemberRemoveDialogBody",
         "circleMemberRemoveError"
       ],
@@ -976,7 +926,7 @@
         }
       ],
       "guards": [],
-      "residual": "Scoped to ADMIN removal — both Rust tests exercise that path. The assertion key privacyEncryptionWhenSomeoneLeaves also covers the SELF-LEAVE path, which has an accepted unconverged case (deviation LEAVE-GHOST) where the ghost stays authorized until a manual admin removal; that removal is now an affordance an admin actually has (the member row's remove button, shipped 2026-08-15), where before it existed only as a service with no caller. Nothing still fails when the self-leave path breaks and no copy discloses it, so LEAVE-GHOST remains undeclared for want of a disclosure to attach it to. circleMemberRemoveDialogBody makes the forward-secrecy claim in the admin's own words and circleMemberRemoveError makes the rollback one; both are backed by the tests above, but neither is reachable by the claim-language sweep, so this row is what keeps them proven."
+      "residual": "Scoped to ADMIN removal — both Rust tests exercise that path. The SELF-LEAVE path (which the Privacy-page sentence covered until the page was removed on 2026-08-29) has an accepted unconverged case (deviation LEAVE-GHOST) where the ghost stays authorized until a manual admin removal; that removal is now an affordance an admin actually has (the member row's remove button, shipped 2026-08-15), where before it existed only as a service with no caller. Nothing still fails when the self-leave path breaks, and since 2026-08-29 no copy describes it either way; LEAVE-GHOST stays a registered deviation without an invariant of its own (docs/privacy/README.md, Known gaps). circleMemberRemoveDialogBody makes the forward-secrecy claim in the admin's own words and circleMemberRemoveError makes the rollback one; both are backed by the tests above, but neither is reachable by the claim-language sweep, so this row is what keeps them proven."
     },
     {
       "id": "INV-E-JOINER-GETS-NO-HISTORY",
@@ -984,7 +934,6 @@
       "statement": "A member added at epoch N cannot DECRYPT any kind-445 sealed before the commit that added them, regardless of what a relay serves: the Welcome conveys only the current epoch's joiner_secret path and the MLS key schedule is one-way, so no earlier exporter_secret is derivable. Haven additionally has no backfill path — the Add stages no application message and the welcome ingest carries no location results.",
       "status": "enforced",
       "assertion_arb_keys": [
-        "privacyEncryptionWhenSomeoneJoins",
         "addMemberInfo"
       ],
       "disclosure_arb_keys": [],
@@ -1010,9 +959,7 @@
       "statement": "The engine keeps DEFAULT_MAX_PAST_EPOCHS = 5 past epochs' exporter secrets and its application-message accept window equals that bound, so a ciphertext exactly at the window edge still decrypts and one past it does not; widening the window keeps stale secrets alive, narrowing it drops legitimate offline backlog, and either direction fails the pin.",
       "status": "enforced",
       "assertion_arb_keys": [],
-      "disclosure_arb_keys": [
-        "privacyEncryptionDetailEpochs"
-      ],
+      "disclosure_arb_keys": [],
       "non_arb_claims": [],
       "doc_anchors": [
         "haven-core/SECURITY.md#mls-security"
@@ -1041,7 +988,6 @@
       "status": "enforced",
       "assertion_arb_keys": [],
       "disclosure_arb_keys": [
-        "privacyWhatOthersSeeMembersLearnKey",
         "addMemberInfo"
       ],
       "non_arb_claims": [],
@@ -1075,9 +1021,7 @@
       "statement": "Published group events carry only the h routing tag (plus a NIP-40 expiration on application messages); no alt tag, no geohash g tag and no client tag ever reaches a relay — in particular the dead local 445 builder at nostr/event.rs, which stamps alt and a truncated 5-char geohash, must stay unreachable.",
       "status": "enforced",
       "assertion_arb_keys": [],
-      "disclosure_arb_keys": [
-        "privacyWhatOthersSeeRelaysCan"
-      ],
+      "disclosure_arb_keys": [],
       "non_arb_claims": [],
       "event_kinds": [
         {
@@ -1113,9 +1057,7 @@
       "statement": "Every kind-445 APPLICATION message THIS DEVICE publishes carries a NIP-40 `expiration` of inner_created_at + at most LOCATION_MESSAGE_RETENTION_SECS (228 s), in EVERY circle — including one created by a client that declared no message-retention.v1 component (0x8005), where the engine would stamp nothing: the installed peeler (RetentionBoundPeeler) supplies Haven's own window when the group declares none or zero, caps a longer group policy to it, and honours a shorter one as declared. This device never stamps a commit or proposal, so among the 445s THIS device sends, the absence of an expiration identifies a group-control message. That inference does NOT extend to the circle's whole #h stream: in a circle declaring no component, another member's unstamped 445 may be a location update (see residual). The tag set on this device's 445s is exactly `h` for control and `h` + `expiration` for application messages — nothing else.",
       "status": "ratcheted",
       "assertion_arb_keys": [],
-      "disclosure_arb_keys": [
-        "privacyWhatOthersSeeDetailExpiry"
-      ],
+      "disclosure_arb_keys": [],
       "non_arb_claims": [],
       "doc_anchors": [
         "haven-core/SECURITY.md#outer-kind445-metadata-group-governed-nip-40-expiration"
@@ -1203,16 +1145,14 @@
       "guards": [
         "tooling/e2e/ci/check-wire-journal.sh#workflow=e2e-android.yml"
       ],
-      "residual": "Bounded to the traffic THIS device authors, which is all it can bound. In a circle created by a client that declared no 0x8005 component, another member's own location 445s still carry no expiration: they may be retained indefinitely AND, to any relay watching the circle's public #h, they are indistinguishable from membership changes — so in such a mixed circle the un-stamped class contains another member's LOCATION UPDATES, not only control messages, and `privacyWhatOthersSeeDetailExpiry`'s discriminator sentence used to read more widely than it holds. That is now closed in the copy: the sentence is scoped to the messages this device sends (\"Among the messages your phone sends, only location updates carry that expiry request, so a message without one is visibly a membership or settings change rather than a location update\"), and it names the whole un-stamped class rather than membership alone — an admin handoff and a relay-set change are UpdateAppComponents commits and are un-stamped too, which is what `expiration_separates_location_from_control_and_no_other_tag_appears` actually publishes. Haven still cannot repair the group itself: writing the component is admin-gated upstream (require_admin on the UpdateAppComponents path) and a joiner is not an admin, and doing it inside the join path would stage an epoch-advancing commit whose non-publication pins the group in PendingPublish and buffers every inbound message forever, which is a worse loss than the leak. What remains is that the residue is disclosed nowhere: nothing in the app tells the user that in such a circle another member's location 445s may sit on a relay indefinitely and read as group control. Owner decision: disclose that residue too, or accept that the scoped sentence is where the disclosure stops. SECOND: the bound MASKS the group-level declaration, and it masks it in three pre-existing proofs, not one. `encrypt_location_attaches_group_retention_expiration` and `decrypt_location_drops_expired_event` (src/circle/manager.rs) and the E2E wire oracle (tooling/e2e/wire_allowlist.json, kind 445 `required: [h, expiration]`) all now pass with create_group's 0x8005 declaration removed, because the bound supplies the tag they look for; `live_sync_cursor_replay_e2e.rs`'s expiration precondition is masked the same way. NOTHING AT THE WIRE LEVEL still proves Haven declares 0x8005 to its peers, and the component is the only thing governing every OTHER member's client. Held at host level instead, by `a_locally_created_circle_declares_havens_retention_window_to_every_member` (both parties read the window back out of group state) and `a_shorter_group_policy_reaches_the_wire_as_declared` (a foreign circle's narrower window reaches the wire as declared, which the bound could not fake). Closing it on the wire needs an allow-list entry that asserts the delta VALUE against the circle's declared window rather than the tag's presence — owned by the E2E lane, not by this crate. THIRD: the bound honours an arbitrarily short declared window, so a circle whose creator declares e.g. 1 s has every Haven member's location dropped by a NIP-40-honouring relay almost immediately. Deliberately not floored — a floor would ask relays to hold location ciphertext LONGER than the circle declared, and would not restore visibility, since the same component governs every other member's client. SECURITY.md's no-gap invariant is scoped to circles Haven created for exactly this reason. That window is no longer undisclosed: the circle-details subtitle reports the EFFECTIVE window for the messages this device sends into that circle — in seconds when it is under a minute, so a narrow foreign window reads as alarming rather than being rounded away — held by INV-U-CIRCLE-EXPIRY-SHOWN-IS-EXPIRY-SENT. What the sheet does not say is WHY it is short: it reports the number, not that another client chose it."
+      "residual": "Bounded to the traffic THIS device authors, which is all it can bound. In a circle created by a client that declared no 0x8005 component, another member's own location 445s still carry no expiration: they may be retained indefinitely AND, to any relay watching the circle's public #h, they are indistinguishable from membership changes — so in such a mixed circle the un-stamped class contains another member's LOCATION UPDATES, not only control messages. The un-stamped class is every group-control message, not membership alone — an admin handoff and a relay-set change are UpdateAppComponents commits and are un-stamped too, which is what `expiration_separates_location_from_control_and_no_other_tag_appears` actually publishes. The Privacy-page sentence that stated this discriminator (scoped to the messages this device sends) was removed with the page on 2026-08-29; SECURITY.md's discriminator bullet is now its only statement. Haven still cannot repair the group itself: writing the component is admin-gated upstream (require_admin on the UpdateAppComponents path) and a joiner is not an admin, and doing it inside the join path would stage an epoch-advancing commit whose non-publication pins the group in PendingPublish and buffers every inbound message forever, which is a worse loss than the leak. The residue is disclosed nowhere: nothing in the app tells the user that in such a circle another member's location 445s may sit on a relay indefinitely and read as group control — and since the owner removed the in-app explanation layer on 2026-08-29 there is no surface left to disclose it on, so it is recorded in SECURITY.md rather than held open as a copy decision. SECOND: the bound MASKS the group-level declaration, and it masks it in three pre-existing proofs, not one. `encrypt_location_attaches_group_retention_expiration` and `decrypt_location_drops_expired_event` (src/circle/manager.rs) and the E2E wire oracle (tooling/e2e/wire_allowlist.json, kind 445 `required: [h, expiration]`) all now pass with create_group's 0x8005 declaration removed, because the bound supplies the tag they look for; `live_sync_cursor_replay_e2e.rs`'s expiration precondition is masked the same way. NOTHING AT THE WIRE LEVEL still proves Haven declares 0x8005 to its peers, and the component is the only thing governing every OTHER member's client. Held at host level instead, by `a_locally_created_circle_declares_havens_retention_window_to_every_member` (both parties read the window back out of group state) and `a_shorter_group_policy_reaches_the_wire_as_declared` (a foreign circle's narrower window reaches the wire as declared, which the bound could not fake). Closing it on the wire needs an allow-list entry that asserts the delta VALUE against the circle's declared window rather than the tag's presence — owned by the E2E lane, not by this crate. THIRD: the bound honours an arbitrarily short declared window, so a circle whose creator declares e.g. 1 s has every Haven member's location dropped by a NIP-40-honouring relay almost immediately. Deliberately not floored — a floor would ask relays to hold location ciphertext LONGER than the circle declared, and would not restore visibility, since the same component governs every other member's client. SECURITY.md's no-gap invariant is scoped to circles Haven created for exactly this reason. That window is no longer undisclosed: the circle-details subtitle reports the EFFECTIVE window for the messages this device sends into that circle — in seconds when it is under a minute, so a narrow foreign window reads as alarming rather than being rounded away — held by INV-U-CIRCLE-EXPIRY-SHOWN-IS-EXPIRY-SENT. What the sheet does not say is WHY it is short: it reports the number, not that another client chose it."
     },
     {
       "id": "INV-W-445-EXPIRATION-WINDOW",
       "title": "The relay-residency window Haven asks for is the CEILING the copy states, and the smallest the no-gap floor allows",
-      "statement": "LOCATION_MESSAGE_RETENTION_SECS is the CEILING on the NIP-40 window Haven requests, not the window every message carries: an application kind-445 gets it whenever the group declares no message-retention.v1 (0x8005) window, declares zero, or declares a LONGER one, while a SHORTER declared window is honoured as declared (bounded_retention_secs — see INV-W-445-EXPIRATION-SCOPE for the per-message rule and INV-U-CIRCLE-EXPIRY-SHOWN-IS-EXPIRY-SENT for what the user is shown). The constant equals kLocationPublishMaxInterval + 2 * kTtlNetworkBufferSeconds read out of haven/lib/src/constants/location.dart. Four things therefore move together: the prose figure in privacyWhatOthersSeeDetailExpiry ('about four minutes'), the qualifier that makes it a bound rather than a flat promise ('at most', with the shorter-window case named — a flat figure is false in every circle another client created with a narrower window, which is the circle whose window the user cannot change), the no-widening bound (a larger window leaves every published location on relays longer than the design commits to), and the no-narrowing bound (a smaller one leaves a member returning from offline with nothing unexpired left to fetch, while the copy still promises their position goes out every couple of minutes). Editing the constant, the Dart publish ceiling, the sentence, or the honouring of a shorter declared window without the others fails.",
+      "statement": "LOCATION_MESSAGE_RETENTION_SECS is the CEILING on the NIP-40 window Haven requests, not the window every message carries: an application kind-445 gets it whenever the group declares no message-retention.v1 (0x8005) window, declares zero, or declares a LONGER one, while a SHORTER declared window is honoured as declared (bounded_retention_secs — see INV-W-445-EXPIRATION-SCOPE for the per-message rule and INV-U-CIRCLE-EXPIRY-SHOWN-IS-EXPIRY-SENT for what the user is shown). The constant equals kLocationPublishMaxInterval + 2 * kTtlNetworkBufferSeconds read out of haven/lib/src/constants/location.dart. Three things therefore move together: the no-widening bound (a larger window leaves every published location on relays longer than the design commits to), the no-narrowing bound (a smaller one leaves a member returning from offline with nothing unexpired left to fetch), and the honouring of a shorter declared window (a flat figure would be false in every circle another client created with a narrower window, which is the circle whose window the user cannot change; the wire-level proof is INV-W-445-EXPIRATION-SCOPE's a_shorter_group_policy_reaches_the_wire_as_declared, and the effective figure the user still sees is the circle-details subtitle, INV-U-CIRCLE-EXPIRY-SHOWN-IS-EXPIRY-SENT). The Privacy-page sentence that quoted the figure ('about four minutes', as an 'at most' bound) was removed with the page on 2026-08-29 and its copy-tie tests with it; SECURITY.md carries the derivation. Editing the constant, the Dart publish ceiling, or the honouring of a shorter declared window without the others fails.",
       "status": "enforced",
-      "assertion_arb_keys": [
-        "privacyWhatOthersSeeDetailExpiry"
-      ],
+      "assertion_arb_keys": [],
       "disclosure_arb_keys": [],
       "doc_anchors": [
         "haven-core/SECURITY.md#the-no-gap-invariant"
@@ -1230,14 +1170,6 @@
       "tests": [
         {
           "file": "haven-core/tests/privacy_copy_ties.rs",
-          "name": "relay_expiry_copy_states_the_retention_window"
-        },
-        {
-          "file": "haven-core/tests/privacy_copy_ties.rs",
-          "name": "relay_expiry_copy_states_the_window_as_a_ceiling"
-        },
-        {
-          "file": "haven-core/tests/privacy_copy_ties.rs",
           "name": "widening_the_retention_would_outlive_the_disclosed_expiry"
         },
         {
@@ -1253,9 +1185,7 @@
       "statement": "Published events carry nostr_group_id in the h tag and the real MLS group ID appears nowhere in the event JSON or any tag; the tag is stable for the life of a circle because Haven never invokes the rotation the nostr-routing component permits, so a relay can group one circle's traffic indefinitely. Publishing the raw MLS group ID, or leaving the copy attributing the stability to the protocol rather than to Haven, falsifies this.",
       "status": "ratcheted",
       "assertion_arb_keys": [],
-      "disclosure_arb_keys": [
-        "privacyWhatOthersSeeDetailTag"
-      ],
+      "disclosure_arb_keys": [],
       "non_arb_claims": [],
       "event_kinds": [
         {
@@ -1300,9 +1230,7 @@
       "statement": "The kind-444 Welcome rumor carries no signature (so a recipient cannot republish it as the inviter), it is delivered inside a NIP-59 kind-1059 gift wrap authored by a freshly generated key, and neither the wrap nor its tags leak the MLS group ID, the circle name or the roster; signing the rumor, reusing a wrap author, or adding any tag beyond p falsifies this.",
       "status": "enforced",
       "assertion_arb_keys": [],
-      "disclosure_arb_keys": [
-        "privacyRelaysYourLists"
-      ],
+      "disclosure_arb_keys": [],
       "non_arb_claims": [],
       "event_kinds": [
         {
@@ -1366,7 +1294,7 @@
     {
       "id": "INV-U-CIRCLE-EXPIRY-SHOWN-IS-EXPIRY-SENT",
       "title": "The expiry a circle's details sheet shows is the expiry this device stamps on its own location messages",
-      "statement": "The circle-details subtitle reports the EFFECTIVE relay-retention window for the location messages THIS device sends into that circle — bounded_retention_secs applied to the group's declared 0x8005 component — and never the raw declaration. The two diverge in exactly the cases that matter: a circle that declares nothing, and one that declares longer than Haven's own window, both collapse to LOCATION_MESSAGE_RETENTION_SECS, while a SHORTER foreign declaration is honoured and is therefore shown as declared. A circle with no live MLS group shows no window at all rather than falling back to Haven's, because the fallback would report 'about four minutes' for a circle that cannot send. The copy states whose messages the number governs ('the location updates you send') and keeps the window a request to relays rather than a promise of deletion, matching privacyWhatOthersSeeDetailExpiry.",
+      "statement": "The circle-details subtitle reports the EFFECTIVE relay-retention window for the location messages THIS device sends into that circle — bounded_retention_secs applied to the group's declared 0x8005 component — and never the raw declaration. The two diverge in exactly the cases that matter: a circle that declares nothing, and one that declares longer than Haven's own window, both collapse to LOCATION_MESSAGE_RETENTION_SECS, while a SHORTER foreign declaration is honoured and is therefore shown as declared. A circle with no live MLS group shows no window at all rather than falling back to Haven's, because the fallback would report 'about four minutes' for a circle that cannot send. The copy states whose messages the number governs ('the location updates you send') and keeps the window a request to relays rather than a promise of deletion.",
       "status": "enforced",
       "assertion_arb_keys": [
         "circleDetailsMetaWithExpiry",
@@ -1424,13 +1352,8 @@
       "title": "The inbox and KeyPackage relay lists are published under the identity key",
       "statement": "Haven publishes a kind-10050 inbox relay list and a kind-10002 NIP-65 list, both signed by the identity key and both fanned out to the relays already on them, and it publishes kind-30443 KeyPackages to those relays; consequently every URL a user adds to those lists becomes public and permanently linked to their pubkey, and the retired kind-10051 is emitted only as an empty replaceable retraction.",
       "status": "enforced",
-      "assertion_arb_keys": [
-        "privacyRelaysYourLists"
-      ],
-      "disclosure_arb_keys": [
-        "privacyRelaysDetailKeyListIsPublic",
-        "privacyRelaysMeansForYou"
-      ],
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [],
       "non_arb_claims": [],
       "event_kinds": [
         {
@@ -1504,9 +1427,7 @@
       "title": "No wire kind exists for the profile relay category",
       "statement": "RelayType::Profile::to_kind() returns None, so there is no kind an EventBuilder could be handed for a profile relay list and no code path can serialize that list into a published event; a relay that only carries location or invitation traffic therefore has no signed pointer telling it which relays the device uses for its profile. Adding a kind mapping, or publishing a kind-10002 that names the profile pool, falsifies this.",
       "status": "enforced",
-      "assertion_arb_keys": [
-        "privacyRelaysYourLists"
-      ],
+      "assertion_arb_keys": [],
       "disclosure_arb_keys": [],
       "non_arb_claims": [],
       "doc_anchors": [
@@ -1544,16 +1465,8 @@
       "title": "Haven operates no server of its own on any plane",
       "statement": "There is no Haven-operated relay, no Haven backend, and no account record: the seeded relays are third-party Nostr relays, identity creation takes no email, phone number or password, and the map plane's only first-party artefact is a single shared Stadia API key carrying no per-user identifier. Introducing a Haven-hosted endpoint that receives user data falsifies this.",
       "status": "enforced",
-      "assertion_arb_keys": [
-        "privacyWhatHavenIsNoAccount",
-        "privacyWhatHavenIsNoServers",
-        "privacyRelaysWhatIsARelay",
-        "privacyHubSummary",
-        "privacyWhatHavenIsSubtitle"
-      ],
-      "disclosure_arb_keys": [
-        "privacyWhatHavenIsMeansForYou"
-      ],
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [],
       "non_arb_claims": [
         {
           "carrier": "dart_source",
@@ -1586,9 +1499,7 @@
       "title": "No push notification plane exists",
       "statement": "No FCM/APNs/OneSignal-class dependency is declared in pubspec.yaml, and nothing under haven/ios registers for remote notifications (no remote-notification background mode, no aps-environment entitlement, no registerForRemoteNotifications), so no coordinator ever learns when someone in a circle has something to deliver.",
       "status": "enforced",
-      "assertion_arb_keys": [
-        "privacyWhatHavenIsDetailNoPush"
-      ],
+      "assertion_arb_keys": [],
       "disclosure_arb_keys": [],
       "non_arb_claims": [],
       "doc_anchors": [
@@ -1605,9 +1516,7 @@
       "title": "No analytics, crash-reporting or advertising code ships",
       "statement": "The app declares no analytics, crash-reporting or ad SDK and contains no code path that reports usage, exceptions or identifiers to any third party; adding a Sentry/Crashlytics/Firebase-Analytics-class dependency, or a hand-rolled event-reporting HTTP call, falsifies this.",
       "status": "enforced",
-      "assertion_arb_keys": [
-        "privacyWhatHavenIsDetailNoTelemetry"
-      ],
+      "assertion_arb_keys": [],
       "disclosure_arb_keys": [],
       "non_arb_claims": [],
       "symbols": [],
@@ -1622,9 +1531,7 @@
       "title": "More than one relay is seeded, so no single relay can cut a user off",
       "statement": "PRODUCTION_DEFAULT_RELAYS holds exactly three wss:// relays run by independent operators, and no relay in that set is Haven-operated or individually required; shrinking the set to one — or to two, which is thinner than the copy discloses — falsifies the \"several relays, so no single one can cut you off\" promise.",
       "status": "enforced",
-      "assertion_arb_keys": [
-        "privacyRelaysWhyMany"
-      ],
+      "assertion_arb_keys": [],
       "disclosure_arb_keys": [
         "circleDetailsRelaysNote"
       ],
@@ -1685,9 +1592,7 @@
       "statement": "The engine Client is built with automatic_authentication(false) and no gossip, so it refuses every NIP-42 AUTH challenge (never signing a kind-22242 that would join the identity key to the circle traffic on that socket) and its relay pool equals exactly the configured circle-union-inbox set even after a kind-10002 advertises a phantom relay. verify_subscriptions must also stay off, or fresh REQs silently drop their first stored events.",
       "status": "enforced",
       "assertion_arb_keys": [],
-      "disclosure_arb_keys": [
-        "privacyInferencePresence"
-      ],
+      "disclosure_arb_keys": [],
       "non_arb_claims": [],
       "event_kinds": [
         {
@@ -1728,12 +1633,7 @@
       "status": "accepted_deviation",
       "accepted_deviation_id": "RC1",
       "assertion_arb_keys": [],
-      "disclosure_arb_keys": [
-        "privacyWhatOthersSeeDetailOneConnection",
-        "privacyWhatOthersSeeRelaysCannot",
-        "privacyWhatOthersSeeMeansForYou",
-        "privacyInferencePresence"
-      ],
+      "disclosure_arb_keys": [],
       "non_arb_claims": [],
       "doc_anchors": [
         "haven-core/SECURITY.md#relay-observable-metadata-and-correlation-accepted"
@@ -1765,11 +1665,7 @@
       "statement": "The publish cadence is jittered uniformly over [nominal*(1-0.4), nominal*(1+0.4)] = [72 s, 168 s] from a CSPRNG, which defeats short-window rhythm fingerprinting but not long-run averaging; message sizes are NOT padded, so location updates fall in a narrow, recognisable size band. Narrowing the Rust spread without the Dart endpoints, or presenting the jitter as defeating traffic analysis, falsifies this.",
       "status": "enforced",
       "assertion_arb_keys": [],
-      "disclosure_arb_keys": [
-        "privacyInferenceWhatIsMetadata",
-        "privacyInferenceDetailJitter",
-        "privacyWhatOthersSeeRelaysCan"
-      ],
+      "disclosure_arb_keys": [],
       "non_arb_claims": [],
       "doc_anchors": [
         "haven-core/SECURITY.md#publish-cadence-jittered-scheduler"
@@ -1808,9 +1704,7 @@
       "statement": "Each circle's publish cycle is seeded from a staggered per-circle offset and paced by the running-gap slot rule, so a user in several circles does not emit one synchronous burst that ties those circles together for an observer watching more than one relay; collapsing the per-circle schedules back onto one shared timer falsifies this.",
       "status": "enforced",
       "assertion_arb_keys": [],
-      "disclosure_arb_keys": [
-        "privacyInferenceDetailJitter"
-      ],
+      "disclosure_arb_keys": [],
       "non_arb_claims": [],
       "symbols": [
         {
@@ -1841,11 +1735,7 @@
       "status": "accepted_deviation",
       "accepted_deviation_id": "P6",
       "assertion_arb_keys": [],
-      "disclosure_arb_keys": [
-        "privacyInferenceIpAddress",
-        "privacyWhatOthersSeeCoMemberIp",
-        "privacyRelaysDetailIndexers"
-      ],
+      "disclosure_arb_keys": [],
       "non_arb_claims": [
         {
           "carrier": "dart_source",
@@ -1866,12 +1756,7 @@
           "symbol": "PRODUCTION_DISCOVERY_RELAYS"
         }
       ],
-      "tests": [
-        {
-          "file": "haven-core/tests/privacy_copy_ties.rs",
-          "name": "indexer_paragraph_spells_both_pool_sizes"
-        }
-      ],
+      "tests": [],
       "guards": []
     },
     {
@@ -1880,9 +1765,7 @@
       "statement": "PRODUCTION_PROFILE_RELAYS (8) and PRODUCTION_DISCOVERY_RELAYS (6) are disjoint by construction and disjoint from the account seed defaults, and both are contacted unconditionally even when every relay the user chose is private; the curated eight cannot be taken out of the profile group at EITHER layer — Settings offers no remove control on a curated Profile row (matched across URL spelling variants, so a case or trailing-slash difference cannot bring the control back), and usable_profile_relays() unions the defaults back in on every resolution, so a row deleted by any other route still leaves the relay dialled. The copy must therefore keep saying \"that you do not choose\". Resizing either pool without updating the paragraph that spells both counts fails the copy tie.",
       "status": "enforced",
       "assertion_arb_keys": [],
-      "disclosure_arb_keys": [
-        "privacyRelaysDetailIndexers"
-      ],
+      "disclosure_arb_keys": [],
       "non_arb_claims": [],
       "doc_anchors": [
         "haven-core/SECURITY.md#profile-plane-relay-separation--accepted-deviations"
@@ -1918,10 +1801,6 @@
           "name": "pool_is_disjoint_from_account_seed_defaults"
         },
         {
-          "file": "haven-core/tests/privacy_copy_ties.rs",
-          "name": "indexer_paragraph_spells_both_pool_sizes"
-        },
-        {
           "file": "haven-core/tests/profile_curated_pool_removal.rs",
           "name": "removing_a_curated_profile_relay_shortens_the_list_but_not_the_dialled_set"
         },
@@ -1948,9 +1827,7 @@
       "statement": "The tile prefetcher warms rings around the coordinates of visible circle members, not only around the viewport, so the map provider receives tile coordinates derived from where the user's circle is — not merely where the user is looking; it never receives a name, key or member list. Making the prefetch viewport-only would narrow the leak; removing the disclosure while keeping the prefetch would make the copy false.",
       "status": "enforced",
       "assertion_arb_keys": [],
-      "disclosure_arb_keys": [
-        "privacyInferenceMapTiles"
-      ],
+      "disclosure_arb_keys": [],
       "non_arb_claims": [
         {
           "carrier": "dart_source",
@@ -2019,17 +1896,12 @@
     {
       "id": "INV-R-VPN-NOT-BYPASSED",
       "title": "Nothing in Haven bypasses an OS-level VPN tunnel or echoes the IP into a payload",
-      "statement": "This claim is about VPN technology, not Haven code; it becomes false only through a Haven change — a raw socket or DNS path that escapes the system tunnel, or a payload field that carries the device's observed IP. No such path exists: all relay traffic goes through the nostr-sdk WebSocket client and all HTTP through package:http, both of which use the platform stack, and LocationMessage carries no address field.",
+      "statement": "This property is about VPN technology, not Haven code; it becomes false only through a Haven change — a raw socket or DNS path that escapes the system tunnel, or a payload field that carries the device's observed IP. No such path exists: all relay traffic goes through the nostr-sdk WebSocket client and all HTTP through package:http, both of which use the platform stack, and LocationMessage carries no address field.",
       "status": "ratcheted",
       "residual": "UNPROVEN in the tunnel-bypass direction. No test or guard forbids a raw socket, a custom DNS resolver, or a dart:io HttpClient configured with a proxy override. The no-IP-in-payload half is covered by the LocationMessage field tests cited here; the no-bypass half rests on the current dependency set alone.",
-      "attributed_arb_keys": [
-        "privacyInferenceVpnHelps"
-      ],
+      "attributed_arb_keys": [],
       "assertion_arb_keys": [],
-      "disclosure_arb_keys": [
-        "privacyInferenceVpnLimits",
-        "privacyInferenceMeansForYou"
-      ],
+      "disclosure_arb_keys": [],
       "non_arb_claims": [],
       "symbols": [
         {
@@ -2051,9 +1923,7 @@
       "statement": "Haven's design makes no claim against an adversary who can watch many relays simultaneously, nor against an adversary who controls the user's own device; no mixing, cover traffic, padding or remote-wipe mechanism exists, so removing this disclosure would leave the reader to assume coverage the code does not provide.",
       "status": "enforced",
       "assertion_arb_keys": [],
-      "disclosure_arb_keys": [
-        "privacyInferenceDetailOutOfScope"
-      ],
+      "disclosure_arb_keys": [],
       "non_arb_claims": [],
       "doc_anchors": [
         "haven-core/SECURITY.md#network-threat-model"
@@ -2080,12 +1950,10 @@
       "statement": "The 32-byte identity secret is persisted only in flutter_secure_storage (Keychain / Keystore), is read back per use rather than held, and no code path serializes it into a Nostr event, an HTTP body or a log line; this becomes false the moment a secret-bytes value is bound to a long-lived field or interpolated into any outbound payload.",
       "status": "enforced",
       "assertion_arb_keys": [
-        "privacyYourKeysSecretStaysHere",
         "onboardingCreateIdentityBody",
         "onboardingValueProp3Summary"
       ],
       "disclosure_arb_keys": [
-        "privacyYourKeysNeverShareSecret",
         "identityAdvancedSecretKeyWarning"
       ],
       "doc_anchors": [
@@ -2125,9 +1993,7 @@
       "title": "Secret-bearing values are zeroized after use",
       "statement": "Every Rust struct field holding key material is either Zeroizing<T> or lives in a ZeroizeOnDrop type, and on the Dart side every fetched secret-bytes buffer is taken over rather than copied — so exactly one buffer ever holds the secret — and that one buffer is overwritten on every exit: normal completion, a throw out of the FFI call, and rejection of a wrong-length secret. This becomes false when a raw [u8; 32] field is added without the derive, when a Dart secret is bound to a local that no finally clears, or when a secret is passed through Uint8List.fromList, which copies and leaves the source buffer live under no name any fillRange can reach.",
       "status": "enforced",
-      "assertion_arb_keys": [
-        "privacyYourKeysDetailFormats"
-      ],
+      "assertion_arb_keys": [],
       "disclosure_arb_keys": [],
       "doc_anchors": [
         "haven-core/SECURITY.md#database-encryption"
@@ -2219,9 +2085,7 @@
       "title": "Circle encryption keys are not the identity key",
       "statement": "The MLS leaf signature key of every circle differs from the Nostr identity key, and the identity key is never used to sign a kind-445 group message; this becomes false if a group's credential is minted from the identity keypair or if the identity signer is handed to the group-message builder.",
       "status": "enforced",
-      "assertion_arb_keys": [
-        "privacyYourKeysDetailSeparation"
-      ],
+      "assertion_arb_keys": [],
       "disclosure_arb_keys": [],
       "doc_anchors": [
         "haven-core/SECURITY.md#mls-security"
@@ -2259,7 +2123,6 @@
       "statement": "A kind-445 location event carries a fresh ephemeral author key and an h tag holding only the nostr_group_id, so possession of an npub yields no filter that returns that user's location events and no key that decrypts them; this becomes false if the identity pubkey is ever used as the 445 author or added as a tag.",
       "status": "enforced",
       "assertion_arb_keys": [
-        "privacyYourKeysPublicIsSafe",
         "qrCodeExplainerKeys",
         "qrCodeExplainerUsername"
       ],
@@ -2302,7 +2165,6 @@
       "residual": "Nothing fails if a key-escrow or cloud-backup path is added: the guarantee rests on INV-K-SECRET-KEY-NEVER-LEAVES-DEVICE's log/commit guards, which detect logging and committed secrets but not a deliberate upload. No test asserts the absence of a recovery endpoint.",
       "assertion_arb_keys": [],
       "disclosure_arb_keys": [
-        "privacyYourKeysMeansForYou",
         "onboardingCreateIdentityWarning"
       ],
       "symbols": [
@@ -2389,9 +2251,7 @@
       "status": "accepted_deviation",
       "accepted_deviation_id": "M5",
       "assertion_arb_keys": [],
-      "disclosure_arb_keys": [
-        "privacyEncryptionKeysChangeOnMembership"
-      ],
+      "disclosure_arb_keys": [],
       "doc_anchors": [
         "haven-core/SECURITY.md#self-update-disabled-m5--accepted-mip-02mip-03-deviation"
       ],
@@ -2427,10 +2287,6 @@
       "accepted_deviation_id": "R10",
       "assertion_arb_keys": [],
       "disclosure_arb_keys": [
-        "privacyPublicProfileTitle",
-        "privacyPublicProfileSubtitle",
-        "privacyPublicProfileIsPublic",
-        "privacyPublicProfileOnSave",
         "profileIsPublicNoticeTitle",
         "profileIsPublicNoticeBody",
         "avatarPickerPhotoUpdated",
@@ -2500,7 +2356,6 @@
       "residual": "No test or guard fails if the blank-republish is removed, and none asserts the absence of a Blossom DELETE. (The internal docs that used to claim a DELETE is issued — SECURITY.md's best-effort-delete bullet and check_profile_privacy_boundaries.sh's CONSENT_GATE_EXEMPT_FNS comment — were both corrected 2026-08-13; do not 'restore consistency' by reinstating the false claim.)",
       "assertion_arb_keys": [],
       "disclosure_arb_keys": [
-        "privacyPublicProfileRemovalIsNotDeletion",
         "photoHeaderRemoveBody"
       ],
       "doc_anchors": [
@@ -2538,9 +2393,7 @@
       "title": "Pictures are re-encoded and stripped of EXIF/GPS before any network write",
       "statement": "upload_profile_picture routes every input through process_own_avatar, which decodes, bakes orientation and re-encodes to a fresh JPEG, so no EXIF/GPS block and no PNG text chunk survives into the uploaded bytes; this becomes false if the raw input bytes are ever handed to the uploader.",
       "status": "enforced",
-      "assertion_arb_keys": [
-        "privacyPublicProfileDetailExifStripped"
-      ],
+      "assertion_arb_keys": [],
       "disclosure_arb_keys": [],
       "doc_anchors": [
         "haven-core/SECURITY.md#public-nostr-profiles-kind-0--blossom"
@@ -2581,9 +2434,7 @@
       "statement": "DEFAULT_BLOSSOM_SERVER is an https:// URL, no plaintext http:// literal exists in the profile module outside the debug loopback exemption, and the download client refuses redirects and rejects loopback, RFC1918, ULA, link-local, CGNAT, multicast, NAT64/IPv4-compatible-embedded and documentation addresses at connect time; this becomes false if the scheme check is relaxed or the resolver filter is bypassed.",
       "status": "enforced",
       "assertion_arb_keys": [],
-      "disclosure_arb_keys": [
-        "privacyPublicProfileDetailKindZero"
-      ],
+      "disclosure_arb_keys": [],
       "doc_anchors": [
         "haven-core/SECURITY.md#public-nostr-profiles-kind-0--blossom"
       ],
@@ -2624,10 +2475,6 @@
         {
           "file": "haven-core/src/profile/blossom.rs",
           "name": "upload_auth_header_is_standard_base64_24242_event"
-        },
-        {
-          "file": "haven-core/tests/privacy_copy_ties.rs",
-          "name": "public_profile_paragraph_names_the_blossom_host"
         }
       ],
       "guards": [
@@ -2706,9 +2553,7 @@
       "title": "The pre-filled display name is a local pseudonym derived from nothing about the user",
       "statement": "generateAnonymousName picks one adjective and one archetype uniformly at random from two disjoint, curated ASCII word lists compiled into the app, with no device identifier, contact, locale or pubkey as input; this becomes false if any device- or user-derived value is mixed into the selection, or the word lists stop being English ASCII while the copy keeps quoting \"Quiet Wanderer\".",
       "status": "enforced",
-      "assertion_arb_keys": [
-        "privacyPublicProfilePseudonym"
-      ],
+      "assertion_arb_keys": [],
       "disclosure_arb_keys": [],
       "doc_anchors": [
         "CLAUDE.md#privacy-model"
@@ -2752,9 +2597,7 @@
       "title": "The eight profile relays and the six discovery relays never overlap, and neither carries circle traffic",
       "statement": "profile_relay_pool_default() has exactly eight entries, PRODUCTION_DISCOVERY_RELAYS exactly six, the two sets are disjoint by construction, and the profile pool is disjoint from the account seed defaults that carry kind-445/1059 traffic; this becomes false if a URL is added to one pool that already appears in the other, or if a pool relay is seeded into the circle plane.",
       "status": "enforced",
-      "assertion_arb_keys": [
-        "privacyRelaysDetailIndexers"
-      ],
+      "assertion_arb_keys": [],
       "disclosure_arb_keys": [],
       "doc_anchors": [
         "haven-core/SECURITY.md#profile-plane-relay-separation--accepted-deviations"
@@ -2785,10 +2628,6 @@
         {
           "file": "haven-core/src/relay/discovery.rs",
           "name": "discovery_plane_size_is_exactly_six"
-        },
-        {
-          "file": "haven-core/tests/privacy_copy_ties.rs",
-          "name": "indexer_paragraph_spells_both_pool_sizes"
         }
       ],
       "guards": [
@@ -2801,7 +2640,6 @@
       "statement": "RelayType::Profile::to_kind() returns None, so no NIP-65 kind-10002 (or any other event) is ever built that serializes the profile relay list; this becomes false the moment Profile maps to a publishable kind or the list is written into an event's tags.",
       "status": "enforced",
       "assertion_arb_keys": [
-        "privacyRelaysYourLists",
         "relaySettingsProfileSubtitle"
       ],
       "disclosure_arb_keys": [],
@@ -2833,9 +2671,7 @@
       "title": "Profile lookups ask one relay about one person, bounded at two relays",
       "statement": "Every kind-0 filter carries exactly one author, no p tag and kind 0 only; each author resolves to its own assigned relay by salted rendezvous hash, and PROFILE_MAX_RELAY_RANK = 2 caps the retry ladder — so a lookup discloses an author to at most two of the eight. This becomes false if authors are batched into one filter, if the rank cap is raised, or if a fetch fans out beyond the assignment.",
       "status": "enforced",
-      "assertion_arb_keys": [
-        "privacyRelaysDetailProfileLookups"
-      ],
+      "assertion_arb_keys": [],
       "disclosure_arb_keys": [],
       "doc_anchors": [
         "haven-core/SECURITY.md#profile-plane-relay-separation--accepted-deviations"
@@ -2925,9 +2761,7 @@
       "status": "accepted_deviation",
       "accepted_deviation_id": "P1",
       "assertion_arb_keys": [],
-      "disclosure_arb_keys": [
-        "privacyRelaysDetailProfileLookups"
-      ],
+      "disclosure_arb_keys": [],
       "doc_anchors": [
         "haven-core/SECURITY.md#the-guarantee-is-bounded--collisions-are-expected-p1"
       ],
@@ -2952,9 +2786,7 @@
       "status": "accepted_deviation",
       "accepted_deviation_id": "P2",
       "assertion_arb_keys": [],
-      "disclosure_arb_keys": [
-        "privacyRelaysDetailProfileLookups"
-      ],
+      "disclosure_arb_keys": [],
       "doc_anchors": [
         "haven-core/SECURITY.md#publish-fans-out-to-the-whole-pool-p2"
       ],
@@ -2975,10 +2807,6 @@
         {
           "file": "haven-core/src/profile/publish.rs",
           "name": "publish_metadata_fails_closed_on_empty_relays"
-        },
-        {
-          "file": "haven-core/tests/privacy_copy_ties.rs",
-          "name": "profile_publish_paragraph_spells_the_profile_pool_size"
         }
       ],
       "guards": []
@@ -2990,9 +2818,7 @@
       "status": "accepted_deviation",
       "accepted_deviation_id": "P3",
       "assertion_arb_keys": [],
-      "disclosure_arb_keys": [
-        "privacyRelaysDetailIndexers"
-      ],
+      "disclosure_arb_keys": [],
       "doc_anchors": [
         "haven-core/SECURITY.md#no-kind-10002-for-the-profile-plane-p3"
       ],
@@ -3002,12 +2828,7 @@
           "symbol": "profile_relay_pool_default"
         }
       ],
-      "tests": [
-        {
-          "file": "haven-core/tests/privacy_copy_ties.rs",
-          "name": "indexer_paragraph_spells_both_pool_sizes"
-        }
-      ],
+      "tests": [],
       "guards": [
         "scripts/ci/check_profile_privacy_boundaries.sh"
       ]
@@ -3019,9 +2840,7 @@
       "status": "accepted_deviation",
       "accepted_deviation_id": "P5",
       "assertion_arb_keys": [],
-      "disclosure_arb_keys": [
-        "privacyRelaysDetailProfileLookups"
-      ],
+      "disclosure_arb_keys": [],
       "doc_anchors": [
         "haven-core/SECURITY.md#the-assignment-salt-is-never-rotated-p5"
       ],
@@ -3050,18 +2869,11 @@
       "status": "accepted_deviation",
       "accepted_deviation_id": "P6",
       "assertion_arb_keys": [],
-      "disclosure_arb_keys": [
-        "privacyWhatOthersSeeCoMemberIp"
-      ],
+      "disclosure_arb_keys": [],
       "doc_anchors": [
         "haven-core/SECURITY.md#ip-level-linkage-is-out-of-scope-p6"
       ],
-      "symbols": [
-        {
-          "file": "haven/lib/src/constants/tiles.dart",
-          "symbol": "kMullvadUrl"
-        }
-      ],
+      "symbols": [],
       "tests": [
         {
           "file": "haven-core/src/profile/blossom.rs",
@@ -3127,9 +2939,7 @@
       "title": "The map-tile cache is encrypted, capped at seven days, and wiped on identity deletion",
       "statement": "Tile blobs are stored only as SQLCipher-encrypted rows keyed by (style,z,x,y,retina) with the Stadia api_key stripped in Dart before the FFI, kTileMaxRetention is seven days and is the value the privacy copy quotes, and the wipe runs inside NostrIdentityService.deleteIdentity; this becomes false if a raw URL or api_key reaches the store, if the retention constant and the copy diverge, or if the wipe leaves the delete path.",
       "status": "enforced",
-      "assertion_arb_keys": [
-        "privacyInferenceMapTiles"
-      ],
+      "assertion_arb_keys": [],
       "disclosure_arb_keys": [],
       "symbols": [
         {
@@ -3145,10 +2955,6 @@
         {
           "file": "haven-core/tests/tile_at_rest_test.rs",
           "name": "tile_blobs_are_encrypted_at_rest"
-        },
-        {
-          "file": "haven/test/constants/tile_cache_policy_test.dart",
-          "name": "matches the day count named in privacyInferenceMapTiles"
         },
         {
           "file": "haven/test/constants/tile_cache_policy_test.dart",
@@ -3284,7 +3090,7 @@
       "guards": [
         "scripts/ci/check_member_directory_privacy.sh"
       ],
-      "residual": "TWO RESIDUALS, BOTH IRREDUCIBLE AT THIS LAYER AND BOTH NOW OWNER-ACCEPTED RATHER THAN OPEN (decision D9, 2026-08-28, docs/MEMBER_PICKER_PLAN.md §10). (1) THE DEADLINE IS ENFORCED BY THREE ON-DEMAND SWEEPS, NOT BY A TIMER. An expired row is deleted at the next process start, at the next ranked read, or at the next reconcile — whichever comes first — and no read can return one, because the read sweeps inside its own transaction before it selects. What remains is the interval between the deadline and the next of those events on a device where the app never runs at all: the row is still on disk, unread by anything, until the process that would read it starts and erases it first. THAT ENFORCEMENT MODEL IS A DECISION, NOT AN INTERIM STATE: a timer and a background wake were both considered and declined under D9, because they buy the earlier deletion of a row nothing can read — the ranked read sweeps inside its own transaction before it selects — at the price of periodic wakeups. (2) THE CLOCK IS UNTRUSTED IN BOTH DIRECTIONS, and there is no monotonic floor anywhere in the path. A forward jump purges EARLY, which costs recent contacts and is self-healing for current members. A BACKWARD jump is the mirror case and is worse for the promise: purge_expired is DELETE ... WHERE purge_after < ?1, so a rolled-back clock makes every one of the three sweeps a no-op — expiry is not delayed but suspended — and because the ranked read's in-transaction sweep is that same comparison, a row past its window stays both STORED and RETURNABLE for as long as the clock reads earlier than its deadline. Closing this needs a trusted clock: SQLCipher offers no monotonic counter and a boot-relative clock does not survive a reboot, so it is stated rather than fixed, and D9 accepts it in the same breath as the sweep model; the eventual copy may not resolve it by promising a fixed wall-clock window. It is stated because a disclosure claiming a fixed window depends on it — and that copy (owner decision D6) is DEFERRED with the Settings privacy page pending a major overhaul, not merely unwritten, which is why this entry carries no disclosure key. The copy-tie test that would pin the wording to DIRECTORY_RETENTION_DAYS is deferred with it, so until the overhaul nothing mechanically prevents the constant and the eventual copy from drifting; the constant itself stays test-enforced (retention_is_the_owner_decided_three_days). The drafted paragraph and its clause-by-clause constraints are preserved in docs/MEMBER_PICKER_PLAN.md D6."
+      "residual": "TWO RESIDUALS, BOTH IRREDUCIBLE AT THIS LAYER AND BOTH NOW OWNER-ACCEPTED RATHER THAN OPEN (decision D9, 2026-08-28, docs/MEMBER_PICKER_PLAN.md §10). (1) THE DEADLINE IS ENFORCED BY THREE ON-DEMAND SWEEPS, NOT BY A TIMER. An expired row is deleted at the next process start, at the next ranked read, or at the next reconcile — whichever comes first — and no read can return one, because the read sweeps inside its own transaction before it selects. What remains is the interval between the deadline and the next of those events on a device where the app never runs at all: the row is still on disk, unread by anything, until the process that would read it starts and erases it first. THAT ENFORCEMENT MODEL IS A DECISION, NOT AN INTERIM STATE: a timer and a background wake were both considered and declined under D9, because they buy the earlier deletion of a row nothing can read — the ranked read sweeps inside its own transaction before it selects — at the price of periodic wakeups. (2) THE CLOCK IS UNTRUSTED IN BOTH DIRECTIONS, and there is no monotonic floor anywhere in the path. A forward jump purges EARLY, which costs recent contacts and is self-healing for current members. A BACKWARD jump is the mirror case and is worse for the promise: purge_expired is DELETE ... WHERE purge_after < ?1, so a rolled-back clock makes every one of the three sweeps a no-op — expiry is not delayed but suspended — and because the ranked read's in-transaction sweep is that same comparison, a row past its window stays both STORED and RETURNABLE for as long as the clock reads earlier than its deadline. Closing this needs a trusted clock: SQLCipher offers no monotonic counter and a boot-relative clock does not survive a reboot, so it is stated rather than fixed, and D9 accepts it in the same breath as the sweep model; the eventual copy may not resolve it by promising a fixed wall-clock window. It is stated because a disclosure claiming a fixed window depends on it — and that copy (owner decision D6) has had no surface since the Settings → Privacy page was removed on 2026-08-29, which is why this entry carries no disclosure key. There is no wording for a copy-tie test to pin to DIRECTORY_RETENTION_DAYS; the constant itself stays test-enforced (retention_is_the_owner_decided_three_days). The drafted paragraph and its clause-by-clause constraints are preserved in docs/MEMBER_PICKER_PLAN.md D6."
     },
     {
       "id": "INV-D-DIRECTORY-NEVER-LEAVES-SQLCIPHER",
@@ -3313,16 +3119,14 @@
       "guards": [
         "scripts/ci/check_member_directory_privacy.sh"
       ],
-      "note": "Status stays 'enforced' under owner decision D8 (2026-08-28), which accepts the iOS backup posture unchanged. What this invariant checks is that the rows have NO SECOND HOME — no preferences entry, no secure-storage item, no sidecar file, no second Connection — and an iOS backup is not a second home Haven writes: it is the OS copying the one home wholesale, still inside SQLCipher, still keyed by a ThisDeviceOnly Keychain item. The rows are never outside the encrypted container, which is the claim as titled, so a downgrade would report Haven's storage discipline as partly enforced when it is not partly anything, and would spend the ratchet's signal on the event this row exists to catch: the day a real second home appears. What the backup DOES falsify is the corollary — 'deleting the file set destroys it' read as absolute — and that corollary is now scoped in the statement and registered as deviation IOS-BACKUP, whose forbidden_claim binds the copy. Status 'accepted_deviation' was not available: rule 9 requires a disclosure, and the member-directory disclosure (decision D6) is deferred with the Settings privacy page, so filing one would mean inventing a disclosure that does not exist."
+      "note": "Status stays 'enforced' under owner decision D8 (2026-08-28), which accepts the iOS backup posture unchanged. What this invariant checks is that the rows have NO SECOND HOME — no preferences entry, no secure-storage item, no sidecar file, no second Connection — and an iOS backup is not a second home Haven writes: it is the OS copying the one home wholesale, still inside SQLCipher, still keyed by a ThisDeviceOnly Keychain item. The rows are never outside the encrypted container, which is the claim as titled, so a downgrade would report Haven's storage discipline as partly enforced when it is not partly anything, and would spend the ratchet's signal on the event this row exists to catch: the day a real second home appears. What the backup DOES falsify is the corollary — 'deleting the file set destroys it' read as absolute — and that corollary is now scoped in the statement and registered as deviation IOS-BACKUP, whose forbidden_claim binds the copy. Status 'accepted_deviation' was not available: rule 9 requires a disclosure, and the member-directory disclosure (decision D6) has had no surface since the Settings → Privacy page was removed on 2026-08-29; a zero-disclosure accepted deviation is permitted since that date, so filing one is a deliberate act, not done here."
     },
     {
       "id": "INV-D-SCREENSHOTS-BLOCKED-ON-ANDROID",
       "title": "FLAG_SECURE covers every Activity in the Android process",
       "statement": "HavenApplication.onCreate registers an activity-lifecycle callback that SETS FLAG_SECURE in onActivityCreated, no Activity sets it per-Activity, and the manifest still names HavenApplication — so the block covers the photo-crop Activity and any future plugin Activity, not just MainActivity. This becomes false if any one of those four links is removed.",
       "status": "enforced",
-      "assertion_arb_keys": [
-        "privacyWhatOthersSeeScreenshots"
-      ],
+      "assertion_arb_keys": [],
       "disclosure_arb_keys": [],
       "symbols": [
         {
@@ -3341,9 +3145,7 @@
       "statement": "iOS offers no FLAG_SECURE equivalent, so nothing prevents an in-app screenshot or screen recording by a circle member; the only protection is the app-switcher blur, installed on applicationWillResignActive (not didEnterBackground), covering the window itself, removed and re-armed only on applicationDidBecomeActive, with no UIApplicationSceneManifest that would stop UIKit calling those callbacks. This becomes false if any one of those links is removed.",
       "status": "enforced",
       "assertion_arb_keys": [],
-      "disclosure_arb_keys": [
-        "privacyWhatOthersSeeScreenshots"
-      ],
+      "disclosure_arb_keys": [],
       "symbols": [
         {
           "file": "haven/ios/Runner/AppDelegate.swift",
@@ -3390,9 +3192,7 @@
       "statement": "The only consumer of a library-picked image is the profile avatar pipeline, which uploads it to the public Blossom host and references it from a public kind-0 — there is no private or circles-only destination, and the iOS permission prompt says so at the moment consent is given.",
       "status": "enforced",
       "assertion_arb_keys": [],
-      "disclosure_arb_keys": [
-        "privacyPublicProfileMeansForYou"
-      ],
+      "disclosure_arb_keys": [],
       "non_arb_claims": [
         {
           "carrier": "ios_infoplist",
@@ -3499,7 +3299,7 @@
       "title": "Haven runs no server of its own for circle traffic",
       "statement": "Publishes target exactly the user's own relay list and the live-sync engine connects only to configured relays, never a gossip-discovered one — there is no Haven-operated endpoint in the location path. This becomes false if any publisher or engine client acquires a hardcoded first-party destination.",
       "status": "ratcheted",
-      "residual": "The 'you choose which ones to use' half is NOT true of the whole app: the eight profile relays and six discovery relays are contacted unconditionally and cannot be removed (INV-P-P3), the Blossom host is hardcoded to blossom.primal.net, and the tile provider is hardcoded to Stadia. Nothing fails if that gap widens. See the report's copy-defect section — onboardingValueProp2Summary's 'a relay network you choose' contradicts privacyRelaysDetailIndexers.",
+      "residual": "The 'you choose which ones to use' half is NOT true of the whole app: the eight profile relays and six discovery relays are contacted unconditionally and cannot be removed (INV-P-P3), the Blossom host is hardcoded to blossom.primal.net, and the tile provider is hardcoded to Stadia. Nothing fails if that gap widens. See the report's copy-defect section — onboardingValueProp2Summary's 'a relay network you choose' is contradicted by the code (usable_profile_relays() re-unions the curated pool); the Privacy-page paragraph that said so in the user's own words was removed on 2026-08-29, so nothing in the app corrects the onboarding claim any more.",
       "assertion_arb_keys": [
         "onboardingValueProp2Title",
         "onboardingValueProp2Summary",
@@ -3522,7 +3322,7 @@
         },
         {
           "file": "haven/test/pages/settings/relay_settings_page_test.dart",
-          "name": "shows a short caption linking to the Privacy topic"
+          "name": "shows a short caption, not the long explainer"
         }
       ],
       "guards": [
@@ -3560,36 +3360,6 @@
         }
       ],
       "guards": []
-    },
-    {
-      "id": "INV-O-VPN-IS-A-THIRD-PARTY-MITIGATION",
-      "title": "The VPN recommendation is attributed, not a Haven guarantee",
-      "statement": "The VPN paragraph describes a third party's transport behaviour, not Haven code; it becomes false only through a Haven change — a raw socket that bypasses the OS tunnel, or an IP echoed inside an application payload. Haven itself provides no network-level unlinkability (see P6).",
-      "status": "ratcheted",
-      "residual": "There is no test or guard forbidding a network path that bypasses the OS tunnel, and no test asserting that no payload echoes the client IP. Unlike LocationDisclosureStrings.how, this paragraph carries NO recorded provenance read date in the tree — the date below is the commit that authored the privacy page, not a policy read.",
-      "assertion_arb_keys": [],
-      "disclosure_arb_keys": [],
-      "attributed_arb_keys": [
-        "privacyInferenceVpnHelps"
-      ],
-      "attribution": {
-        "source": "Third-party VPN transport behaviour; Haven recommends Mullvad (haven/lib/src/constants/tiles.dart, kMullvadUrl). No vendor policy document is quoted.",
-        "url": "https://mullvad.net",
-        "read_on": "2026-07-29"
-      },
-      "doc_anchors": [
-        "haven-core/SECURITY.md#ip-level-linkage-is-out-of-scope-p6"
-      ],
-      "symbols": [
-        {
-          "file": "haven/lib/src/constants/tiles.dart",
-          "symbol": "kMullvadUrl"
-        }
-      ],
-      "tests": [],
-      "guards": [
-        "scripts/ci/check_internet_permission.sh"
-      ]
     },
     {
       "id": "INV-O-LEGACY-KEY-ADVERTISEMENT-RETRACTION",
@@ -3636,10 +3406,8 @@
       "title": "Roster and circle name rest on one confidentiality layer, not two",
       "statement": "Group-control kind-445s (commits and proposals) are MLS PublicMessage under the engine's PURE_PLAINTEXT_WIRE_FORMAT_POLICY — signed and integrity-protected but NOT MLS-encrypted — so the roster, member credentials (each member's Nostr identity pubkey), their 0xF2F1 identity proofs and the circle name carried inside them are protected by the outer exporter-keyed ChaCha20-Poly1305 wrap ALONE. Application messages are double-sealed: OpenMLS encrypts them unconditionally regardless of the wire-format policy, so a location sits inside an MLS PrivateMessage inside that same outer wrap.",
       "status": "ratcheted",
-      "residual": "Nothing in this tree fails if an MDK bump changes the wire-format policy or the exporter derivation; the only levers are pinned_dependencies.mdk_rev and the grep-based check_no_exporter_label_override.sh. Upstream itself marks the policy WIRE_FORMAT_POLICY_REVIEW_REQUIRED ('Revisit Before External Rollout'). So the half of privacyWhatOthersSeeRelaysCannot covering the circle's NAME and MEMBER LIST is single-layered while the location half is not — a future change could silently downgrade one and not the other.",
-      "disclosure_arb_keys": [
-        "privacyWhatOthersSeeRelaysCannot"
-      ],
+      "residual": "Nothing in this tree fails if an MDK bump changes the wire-format policy or the exporter derivation; the only levers are pinned_dependencies.mdk_rev and the grep-based check_no_exporter_label_override.sh. Upstream itself marks the policy WIRE_FORMAT_POLICY_REVIEW_REQUIRED ('Revisit Before External Rollout'). So the confidentiality of the circle's NAME and MEMBER LIST is single-layered while the location half is not — a future change could silently downgrade one and not the other.",
+      "disclosure_arb_keys": [],
       "symbols": [
         {
           "file": "haven-core/src/nostr/mls/manager.rs",
@@ -3657,5 +3425,11 @@
         }
       ]
     }
-  ]
+  ],
+  "ratchet_override": {
+    "reason": "Owner directive 2026-08-29: the Settings → Privacy page, every privacy* ARB key and the About-page VPN link were removed. INV-O-VPN-IS-A-THIRD-PARTY-MITIGATION existed to keep the VPN recommendation attributed; the recommendation and its kMullvadUrl symbol no longer exist, so there is nothing left for it to hold. Delete this override in the next change (it is stale once this lands on main).",
+    "items": [
+      "INV-O-VPN-IS-A-THIRD-PARTY-MITIGATION.deleted"
+    ]
+  }
 }

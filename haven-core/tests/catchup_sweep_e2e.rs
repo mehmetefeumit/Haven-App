@@ -2411,6 +2411,31 @@ async fn a_relay_unreachable_for_the_first_page_does_not_freeze_the_window() {
     );
 }
 
+/// Answers every REQ, a fixed `delay` later.
+///
+/// It is what lets the two tests below place the deadline where they need it BY
+/// CONSTRUCTION instead of by racing the machine: a delay smaller than the
+/// budget spends part of it per round, a delay larger than the budget spends all
+/// of it on the opening fetch. A slow or loaded runner only ever moves the fetch
+/// later, which is the direction both tests already assume.
+#[derive(Debug)]
+struct DelayEveryQuery {
+    delay: Duration,
+}
+
+impl QueryPolicy for DelayEveryQuery {
+    fn admit_query<'a>(
+        &'a self,
+        _query: &'a nostr::Filter,
+        _addr: &'a std::net::SocketAddr,
+    ) -> BoxedFuture<'a, PolicyResult> {
+        Box::pin(async move {
+            tokio::time::sleep(self.delay).await;
+            PolicyResult::Accept
+        })
+    }
+}
+
 /// A chase that spends the whole wake budget must still APPLY the pages it
 /// managed to fetch.
 ///
@@ -2423,27 +2448,6 @@ async fn a_relay_unreachable_for_the_first_page_does_not_freeze_the_window() {
 /// never converges, so a stranded commit stays stranded however many wakes go by.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_chase_that_spends_the_wake_budget_still_applies_what_it_fetched() {
-    /// Answers every REQ, a fixed `delay` later. Slow enough that the wake
-    /// budget below buys a few rounds and not the whole chase, so the deadline
-    /// lands mid-chase by construction rather than by racing the machine.
-    #[derive(Debug)]
-    struct DelayEveryQuery {
-        delay: Duration,
-    }
-
-    impl QueryPolicy for DelayEveryQuery {
-        fn admit_query<'a>(
-            &'a self,
-            _query: &'a nostr::Filter,
-            _addr: &'a std::net::SocketAddr,
-        ) -> BoxedFuture<'a, PolicyResult> {
-            Box::pin(async move {
-                tokio::time::sleep(self.delay).await;
-                PolicyResult::Accept
-            })
-        }
-    }
-
     let relay = SeededRelay::from_builder(RelayBuilder::default().query_policy(DelayEveryQuery {
         delay: Duration::from_secs(1),
     }))
@@ -2491,6 +2495,62 @@ async fn a_chase_that_spends_the_wake_budget_still_applies_what_it_fetched() {
          have bought it a cursor advance"
     );
     assert_eq!(fx.alice_cursor(), None, "and the cursor holds");
+}
+
+/// A sweep whose OPENING fetch outlives the entire wake budget still applies one
+/// event.
+///
+/// The test above places the deadline mid-chase and then relies on some budget
+/// having survived the first fetch, which is a property of the machine: starve
+/// it — a loaded runner, an instrumented build, a slow relay — and the fetch
+/// alone spends the whole wake. The ingest loop then reaches its very first
+/// event already out of time, defers the page it just paid for, and leaves the
+/// cursor exactly where the next wake will start. That wake re-fetches the same
+/// page and repeats it, so the circle never converges however many wakes pass —
+/// the livelock the module header promises is gone ("pages are applied as they
+/// arrive").
+///
+/// So this pins the guarantee where it is decided rather than where it usually
+/// holds. A 2 s query delay against a 1 s budget puts the deadline BEHIND the
+/// opening fetch by construction, and load can only widen that gap, never close
+/// it: there is no machine fast enough to make this test green by luck.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fetch_that_outlives_the_whole_budget_still_applies_one_event() {
+    let relay = SeededRelay::from_builder(RelayBuilder::default().query_policy(DelayEveryQuery {
+        delay: Duration::from_secs(2),
+    }))
+    .await;
+    let relay_mgr = RelayManager::new();
+    let fx = build_two_member_circle(vec![relay.url.clone()]).await;
+
+    let backlog = 4;
+    let window = unparseable_window(
+        &hex::encode(fx.nostr_group_id),
+        backlog,
+        chrono::Utc::now().timestamp() - 60,
+    );
+    relay.seed(&window).await;
+
+    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 1).await;
+
+    assert!(
+        out.deadline_hit,
+        "precondition: a 1 s budget must really have expired during a 2 s fetch"
+    );
+    assert_eq!(
+        out.events_rejected_pre_auth, 1,
+        "the sweep spent its whole budget fetching this page, so it must apply          one of it — applying none leaves the next wake starting exactly here,          re-fetching exactly this, forever"
+    );
+    assert_eq!(
+        out.events_deferred,
+        backlog - 1,
+        "and exactly one: the floor redeems the fetch, it does not license          ingesting the rest of the page past the deadline"
+    );
+    assert_eq!(
+        fx.alice_cursor(),
+        None,
+        "the tail it did NOT reach still holds the advance"
+    );
 }
 
 /// A genuine peer location that lands in a LATER page is still applied, still

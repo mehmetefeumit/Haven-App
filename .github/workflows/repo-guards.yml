@@ -73,10 +73,9 @@
 #     the relay receive path; a release without it ships silently broken.
 #
 #   App-wide FLAG_SECURE              scripts/ci/check_flag_secure_app_wide.sh
-#     `privacyWhatOthersSeeScreenshots` promises, in thirteen languages, that
-#     Haven blocks screenshots "everywhere in the app". FLAG_SECURE is a WINDOW
-#     flag, so the per-Activity `setFlags` this replaced made that true of
-#     MainActivity and of nothing else — including `UCropActivity`, a
+#     Haven blocks screenshots everywhere in the app on Android. FLAG_SECURE is
+#     a WINDOW flag, so the per-Activity `setFlags` this replaced protected
+#     MainActivity and nothing else — including `UCropActivity`, a
 #     dependency's Activity that renders the user's picked photo full-screen.
 #     The guard is a union: HavenApplication.onCreate registers the lifecycle
 #     callbacks, onActivityCreated SETS (never clears) the flag, no Activity
@@ -85,24 +84,16 @@
 #     never.
 #
 #   iOS app-switcher blur             scripts/ci/check_ios_privacy_blur.sh
-#     The iOS half of that same sentence. iPhone cannot block capture, so what
-#     Haven promises there is a blurred app-switcher preview — six lines of
+#     The iOS half of the same protection. iPhone cannot block capture, so
+#     what Haven does there is blur the app-switcher preview — six lines of
 #     AppDelegate.swift that were backed by nothing at all. Delete them and
-#     every other gate stays green while thirteen translations keep promising
-#     the blur. Union: installed on applicationWillResignActive (the switcher
-#     card is on screen while the app is still FOREGROUND, so
-#     didEnterBackground is too late), covering the window with a real
-#     .systemMaterial blur, removed and re-armed only on
-#     applicationDidBecomeActive, no UIApplicationSceneManifest in Info.plist
-#     (adopting scenes stops UIKit calling any of those callbacks, leaving
-#     every other link intact and executing never), and the claim itself still
-#     made — which is deliberately split across the locale set: the key must
-#     exist and be non-empty in ALL THIRTEEN locale ARBs and there must still be
-#     thirteen of them (so "promised in thirteen languages" cannot quietly
-#     become twelve by deleting a file), while only app_en.arb is checked for
-#     STRUCTURE, i.e. that the value still names Android, iPhone/iOS and the
-#     blur. Presence across locales, wording in English — a softened
-#     translation is an l10n-review problem, a deleted locale is this guard's.
+#     every other gate stays green. Union: installed on
+#     applicationWillResignActive (the switcher card is on screen while the
+#     app is still FOREGROUND, so didEnterBackground is too late), covering
+#     the window with a real .systemMaterial blur, removed and re-armed only on
+#     applicationDidBecomeActive, and no UIApplicationSceneManifest in
+#     Info.plist (adopting scenes stops UIKit calling any of those callbacks,
+#     leaving every other link intact and executing never).
 #
 #   Background-wake invariants        scripts/ci/check_m7_native_wake_guards.sh
 #     Static correctness invariants of the Android WorkManager + iOS
@@ -111,10 +102,9 @@
 #     iOS-safe registration gate, wake-path intent re-check). The runtime
 #     proofs live in the E2E background catch-up lane; this covers only what
 #     a static check can prove.
-#     Check 9b is the odd one out: it backs
-#     privacyWhatHavenIsDetailNoTelemetry ("no analytics, crash reporting, or
-#     advertising code ... can be checked rather than taken on trust") the way
-#     check 9 backs the no-push claim next to it. It refuses such a dependency
+#     Check 9b is the odd one out: it keeps the app free of analytics,
+#     crash-reporting and advertising code the way check 9 keeps it free of
+#     push. It refuses such a dependency
 #     in every position that reaches a build — pubspec (direct AND dev), the
 #     transitive pubspec.lock, both Cargo manifests and lockfiles, every
 #     haven/android build file, AndroidManifest components, Info.plist keys,

@@ -158,8 +158,7 @@
       "tags": { "allowed": ["p"], "required": ["p"] },
       "_site": "mdk transport-nostr-peeler/src/peeler.rs:367 (gift_wrap with empty extra-tags); published from haven/lib/src/services/nostr_circle_service.dart:581,1180",
       "_why": [
-        "Production gift wraps carry `p` and nothing else, and the user-facing privacy copy says so",
-        "(`privacyWhatOthersSeeDetailExpiry`: invitations carry no expiry). A NIP-40 `expiration`",
+        "Production gift wraps carry `p` and nothing else. A NIP-40 `expiration`",
         "here would publish a retention claim in cleartext AND single Haven's invitations out of",
         "every other NIP-17 gift wrap on the relay, which carry none. This entry was written when",
         "haven-core/src/nostr/giftwrap.rs held an orphaned-but-still-pub wrap_welcome that stamped a",

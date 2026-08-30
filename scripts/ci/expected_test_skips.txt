@@ -160,18 +160,13 @@ flutter|test/providers/background_location_provider_test.dart::BackgroundSharing
 flutter|test/providers/background_location_provider_test.dart::BackgroundSharingNotifier.setEnabled — permission gating Android: enable + NotificationDenied → state false, prefs false, returns NotificationDenied|Platform.isAndroid == false on runner — see T10 for seam version
 flutter|test/providers/background_location_provider_test.dart::BackgroundSharingNotifier.setEnabled — permission gating Android: enable + BatteryOptDenied → state true, prefs true, returns BatteryOptDenied (soft warning)|Platform.isAndroid == false on runner — see T11 for seam version
 
-# The pseudo-locale sweep: overflow + un-extracted-string checks for the Privacy
-# and About surfaces at 200% text scale in the accented `en_XA` pseudo locale.
+# The pseudo-locale sweep: overflow + un-extracted-string checks for the About
+# page at 200% text scale in the accented `en_XA` pseudo locale.
 # `lib/l10n/app_en_XA.arb` is generated on demand and intentionally NOT
 # committed (the file's header documents the generate/run/delete cycle), so the
 # whole group is gated on one `hasPseudo` condition and is inert in CI by
 # design. This is the one genuinely LOCAL-ONLY proof in the manifest — CI has no
 # substitute for it, though `test/l10n/locale_smoke_test.dart` covers overflow
 # for the 13 real locales at 1.5x and DOES run.
-#
-# Globbed because the names are generated from `PrivacyTopic.values`, but the
-# count is pinned: adding or removing a privacy topic changes 19, fails this
-# gate, and forces the number to be re-stated deliberately. Combined with the
-# exact-reason match, a NEW skip in this file gated on anything other than the
-# missing ARB is still rejected.
-flutter|test/l10n/pseudo_locale_sweep_test.dart::pseudo-locale sweep *|app_en_XA.arb absent|19
+flutter|test/l10n/pseudo_locale_sweep_test.dart::pseudo-locale sweep AboutPage does not overflow at 200% scale|app_en_XA.arb absent
+flutter|test/l10n/pseudo_locale_sweep_test.dart::pseudo-locale sweep AboutPage has no un-extracted strings|app_en_XA.arb absent

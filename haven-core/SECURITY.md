@@ -594,11 +594,13 @@ window, in `SessionManager::process_event` — the choke point every receive pla
 supplied at group CREATION, which means a circle created by anything other than
 a current Haven build — an older one, or another Marmot client — carries no
 retention policy, and upstream then reports `None` for the group and stamps **no
-expiration at all** on this device's own application 445s. Both halves of
-`privacyWhatOthersSeeDetailExpiry` invert together in that case, in opposite
+expiration at all** on this device's own application 445s. Both halves of what
+the app used to tell the user invert together in that case, in opposite
 directions: the four-minute claim goes false, AND an unstamped location update
 is misclassified as a membership change by any relay watching the circle's `#h`
-(see the discriminator below). Haven closes that on the send side with
+(see the discriminator below). Since 2026-08-29 neither half is stated to the
+user — the sentence lived on the deleted Privacy page — so this is a property of
+the wire, not of any copy. Haven closes that on the send side with
 `RetentionBoundPeeler` (`src/nostr/mls/retention.rs`), the transport peeler the
 session installs: it delegates every operation to the real Nostr peeler but
 bounds an APPLICATION message's retention on the way through — Haven's own
@@ -687,10 +689,13 @@ What this does **not** provide, including one property the retired design had:
   device sends, one *without* an expiration is visibly a group-control message
   rather than a location update. That class is wider than membership: an admin
   handoff and a change to the circle's relays are `UpdateAppComponents` commits
-  and are un-stamped too. This is disclosed to the user in
-  `privacyWhatOthersSeeDetailExpiry`, which states it as "a membership or
-  settings change" and scopes it to "the messages your phone sends" for the
-  reason in the next bullet.
+  and are un-stamped too. This **is not disclosed to the user anywhere**: the
+  sentence that carried it (`privacyWhatOthersSeeDetailExpiry`, "a membership or
+  settings change", scoped to "the messages your phone sends" for the reason in
+  the next bullet) was deleted with the Settings → Privacy page on 2026-08-29.
+  The behaviour is unchanged and stays pinned by this section and by the
+  manifest's residual; it is an undisclosed residue, recorded here so a future
+  disclosure surface can pick it up deliberately.
 - **It bounds only what this device authors.** In a circle created without the
   component, another member's own location 445s still carry no expiration: they
   may be retained indefinitely, and they read as membership changes to any relay

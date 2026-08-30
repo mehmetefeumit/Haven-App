@@ -19,23 +19,29 @@
 #     1. coverage-floor manifest lint      -> repo-guards.yml
 #     2. floors guard self-test            -> repo-guards.yml
 #     3. lcov filter self-test             -> repo-guards.yml
+#     4. lcov aggregate self-test          -> repo-guards.yml
+#     5. stale test-asset guard self-test  -> local only (see gate 9)
 #
 #   RUST (haven-core)
-#     4. suite runs green                  -> "Run tests with coverage"
-#     5. aggregate >= 80%                  -> "Check coverage threshold"
-#     6. per-path floors                   -> "Per-path coverage floors (haven-core)"
+#     6. suite runs green                  -> "Run tests with coverage"
+#     7. aggregate >= 80%                  -> "Check coverage threshold"
+#     8. per-path floors                   -> "Per-path coverage floors (haven-core)"
 #
 #   FLUTTER (haven)
-#     7. suite runs green                  -> "Run tests with coverage"
-#     8. no undeclared test skips          -> "No undeclared test skips"
-#     9. rollback-path flag-off unit run   -> "Rollback-path flag-off unit check"
-#    10. aggregate >= 50% on the FILTERED report
+#     9. drop a test-asset bundle compiled by a different Flutter SDK
+#                                          -> local only: a CI runner has no
+#                                             bundle to go stale, a developer
+#                                             switching SDKs does
+#    10. suite runs green                  -> "Run tests with coverage"
+#    11. no undeclared test skips          -> "No undeclared test skips"
+#    12. rollback-path flag-off unit run   -> "Rollback-path flag-off unit check"
+#    13. aggregate >= 50% on the FILTERED report
 #                                          -> "Remove generated files" + "Check coverage threshold"
-#    11. per-path floors on the same file  -> "Per-path coverage floors (haven)"
+#    14. per-path floors on the same file  -> "Per-path coverage floors (haven)"
 #
 # The static gates run FIRST and alone. A hand-edited floor — the single most
 # common way this workflow goes red — now costs 50 ms to discover instead of
-# sixteen minutes, and the same three checks run in the pre-commit hook, so in
+# sixteen minutes, and the same static checks run in the pre-commit hook, so in
 # practice it costs nothing at all.
 #
 # ## Measuring instrument
@@ -160,6 +166,14 @@ run_static() {
     rc=1
   fi
 
+  if "$SCRIPT_DIR/invalidate_stale_test_assets.sh" --self-test >"$TMP/testassets-selftest.log" 2>&1; then
+    ok "Stale test-asset guard self-test"
+  else
+    err "Stale test-asset guard self-test FAILED — a bundle compiled by another SDK could survive an SDK switch:"
+    cat "$TMP/testassets-selftest.log" >&2
+    rc=1
+  fi
+
   info ""
   return "$rc"
 }
@@ -278,6 +292,16 @@ stack_flutter() {
   fi
 
   info "${BOLD}▶ Flutter coverage (haven) — threshold ${FLUTTER_MIN}%, SDK pin ${COVERAGE_FLUTTER}${RESET}"
+
+  # `flutter test` reuses build/unit_test_assets whenever the bundle is newer
+  # than pubspec.yaml and the asset sources; which SDK compiled the shaders in
+  # it is not part of that decision (flutter_tools `_needsRebuild`,
+  # flutter/flutter#128563). Pinning the coverage SDK while everything else
+  # floats on stable means switching SDKs is routine here, and a bundle left
+  # behind by the other one fails every Material-ink widget test with
+  # "Unsupported runtime stages format version" — dozens of red tests that
+  # look like a broken suite. Cost when the SDK has not changed: one stat.
+  "$SCRIPT_DIR/invalidate_stale_test_assets.sh" "$ROOT/haven" "${have:-unknown}"
 
   local status=0 report="$TMP/flutter-test-report.json"
 

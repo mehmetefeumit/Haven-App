@@ -16,8 +16,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/constants/relays.dart';
-import 'package:haven/src/pages/settings/privacy_content.dart';
-import 'package:haven/src/pages/settings/privacy_topic_page.dart';
 import 'package:haven/src/pages/settings/relay_settings_page.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/legacy_retraction_provider.dart';
@@ -113,7 +111,7 @@ void main() {
       );
     });
 
-    testWidgets('shows a short caption linking to the Privacy topic', (
+    testWidgets('shows a short caption, not the long explainer', (
       tester,
     ) async {
       await tester.pumpWidget(buildApp(mock: seededMock()));
@@ -124,35 +122,11 @@ void main() {
       await tester.scrollUntilVisible(caption, 300);
       expect(caption, findsOneWidget);
 
-      // ...but the 450-word explainer moved to Privacy ▸ Relays. Keeping a
-      // second copy here is what let the two drift apart before.
+      // ...but not the 450-word explainer. A second copy of it here is what
+      // let the two drift apart before.
       expect(find.text('How this works'), findsNothing);
       expect(find.textContaining('forward secrecy'), findsNothing);
       expect(find.textContaining('are your mailbox'), findsNothing);
-    });
-
-    testWidgets('the caption Learn more opens Privacy ▸ Relays', (
-      tester,
-    ) async {
-      await tester.pumpWidget(buildApp(mock: seededMock()));
-      await tester.pumpAndSettle();
-
-      final learnMore = find.text('Learn more');
-      // `scrollUntilVisible` only guarantees the widget is BUILT (inside the
-      // cache extent), not that it is on-screen and hit-testable — the same
-      // trap the tall-surface cases further down document. `ensureVisible`
-      // scrolls it fully into view, so the tap below cannot miss as the page
-      // grows.
-      await tester.scrollUntilVisible(learnMore, 300);
-      await tester.ensureVisible(learnMore);
-      await tester.pumpAndSettle();
-      await tester.tap(learnMore);
-      await tester.pumpAndSettle();
-
-      final page = tester.widget<PrivacyTopicPage>(
-        find.byType(PrivacyTopicPage),
-      );
-      expect(page.topic, PrivacyTopic.relays);
     });
 
     testWidgets('renders Add relay buttons for each category', (tester) async {

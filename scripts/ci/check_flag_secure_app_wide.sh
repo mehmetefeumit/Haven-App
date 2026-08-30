@@ -2,14 +2,13 @@
 # CI guard: FLAG_SECURE covers EVERY Activity, from exactly one registration
 # site.
 #
-# `privacyWhatOthersSeeScreenshots` tells the user, in thirteen languages, that
-# "On Android, Haven blocks screenshots and screen recording everywhere in the
-# app". `FLAG_SECURE` is a WINDOW flag, so a per-Activity `setFlags` in
-# `MainActivity.onCreate` makes that sentence true of MainActivity and of
-# nothing else — and Haven hosts an Activity it does not own the source of:
+# On Android, Haven blocks screenshots and screen recording everywhere in the
+# app. `FLAG_SECURE` is a WINDOW flag, so a per-Activity `setFlags` in
+# `MainActivity.onCreate` protects MainActivity and nothing else — and Haven
+# hosts an Activity it does not own the source of:
 # `com.yalantis.ucrop.UCropActivity`, which renders the user's picked photo
-# full-screen. For as long as the flag lived in MainActivity the shipped promise
-# was false on exactly the screen showing a photo, and no test or guard could
+# full-screen. For as long as the flag lived in MainActivity the protection was
+# absent on exactly the screen showing a photo, and no test or guard could
 # tell, because the flag was set and the app looked protected.
 #
 # The fix is structural, so the guard is a UNION of the three links that make it
@@ -32,7 +31,7 @@
 #
 #   3. NOBODY SETS IT PER ACTIVITY. A second, isolated `FLAG_SECURE` is not
 #      redundant belt-and-braces: it is the pattern the registration replaces,
-#      and it makes the promise look owned by the Activity that carries it, so
+#      and it makes the protection look owned by the Activity that carries it, so
 #      the next Activity is added without one and the app-wide site is the last
 #      thing anyone thinks to check. One owner, or none.
 #
@@ -134,8 +133,8 @@ check_registration() {
     echo "ERROR: ${file} does not register ActivityLifecycleCallbacks from"
     echo "onCreate(). Without that registration FLAG_SECURE reaches only the"
     echo "Activities Haven writes, and UCropActivity — which renders the user's"
-    echo "picked photo full-screen — is not one of them, so"
-    echo "privacyWhatOthersSeeScreenshots (\"everywhere in the app\") is false."
+    echo "picked photo full-screen — is not one of them, so screenshots are"
+    echo "not blocked everywhere in the app."
     return 1
   fi
 
@@ -155,8 +154,8 @@ check_registration() {
   fi
   if grep -q 'clearFlags(' <<<"${on_activity_created}"; then
     echo "ERROR: ${file}: onActivityCreated CLEARS a window flag. Exempting a"
-    echo "screen from FLAG_SECURE contradicts the shipped promise that Haven"
-    echo "blocks screenshots everywhere in the app; change the promise first."
+    echo "screen from FLAG_SECURE punches a hole in app-wide screenshot"
+    echo "blocking; argue for it here, never slip it in."
     return 1
   fi
   return 0

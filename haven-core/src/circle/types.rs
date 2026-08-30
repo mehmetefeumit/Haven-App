@@ -582,10 +582,12 @@ mod tests {
 
     #[test]
     fn production_default_relays_count_is_pinned() {
-        // The count is load-bearing for `privacyRelaysWhyMany`, which promises
-        // "several relays, so no single one can cut you off" — false at one
-        // relay, and thinner than disclosed at two. Pinned exactly so any
-        // change to the seed list is a deliberate, reviewed act.
+        // Pinned exactly so any change to the seed list is a deliberate,
+        // reviewed act. It used to be load-bearing for a sentence promising
+        // "several relays, so no single one can cut you off"; that sentence
+        // went with the Privacy page (2026-08-29), so this pin is now the only
+        // thing standing between a one-relay seed list and a silent single
+        // point of failure.
         assert_eq!(PRODUCTION_DEFAULT_RELAYS.len(), 3);
     }
 

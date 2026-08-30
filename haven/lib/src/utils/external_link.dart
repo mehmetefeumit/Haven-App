@@ -1,9 +1,8 @@
 /// Shared external-link launcher.
 ///
 /// Extracted because the same handler was duplicated verbatim twice inside
-/// `about_page.dart` alone, and the Privacy page adds several more call sites.
-/// Centralising it keeps one rule in one place: a link failure never surfaces
-/// a raw error to the user.
+/// `about_page.dart`. Centralising it keeps one rule in one place: a link
+/// failure never surfaces a raw error to the user.
 library;
 
 import 'package:flutter/material.dart';

@@ -1,36 +1,35 @@
-//! Ties the constants the privacy copy states as facts to the values those
-//! facts are read off.
+//! Ties constants to the user-facing sentences that state them as facts, and
+//! to the derivations those facts ride on.
 //!
-//! Privacy → Relays tells the user "eight for looking up other people's names
-//! and photos, and six for looking up the keys needed to invite them"
-//! (`privacyRelaysDetailIndexers`), and `privacyRelaysDetailProfileLookups`
-//! states the same eight when bounding what a lookup discloses and where a
-//! saved profile goes. Those numbers are [`PRODUCTION_PROFILE_RELAYS`] and
-//! [`PRODUCTION_DISCOVERY_RELAYS`]. Privacy →
-//! Public profile names the photo host verbatim
-//! (`privacyPublicProfileDetailKindZero`); that is [`DEFAULT_BLOSSOM_SERVER`].
-//! Privacy → What members see and the leave-circle dialog both promise how long
-//! a member's phone keeps the last position it received from you
-//! (`privacyWhatOthersSeeDetailOnDevice`, `leaveCircleDialogBody`); that is
-//! [`LOCATION_RETENTION_SECS`]. The same section promises how long a location
-//! ciphertext may sit on a *relay* (`privacyWhatOthersSeeDetailExpiry`); that
-//! is at most [`LOCATION_MESSAGE_RETENTION_SECS`], which is additionally held
-//! to the derivation its own doc comment states, because that derivation is
-//! what makes the sentence honest in the other direction.
+//! **Most of this file went with the Settings → Privacy page (owner directive,
+//! 2026-08-29).** Four pins read `privacy*` strings that no longer exist — the
+//! two relay-pool counts, the relay-residency figure and the Blossom host — and
+//! were deleted with them; a pin against a string nobody can read asserts
+//! nothing. What is kept is everything that still binds:
 //!
-//! `src/profile/relay_pool.rs` and `src/relay/discovery.rs` each pin their own
-//! constant to an exact size, which catches a resize. These catch the other
-//! half: a resize that forgot the copy, and a copy edit that forgot the pool.
-//! They live outside those modules because one paragraph states both counts.
+//!   * `leaveCircleDialogBody` still promises how long a member's phone keeps
+//!     the last position it received, and that is still
+//!     [`LOCATION_RETENTION_SECS`]. The dialog is a surface the user reads
+//!     while acting, so the tie survives the page.
+//!   * The relay-residency window's DERIVATION is unchanged and is pinned in
+//!     both directions ([`LOCATION_MESSAGE_RETENTION_SECS`] against the no-gap
+//!     minimum). Those two pins never read the ARB; they hold the invariant the
+//!     sentence used to describe, and they are what `INV-W-445-EXPIRATION-WINDOW`
+//!     cites.
+//!   * [`bounded_retention_secs`] honouring a shorter declared window is a
+//!     BEHAVIOUR pin. It was written as the other half of a copy pin, and it
+//!     outlives it: a circle created by another Marmot client declares its own
+//!     window, and flooring it would ask relays to hold ciphertext longer than
+//!     that circle asked.
 //!
-//! Only the English template is checked — a translated numeral or host is a
-//! translation concern, gated by `scripts/ci/arb_parity_check.dart` and the
-//! l10n review.
+//! What is NOT recoverable here: the constants below are no longer stated to
+//! the user anywhere, so nothing in CI can catch a drift between a number and
+//! a sentence — there is no sentence. `src/profile/relay_pool.rs` and
+//! `src/relay/discovery.rs` still pin their own pool sizes exactly, which is
+//! now the whole of that guarantee.
 
 use haven_core::location::{LOCATION_MESSAGE_RETENTION_SECS, LOCATION_RETENTION_SECS};
 use haven_core::nostr::mls::bounded_retention_secs;
-use haven_core::profile::{DEFAULT_BLOSSOM_SERVER, PRODUCTION_PROFILE_RELAYS};
-use haven_core::relay::PRODUCTION_DISCOVERY_RELAYS;
 
 /// Returns the English (template) string for `key`.
 fn english_copy(key: &str) -> String {
@@ -122,105 +121,24 @@ fn spelled_days(secs: u64) -> String {
     }
 }
 
-/// How the copy words a relay-residency window of `secs`: "about four minutes".
-///
-/// The window is deliberately not a whole number of minutes (228 s is 3 min
-/// 48 s) — that is what the copy's "about" is doing — so the figure spelled out
-/// is the window rounded to the nearest minute.
-fn spelled_about_minutes(secs: u64) -> String {
-    let minutes =
-        usize::try_from((secs + 30) / 60).expect("a retention window in minutes fits a usize");
-    assert!(
-        minutes >= 2,
-        "the retention window no longer rounds to a plural number of minutes, but the \
-         copy states it as one — change the window back, or reword the copy and this pin \
-         together"
-    );
-    format!("about {} minutes", spelled(minutes))
-}
-
-#[test]
-fn indexer_paragraph_spells_both_pool_sizes() {
-    let copy = english_copy("privacyRelaysDetailIndexers");
-    // Each count is matched together with the clause it introduces, never as a
-    // bare number: the paragraph also says "two fixed groups", and a number
-    // read positionally would still pass if a reword swapped the two clauses
-    // and their numbers together — which is exactly the copy going false.
-    for (claim, plural) in [
-        (
-            format!(
-                "{} for looking up other people's names and photos",
-                spelled(PRODUCTION_PROFILE_RELAYS.len())
-            ),
-            "profile (src/profile/relay_pool.rs)",
-        ),
-        (
-            format!(
-                "{} for looking up the keys needed to invite them",
-                spelled(PRODUCTION_DISCOVERY_RELAYS.len())
-            ),
-            "discovery (src/relay/discovery.rs)",
-        ),
-    ] {
-        assert!(
-            copy.contains(&claim),
-            "privacyRelaysDetailIndexers no longer says \"{claim}\", but the \
-             {plural} pool is that size. Restore the pool size, or update the \
-             English copy in haven/lib/l10n/app_en.arb and every locale beside \
-             it.\nCopy was: {copy}"
-        );
-    }
-}
-
-#[test]
-fn profile_publish_paragraph_spells_the_profile_pool_size() {
-    let copy = english_copy("privacyRelaysDetailProfileLookups");
-    // Carries the clause around the number, not the bare word: "the eight" is
-    // also a prefix of "the eighteen", and the paragraph states a second,
-    // unrelated count ("at most two of the eight") that a positional read
-    // could pick up instead.
-    let claim = format!(
-        "the {}, minus any Haven has excluded",
-        spelled(PRODUCTION_PROFILE_RELAYS.len())
-    );
-    assert!(
-        copy.contains(&claim),
-        "privacyRelaysDetailProfileLookups no longer says \"{claim}\", but the \
-         profile pool holds {} (src/profile/relay_pool.rs). Restore the pool \
-         size, or update the English copy in haven/lib/l10n/app_en.arb and \
-         every locale beside it.\nCopy was: {copy}",
-        PRODUCTION_PROFILE_RELAYS.len(),
-    );
-}
-
-/// The purge window is receiver-side and hard-coded: no relay, no setting and no
-/// FFI value carries it, so these two sentences are the only place the user ever
-/// learns it — and, until this pin, the only place it was written down twice.
-/// Each claim carries the clause around the duration, so a reword that keeps the
-/// promise stays honest while an edit to "a couple of days" cannot ship.
 #[test]
 fn on_device_retention_copy_states_the_purge_window() {
+    // `privacyWhatOthersSeeDetailOnDevice` carried the same promise and was
+    // deleted with the Privacy page (2026-08-29); the leave dialog is now the
+    // only place the user is told this, which is why the pin narrowed rather
+    // than went away.
     let window = spelled_days(LOCATION_RETENTION_SECS);
-    for (key, claim) in [
-        (
-            "privacyWhatOthersSeeDetailOnDevice",
-            format!("after {window}, and deletes it"),
-        ),
-        (
-            "leaveCircleDialogBody",
-            format!("stays on their phones for up to {window}"),
-        ),
-    ] {
-        let copy = english_copy(key);
-        assert!(
-            copy.contains(&claim),
-            "{key} no longer says \"{claim}\", but a receiver purges the last known \
-             position after LOCATION_RETENTION_SECS = {LOCATION_RETENTION_SECS}s \
-             (src/location/types.rs). Restore the retention window, or update the \
-             English copy in haven/lib/l10n/app_en.arb and every locale beside \
-             it.\nCopy was: {copy}"
-        );
-    }
+    let key = "leaveCircleDialogBody";
+    let claim = format!("stays on their phones for up to {window}");
+    let copy = english_copy(key);
+    assert!(
+        copy.contains(&claim),
+        "{key} no longer says \"{claim}\", but a receiver purges the last known \
+         position after LOCATION_RETENTION_SECS = {LOCATION_RETENTION_SECS}s \
+         (src/location/types.rs). Restore the retention window, or update the \
+         English copy in haven/lib/l10n/app_en.arb and every locale beside \
+         it.\nCopy was: {copy}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -240,41 +158,13 @@ fn on_device_retention_copy_states_the_purge_window() {
 // without touching this crate.
 // ---------------------------------------------------------------------------
 
-/// Copy ↔ constant, in both directions of drift. This paragraph is the only
-/// place the user learns how long a location ciphertext may sit on a relay, and
-/// it spells the figure in prose: edit the constant far enough and the sentence
-/// describes a window Haven no longer asks for, edit the sentence and it
-/// describes one Haven never asked for. The number is carried inside the clause
-/// it belongs to, so a reword that keeps the promise stays green.
-#[test]
-fn relay_expiry_copy_states_the_retention_window() {
-    let copy = english_copy("privacyWhatOthersSeeDetailExpiry");
-    let claim = format!(
-        "drop location messages after {}",
-        spelled_about_minutes(LOCATION_MESSAGE_RETENTION_SECS)
-    );
-    assert!(
-        copy.contains(&claim),
-        "privacyWhatOthersSeeDetailExpiry no longer says \"{claim}\", but Haven asks \
-         relays to drop a location message LOCATION_MESSAGE_RETENTION_SECS = \
-         {LOCATION_MESSAGE_RETENTION_SECS}s after it was written \
-         (src/location/ttl.rs, stamped into every circle as the 0x8005 \
-         message-retention component). Restore the window, or update the English \
-         copy in haven/lib/l10n/app_en.arb and every locale beside it.\nCopy was: {copy}"
-    );
-}
-
-/// WIDENING. Relay-side residency of location ciphertext is the thing this
-/// constant exists to minimize, and 228 s is documented as the *smallest* value
-/// that still keeps the no-gap invariant, so anything above the derived floor
-/// leaves every published location on relays longer than the design commits to.
+/// WIDENING. The constant against the derivation it must not outgrow.
 ///
-/// This assertion is the only thing that catches that; the copy is NOT a second
-/// line of defence. [`spelled_about_minutes`] rounds to the nearest minute, so
-/// every window in `[210, 269]` still spells "about four minutes" and
-/// `relay_expiry_copy_states_the_retention_window` stays green across an 18 %
-/// widening of relay residency. The disclosed figure bounds the sentence, never
-/// the residency.
+/// Nothing states this window to the user any more (the sentence went with the
+/// Privacy page, 2026-08-29), so this pin and its mirror below are the whole of
+/// the guarantee: they hold the no-gap invariant itself rather than a sentence
+/// about it, and they fire when the constant moves OR when the publish ceiling
+/// it is derived from moves under it — which happens in the Flutter crate.
 #[test]
 fn widening_the_retention_would_outlive_the_disclosed_expiry() {
     let retention = LOCATION_MESSAGE_RETENTION_SECS;
@@ -324,20 +214,18 @@ fn narrowing_the_retention_would_strand_a_returning_member() {
     );
 }
 
-/// A CEILING, not a flat figure — the half of the sentence the constant alone
-/// cannot hold up. [`bounded_retention_secs`] honours a circle's OWN declared
-/// window when it is shorter than Haven's, so the number above is the largest
-/// residency Haven ever asks for and not the one every message carries. That
-/// case is neither hypothetical nor the user's to control: a circle created by
-/// any other Marmot client declares its own window, and Haven stamps it as
-/// declared.
+/// A CEILING, not a flat figure. [`bounded_retention_secs`] honours a circle's
+/// OWN declared window when it is shorter than Haven's, so
+/// [`LOCATION_MESSAGE_RETENTION_SECS`] is the largest residency Haven ever asks
+/// for and not the one every message carries. That case is neither hypothetical
+/// nor the user's to control: a circle created by any other Marmot client
+/// declares its own window, and Haven stamps it as declared.
 ///
-/// Both halves are asserted here on purpose. A copy pin alone would still pass
-/// if the bound started flooring a shorter window (the sentence would go false
-/// with no test moving), and a behaviour pin alone would still pass if the
-/// qualifier were edited out of the sentence.
+/// This began as one half of a copy pin; the copy half is gone (2026-08-29) and
+/// the behaviour half is what was worth keeping — a flat-flooring regression
+/// would otherwise pass unnoticed now that no sentence contradicts it.
 #[test]
-fn relay_expiry_copy_states_the_window_as_a_ceiling() {
+fn bounded_retention_honours_a_shorter_declared_window() {
     let declared = LOCATION_MESSAGE_RETENTION_SECS / 2;
     assert_eq!(
         bounded_retention_secs(Some(declared)),
@@ -346,34 +234,8 @@ fn relay_expiry_copy_states_the_window_as_a_ceiling() {
          (src/nostr/mls/retention.rs). Flooring it would ask relays to hold \
          location ciphertext longer than the circle asked, and would make \
          LOCATION_MESSAGE_RETENTION_SECS the window every application 445 \
-         carries rather than the ceiling the copy states."
-    );
-
-    let copy = english_copy("privacyWhatOthersSeeDetailExpiry");
-    let claim = format!(
-        "{} at most",
-        spelled_about_minutes(LOCATION_MESSAGE_RETENTION_SECS)
-    );
-    assert!(
-        copy.contains(&claim),
-        "privacyWhatOthersSeeDetailExpiry no longer bounds its figure \
-         (\"{claim}\"), but Haven honours a shorter declared window as declared, \
-         so a flat figure is false in every circle another client created with a \
-         narrower one — and that is the circle whose window the user cannot \
-         change. Restore the qualifier, or stop honouring the shorter \
-         window.\nCopy was: {copy}"
-    );
-}
-
-#[test]
-fn public_profile_paragraph_names_the_blossom_host() {
-    let copy = english_copy("privacyPublicProfileDetailKindZero");
-    let host = DEFAULT_BLOSSOM_SERVER
-        .strip_prefix("https://")
-        .expect("DEFAULT_BLOSSOM_SERVER must be an https:// URL");
-    assert!(
-        copy.contains(host),
-        "privacyPublicProfileDetailKindZero no longer names {host} \
-         (constant and copy have drifted apart)"
+         carries rather than the ceiling it is. The sentence that used to state \
+         this as a ceiling to the user went with the Privacy page (2026-08-29); \
+         the behaviour it described is pinned here on its own."
     );
 }

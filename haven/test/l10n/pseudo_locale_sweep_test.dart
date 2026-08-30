@@ -31,9 +31,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/pages/settings/about_page.dart';
-import 'package:haven/src/pages/settings/privacy_content.dart';
-import 'package:haven/src/pages/settings/privacy_page.dart';
-import 'package:haven/src/pages/settings/privacy_topic_page.dart';
 
 import '../helpers/localized_app_harness.dart';
 
@@ -45,7 +42,7 @@ bool _allowedUnwrapped(String s) {
   if (t.isEmpty) return true;
   // No lowercase ASCII letters → not prose (icons, symbols, digits, bullets).
   if (!RegExp(r'[a-z]{3,}').hasMatch(t)) return true;
-  const allow = {'Haven', 'Version 0.1.0', 'mullvad.net'};
+  const allow = {'Haven', 'Version 0.1.0'};
   return allow.contains(t);
 }
 
@@ -66,72 +63,34 @@ void main() {
       addTearDown(tester.view.resetDevicePixelRatio);
     }
 
-    /// Every page the Privacy consolidation created or edited.
-    final pages = <String, Widget>{
-      'PrivacyPage': const PrivacyPage(),
-      'AboutPage': const AboutPage(),
-      for (final t in PrivacyTopic.values)
-        'PrivacyTopicPage.${t.name}': PrivacyTopicPage(topic: t),
-    };
-
-    pages.forEach((name, page) {
-      testWidgets('$name does not overflow at 200% scale', (tester) async {
-        useHarshSurface(tester);
-        await pumpLocalized(
-          tester,
-          page,
-          locale: _pseudo,
-          textScaler: const TextScaler.linear(2),
-        );
-        expect(tester.takeException(), isNull);
-      });
-
-      testWidgets('$name has no un-extracted strings', (tester) async {
-        useHarshSurface(tester);
-        await pumpLocalized(tester, page, locale: _pseudo);
-
-        final leaks = <String>[];
-        for (final w in tester.widgetList<Text>(find.byType(Text))) {
-          final data = w.data;
-          if (data == null) continue;
-          if (data.contains('⟦')) continue;
-          if (_allowedUnwrapped(data)) continue;
-          leaks.add(data);
-        }
-        expect(
-          leaks,
-          isEmpty,
-          reason: '$name renders hardcoded strings that never reached the ARB',
-        );
-      });
+    testWidgets('AboutPage does not overflow at 200% scale', (tester) async {
+      useHarshSurface(tester);
+      await pumpLocalized(
+        tester,
+        const AboutPage(),
+        locale: _pseudo,
+        textScaler: const TextScaler.linear(2),
+      );
+      expect(tester.takeException(), isNull);
     });
 
-    testWidgets('expanding tier-3 detail does not overflow either', (
-      tester,
-    ) async {
-      // The collapsed region hides the longest paragraphs on every topic, so
-      // overflow that only appears once expanded would otherwise go unseen.
-      for (final topic in PrivacyTopic.values) {
-        useHarshSurface(tester);
-        await pumpLocalized(
-          tester,
-          PrivacyTopicPage(topic: topic),
-          locale: _pseudo,
-          textScaler: const TextScaler.linear(2),
-        );
-        final l10n = l10nOf(tester, PrivacyTopicPage);
-        final header = find.text(l10n.privacyMoreDetailLabel);
-        if (header.evaluate().isEmpty) {
-          await tester.scrollUntilVisible(header, 200);
-        }
-        await tester.tap(header);
-        await tester.pumpAndSettle();
-        expect(
-          tester.takeException(),
-          isNull,
-          reason: 'overflow after expanding detail on ${topic.name}',
-        );
+    testWidgets('AboutPage has no un-extracted strings', (tester) async {
+      useHarshSurface(tester);
+      await pumpLocalized(tester, const AboutPage(), locale: _pseudo);
+
+      final leaks = <String>[];
+      for (final w in tester.widgetList<Text>(find.byType(Text))) {
+        final data = w.data;
+        if (data == null) continue;
+        if (data.contains('⟦')) continue;
+        if (_allowedUnwrapped(data)) continue;
+        leaks.add(data);
       }
+      expect(
+        leaks,
+        isEmpty,
+        reason: 'AboutPage renders hardcoded strings that never reached the ARB',
+      );
     });
   });
 }

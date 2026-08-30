@@ -720,7 +720,7 @@ abstract class AppLocalizations {
   /// **'Something went wrong'**
   String get locationSettingsErrorSnack;
 
-  /// Framing paragraph at the top of the location settings page. MUST NOT promise that the user's OWN sharing resumes after the system closes the app: every background wake path (catchup_service.dart, ios_background_catchup.dart, HavenSLCHandler.swift) is receive-only and contains no publish call site, and Android has no movement trigger at all. An earlier version claimed 'updates resume when you move or when the system next wakes the app', which was false on both platforms. The final sentence is a SECOND, later correction and is platform-asymmetric on purpose, the same way privacyWhatOthersSeeScreenshots is: a version after that one said flatly 'sharing stops until you open it again', which is false on Android in the dangerous direction. RebootReceiver is android:enabled="true" (AndroidManifest.xml) and ForegroundTaskOptions sets autoRunOnBoot:true (background_location_manager.dart), so a reboot resurrects the PUBLISHING foreground service with no user action; and no android:stopWithTask is set anywhere, so the service also survives the app being swiped out of recents. A user who reboots believing sharing stopped is still broadcasting, so never flatten these two platforms back into one sentence. The Android exception stops exactly there and must not be widened: RestartReceiver is android:enabled="false", so an OS or OEM kill of the service is never auto-restarted, and iOS has no publishing wake path at all.
+  /// Framing paragraph at the top of the location settings page. MUST NOT promise that the user's OWN sharing resumes after the system closes the app: every background wake path (catchup_service.dart, ios_background_catchup.dart, HavenSLCHandler.swift) is receive-only and contains no publish call site, and Android has no movement trigger at all. An earlier version claimed 'updates resume when you move or when the system next wakes the app', which was false on both platforms. The final sentence is a SECOND, later correction and is platform-asymmetric on purpose: a version after that one said flatly 'sharing stops until you open it again', which is false on Android in the dangerous direction. RebootReceiver is android:enabled="true" (AndroidManifest.xml) and ForegroundTaskOptions sets autoRunOnBoot:true (background_location_manager.dart), so a reboot resurrects the PUBLISHING foreground service with no user action; and no android:stopWithTask is set anywhere, so the service also survives the app being swiped out of recents. A user who reboots believing sharing stopped is still broadcasting, so never flatten these two platforms back into one sentence. The Android exception stops exactly there and must not be widened: RestartReceiver is android:enabled="false", so an OS or OEM kill of the service is never auto-restarted, and iOS has no publishing wake path at all.
   ///
   /// In en, this message translates to:
   /// **'Haven shares your location with your circles whenever the app is open. Turn this on and your circles keep seeing it while Haven is in the background. If the system closes Haven, sharing stops — background wake-ups only fetch your circles\' locations, they never send yours. On Android, sharing survives swiping Haven away and starts again by itself after a reboot; on iPhone it stays stopped until you open Haven.'**
@@ -936,12 +936,6 @@ abstract class AppLocalizations {
   /// **'Could not open link'**
   String get aboutLinkOpenError;
 
-  /// Link label for the Mullvad VPN website. A domain name, intentionally English (not translated).
-  ///
-  /// In en, this message translates to:
-  /// **'mullvad.net'**
-  String get aboutVpnLinkLabel;
-
   /// Footer line stating the app's license. 'MIT License' is intentionally English (license name).
   ///
   /// In en, this message translates to:
@@ -954,527 +948,11 @@ abstract class AppLocalizations {
   /// **'Version {version}'**
   String aboutFooterVersion(String version);
 
-  /// Title of the Privacy section: both the Settings row (directly above About) and the Privacy hub page's app bar.
-  ///
-  /// In en, this message translates to:
-  /// **'Privacy'**
-  String get privacyTitle;
-
-  /// Always-visible summary paragraph at the top of the Privacy hub — the thirty-second answer for a reader who taps nothing else. Audience: non-technical, no Nostr knowledge assumed. Must promise honesty about limits, not only reassurance. Keep sentences under 25 words. The third sentence is factually load-bearing: the profile (kind 0) is NOT the only public thing — the kind-10002/10050 relay lists and the kind-30443 KeyPackage are published under the same identity key, and relay-list publishing is on by default (haven-core/src/circle/storage_relay_prefs.rs). An earlier version claimed the name and photo were 'the one thing that is public', which the app's own privacyRelaysMeansForYou and privacyRelaysDetailKeyListIsPublic contradicted. Match the enumeration already used in privacyRelaysMeansForYou in this locale.
-  ///
-  /// In en, this message translates to:
-  /// **'Haven shares your location only with the small groups you choose, called circles, and encrypts it on your phone before it leaves. There is no sign-up and no Haven server. The display name and photo you set are public, along with the keys and relay lists that others need in order to invite you. The pages below explain that, and everything else, in plain language.'**
-  String get privacyHubSummary;
-
-  /// Header for the first group of Privacy topics on the hub (what Haven is, your keys, your public profile).
-  ///
-  /// In en, this message translates to:
-  /// **'The basics'**
-  String get privacyGroupBasicsHeading;
-
-  /// Fixed label introducing the practical takeaway at the end of every Privacy topic page. Appears on every topic, so it must read naturally as a recurring heading.
-  ///
-  /// In en, this message translates to:
-  /// **'What this means for you'**
-  String get privacyMeansForYouLabel;
-
-  /// Header of the collapsed region holding technical depth at the end of a Privacy topic page. Should invite a curious reader without implying the main text was incomplete.
-  ///
-  /// In en, this message translates to:
-  /// **'In more detail'**
-  String get privacyMoreDetailLabel;
-
-  /// Screen-reader action hint on the collapsed 'In more detail' header, describing what activating it does.
-  ///
-  /// In en, this message translates to:
-  /// **'Show the technical detail'**
-  String get privacyMoreDetailExpandHint;
-
-  /// Screen-reader action hint on the expanded 'In more detail' header, describing what activating it does.
-  ///
-  /// In en, this message translates to:
-  /// **'Hide the technical detail'**
-  String get privacyMoreDetailCollapseHint;
-
-  /// Screen-reader announcement fired when the 'In more detail' region is expanded. Announces the resulting state, not the action.
-  ///
-  /// In en, this message translates to:
-  /// **'Technical detail shown'**
-  String get privacyMoreDetailExpandedAnnouncement;
-
-  /// Screen-reader announcement fired when the 'In more detail' region is collapsed. Announces the resulting state, not the action.
-  ///
-  /// In en, this message translates to:
-  /// **'Technical detail hidden'**
-  String get privacyMoreDetailCollapsedAnnouncement;
-
-  /// Title of the Privacy topic covering Haven's shape: no account, no Haven servers, no analytics. Front-loaded with the distinguishing words so screen-reader users scanning headings hear what differs first.
-  ///
-  /// In en, this message translates to:
-  /// **'What Haven is, and why there\'s no account'**
-  String get privacyWhatHavenIsTitle;
-
-  /// One-line preview shown under the topic title on the Privacy hub.
-  ///
-  /// In en, this message translates to:
-  /// **'No sign-up, no company server'**
-  String get privacyWhatHavenIsSubtitle;
-
-  /// Body paragraph, Privacy → What Haven is. Audience: non-technical. 'circle' is Haven's own term for a sharing group — keep it consistent with how circles are named elsewhere in the app. Sentences under 20 words.
-  ///
-  /// In en, this message translates to:
-  /// **'Haven shares your location with small groups you choose, called circles. There is no account behind it. You never give an email address, a phone number, or a password.'**
-  String get privacyWhatHavenIsNoAccount;
-
-  /// Body paragraph, Privacy → What Haven is. Introduces 'relay' with a plain-language handhold BEFORE the term ('independent servers called relays'), which is the pattern used throughout this section. 'relay' is a Nostr term of art — keep it recognizable; do not translate it to a generic word for 'server'.
-  ///
-  /// In en, this message translates to:
-  /// **'Haven also runs no servers of its own. Your encrypted location updates pass through independent servers called relays, run by other people. Haven\'s developers cannot see your location and put no tracking in the app. The one thing they can see is how much the map is used in total, because map tiles are fetched with a single shared key, never who fetched them.'**
-  String get privacyWhatHavenIsNoServers;
-
-  /// The practical takeaway for Privacy → What Haven is. Deliberately pairs the benefit with its cost. Factually load-bearing: an earlier version said 'nobody is holding it', which is false — relays retain the kind-0 profile, the kind-10002/10050 relay lists and the kind-30443 KeyPackage indefinitely, no deletion path exists for the KeyPackage, and the photo sits on a Blossom image host with no DELETE (haven-core/src/profile/). Scope the 'cannot hand over' claim to LOCATION, which is genuinely unreadable to a relay, and keep the published-is-permanent clause — the app states the same thing in privacyPublicProfileRemovalIsNotDeletion. The quoted phrase is the leading phrase of the privacyYourKeysTitle topic title — translate it identically to the way that title opens in this locale so the cross-reference is recognisable.
-  ///
-  /// In en, this message translates to:
-  /// **'No relay operator can be made to hand over your location, because the servers that carry it cannot read it. The cost is that nobody can restore your identity for you, and whatever you have already published stays published. See “Your two keys” for what to back up.'**
-  String get privacyWhatHavenIsMeansForYou;
-
-  /// Technical-detail paragraph (collapsed by default), Privacy → What Haven is. Register may be more technical than the main body.
-  ///
-  /// In en, this message translates to:
-  /// **'The app contains no analytics, crash reporting, or advertising code. Because Haven is open source, that can be checked rather than taken on trust.'**
-  String get privacyWhatHavenIsDetailNoTelemetry;
-
-  /// Technical-detail paragraph (collapsed by default), Privacy → What Haven is. Explains a deliberate omission, so the reasoning matters more than the feature.
-  ///
-  /// In en, this message translates to:
-  /// **'Haven also has no push notifications, on purpose. A notification service would have to be told whenever anyone in your circles had something to deliver, which would reveal more about your habits than the relays do.'**
-  String get privacyWhatHavenIsDetailNoPush;
-
-  /// Title of the Privacy topic covering the secret/public key pair. Also quoted inside privacyWhatHavenIsMeansForYou — keep both translations identical.
-  ///
-  /// In en, this message translates to:
-  /// **'Your two keys: one secret, one to share'**
-  String get privacyYourKeysTitle;
-
-  /// One-line preview shown under the topic title on the Privacy hub.
-  ///
-  /// In en, this message translates to:
-  /// **'What identifies you, and what to back up'**
-  String get privacyYourKeysSubtitle;
-
-  /// Body paragraph, Privacy → Your two keys. Audience: non-technical; the username/password comparison is the handhold and should be kept.
-  ///
-  /// In en, this message translates to:
-  /// **'Instead of a username and password, you have a pair of keys. The secret key proves you are you. The public key is what others use to find and invite you.'**
-  String get privacyYourKeysWhatTheyAre;
-
-  /// Body paragraph, Privacy → Your two keys.
-  ///
-  /// In en, this message translates to:
-  /// **'Your secret key is kept only on this phone, in storage the operating system protects. Haven never sends it anywhere: not to any server, not to us.'**
-  String get privacyYourKeysSecretStaysHere;
-
-  /// Body paragraph, Privacy → Your two keys.
-  ///
-  /// In en, this message translates to:
-  /// **'Your public key is safe to hand out. It works like a username you can post anywhere. Sharing it cannot reveal where you are.'**
-  String get privacyYourKeysPublicIsSafe;
-
-  /// The practical takeaway for Privacy → Your two keys — the one genuinely actionable instruction in this group. 'Settings → Identity → Advanced' is a navigation path: translate the screen names to match those screens' own titles in this locale, and keep the arrows.
-  ///
-  /// In en, this message translates to:
-  /// **'To keep this identity, back it up. Go to Settings → Identity → Advanced, tap Reveal Secret Key, and save it somewhere safe such as a password manager. Without that backup, losing the phone loses the identity for good.'**
-  String get privacyYourKeysMeansForYou;
-
-  /// Warning callout, Privacy → Your two keys. This is a limitation the reader can act on, so it is styled as a warning rather than a neutral note. Keep the imperative force in translation.
-  ///
-  /// In en, this message translates to:
-  /// **'Anyone who gets your secret key becomes you. They could join circles as you or publish under your name. Never paste it into another app, a message, or a website.'**
-  String get privacyYourKeysNeverShareSecret;
-
-  /// Technical-detail paragraph (collapsed by default), Privacy → Your two keys. 'secp256k1', 'Nostr', 'npub1…' and 'nsec1…' are intentionally English (algorithm name, protocol name, and literal key prefixes users will see verbatim).
-  ///
-  /// In en, this message translates to:
-  /// **'Both keys are secp256k1, shown in the standard Nostr formats: npub1… for the public key and nsec1… for the secret one. Signing happens inside the app, and the secret is cleared from the parts that handle it directly as soon as it is used.'**
-  String get privacyYourKeysDetailFormats;
-
-  /// Technical-detail paragraph (collapsed by default), Privacy → Your two keys. Describes MLS/Nostr key separation without naming the protocols. Do NOT strengthen this into a claim that a leaked identity key is harmless.
-  ///
-  /// In en, this message translates to:
-  /// **'The keys that encrypt your circles\' messages are separate from this identity key, and are held only by the app. That separation is deliberate: the key that names you is not the key that unlocks what you sent.'**
-  String get privacyYourKeysDetailSeparation;
-
-  /// Title of the Privacy topic covering the public profile. States the conclusion in the title rather than hedging, because a reader who reads nothing else should still learn this.
-  ///
-  /// In en, this message translates to:
-  /// **'Your name and photo are public'**
-  String get privacyPublicProfileTitle;
-
-  /// One-line preview shown under the topic title on the Privacy hub.
-  ///
-  /// In en, this message translates to:
-  /// **'Visible to anyone, not just your circles'**
-  String get privacyPublicProfileSubtitle;
-
-  /// Body paragraph, Privacy → Your name and photo are public. 'Nostr' is intentionally English (protocol name), though the surrounding sentence is translatable.
-  ///
-  /// In en, this message translates to:
-  /// **'The display name and photo you set are published to Nostr, the open public network Haven runs on. Anyone can look them up, not only the people in your circles.'**
-  String get privacyPublicProfileIsPublic;
-
-  /// Body paragraph, Privacy → Your name and photo are public. States that publishing is unconditional — there is deliberately no consent toggle. Do not soften this into 'may be published'.
-  ///
-  /// In en, this message translates to:
-  /// **'Your name and photo go public the moment you save them. There is no setting that keeps them private, and no way to share a name with your circles only.'**
-  String get privacyPublicProfileOnSave;
-
-  /// Body paragraph, Privacy → Your name and photo are public. The quoted example “Quiet Wanderer” is intentionally English and MUST be kept verbatim in every locale: the generator's word lists (lib/src/utils/anonymous_name_words.dart) are English ASCII only, so this is literally the kind of name a user of any locale will see pre-filled. Translating it would describe a name the app never generates.
-  ///
-  /// In en, this message translates to:
-  /// **'New installs start with a made-up name such as “Quiet Wanderer”, which says nothing about you. You can keep it, or replace it with whatever you like.'**
-  String get privacyPublicProfilePseudonym;
-
-  /// The practical takeaway for Privacy → Your name and photo are public.
-  ///
-  /// In en, this message translates to:
-  /// **'Pick a name and photo you are happy to show in public. If you would rather not be recognised, keep the made-up name you were given and skip the photo.'**
-  String get privacyPublicProfileMeansForYou;
-
-  /// Warning callout, Privacy → Your name and photo are public. Factually load-bearing: Haven issues no delete request for the hosted image, so the copy must not imply deletion. Keep 'does not unpublish' unambiguous.
-  ///
-  /// In en, this message translates to:
-  /// **'Removing your photo later does not delete the copy on the server. Haven replaces your profile with an empty one. The image file stays where it is hosted, and any copy already downloaded stays out there. Treat anything you publish as permanent.'**
-  String get privacyPublicProfileRemovalIsNotDeletion;
-
-  /// Technical-detail paragraph (collapsed by default), Privacy → Your name and photo are public. 'Nostr', 'kind 0', 'Blossom' and 'blossom.primal.net' are intentionally English (protocol name, event-kind identifier, protocol name, hostname).
-  ///
-  /// In en, this message translates to:
-  /// **'The profile is a Nostr “kind 0” event signed by your identity key. Photos are uploaded to a public image host, blossom.primal.net, which sees the image, your public key, and your network address. Haven does not yet let you choose a different host.'**
-  String get privacyPublicProfileDetailKindZero;
-
-  /// Technical-detail paragraph (collapsed by default), Privacy → Your name and photo are public. Describes EXIF/GPS stripping without naming EXIF. 'GPS' is intentionally English (widely-understood initialism).
-  ///
-  /// In en, this message translates to:
-  /// **'Before uploading, Haven re-encodes the picture and drops the hidden data cameras attach, including the GPS position where the photo was taken. That matters here: a holiday snapshot can otherwise carry the coordinates of your home.'**
-  String get privacyPublicProfileDetailExifStripped;
-
-  /// Header for the second group of Privacy topics on the hub (relays, how the encryption works, what members and relay operators see).
-  ///
-  /// In en, this message translates to:
-  /// **'How your location travels'**
-  String get privacyGroupHowLocationTravelsHeading;
-
-  /// Title of the Privacy topic explaining what a relay is. Front-loaded with the distinguishing word so screen-reader users scanning headings hear it first. 'Relays' is a Nostr term of art — keep it recognizable; do not translate it to a generic word for 'server' unless this locale's file already does so consistently.
-  ///
-  /// In en, this message translates to:
-  /// **'Relays: the servers that pass messages along'**
-  String get privacyRelaysTitle;
-
-  /// One-line preview shown under the topic title on the Privacy hub.
-  ///
-  /// In en, this message translates to:
-  /// **'Whose computers your updates pass through'**
-  String get privacyRelaysSubtitle;
-
-  /// Body paragraph, Privacy → Relays. Introduces 'relay' with the plain-language handhold BEFORE the term, which is the pattern used throughout this section. Audience: non-technical, no Nostr knowledge.
-  ///
-  /// In en, this message translates to:
-  /// **'Haven has no server of its own, so your updates travel through other people\'s. These are called relays: small, independent servers that anyone can run. A relay holds an encrypted message briefly, then hands it on when your circle asks for it.'**
-  String get privacyRelaysWhatIsARelay;
-
-  /// Body paragraph, Privacy → Relays, on why Haven uses more than one relay.
-  ///
-  /// In en, this message translates to:
-  /// **'Haven uses several relays, so no single one can cut you off. If one goes offline, the rest keep working. You choose the relays where invitations reach you; the relays a circle uses are fixed when it is created.'**
-  String get privacyRelaysWhyMany;
-
-  /// Body paragraph, Privacy → Relays, explaining the three user-editable relay lists (inbox, KeyPackage, and the local-only profile list) plus the per-circle list. 'KeyPackage' is intentionally English and is deliberately NOT simplified to plain language here: the reader has to find this list on the Relay settings page, which is labelled with that exact term (relaySettingsKeyPackageTitle), so findability outranks register. The sentence itself carries the plain-language gloss. Keep 'inbox relays' matching relaySettingsInboxTitle, and 'profile relays' matching relaySettingsProfileTitle, in this locale. IMPORTANT — do not overstate the guarantee: do not imply that no relay can ever learn a device uses it for the profile plane (a relay that actually serves the profile pool obviously sees that traffic directly, and profile-relay assignment can collide across contacts). What is true, and all this sentence claims, is that Haven never publishes a list naming the profile relays, so a relay outside that pool (e.g. one that only sees your location or invitation traffic) has no public pointer to it. See haven-core/SECURITY.md, 'Profile-plane relay separation — accepted deviations', point P3, for the precise wording to match.
-  ///
-  /// In en, this message translates to:
-  /// **'Haven keeps three lists for you. Your inbox relays are where invitations reach you, and your KeyPackage relays are where people fetch the keys they need in order to invite you — Haven publishes both of these lists so others can find them. Your profile relays are different: that is where your name and photo are looked up and published, but the list itself stays on your device and is never published. A relay that only carries your location traffic or invitations therefore has no public list telling it which relays you use for your profile. Each circle also carries its own list, and that is where the circle\'s encrypted updates travel.'**
-  String get privacyRelaysYourLists;
-
-  /// The practical takeaway for Privacy → Relays. Reassuring rather than actionable, deliberately — there is no setting the reader must change. The split in the middle is factually load-bearing: since the profile-plane relay separation (haven-core/SECURITY.md) no single relay sees all three things. The profile pool carries the name and photo; the user's own inbox/KeyPackage relays carry the keys and the published lists, and the two sets are disjoint by construction. An earlier version attributed all three to one relay, which is now false. Do not merge the sentences back together.
-  ///
-  /// In en, this message translates to:
-  /// **'A relay never sees your location, because it is encrypted before it leaves your phone. It does see what has to be public for people to reach you: the keys others need to invite you, and the lists saying which relays to use. Your name and photo are public too, but they go to a separate set of relays. Haven starts you with working relays, so there is nothing you must change.'**
-  String get privacyRelaysMeansForYou;
-
-  /// Technical-detail paragraph (collapsed by default), Privacy → Relays. Discloses the unconditional lookups on servers the user never chose, which are not surfaced anywhere else in the app. Do NOT soften 'even if every relay you chose for yourself is private' — that is the point of the paragraph. The two-pool split is factually load-bearing and post-dates an earlier version that described a single 'set of public directory relays': profiles (kind 0) go to the eight-relay profile pool (haven-core/src/profile/relay_pool.rs) and keys go to the six discovery relays (haven-core/src/relay/discovery.rs), and the two sets are disjoint by construction — that disjointness is the whole point of the profile-plane relay separation (haven-core/SECURITY.md). Keep the counts accurate; if a pool changes size, this string changes with it. 'that you do not choose' was challenged as false for the eight, on the grounds that they seed a user-editable RelayType::Profile list (haven-core/src/circle/storage_relay_prefs.rs) with a full add/remove/restore-defaults section in Settings → Relays (relay_settings_page.dart). It was VERIFIED AND KEPT, because removal does not take effect: usable_profile_relays() unions profile_relay_pool_default() back in on every resolution (haven-core/src/circle/storage_contamination.rs), and every fetch and publish path resolves through it, so the only thing that ever drops one of the eight is the contamination ledger. Removing one in Settings shortens the displayed list while Haven keeps contacting it — so 'you can edit the eight' would be a NEW false claim in the dangerous direction. Do not make that edit. The third sentence is what reconciles this paragraph with privacyRelaysYourLists, which correctly calls the profile list user-editable: additions are real, removals of the curated eight are not.
-  ///
-  /// In en, this message translates to:
-  /// **'Separately from your own lists, Haven uses two groups of public servers that you do not choose: eight for looking up other people\'s names and photos, and six for looking up the keys needed to invite them. The two groups never overlap. You can add your own servers to the profile group, but you cannot take these eight out of it. Haven contacts both groups even if every relay you chose for yourself is private, and each of them sees your network address.'**
-  String get privacyRelaysDetailIndexers;
-
-  /// Technical-detail paragraph (collapsed by default), Privacy → Relays. Discloses three properties of profile lookups that were previously stated nowhere in the app: one author per request (never a batched roster, which is CI-enforced), a salted per-install assignment that is deliberately NEVER rotated, and that publishing fans out to the whole pool. The never-changing pairing is the honest cost of not rotating the salt (haven-core/SECURITY.md, 'Profile-plane relay separation — accepted deviations', point P5) and must not be presented as a pure benefit — keep the cost sentence alongside the spreading claim. Do NOT strengthen the spreading claim into 'no single server sees everyone you look up': that is a statistical property of a per-install hash, not an invariant, and P1 records that collisions follow the birthday bound (~79% for a five-member roster over eight relays), so for a small circle one server genuinely can be assigned everyone. The final clause of the second sentence exists to say so. The publish fan-out is point P2, and it targets the ENTIRE usable pool, so keep it phrased as every profile relay in use. Two claims here are corrections and must not drift back. (1) An earlier version said Haven 'always asks the same server about the same person' and that the pairing 'never changes'. Both were false: PROFILE_MAX_RELAY_RANK is 2 (haven-core/src/profile/assignment.rs) and assigned_relay_for_attempt walks a retry ladder fed by a persisted miss counter (haven-core/src/circle/storage_profile.rs), so an author whose kind-0 misses — the normal case for a brand-new contact — is asked of a SECOND relay; and because the ranking is rendezvous-hashed over the resolved pool, assignments shift for roughly 1/N of authors whenever the pool changes (resolve_profile_pool subtracts contaminated relays, haven-core/src/profile/relay_pool.rs). State the bound as at most TWO of the eight — that cap is the actual privacy parameter, and understating it as one makes the paragraph read as a stronger guarantee than the code gives. (2) An earlier version said a saved profile 'goes to all eight' unconditionally; the publish uses usable_profile_relays() (haven/rust_builder/src/api.rs, haven-core/src/circle/storage_contamination.rs), which is the curated pool minus the contamination ledger plus the user's own additions. 'the eight' must agree with the count in privacyRelaysDetailIndexers.
-  ///
-  /// In en, this message translates to:
-  /// **'For names and photos, Haven asks about one person at a time. Each person is assigned a server on your device; if that server has nothing for them, Haven tries one more. Looking someone up therefore discloses them to at most two of the eight, never to the whole set. Haven never reshuffles those assignments on its own, though they do shift if the set of servers changes. That spreads your lookups rather than sending them all to one server. Each assigned server still builds a lasting record that your phone keeps asking about someone, and with only a few people, several of them can land on the same server. When you save your own name or photo, it goes to every profile relay you are using — the eight, minus any Haven has excluded, plus any you added — so each of those learns your public key.'**
-  String get privacyRelaysDetailProfileLookups;
-
-  /// Technical-detail paragraph (collapsed by default), Privacy → Relays. Warns that following the app's own 'use your own private relay' advice publishes that relay's address. Factually load-bearing — do not weaken to 'may become public'.
-  ///
-  /// In en, this message translates to:
-  /// **'Your KeyPackage-relay list is signed by your identity key and published to the relays already on it. If you add a private relay there, its address becomes public and tied to you. There is no way to keep a relay on that list private.'**
-  String get privacyRelaysDetailKeyListIsPublic;
-
-  /// Title of the Privacy topic explaining MLS/Marmot encryption in plain language.
-  ///
-  /// In en, this message translates to:
-  /// **'How the encryption works'**
-  String get privacyEncryptionTitle;
-
-  /// One-line preview shown under the topic title on the Privacy hub.
-  ///
-  /// In en, this message translates to:
-  /// **'One key per circle, and what changes when people join or leave'**
-  String get privacyEncryptionSubtitle;
-
-  /// Body paragraph, Privacy → How the encryption works. 'MLS' is intentionally English (standard name). Do NOT rewrite this to imply two independent layers of encryption protect message contents — there is one strong layer.
-  ///
-  /// In en, this message translates to:
-  /// **'Your location is encrypted on your phone before it leaves, using an open standard called MLS. Each circle is its own encrypted group with its own keys. Nobody outside a circle can read what is sent inside it: not a relay, not Haven, not another circle you belong to.'**
-  String get privacyEncryptionPerCircle;
-
-  /// Body paragraph, Privacy → How the encryption works. This claim is firm and verified: a joiner gets only current-epoch keys and no history is transferred.
-  ///
-  /// In en, this message translates to:
-  /// **'When someone joins, the circle moves to a new key. They can read what is sent after they arrive, and nothing from before it. Haven never sends a new member any past locations.'**
-  String get privacyEncryptionWhenSomeoneJoins;
-
-  /// Body paragraph, Privacy → How the encryption works. 'Within a few minutes at most' is deliberate and must not become 'immediately' — the real cutoff waits for the next published update. The important caveat about saved messages follows in privacyEncryptionKeysChangeOnMembership.
-  ///
-  /// In en, this message translates to:
-  /// **'When someone leaves a circle, it moves to another new key. They stop being able to read anything new once the rest of the circle has caught up, usually within a few minutes, longer for anyone who was offline at the time.'**
-  String get privacyEncryptionWhenSomeoneLeaves;
-
-  /// Warning callout, Privacy → How the encryption works. THE most factually load-bearing string in the Privacy section. Haven runs NO periodic key rotation (an owner-accepted deviation documented in haven-core/SECURITY.md), so one key covers a whole epoch. Keys change on exactly TWO triggers: a membership change, and the circle's sole ADMIN tapping Repair on a circle whose delivery has broken (docs/EPOCH_ROTATION_REPAIR_PLAN.md — admin-only, rate-limited to once a day). Name the ROLE, not the creator: after an admin handoff the creator can no longer do it, so 'the person who created the circle' is false. Use this locale's Admin badge wording (circleMemberAdmin), the same term sharingHealthRepairNotOwner uses. The absolute claim that must survive translation is 'never on a timer'; do NOT re-add an exclusivity word on the membership trigger, which would make the sentence false again. Do not translate 'repair' as reset / reinstall / restart — it names the Repair control in sharingHealthRepairAction, so use this locale's wording for that button. Never translate this in a way that implies keys rotate regularly, and never use this locale's term for 'forward secrecy' here.
-  ///
-  /// In en, this message translates to:
-  /// **'Leaving a circle does not take back what its members already saved. Haven changes keys when someone joins or leaves, or when a circle\'s admin repairs it after it stops receiving — never on a timer. So one key can cover weeks of messages, and anything a member saved in that time stays readable to them. They still cannot open anything sent after they left.'**
-  String get privacyEncryptionKeysChangeOnMembership;
-
-  /// The practical takeaway for Privacy → How the encryption works, and the actionable consequence of the epoch caveat above.
-  ///
-  /// In en, this message translates to:
-  /// **'Encryption protects you from everyone outside your circles. It cannot protect you from someone who was once inside one. To stop sharing with a particular person, leave the circle you share with them and start a new one without them.'**
-  String get privacyEncryptionMeansForYou;
-
-  /// Technical-detail paragraph (collapsed by default), Privacy → How the encryption works. 'MLS (Messaging Layer Security)', 'IETF', 'Nostr' and 'Marmot' are intentionally English (standard, body and protocol names).
-  ///
-  /// In en, this message translates to:
-  /// **'MLS (Messaging Layer Security) is the same IETF standard used by other secure messengers. Haven reaches the Nostr network through the Marmot protocol, which defines how MLS groups travel over relays. The key each circle signs with is separate from your public Nostr identity key.'**
-  String get privacyEncryptionDetailMls;
-
-  /// Technical-detail paragraph (collapsed by default), Privacy → How the encryption works. 'epoch' is a term of art; introduce it as the paragraph does rather than replacing it. A circle moves to a new epoch on exactly TWO triggers — a membership change, and the circle's sole ADMIN tapping Repair on a circle whose delivery has broken (docs/EPOCH_ROTATION_REPAIR_PLAN.md). Name the ROLE, not the creator: after an admin handoff the creator can no longer do it. Use this locale's Admin badge wording (circleMemberAdmin). An earlier version said 'only when its membership changes'; do NOT restore that exclusivity, it is false. The closing sentence must keep BOTH conditions (nobody joined or left AND it never needed repairing), or it claims more than the code guarantees.
-  ///
-  /// In en, this message translates to:
-  /// **'Each key period is called an epoch. A circle moves to a new one when its membership changes, and when its admin repairs it after it stops receiving. Your device keeps the keys for the current epoch and a few recent ones, enough to open messages still arriving, and drops the rest. A circle nobody has joined or left, and that has never needed repairing, is still on the epoch it started on.'**
-  String get privacyEncryptionDetailEpochs;
-
-  /// Title of the Privacy topic contrasting what circle members can observe with what relay operators can observe. The two are deliberately on one page so the contrast is unmissable.
-  ///
-  /// In en, this message translates to:
-  /// **'What members see, and what relays see'**
-  String get privacyWhatOthersSeeTitle;
-
-  /// One-line preview shown under the topic title on the Privacy hub.
-  ///
-  /// In en, this message translates to:
-  /// **'The people you share with, and the servers in between'**
-  String get privacyWhatOthersSeeSubtitle;
-
-  /// Section heading within the Privacy topic, introducing what circle members can observe. Rendered as a navigable screen-reader heading.
-  ///
-  /// In en, this message translates to:
-  /// **'The people in your circles'**
-  String get privacyWhatOthersSeeMembersHeading;
-
-  /// Body paragraph, Privacy → What members see. Factually load-bearing: Haven shares full-precision GPS and the obfuscation tiers were removed, so do not imply any approximate mode exists.
-  ///
-  /// In en, this message translates to:
-  /// **'Everyone in a circle sees your exact position on the map, not a rough area. There is no setting that shares a vaguer location with some members and a precise one with others.'**
-  String get privacyWhatOthersSeeMembersExact;
-
-  /// Body paragraph, Privacy → What members see. Factually load-bearing and easy to get wrong: only BACKGROUND sharing is toggleable (locationSettingsToggleTitle); foreground sharing is unconditional. Do not imply a pause or ghost mode exists. The second and third sentences carry the same correction as locationSettingsIntro and must stay consistent with it in this locale: an earlier version said the switch governs sharing 'after you close the app', which overstated it — no background wake path publishes, so once the system closes Haven, sharing stops. The per-platform sentence is a SECOND, later correction: the version that carried the first one ended 'sharing stops until you open it again', which is false on Android and false in the dangerous direction, because RebootReceiver (android:enabled="true") plus autoRunOnBoot:true resurrect the publishing foreground service after a reboot with no user action, and nothing sets android:stopWithTask, so it also survives being swiped out of recents. That matters most in THIS paragraph, whose whole subject is how a user stops being seen — someone who swipes Haven away or reboots to stop sharing has not stopped sharing, and the closing Leave Circle sentence is the only advice here that actually works. Keep both platforms named; never flatten them. Match the phrasing this locale already uses in locationSettingsIntro.
-  ///
-  /// In en, this message translates to:
-  /// **'While Haven is open and you are in a circle, your position goes out every couple of minutes on its own. There is no pause button: the switch on the Location page only controls whether that continues while Haven is in the background. If the system closes Haven, sharing stops. On Android, sharing survives swiping Haven away and starts again by itself after a reboot; on iPhone it stays stopped until you open Haven. To stop sharing with a circle, open it and choose Leave Circle.'**
-  String get privacyWhatOthersSeeCannotPause;
-
-  /// Body paragraph, Privacy → What members see.
-  ///
-  /// In en, this message translates to:
-  /// **'Joining a circle also shows every member your public key. Through it they can look up your public profile, and anything else you have ever published under that key.'**
-  String get privacyWhatOthersSeeMembersLearnKey;
-
-  /// Warning callout, Privacy → What members see. Discloses co-member IP harvesting via an attacker-controlled kind-0 picture URL, which Haven's own source names as a risk and which is disclosed nowhere else in the app. Keep 'without you tapping anything' — the automatic nature is the point.
-  ///
-  /// In en, this message translates to:
-  /// **'Your phone downloads each member\'s profile photo from a server that member chose, without you tapping anything. That server then sees your network address, which places you roughly on the map. A VPN hides this; nothing else does.'**
-  String get privacyWhatOthersSeeCoMemberIp;
-
-  /// Section heading within the Privacy topic, introducing what relay operators can observe. Rendered as a navigable screen-reader heading.
-  ///
-  /// In en, this message translates to:
-  /// **'The relay operators'**
-  String get privacyWhatOthersSeeRelaysHeading;
-
-  /// Body paragraph, Privacy → What relays see. All four 'cannot' items are verified. The single-use sender address is real (a new key per message) — but note the following paragraph deliberately walks back what it does NOT hide, so do not merge the two.
-  ///
-  /// In en, this message translates to:
-  /// **'Relays, the independent servers your updates pass through, cannot read your location, your messages, your circle\'s name, or its member list. Your location updates carry a fresh, single-use sender address instead of your public key. Your profile, invitations and relay lists do carry it, so a relay handling both can often tell you are in a circle, without reading anything inside.'**
-  String get privacyWhatOthersSeeRelaysCannot;
-
-  /// Body paragraph, Privacy → What relays see. The honest counterweight to the previous paragraph. Do not soften: activity timing, message sizes and the per-circle tag are all genuinely observable.
-  ///
-  /// In en, this message translates to:
-  /// **'They do see your network address, when you are online, and how large and how frequent your traffic is. Each circle carries a random tag. A relay can group one circle\'s messages by that tag and estimate how many people are in it, without learning who any of them are.'**
-  String get privacyWhatOthersSeeRelaysCan;
-
-  /// The practical takeaway for Privacy → What members see and what relays see. The blunt final sentence is deliberate — it is the one thing on this page a reader must not miss.
-  ///
-  /// In en, this message translates to:
-  /// **'Only join a circle with people you would give your home address to. Encryption holds against relays and outsiders, and a VPN hides the address your phone connects from. Nothing protects you from a member who takes a screenshot.'**
-  String get privacyWhatOthersSeeMeansForYou;
-
-  /// Technical-detail paragraph (collapsed by default), Privacy → What members see and what relays see. Describes the stable per-circle routing tag without naming the 'h' tag or the group ID. The second sentence is a correction and must not drift back: an earlier version said the stability was 'a property of the underlying protocol, not something Haven can change', which is false. The Marmot nostr-routing-v1 app component explicitly permits rotation ('an update MAY also change nostr_group_id'), and the pinned MDK v0.9.4 implements it end to end. Haven simply does not rotate — a product choice, not a protocol limit — so the copy must attribute it to Haven. Keep the final clause: rotation is forward-only and does not retract prior correlation.
-  ///
-  /// In en, this message translates to:
-  /// **'A circle\'s tag stays the same for the life of that circle, so a relay can link all of its messages together indefinitely. The protocol does allow a circle to move to a new tag, but Haven does not do that today — and moving would not undo what a relay has already linked.'**
-  String get privacyWhatOthersSeeDetailTag;
-
-  /// Shared label for a link that opens the matching Privacy topic for a fuller explanation. Used on the Relay settings, Public key QR and Location settings pages. Keep it short — it sits under a paragraph as a TextButton.
-  ///
-  /// In en, this message translates to:
-  /// **'Learn more'**
-  String get commonLearnMore;
-
-  /// Two-sentence caption below the relay lists on the Relay settings page, replacing a much longer explainer that moved to the Privacy section. Keeps just enough framing to make the 'Inbox' and 'KeyPackage' section headers meaningful. 'relay' is a Nostr term of art — match this locale's rendering in privacyRelaysWhatIsARelay.
+  /// Two-sentence caption below the relay lists on the Relay settings page, replacing a much longer explainer. Keeps just enough framing to make the 'Inbox' and 'KeyPackage' section headers meaningful. 'relay' is a Nostr term of art — keep this locale's established rendering.
   ///
   /// In en, this message translates to:
   /// **'Haven has no server of its own. Your encrypted updates pass through independent servers called relays, which cannot read your location or your messages.'**
   String get relaySettingsBackendCaption;
-
-  /// Warning callout, Privacy → What members see. Factually load-bearing and asymmetric: Android sets FLAG_SECURE on every Activity in the process, registered once in HavenApplication.kt (which is what makes 'everywhere in the app' true — it covers the photo-crop screen and any future plugin Activity, not just MainActivity), whereas iOS has no equivalent and only the app-switcher snapshot is blurred (AppDelegate.swift). Do NOT flatten this into a single claim covering both platforms, and never imply iOS blocks in-app screenshots.
-  ///
-  /// In en, this message translates to:
-  /// **'This depends on your phone. On Android, Haven blocks screenshots and screen recording everywhere in the app. On iPhone it cannot: Haven blurs the app-switcher preview, but a member can still capture what is on screen.'**
-  String get privacyWhatOthersSeeScreenshots;
-
-  /// Technical-detail paragraph (collapsed by default), Privacy → What members see and what relays see. 'At most' is load-bearing and must survive translation: the window Haven requests is the SMALLER of its own LOCATION_MESSAGE_RETENTION_SECS and whatever the circle's 0x8005 component declares, so a circle created by another Marmot client can be shorter — and the circle-details sheet now displays that shorter window (circleDetailsMetaWithExpiry), which is what made the un-qualified sentence contradict the app. The reason it can be shorter is another app's declaration, never a setting the user can change. Keep 'about four minutes' contiguous: relay_expiry_copy_states_the_retention_window (haven-core/tests/privacy_copy_ties.rs) matches the substring 'drop location messages after about four minutes' against the constant. 'Advisory' is essential — the expiry is a NIP-40 hint a relay may ignore, so never phrase this as a guarantee that messages are deleted. The third sentence discloses a public discriminator that was previously stated nowhere: Haven stamps the expiration on application messages only, while commits and proposals carry the routing tag alone, so its presence or absence separates group-control traffic from location traffic to any observer. Its opening scope clause ('Among the messages your phone sends') is load-bearing and must survive translation as a real restriction, never generalised to every message in the circle: Haven stamps its OWN application messages unconditionally, but it cannot stamp another member's, and in a circle created by a client that declared no retention policy another member's unstamped message may itself be a location update — the unscoped sentence pointed a relay at the wrong conclusion about a real position report. 'membership or settings change' is the whole un-stamped class, which is every group-control message: joins and removals, but also an admin handoff or a change to the circle's relays — do not narrow it back to membership. Phrase the sentence so the thing that is absent is unmistakably the EXPIRY REQUEST — an earlier version ended 'by its absence', where the nearest antecedent was 'a location update', and that misreading turns the sentence into a different and false claim.
-  ///
-  /// In en, this message translates to:
-  /// **'Haven asks relays to drop location messages after about four minutes at most — sooner, in a circle created by another app that asked for less. That request is advisory: a relay is free to keep them for longer. Among the messages your phone sends, only location updates carry that expiry request, so a message without one is visibly a membership or settings change rather than a location update. Invitations carry no expiry at all, and may sit on your inbox relay indefinitely.'**
-  String get privacyWhatOthersSeeDetailExpiry;
-
-  /// Technical-detail paragraph (collapsed by default), Privacy → What members see and what relays see. Discloses the on-device retention of other members' coordinates, which the app previously stated only in passing in leaveCircleDialogBody. 'a day' is the fixed 24-hour purge window (LOCATION_RETENTION_SECS, haven-core/src/location/types.rs); it is not configurable and does not follow any hint in the payload, so do not translate it as an approximation or a setting. The second sentence keeps the automatic purge from being read as a guarantee about what a member kept deliberately.
-  ///
-  /// In en, this message translates to:
-  /// **'Each member\'s phone stops showing the last position it received from you after a day, and deletes it the next time they open Haven. That is separate from anything a member chose to save or screenshot themselves, which Haven has no say over.'**
-  String get privacyWhatOthersSeeDetailOnDevice;
-
-  /// Technical-detail paragraph (collapsed by default), Privacy → What members see and what relays see. Discloses socket-level correlation, previously undisclosed: a single connection carries both the inbox filter naming the user's OWN public key and every subscribed circle's routing-tag filter (haven-core/src/relay/live_sync/session.rs). The public key here is the reader's own — it is the gift-wrap recipient tag — NOT other members' keys, so do not translate this as though Haven were sending its contacts' keys to a relay. The final sentence matters: the overlap is the default configuration, not a rare misconfiguration, because the inbox and per-circle relay sets both seed from the same defaults.
-  ///
-  /// In en, this message translates to:
-  /// **'Haven opens one connection to each relay and uses it for everything on that relay. Where a relay carries both your invitations and a circle\'s messages, that single connection asks for invitations addressed to your public key and for that circle\'s messages by its tag at the same time, which is what lets the relay tie the two together. On a new install the same relays are used for both.'**
-  String get privacyWhatOthersSeeDetailOneConnection;
-
-  /// Header for the third group of Privacy topics on the hub — the honest disclosures about what Haven does not protect. Grouping them under one candid heading is deliberate: it reads as candour, where scattering the same caveats through the reassuring topics would read as hedging.
-  ///
-  /// In en, this message translates to:
-  /// **'The limits'**
-  String get privacyGroupTheLimitsHeading;
-
-  /// Title of the Privacy topic on metadata, traffic patterns, IP address and VPNs. Front-loaded with the distinguishing words. Deliberately says 'still' — it follows the topics that explain what IS protected.
-  ///
-  /// In en, this message translates to:
-  /// **'What can still be worked out about you'**
-  String get privacyInferenceTitle;
-
-  /// One-line preview shown under the topic title on the Privacy hub.
-  ///
-  /// In en, this message translates to:
-  /// **'The traces encryption cannot cover'**
-  String get privacyInferenceSubtitle;
-
-  /// Body paragraph, Privacy → What can still be worked out. Defines 'metadata' at first use, which is the single most misunderstood word in this section — keep the definition, and use this locale's established word for the concept if the app already has one.
-  ///
-  /// In en, this message translates to:
-  /// **'Encryption hides what you send. It cannot hide that you sent something. That leftover trail is called metadata: when a message went out, how big it was, and which servers you were connected to. It stays visible even when the contents do not.'**
-  String get privacyInferenceWhatIsMetadata;
-
-  /// Body paragraph, Privacy → What can still be worked out. Discloses that motion-triggered publishes make moving-vs-stationary inferable, which is a real activity-level leak and is disclosed nowhere else in the app. Keep the closing 'That pattern never shows where you are' — it bounds the claim, and it names its subject explicitly because the preceding sentences use 'it' for Haven, so a bare pronoun here collides with that referent when the paragraph is read aloud. The scoping in the second sentence is factually load-bearing and must not be flattened back into an unconditional claim: the motion trigger lives only in the Flutter UI isolate (haven/lib/src/pages/map_shell.dart, gated on kMotionTriggerDistanceMeters and rate-limited by kLocationPublishOverlapGuard), so it exists in the foreground on both platforms and on iOS while background sharing keeps the process alive, but NOT in the Android background service, which is a plain timer with no awareness of movement at all. 'at most once a minute' states the rate limit and bounds the leak — keep it.
-  ///
-  /// In en, this message translates to:
-  /// **'From that pattern, a relay you use can tell roughly when you are active and how often. While Haven is on screen — and on iPhone, while background sharing keeps it running — it also sends an extra update, at most once a minute, whenever you move about a hundred metres. Over hours, that can show a relay whether you were on the move or staying put. That pattern never shows where you are.'**
-  String get privacyInferenceActivityPattern;
-
-  /// Body paragraph, Privacy → What can still be worked out. Discloses the continuous online-presence signal created by the live connection, and names the benefit it buys so the disclosure is not merely alarming.
-  ///
-  /// In en, this message translates to:
-  /// **'While Haven is running it keeps an open connection to your relays. They can see that you are online, and which circle tags you are following, never a circle\'s name or who is in it. That is the price of updates arriving in seconds rather than minutes.'**
-  String get privacyInferencePresence;
-
-  /// Section heading within the Privacy topic, introducing IP-address exposure. Rendered as a navigable screen-reader heading. Prefer this locale's plain-language phrase over the initialism 'IP' if one reads naturally.
-  ///
-  /// In en, this message translates to:
-  /// **'Your network address'**
-  String get privacyInferenceIpHeading;
-
-  /// Body paragraph, Privacy → What can still be worked out. Names all three classes of server that observe the user's address, including the photo host — an earlier version of this disclosure named only relays and the map provider, which was incomplete.
-  ///
-  /// In en, this message translates to:
-  /// **'Every server Haven talks to sees the address your phone connects from, its IP address: your relays, the map provider, and whoever hosts a member\'s profile photo. Your internet provider sees which of those servers you reached, and when. Haven does nothing to hide either of those on its own.'**
-  String get privacyInferenceIpAddress;
-
-  /// Heading in Privacy > What can be inferred, introducing what the map provider learns.
-  ///
-  /// In en, this message translates to:
-  /// **'The map itself'**
-  String get privacyInferenceMapTilesHeading;
-
-  /// Privacy > What can be inferred: discloses that map tiles are fetched from the map provider around BOTH the user's and other members' positions, that tiles are prefetched ahead of viewing, and the on-device cache retention. Must not overstate: the provider sees tile coordinates, not identities, and Haven never sends it a member list. The final clause must name IDENTITY DELETION, not logout — Haven has no login/logout; the tile wipe runs inside NostrIdentityService.deleteIdentity().
-  ///
-  /// In en, this message translates to:
-  /// **'Drawing the map asks the map provider for the squares of imagery on screen, so it learns roughly which places you look at. Haven also fetches a small area around each member you can see before you scroll there, so the map is ready — which means the provider can learn roughly where your circle is, not only where you are looking. Those squares are kept in an encrypted cache on your phone for up to seven days, and are cleared if you delete your identity.'**
-  String get privacyInferenceMapTiles;
-
-  /// Section heading within the Privacy topic, introducing the VPN recommendation. Rendered as a navigable screen-reader heading. 'VPN' is intentionally English (widely-understood initialism).
-  ///
-  /// In en, this message translates to:
-  /// **'Whether to use a VPN'**
-  String get privacyInferenceVpnHeading;
-
-  /// Body paragraph, Privacy → What can still be worked out. 'VPN' and 'Mullvad' are intentionally English (initialism and brand name).
-  ///
-  /// In en, this message translates to:
-  /// **'A VPN replaces your address with its own, so relays and the other servers no longer see where you connect from. It also hides which servers you reach from your internet provider. We recommend Mullvad.'**
-  String get privacyInferenceVpnHelps;
-
-  /// Body paragraph, Privacy → What can still be worked out. All three limits are real and must survive translation: members are unaffected, traffic analysis by the relay is unaffected, and trust is shifted rather than eliminated.
-  ///
-  /// In en, this message translates to:
-  /// **'It is not a cure-all. A VPN changes nothing about what your circle members see, and it does not hide the timing or size of your traffic from a relay you are talking to. It also moves your trust to the VPN company rather than removing the need to trust anyone.'**
-  String get privacyInferenceVpnLimits;
-
-  /// The practical takeaway for Privacy → What can still be worked out. Deliberately splits the advice by threat model rather than giving one blanket recommendation.
-  ///
-  /// In en, this message translates to:
-  /// **'Worried about relays, your internet provider, or the map servers placing you on a map? A VPN is the single most useful thing you can add. Worried about the people in your circles? It will not help at all.'**
-  String get privacyInferenceMeansForYou;
-
-  /// Technical-detail paragraph (collapsed by default), Privacy → What can still be worked out. Honest about the limits of the jitter defence: it defeats short-window fingerprinting but not long-run averaging. Do not present the jitter as defeating traffic analysis outright.
-  ///
-  /// In en, this message translates to:
-  /// **'Haven varies the gap between updates on purpose, so a short recording shows no clean rhythm. Averaged over many hours the underlying rate can still be estimated. Message sizes are not padded either, and location updates fall in a narrow size range, which makes them recognisable as location updates.'**
-  String get privacyInferenceDetailJitter;
-
-  /// Technical-detail paragraph (collapsed by default), Privacy → What can still be worked out. States the threat model's boundary plainly rather than leaving the reader to assume total coverage.
-  ///
-  /// In en, this message translates to:
-  /// **'Two things are beyond any design choice here: an observer who can watch many relays at once, and your own phone once someone else controls it.'**
-  String get privacyInferenceDetailOutOfScope;
 
   /// Generic button that clears all selected items in a list.
   ///
@@ -1872,7 +1350,7 @@ abstract class AppLocalizations {
   /// **'Retry validation'**
   String get pendingMemberRetryTooltip;
 
-  /// Tooltip on the button that drops someone from the staged list of people you are about to invite, BEFORE any invitation is sent. Deliberately not "Remove member": Haven ships no way to remove an existing member from a circle, and the Privacy section tells users the remedy is to leave the circle instead. This label must not be readable as circle-member removal.
+  /// Tooltip on the button that drops someone from the staged list of people you are about to invite, BEFORE any invitation is sent. Deliberately not "Remove member": Haven ships no way to remove an existing member from a circle. This label must not be readable as circle-member removal.
   ///
   /// In en, this message translates to:
   /// **'Remove from list'**
@@ -2028,7 +1506,7 @@ abstract class AppLocalizations {
   /// **'Circle: {circleName}'**
   String memberPickerCollisionCircleLabel(String circleName);
 
-  /// Shown on the ONE row that appears when the user types or pastes a complete, valid npub for someone not already in the local directory (plan §10 D2), and spoken as the screen-reader label on that row's loading spinner while the lookup is in flight. Appears whether or not anything resolves. Discloses exactly four things and no more: (1) Haven asked ONE public relay (never more — see docs/MEMBER_PICKER_PLAN.md, the design deliberately adds no fan-out of its own — it never pads with decoys, and it issues one request per attempt through the existing per-author relay assignment, whose own ladder is bounded by PROFILE_MAX_RELAY_RANK); (2) that relay can see THIS DEVICE asked about THAT KEY at THAT MOMENT — do not soften this into 'may be able to see' or omit it, it is a real, unavoidable disclosure; (3) the request is NOT tied to the user's Haven identity, because it carries no cryptographic signature and therefore cannot answer a relay's NIP-42 AUTH challenge — translate 'signature' in the cryptographic sense (the same sense as privacyYourKeysDetailFormats' 'Signing happens inside the app'), not a handwritten or email signature; (4) no photo is downloaded at this stage (only the published name, if any, is looked up). Do NOT use a word meaning 'anonymous' or 'anonymously' anywhere in this string — it overclaims: the network address and timing of the request are still visible to the relay, which is exactly what point (2) discloses. Do not add or imply a duration, a retry count, or which relay was asked.
+  /// Shown on the ONE row that appears when the user types or pastes a complete, valid npub for someone not already in the local directory (plan §10 D2), and spoken as the screen-reader label on that row's loading spinner while the lookup is in flight. Appears whether or not anything resolves. Discloses exactly four things and no more: (1) Haven asked ONE public relay (never more — see docs/MEMBER_PICKER_PLAN.md, the design deliberately adds no fan-out of its own — it never pads with decoys, and it issues one request per attempt through the existing per-author relay assignment, whose own ladder is bounded by PROFILE_MAX_RELAY_RANK); (2) that relay can see THIS DEVICE asked about THAT KEY at THAT MOMENT — do not soften this into 'may be able to see' or omit it, it is a real, unavoidable disclosure; (3) the request is NOT tied to the user's Haven identity, because it carries no cryptographic signature and therefore cannot answer a relay's NIP-42 AUTH challenge — translate 'signature' in the cryptographic sense, not a handwritten or email signature; (4) no photo is downloaded at this stage (only the published name, if any, is looked up). Do NOT use a word meaning 'anonymous' or 'anonymously' anywhere in this string — it overclaims: the network address and timing of the request are still visible to the relay, which is exactly what point (2) discloses. Do not add or imply a duration, a retry count, or which relay was asked.
   ///
   /// In en, this message translates to:
   /// **'Haven asked a relay to look up this person\'s published name. That relay can see this device asked about this key just now — but the request carries no signature, so it isn\'t tied to your Haven identity. No photo is downloaded yet.'**
@@ -2184,7 +1662,7 @@ abstract class AppLocalizations {
   /// **'{members} · epoch {epoch}'**
   String circleDetailsMembersWithEpoch(String members, int epoch);
 
-  /// Appends the relay-expiry window to the circle-details subtitle, e.g. '3 members · epoch 14 · expiry 4 min'. {meta} is the already-composed member count (with the epoch, when there is one) and must be inserted untouched; {expiry} is the compact duration (circleDetailsExpiryMinutesShort / circleDetailsExpirySecondsShort). Space is the whole point of this segment: for almost every circle it reads '4 min' forever, so it must stay a couple of words on the dimmest line, never a row or a label of its own. 'expiry' is the same term privacyWhatOthersSeeDetailExpiry uses ('that expiry request') — reuse whatever word that paragraph uses in your language. Do NOT translate it as a promise that messages are deleted, and do NOT make it read as though the CIRCLE expires; what expires is the location message. Reorder freely (a language that wants the duration first can write '{expiry} ... {meta}') and change the separator to whatever punctuation reads naturally, but keep it short enough to sit on one dim line.
+  /// Appends the relay-expiry window to the circle-details subtitle, e.g. '3 members · epoch 14 · expiry 4 min'. {meta} is the already-composed member count (with the epoch, when there is one) and must be inserted untouched; {expiry} is the compact duration (circleDetailsExpiryMinutesShort / circleDetailsExpirySecondsShort). Space is the whole point of this segment: for almost every circle it reads '4 min' forever, so it must stay a couple of words on the dimmest line, never a row or a label of its own. 'expiry' is the relay-expiry window of the location message. Do NOT translate it as a promise that messages are deleted, and do NOT make it read as though the CIRCLE expires; what expires is the location message. Reorder freely (a language that wants the duration first can write '{expiry} ... {meta}') and change the separator to whatever punctuation reads naturally, but keep it short enough to sit on one dim line.
   ///
   /// In en, this message translates to:
   /// **'{meta} · expiry {expiry}'**
@@ -2202,7 +1680,7 @@ abstract class AppLocalizations {
   /// **'{count, plural, =1{{count} sec} other{{count} sec}}'**
   String circleDetailsExpirySecondsShort(int count);
 
-  /// Spelled-out minutes duration read by screen readers inside circleDetailsExpirySemantics, e.g. 'about 4 minutes'. Never displayed. 'about' is required and must survive translation: the number is rounded to the nearest minute (Haven's own window is 228 seconds, which is what makes the usual reading 'about 4 minutes', matching privacyWhatOthersSeeDetailExpiry). Spell the unit out in full — an abbreviation is what this key exists to avoid. These are consumed at exactly ONE call site, inside circleDetailsExpirySemantics, so a language whose carrier sentence governs the duration may fold the preposition or case into this string rather than leave it stranded (ru does: it carries 'через' and the accusative, and its semantics string has no preposition). Do not 'restore' the English shape there.
+  /// Spelled-out minutes duration read by screen readers inside circleDetailsExpirySemantics, e.g. 'about 4 minutes'. Never displayed. 'about' is required and must survive translation: the number is rounded to the nearest minute (Haven's own window is 228 seconds, which is what makes the usual reading 'about 4 minutes'). Spell the unit out in full — an abbreviation is what this key exists to avoid. These are consumed at exactly ONE call site, inside circleDetailsExpirySemantics, so a language whose carrier sentence governs the duration may fold the preposition or case into this string rather than leave it stranded (ru does: it carries 'через' and the accusative, and its semantics string has no preposition). Do not 'restore' the English shape there.
   ///
   /// In en, this message translates to:
   /// **'{count, plural, =1{about {count} minute} other{about {count} minutes}}'**

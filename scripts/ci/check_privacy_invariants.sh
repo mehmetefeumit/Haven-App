@@ -20,6 +20,12 @@
 # not silently delete a privacy warning**. Both are checked here — the first
 # statically (an `accepted_deviation` invariant carrying an `assertion_arb_keys`
 # entry is a contradiction on its face), the second against the merge base.
+# "Silently" is the operative word: a disclosure whose ARB string still exists
+# cannot be de-listed without an override, while one whose string was deleted
+# from the ARB is exempt — the deletion is a 13-locale diff review already sees,
+# and rule 10 would fail the citation if it stayed. Since the owner removed the
+# in-app explanation layer on 2026-08-29 (docs/privacy/README.md), a deviation
+# or invariant with zero disclosures is a permitted state, not a finding.
 #
 # CI cannot judge whether weakening a guarantee is JUSTIFIED. It can only force
 # the weakening to be stated, in the diff, where review sees it: a downgrade
@@ -69,20 +75,25 @@
 #       not run on this PR" citation 6b exists to reject
 #    7. `enforced` ⇒ at least one test or guard
 #    8. `ratcheted` ⇒ a stated residual
-#    9. `accepted_deviation` ⇒ resolves to a declared deviation, carries NO
-#       assertion keys, and IS disclosed somewhere
+#    9. `accepted_deviation` ⇒ resolves to a declared deviation and carries NO
+#       assertion keys. It need not be disclosed: the Privacy page that carried
+#       every deviation's disclosure was removed by owner directive on
+#       2026-08-29, so a deviation with zero disclosures is a permitted state
 #   10. every cited ARB key exists in `haven/lib/l10n/app_en.arb`
 #   11. every assertion key's invariant carries a test or a guard
-#   12. coverage, both directions: every `privacy*` ARB key is classified, AND
-#       so is every ARB key — under any prefix — whose English value carries
-#       claim language (`never`, `only you`, `encrypted`, `no one`, …). The
-#       prefix sweep alone was a third short of the register: 44 of the 133
-#       registered keys are `onboarding*`, `mapLocationSharing*`,
-#       `locationSettings*`, `clockSkew*`, `qrCode*` — including the onboarding
-#       screens where the user is actively deciding whether to trust the app —
-#       so a new `onboardingWeNeverSeeYourLocation` landed unclassified and
-#       green. The value sweep is what closes that; its own bound is stated
-#       under "What the value sweep cannot prove" below; every
+#   12. coverage, both directions: every `privacy*` ARB key is classified (none
+#       has existed since 2026-08-29; the sweep stays so a returning one cannot
+#       land unclassified), AND so is every ARB key — under any prefix — whose
+#       English value carries claim language (`never`, `only you`, `encrypted`,
+#       `no one`, …). The prefix sweep alone was a third short of the register
+#       even while `privacy*` keys existed: `onboarding*`,
+#       `mapLocationSharing*`, `locationSettings*`, `clockSkew*`, `qrCode*` —
+#       including the onboarding screens where the user is actively deciding
+#       whether to trust the app — so a new `onboardingWeNeverSeeYourLocation`
+#       landed unclassified and green. The value sweep is what closes that,
+#       and with the prefix convention gone it is the whole of the ARB half of
+#       this rule; its own bound is stated under "What the value sweep cannot
+#       prove" below; every
 #       `non_claim_arb_keys` key exists, states a reason, and is not also
 #       claimed; every non-ARB carrier key discoverable by grep (iOS
 #       `NS*UsageDescription`, every `LocationDisclosureStrings` field) maps to
@@ -186,21 +197,23 @@ fail_msg() { printf '\033[1;31m[%s] FAIL:\033[0m %s\n' "${SCRIPT_NAME}" "$*" >&2
 misconfig() { printf '\033[1;31m[%s] ERROR:\033[0m %s\n' "${SCRIPT_NAME}" "$*" >&2; exit 2; }
 
 # Anti-vacuity floors (rule 14), pinned at ~90% of the measured manifest
-# (81 invariants · 133 ARB keys · 15 kinds · 19 guards · 156 tests · 22 doc
-# refs, measured 2026-08-13). They were four times lower than that, and a floor
-# four times below reality is not a floor: 60 of the 81 invariants could be
-# deleted — kinds reattached, orphaned keys dumped into `non_claim_arb_keys` —
-# and every one of these still passed. The ratchet already forces an override
+# (86 invariants · 54 ARB keys · 15 kinds · 21 guards · 201 tests · 25 doc
+# refs, measured 2026-08-29). They were four times lower than that once, and a
+# floor four times below reality is not a floor: 60 of the 81 invariants could
+# be deleted — kinds reattached, orphaned keys dumped into `non_claim_arb_keys`
+# — and every one of these still passed. The ratchet already forces an override
 # for any deletion, so a TIGHT floor costs a legitimate removal one extra line
 # and buys the release path (which never ratchets: tags carry no base commit) a
 # real bound. Raise them with the manifest; never lower one to make a diff
-# green.
-FLOOR_INVARIANTS=72
-FLOOR_ARB_KEYS=119
+# green. The one lowering on record is the ARB-key floor, 119 → 48 on
+# 2026-08-29, when the owner deleted the 85 `privacy*` strings the register was
+# mostly made of; the invariants those strings hung off are all still here.
+FLOOR_INVARIANTS=77
+FLOOR_ARB_KEYS=48
 FLOOR_EVENT_KINDS=13
-FLOOR_GUARDS=17
-FLOOR_TESTS=140
-FLOOR_DOC_REFS=19
+FLOOR_GUARDS=18
+FLOOR_TESTS=180
+FLOOR_DOC_REFS=22
 
 # Rule 12's value sweep. A key whose English value contains one of these
 # phrases is making a privacy claim in the user's own words, whatever its name,
@@ -216,13 +229,14 @@ CLAIM_LANGUAGE=(
   'without your' 'not shared'
 )
 # ...and the sweep's own anti-vacuity floors, both scale-free so they hold for
-# a 6-string fixture ARB and a 535-string one alike. Haven's copy runs about
-# one claim-bearing string in sixteen; requiring one in twenty-five leaves room
-# to add plain UI without re-pinning, while a sweep that stopped matching (an
-# emptied list, a broken extractor) fails loudly. The second floor pins the
-# list itself: shortening it narrows what the sweep can see, and that is a
-# coverage decision, never a tidy-up.
-CLAIM_LANGUAGE_PER_KEYS=25
+# a 6-string fixture ARB and a 480-string one alike. Haven's copy runs about
+# one claim-bearing string in thirty-two since the Privacy page went (it was
+# one in sixteen with it); requiring one in fifty leaves room to add plain UI
+# without re-pinning, while a sweep that stopped matching (an emptied list, a
+# broken extractor) fails loudly. The second floor pins the list itself:
+# shortening it narrows what the sweep can see, and that is a coverage
+# decision, never a tidy-up.
+CLAIM_LANGUAGE_PER_KEYS=50
 CLAIM_LANGUAGE_MIN_PHRASES=15
 
 # ---------------------------------------------------------------------------
@@ -1031,7 +1045,9 @@ guard's failure, exactly). A mention in a comment or inside an echoed string is 
 #
 # Rule 9 is the one that carries this workstream: an `accepted_deviation` row
 # carrying an assertion key is a promise made about the very thing the project
-# has written down that it does NOT hold.
+# has written down that it does NOT hold. It used to also demand a disclosure;
+# that half went with the Privacy page on 2026-08-29 (owner directive), because
+# the only place a deviation could be disclosed no longer exists.
 # ---------------------------------------------------------------------------
 check_invariant_rules() { # check_invariant_rules <manifest>
   local manifest="$1" fail=0 n=0
@@ -1079,8 +1095,8 @@ sees. Find the repeated key and merge the two into one."
     fail=1
   fi
 
-  local inv status residual dev_id n_assert n_disc n_disc_claims n_tests n_guards
-  while IFS=$'\037' read -r inv status residual dev_id n_assert n_disc n_disc_claims n_tests n_guards; do
+  local inv status residual dev_id n_assert n_tests n_guards
+  while IFS=$'\037' read -r inv status residual dev_id n_assert n_tests n_guards; do
     [[ -n "${inv}" ]] || continue
     n=$(( n + 1 ))
 
@@ -1112,12 +1128,6 @@ FROM. Either the deviation is not accepted, or the copy is a false promise — o
 two has to change, and CI cannot pick which. ***"
           fail=1
         fi
-        if (( n_disc + n_disc_claims == 0 )); then
-          fail_msg "[rule 9] ${inv} accepts a deviation and discloses it nowhere: no \
-disclosure_arb_keys and no disclosure-kind non_arb_claims. An undisclosed deviation is \
-one the user cannot know about."
-          fail=1
-        fi
         if [[ -z "${dev_id}" || "${dev_id}" == "null" ]]; then
           fail_msg "[rule 9] ${inv} has status 'accepted_deviation' but no \
 accepted_deviation_id."
@@ -1146,8 +1156,6 @@ test and no guard — an unproven promise is exactly what this manifest exists t
     .invariants[] | [
       .id, .status, (.residual // ""), (.accepted_deviation_id // ""),
       ((.assertion_arb_keys // []) | length),
-      ((.disclosure_arb_keys // []) | length),
-      ([(.non_arb_claims // [])[] | select(.kind == "disclosure")] | length),
       ((.tests // []) | length),
       ((.guards // []) | length)
     ] | @tsv')
@@ -1163,9 +1171,8 @@ test and no guard — an unproven promise is exactly what this manifest exists t
   # dialog has a heading and two button labels that claim nothing, and there is
   # nowhere else honest to put them. It carries the same obligation: a
   # non-claim classification is a judgement and must be written down. It counts
-  # for NOTHING elsewhere — not toward an accepted deviation being disclosed
-  # (rule 9), not toward the disclosure ratchet — or it would become the
-  # laundering route for exactly what those two rules exist to stop.
+  # for NOTHING elsewhere — not toward the disclosure ratchet — or it would
+  # become the laundering route for exactly what that rule exists to stop.
   reasonless_none="$(jqm "${manifest}" '[.invariants[] | .id as $i | (.non_arb_claims // [])[]
     | select(.kind == "none") | select(((.reason // "") | length) < 10)
     | "\($i): \(.id)"] | .[]')"
@@ -1227,11 +1234,6 @@ check_arb_coverage() { # check_arb_coverage <manifest> <arb> <plist> <disclosure
     fail_msg "[rule 12] ${arb##*/} yielded no keys — the extractor found nothing to scan."
     return 1
   fi
-  if [[ -z "${privacy_keys}" ]]; then
-    fail_msg "[rule 12] no 'privacy*' key found in ${arb##*/} — the naming convention \
-this coverage rule keys on has changed, so the rule now checks nothing."
-    return 1
-  fi
 
   local claimed non_claim reasonless
   claimed="$(jqm "${manifest}" '[.invariants[] | (.assertion_arb_keys // [])[],
@@ -1281,9 +1283,12 @@ expected."
   done <<< "${non_claim}"
 
   # Rule 12: every privacy* key AND every key whose value carries claim
-  # language is classified. The prefix half of this sweep saw two thirds of the
-  # register; the value half is what makes a claim under a new key name — the
-  # onboarding screens are the live example — impossible to land unclassified.
+  # language is classified. The prefix half saw two thirds of the register
+  # while the Privacy page existed and sees nothing since 2026-08-29 (it stays
+  # so a returning `privacy*` key cannot land unclassified); the value half is
+  # what makes a claim under ANY key name — the onboarding screens are the live
+  # example — impossible to land unclassified, and its floor below is the
+  # vacuity check this function keeps.
   local claimish n_claimish n_arb_total floor_claimish
   claimish="$(claim_language_keys "${arb}")"
   n_claimish="$(grep -c . <<< "${claimish}" || true)"
@@ -1379,7 +1384,7 @@ artefact recording the user's consent; every sentence in it is a claim."
   fi
 
   (( fail == 0 )) || return 1
-  printf '  [rules 10/12] every privacy string and non-ARB carrier is classified (%s privacy* keys, %s carrying claim language).\n' \
+  printf '  [rules 10/12] every privacy string and non-ARB carrier is classified (%s privacy*-prefixed keys, %s carrying claim language).\n' \
     "$(grep -c . <<< "${privacy_keys}" || true)" "${n_claimish}"
 }
 
@@ -1696,12 +1701,29 @@ the deviation reads as undocumented."
 # its ARB-side twin. A key that merely MOVES between invariants is not a
 # weakening — the promise still stands and is still proved — so the drop counts
 # only when the key is claimed as an assertion nowhere in the new manifest.
+#
+# An ARB key that no longer EXISTS in the ARB is exempt from both the
+# disclosure and the assertion enumeration. Deleting a string is not a silent
+# act — it is a 13-locale diff plus the widget that rendered it, and rule 10
+# fails the citation if it is left behind — so the ratchet demanding an
+# override for a drop the manifest had no choice about would hold nothing;
+# that is the shape of the owner's 2026-08-29 removal of every `privacy*`
+# string, 85 keys under 60 invariants. What the ratchet still holds is that a
+# key STILL IN THE ARB cannot be de-listed. Non-ARB disclosures (`non_arb_claims`)
+# are never exempt, and an ARB that cannot be read exempts nothing: the
+# fail-closed direction is "every drop counts".
 # ---------------------------------------------------------------------------
-enumerate_weakenings() { # enumerate_weakenings <current> <baseline>
+enumerate_weakenings() { # enumerate_weakenings <current> <baseline> <arb>
   require_jq
-  jq -rn --slurpfile cur "$1" --slurpfile base "$2" '
+  local arb_ok=0 live=""
+  if [[ -f "$3" ]] && live="$(jq -r 'keys[] | select(startswith("@") | not)' "$3" 2>/dev/null)"; then
+    arb_ok=1
+  fi
+  jq -rn --slurpfile cur "$1" --slurpfile base "$2" --arg live "${live}" --arg arb_ok "${arb_ok}" '
     def rank: {"enforced": 3, "ratcheted": 2, "accepted_deviation": 1}[.] // 0;
     def index($m): ($m[0].invariants // []) | map({key: .id, value: .}) | from_entries;
+    ($live | split("\n") | map(select(length > 0))) as $inarb
+    | def still_in_arb: if $arb_ok == "1" then map(select(IN($inarb[]))) else . end;
     index($cur) as $c | index($base) as $b
     | ([ ($cur[0].invariants // [])[] | (.assertion_arb_keys // [])[] ] | unique) as $still
     | [ $b | to_entries[] ]
@@ -1710,10 +1732,11 @@ enumerate_weakenings() { # enumerate_weakenings <current> <baseline>
         | if ($c[$id] | not) then ["\($id).deleted"]
           else ($c[$id]) as $new
             | ( if ($new.status | rank) < ($old.status | rank) then ["\($id).status"] else [] end )
-            + ( ( ($old.disclosure_arb_keys // []) + [($old.non_arb_claims // [])[] | select(.kind == "disclosure") | .id] )
-                - ( ($new.disclosure_arb_keys // []) + [($new.non_arb_claims // [])[] | select(.kind == "disclosure") | .id] )
+            + ( ( ( ($old.disclosure_arb_keys // []) - ($new.disclosure_arb_keys // []) | still_in_arb )
+                  + ( [($old.non_arb_claims // [])[] | select(.kind == "disclosure") | .id]
+                      - [($new.non_arb_claims // [])[] | select(.kind == "disclosure") | .id] ) )
                 | map("\($id).disclosure:\(.)") )
-            + ( ( ($old.assertion_arb_keys // []) - ($new.assertion_arb_keys // []) - $still )
+            + ( ( ($old.assertion_arb_keys // []) - ($new.assertion_arb_keys // []) - $still | still_in_arb )
                 | map("\($id).assertion:\(.)") )
             + ( if ((($old.tests // []) | length) + (($old.guards // []) | length)) > 0
                    and ((($new.tests // []) | length) + (($new.guards // []) | length)) == 0
@@ -1724,8 +1747,8 @@ enumerate_weakenings() { # enumerate_weakenings <current> <baseline>
     | flatten | unique | .[]'
 }
 
-check_ratchet() { # check_ratchet <current> <baseline-or-empty>
-  local manifest="$1" baseline="$2" fail=0
+check_ratchet() { # check_ratchet <current> <baseline-or-empty> <arb>
+  local manifest="$1" baseline="$2" arb="$3" fail=0
 
   if [[ -z "${baseline}" ]]; then
     printf '%s\n' "  [ratchet] the base ref carries no privacy-invariant manifest at any \
@@ -1734,7 +1757,7 @@ path — nothing to ratchet against, so this is the commit that introduces it."
   fi
 
   local weakenings items reason
-  weakenings="$(enumerate_weakenings "${manifest}" "${baseline}")"
+  weakenings="$(enumerate_weakenings "${manifest}" "${baseline}" "${arb}")"
   items="$(jqm "${manifest}" '(.ratchet_override.items // [])[]')"
   reason="$(jqm "${manifest}" '.ratchet_override.reason // ""')"
 
@@ -1858,7 +1881,7 @@ ${MANIFEST_REL}. Ratcheting against the old path — a rename is not a fresh sta
 # ---------------------------------------------------------------------------
 FIXTURES=0
 SELFTEST_FAILS=0
-EXPECTED_FIXTURES=99
+EXPECTED_FIXTURES=101
 
 _expect() { # _expect <label> <want-rc> <want-tag-or-'-'> <command...>
   local label="$1" want="$2" tag="$3" got=0 err
@@ -2268,7 +2291,7 @@ _ratchet_through_baseline() { # _ratchet_through_baseline <repo> <head-rel>
   MANIFEST_REL="$2"
   local bp
   bp="$(read_baseline "HEAD~1" "$1/baseline-read.json")"
-  check_ratchet "$1/$2" "${bp}"
+  check_ratchet "$1/$2" "${bp}" "$1/haven/lib/l10n/app_en.arb"
 }
 
 # The claim-language sweep with its phrase list gutted: the assignment lives
@@ -2418,8 +2441,14 @@ self_test() {
   # satisfied and rule 9 is the only rule that can red this.
   _fixture "*** an accepted deviation carrying an assertion key fails ***" 1 '[rule 9]' \
     '.invariants[1].assertion_arb_keys = ["privacyPromise"]'
-  _fixture "an accepted deviation disclosing nothing fails" 1 '[rule 9]' \
-    '.invariants[1].disclosure_arb_keys = [] | .invariants[1].non_arb_claims = []'
+  # Owner decision 2026-08-29: the Privacy page that carried every deviation's
+  # disclosure is gone, so an undisclosed deviation is a permitted state. The
+  # consent-dialog field stays classified (`none`, with a reason) so that only
+  # the former disclosure duty is what this fixture exercises.
+  _fixture "an accepted deviation disclosing nothing passes (owner decision 2026-08-29)" 0 - \
+    '.invariants[1].disclosure_arb_keys = []
+     | .invariants[1].non_arb_claims[0].kind = "none"
+     | .invariants[1].non_arb_claims[0].reason = "Heading; the sentence that disclosed P6 was removed with the Privacy page."'
   _fixture "an accepted deviation citing an unknown deviation id fails" 1 '[rule 9]' \
     '.invariants[1].accepted_deviation_id = "P99"'
   _fixture "an unknown non_arb_claims carrier fails" 1 '[rule 1]' \
@@ -2433,10 +2462,6 @@ self_test() {
     '.invariants[0].non_arb_claims += [{"carrier": "dart_source", "id": "LocationDisclosureStrings.agree", "kind": "none", "reason": "Button label; states no fact."}]'
   _fixture "a 'none' non_arb_claim without a reason fails" 1 '[rule 1]' \
     '.invariants[0].non_arb_claims += [{"carrier": "dart_source", "id": "LocationDisclosureStrings.agree", "kind": "none"}]'
-  _fixture "*** 'none' cannot satisfy an accepted deviation's disclosure duty ***" 1 '[rule 9]' \
-    '.invariants[1].disclosure_arb_keys = []
-     | .invariants[1].non_arb_claims[0].kind = "none"
-     | .invariants[1].non_arb_claims[0].reason = "Reclassified to dodge the disclosure requirement."'
 
   log "self-test: rules 10/12 — claim coverage"
   _fixture "an assertion key absent from the ARB fails" 1 '[rule 10]' \
@@ -2461,8 +2486,14 @@ self_test() {
   # Load-bearing BY OMISSION: honest only because of what it does not say.
   _fixture "a forbidden clause added to an omission string fails" 1 '[rule 12]' "" \
     "jq '.privacyOmission = \"Key packages are published here, and your public profile is published here too.\"' haven/lib/l10n/app_en.arb > a && mv a haven/lib/l10n/app_en.arb"
-  _fixture "an ARB with no privacy* key at all fails" 1 '[rule 12]' "" \
-    "jq 'with_entries(select(.key | startswith(\"privacy\") | not))' haven/lib/l10n/app_en.arb > a && mv a haven/lib/l10n/app_en.arb"
+  # The tree since 2026-08-29: not one `privacy*` key. That is a legitimate
+  # ARB as long as nothing cites one; the value sweep is what still floors
+  # vacuity, which the phrase-list fixture below exercises.
+  _fixture "an ARB with no privacy* key at all passes once nothing cites one" 0 - \
+    '.invariants[0].assertion_arb_keys = ["settingsEncryptedNote"] | .invariants[0].disclosure_arb_keys = []
+     | .invariants[1].disclosure_arb_keys = [] | .invariants[1].attributed_arb_keys = []
+     | .non_claim_arb_keys = {}' \
+    "jq 'with_entries(select(.key | startswith(\"privacy\") | not)) | .settingsEncryptedNote = \"Everything Haven keeps on this phone is encrypted.\"' haven/lib/l10n/app_en.arb > a && mv a haven/lib/l10n/app_en.arb"
   # CRITICAL: the prefix sweep saw two thirds of the register. A promise under
   # an `onboarding*` key — the screens where the user is deciding whether to
   # trust the app at all — landed unclassified and green.
@@ -2542,9 +2573,10 @@ self_test() {
   log "self-test: the ratchet"
   local base="${SELFTEST_TMP}/base/docs/privacy/privacy_invariants.json"
   local cur="${SELFTEST_TMP}/ratchet-cur.json"
-  _ratchet_case() { # _ratchet_case <label> <want> <tag> <jq-filter>
+  local arb="${SELFTEST_TMP}/base/haven/lib/l10n/app_en.arb"
+  _ratchet_case() { # _ratchet_case <label> <want> <tag> <jq-filter> [arb]
     jq "$4" "${base}" > "${cur}"
-    _expect "$1" "$2" "$3" check_ratchet "${cur}" "${base}"
+    _expect "$1" "$2" "$3" check_ratchet "${cur}" "${base}" "${5:-${arb}}"
   }
   _ratchet_case "an unchanged manifest passes" 0 - '.'
   _ratchet_case "a deleted invariant fails" 1 '[ratchet]' '.invariants |= .[0:1]'
@@ -2575,6 +2607,19 @@ self_test() {
     '.invariants[0].tests = [] | .invariants[0].guards = []'
   _ratchet_case "an ADDED disclosure key passes" 0 - \
     '.invariants[0].disclosure_arb_keys += ["privacyHeading"]'
+  # A key whose STRING is gone from the ARB is not silently dropped: the
+  # deletion is the diff review sees, and rule 10 fails the citation if it
+  # stays. The owner's 2026-08-29 removal of every `privacy*` string is exactly
+  # this shape, 85 keys wide.
+  local arb_minus="${SELFTEST_TMP}/ratchet-arb-minus.json"
+  jq 'del(.privacyWarning, .privacyPromise)' "${arb}" > "${arb_minus}"
+  _ratchet_case "a disclosure whose ARB string was deleted passes without an override" 0 - \
+    '.invariants[0].disclosure_arb_keys = []' "${arb_minus}"
+  _ratchet_case "an assertion whose ARB string was deleted passes without an override" 0 - \
+    '.invariants[0].assertion_arb_keys = []' "${arb_minus}"
+  # ...and only against an ARB that can be READ: with none, every drop counts.
+  _ratchet_case "*** with no readable ARB a dropped disclosure still fails ***" 1 '[ratchet]' \
+    '.invariants[0].disclosure_arb_keys = []' "${SELFTEST_TMP}/no-such.arb"
   _ratchet_case "a declared override allows the weakening" 0 - \
     '.invariants[0].disclosure_arb_keys = []
      | .ratchet_override = {reason: "The relay-IP warning moved into the consent dialog verbatim; see PR discussion.", items: ["INV-LOCATION-ENCRYPTED.disclosure:privacyWarning"]}'
@@ -2584,7 +2629,7 @@ self_test() {
   # CRITICAL — a stale allowance means the proof it guarded is already gone.
   _ratchet_case "*** a STALE override item fails ***" 1 '[ratchet]' \
     '.ratchet_override = {reason: "This allowance outlived the change it was written for entirely.", items: ["INV-LOCATION-ENCRYPTED.disclosure:privacyWarning"]}'
-  _expect "an absent baseline manifest ratchets vacuously" 0 - check_ratchet "${base}" ""
+  _expect "an absent baseline manifest ratchets vacuously" 0 - check_ratchet "${base}" "" "${arb}"
 
   log "self-test: the ratchet's baseline — new versus MOVED"
   # CRITICAL: renaming the manifest (a one-line edit here and a `git mv` there)
@@ -2656,7 +2701,7 @@ enforcement half of that manifest and has nothing to check without it."
     # shellcheck disable=SC2064
     trap "rm -f '${baseline_file}'" EXIT
     baseline_path="$(read_baseline "${baseline_ref}" "${baseline_file}")"
-    check_ratchet "${manifest}" "${baseline_path}" || rc=1
+    check_ratchet "${manifest}" "${baseline_path}" "${arb}" || rc=1
   else
     printf '  [ratchet] SKIPPED (--no-ratchet) — local use only; CI always ratchets.\n'
   fi
