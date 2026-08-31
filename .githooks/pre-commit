@@ -7,7 +7,7 @@
 #   1. the coverage-manifest lint (below), and
 #   2. the fast SOURCE guards from repo-guards.yml, in parallel
 #      (scripts/ci/run_source_guards.sh — see its header for why the slow e2e
-#      harness self-tests are deliberately left to CI and pre-push).
+#      harness self-tests are deliberately left to CI).
 #
 # Under a second, every commit. It exists because the most common way the
 # Coverage workflow goes red is not a coverage regression at all — it is an
@@ -16,7 +16,8 @@
 # 51.06%: a verdict that took an 11-minute llvm-cov run to reach, on a defect
 # that is visible in the diff.
 #
-# The full gate (which runs both suites, ~6-11 min) stays on pre-push.
+# The full gate (which runs both suites, ~6-11 min) is not a hook at all:
+# run scripts/ci/check_coverage.sh when you want it, and CI enforces it.
 #
 # Enable once per clone:  scripts/ci/install_git_hooks.sh
 # Bypass a single commit: git commit --no-verify

@@ -63,8 +63,9 @@
 #   scripts/ci/check_coverage.sh --sequential    # one stack at a time
 #   scripts/ci/check_coverage.sh --html          # also write HTML reports
 #
-# Wired as .githooks/pre-commit (--static-only) and .githooks/pre-push (full);
-# enable both once per clone with scripts/ci/install_git_hooks.sh.
+# The static half is wired as .githooks/pre-commit (enable once per clone with
+# scripts/ci/install_git_hooks.sh); the full gate is run on demand — there is
+# no pre-push hook, and CI's Coverage job is the enforcing copy.
 #
 # Thresholds (KEEP IN SYNC with coverage.yml) — override via env:
 #   RUST_COVERAGE_MIN     (default 80)

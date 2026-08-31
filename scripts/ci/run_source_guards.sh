@@ -29,7 +29,7 @@
 # The selection is "argument-less `bash scripts/ci/check_*.sh`", which is
 # exactly the source-guard shape. Anything taking a flag (`--self-test`) or
 # living under tooling/e2e/ci is deliberately excluded as the slow half; CI and
-# the pre-push gate still run everything.
+# the full local gate still run everything.
 #
 # ## What this does NOT do
 #

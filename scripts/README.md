@@ -12,7 +12,7 @@ that was enforced.
 | Command | Cost | What it checks |
 |---------|------|----------------|
 | `scripts/ci/check_coverage.sh --static-only` | < 1 s | Manifest pin rule + guard self-tests. Runs on **pre-commit**. |
-| `scripts/ci/check_coverage.sh` | ~6-11 min | **Everything** `.github/workflows/coverage.yml` runs. Runs on **pre-push**. |
+| `scripts/ci/check_coverage.sh` | ~6-11 min | **Everything** `.github/workflows/coverage.yml` runs. Run it on demand; CI enforces the same gates. |
 | `scripts/coverage.sh` | ~6-11 min | The same gate, plus HTML reports. |
 
 ```bash

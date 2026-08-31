@@ -146,7 +146,7 @@ scripts/build_release.sh apk                    # Release APK (also: appbundle |
 scripts/ci/check_coverage.sh --static-only   # < 1 s: manifest pin rule + guard self-tests
 scripts/ci/check_coverage.sh                 # full gate, both stacks in parallel (~6-11 min)
 ./scripts/coverage.sh                        # same gate + HTML reports
-scripts/ci/install_git_hooks.sh              # once per clone: pre-commit (static) + pre-push (full)
+scripts/ci/install_git_hooks.sh              # once per clone: pre-commit (static). No push hook — run the full gate on demand.
 
 # Per-path coverage floors: NEVER hand-edit scripts/ci/coverage_floors.txt.
 # Every floor must equal floor(measured) - 2 (or exactly 100), enforced by --lint.

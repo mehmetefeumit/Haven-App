@@ -19,7 +19,7 @@
 # thresholds, plus the HTML reports that made this script worth having.
 #
 #   scripts/coverage.sh                # both stacks, gated, with HTML reports
-#   scripts/ci/check_coverage.sh       # the gate itself (no HTML) — pre-push hook
+#   scripts/ci/check_coverage.sh       # the gate itself (no HTML)
 #   scripts/ci/check_coverage.sh --static-only   # instant manifest/guard checks
 #
 set -euo pipefail

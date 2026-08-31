@@ -4,7 +4,8 @@
 # per-path floors in scripts/ci/coverage_floors.txt.
 #
 # EVERY gate in this file is also runnable locally, as a superset, with
-# `scripts/ci/check_coverage.sh` (wired as the pre-push hook). When you add a
+# `scripts/ci/check_coverage.sh` (run on demand; there is no pre-push hook).
+# When you add a
 # step here, add it there — the local gate's whole value is the claim that a
 # green run locally means a green run here, and each step that exists in only
 # one of the two erodes it.

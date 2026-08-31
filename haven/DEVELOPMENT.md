@@ -340,9 +340,9 @@ the undeclared-skip check and the rollback-path flag-off run — so a green run
 here means a green run there.
 
 ```bash
-scripts/ci/install_git_hooks.sh              # once per clone: enables both hooks below
-scripts/ci/check_coverage.sh --static-only   # < 1 s  (pre-commit)
-scripts/ci/check_coverage.sh                 # ~6-11 min, stacks in parallel (pre-push)
+scripts/ci/install_git_hooks.sh              # once per clone: enables the pre-commit hook
+scripts/ci/check_coverage.sh --static-only   # < 1 s  (runs on pre-commit)
+scripts/ci/check_coverage.sh                 # ~6-11 min, stacks in parallel (on demand)
 CHECK_FLUTTER=0 scripts/ci/check_coverage.sh # Rust (haven-core) only
 CHECK_RUST=0    scripts/ci/check_coverage.sh # Flutter (haven) only
 ```
@@ -364,8 +364,10 @@ scripts/ci/check_coverage_floors.sh --repin flutter haven/coverage/lcov_filtered
 `--repin` only ever raises a floor. A path whose coverage **fell** is left
 alone: that needs tests, not a smaller number.
 
-Bypass once with `git commit --no-verify` / `git push --no-verify`; disable with
-`git config --unset core.hooksPath`. Requires `cargo-llvm-cov`
+There is no pre-push hook: `git push` runs nothing, and CI's Coverage job is
+what enforces these gates. Run the full gate yourself before pushing when you
+want the answer sooner. Bypass a commit with `git commit --no-verify`; disable
+the hook with `git config --unset core.hooksPath`. Requires `cargo-llvm-cov`
 (`cargo install cargo-llvm-cov`) and the pinned rustc from
 `scripts/ci/coverage_toolchain.env` (`rustup toolchain install <version>`) —
 coverage is measured on a fixed toolchain because instrumented-line counts move

@@ -17,17 +17,14 @@
 #                   publish chain that lost its bound. The list is DERIVED
 #                   from the workflow, so it never drifts.
 #
-#   pre-push    scripts/ci/check_privacy_invariants.sh       (~11 s)
-#               Run inside a throwaway worktree of the COMMIT being pushed,
-#               not the working tree — the manifest gate is a citation
-#               resolver, and staging a citation without the file it cites
-#               passes every working-tree check while the pushed commit is
-#               broken (CI run 32622119290).
-#
-#               scripts/ci/check_coverage.sh                 (~6-11 min)
-#               The full superset of CI's Coverage job: both suites with
-#               coverage, both aggregates, the per-path floors, the
-#               undeclared-skip check and the rollback-path flag-off run.
+# There is deliberately NO pre-push hook. The full gate (both suites under
+# coverage, ~6-11 min) ran there until 2026-08-30 and is now run on demand —
+# `scripts/ci/check_coverage.sh`, plus `scripts/ci/check_privacy_invariants.sh`
+# for the manifest — with CI as the enforcing copy. Two reasons it left: a
+# nine-minute hook is nine minutes of feedback on every push, and `git push`
+# opens its SSH connection BEFORE running the hook, so the connection idled
+# through the gate until the far end dropped it and git died of SIGPIPE with no
+# message at all (exit 141).
 #
 #   Enable:  scripts/ci/install_git_hooks.sh
 #   Disable: git config --unset core.hooksPath
@@ -43,13 +40,13 @@ git config core.hooksPath .githooks
 
 echo "✅ Git hooks enabled (core.hooksPath = .githooks)."
 echo "   'git commit' now runs the instant coverage checks + the fast source guards."
-echo "   'git push'   now runs the full coverage gate (~6-11 min, both stacks in parallel)."
-echo "   Bypass once with: git commit --no-verify / git push --no-verify"
+echo "   'git push'   runs nothing: the full gate is scripts/ci/check_coverage.sh, on demand."
+echo "   Bypass once with: git commit --no-verify"
 echo "   Disable entirely: git config --unset core.hooksPath"
 echo ""
 
 # A pinned measuring toolchain is only useful if it is installed; say so now
-# rather than at the end of the first ten-minute push.
+# rather than at the end of the first ten-minute run of the gate.
 # shellcheck disable=SC1091
 . scripts/ci/coverage_toolchain.env
 if command -v cargo >/dev/null 2>&1 \
