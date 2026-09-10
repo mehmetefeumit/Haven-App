@@ -140,6 +140,11 @@ readonly PKG="com.oblivioustech.haven"
 # clock, without any host-side clock arithmetic (the B8 lane's trap).
 readonly SAMPLE_TAG="b1power"
 readonly SAMPLE_PERIOD_SECS=5
+# The stamp as `logcat -v threadtime` prints it: liblog formats the tag as
+# `%-8.*s: ` (logprint.cpp), so a 7-character tag gains a pad space before the
+# colon. Matching `b1power: SAMPLE ` found no stamp at all in run 34488512808.
+SAMPLE_STAMP="$(printf '%-8s: SAMPLE ' "${SAMPLE_TAG}")"
+readonly SAMPLE_STAMP
 
 readonly LOCATION_CONSTANTS_SRC="${REPO_ROOT}/haven/lib/src/constants/location.dart"
 
@@ -309,6 +314,14 @@ readonly MARK_TRIGGER_WATCHDOG='[BackgroundTask] cycle trigger=watchdog'
 # so the registration that produced a delivery is the one logged in the cycle
 # BEFORE it.
 readonly MARK_REG_ARMED='[BackgroundTask] registration armed ('
+# The drive prints this, then waits for BARRIER_FILE, before it mounts anything
+# that can hold a platform location registration (see the barrier driver in
+# Phase 4). MUST match `kBroadcastBarrierAwaitMarker` and
+# `kBroadcastBarrierFileName` in the drive target VERBATIM. Relative to the
+# directory `run-as` starts in — the app's data dir — so it is the drive's
+# `getApplicationSupportDirectory()` (Context.getFilesDir) by construction.
+readonly MARK_BARRIER_AWAIT='[b1] AWAITING_BROADCAST_BARRIER'
+readonly BARRIER_FILE='files/b1_broadcast_barrier'
 
 # Extract the publish COUNT (N of "Published to N/M due circle(s)") from the
 # highest-N line in a log. Emits nothing when no line matches; callers treat
@@ -372,8 +385,8 @@ pid_of_marker() {
 # One power SAMPLE is one `adb shell` invocation that stamps logcat, prints the
 # DEVICE clock, and dumps `location` and `power`. The stamp is what makes the
 # samples orderable against the drive's own markers without any host-side clock
-# arithmetic: `[b1] HANDOFF_CONFIRMED` and `b1power: SAMPLE 17` are two lines in
-# ONE logcat capture, so "which samples are before the handoff" is a question
+# arithmetic: `[b1] HANDOFF_CONFIRMED` and `b1power : SAMPLE 17` are two lines
+# in ONE logcat capture, so "which samples are before the handoff" is a question
 # about line order, not about two clocks agreeing. (A host-clock sampler is the
 # trap B8 was built around.)
 #
@@ -384,20 +397,28 @@ pid_of_marker() {
 #
 #   `LocationProviderManager.Registration.toString` (android14-release :705-726)
 #       <uid>/<package>[/<listener>] [bg] <LocationRequest>
-#   `LocationRequest.toString` (:844-905)
-#       Request[<provider> @<TimeUtils.formatDuration> HIGH_ACCURACY
+#   `LocationRequest.toString` (:844-905), as the API-34 image prints it
+#       Request[@<TimeUtils.formatDuration> HIGH_ACCURACY
 #               (, minUpdateInterval=<duration> only when < interval)
-#               (, minUpdateDistance=<meters> only when > 0)]
+#               (, minUpdateDistance=<meters> only when > 0)
+#               (, WorkSource{<uid> <package>})]
 #   `PowerManagerService.WakeLock.toString` (:5366-5396)
-#       PARTIAL_WAKE_LOCK 'Haven:publish' ACQ=-12s345ms (uid=… pid=…)
+#       PARTIAL_WAKE_LOCK              'Haven:publish' ACQ=-12s345ms (uid=…)
+#       — `getLockLevelString()` pads the level to 30 columns, so the quote
+#       sits 14 spaces after `PARTIAL_WAKE_LOCK`, never one; ` LONG` follows
+#       the age once a lock has been held past a minute
 #   `TimeUtils.formatDuration` (fieldLen 0)
-#       (+|-)(Nd)?(Nh)?(Nm)?Ns Nms, and the bare string "0" for a zero duration
+#       (+|-)(Nd)?(Nh)?(Nm)?Ns Nms; (+|-)Nms alone under one second; and the
+#       bare string "0" for a zero duration
 #
-# Every one of those is pinned by a fixture in --self-test, so a platform text
-# change lands as a red parser rather than as an oracle that quietly stops
-# matching anything. At RUN time the same shape is protected twice over: an
-# unparseable `Request[…]` is a hard failure (never a skipped line), and the
-# anti-vacuity check below fails a capture in which the parser found no
+# Every one of those — and the logcat stamp — is pinned by a fixture in
+# --self-test, so a platform text change lands as a red parser rather than as an
+# oracle that quietly stops matching anything. Fixtures that agreed with the
+# parser on a grammar the platform does not print are how run 34488512808 went
+# red on a healthy sampler, so the stamp and registration fixtures include lines
+# copied from that run's capture. At RUN time the same shape is protected twice
+# over: an unparseable `Request[…]` is a hard failure (never a skipped line),
+# and the anti-vacuity check below fails a capture in which the parser found no
 # foreground request at all.
 #
 # ## What is NOT proven here
@@ -415,7 +436,9 @@ pid_of_marker() {
 # Returns 1 (printing nothing) on anything that is not that grammar, which is
 # how a platform text change reaches the caller as a failure. Note the trailing
 # field really is "<millis>ms": `printFieldLocked(…, millis, 'm', …)` then a
-# literal 's'.
+# literal 's'. Under one second the seconds field is skipped too (it prints only
+# after a larger field or when non-zero), so a lock sampled inside its first
+# second reads `ACQ=-326ms` — rejecting that reds step 6 by sampling chance.
 formatted_duration_ms() {
   local tok="$1" sign=1 body d h m s ms
   if [[ "${tok}" == "0" ]]; then
@@ -428,6 +451,10 @@ formatted_duration_ms() {
     *) return 1 ;;
   esac
   body="${tok:1}"
+  if [[ "${body}" =~ ^([0-9]{1,3})ms$ ]]; then
+    printf '%d\n' "$((sign * 10#${BASH_REMATCH[1]}))"
+    return 0
+  fi
   [[ "${body}" =~ ^(([0-9]+)d)?(([0-9]+)h)?(([0-9]+)m)?([0-9]+)s([0-9]+)ms$ ]] || return 1
   d=$((10#${BASH_REMATCH[2]:-0}))
   h=$((10#${BASH_REMATCH[4]:-0}))
@@ -519,16 +546,21 @@ location_request_records() {
   done < <(_location_request_fields "${samplefile}" "${lo}" "${hi}")
 }
 
+# A held wake lock's line in `dumpsys power`: the padded level, then the quoted
+# tag. One or more spaces, because only PROXIMITY_SCREEN_OFF_WAKE_LOCK fills the
+# 30-column level field; a single-space match saw no lock in run 34488512808.
+readonly WAKE_LOCK_LINE_ERE="_WAKE_LOCK +'"
+
 # "<sample>\t<tag>\t<ACQ token>" for every HELD wake lock in samples [lo, hi].
 #
-# Keyed on the LOCK LEVEL plus the quoted tag ("PARTIAL_WAKE_LOCK 'x'"), which
+# Keyed on the LOCK LEVEL plus the quoted tag ("PARTIAL_WAKE_LOCK … 'x'"), which
 # `WakeLock.toString` always prints, rather than on `ACQ=`, which it prints only
 # once the lock has been notified. Keying on `ACQ=` would make a lock that
 # printed without one DISAPPEAR, and "the plugin lock went away" is a very
 # different finding from "we could not read its age".
 _wake_lock_fields() {
   local samplefile="$1" lo="$2" hi="$3"
-  awk -v lo="${lo}" -v hi="${hi}" -v q="'" '
+  awk -v lo="${lo}" -v hi="${hi}" -v q="'" -v wl="${WAKE_LOCK_LINE_ERE}" '
     /^=== SAMPLE n=/ {
       n = $0
       sub(/^=== SAMPLE n=/, "", n)
@@ -538,7 +570,7 @@ _wake_lock_fields() {
       next
     }
     !inrange { next }
-    index($0, "WAKE_LOCK " q) == 0 { next }
+    $0 !~ wl { next }
     {
       q1 = index($0, q)
       rest = substr($0, q1 + 1)
@@ -570,6 +602,29 @@ wake_lock_records() {
   done < <(_wake_lock_fields "${samplefile}" "${lo}" "${hi}")
 }
 
+# One sample's raw `date; dumpsys location; dumpsys power` output on stdin ->
+# the lines the parsers read, under a `=== SAMPLE n=<n> …` header.
+#
+# Filtered on the HOST, not the device, and before anything is written:
+# `dumpsys location` prints the active position, and the artifact this feeds
+# has no business carrying coordinates when the assertions need only
+# registration and wake-lock lines. It is deliberately LOOSER than the parser —
+# it keeps every line naming the package beside a `Request[`, including the
+# Event Log's replays of long-cancelled registrations — so the artifact still
+# shows the registration history for triage while the parser (which anchors on
+# the caller identity at the start of a line) counts only the live ones.
+#
+# A function rather than inline in the sampler so --self-test can drive it: a
+# filter that drops a line the parser needs is invisible to every parser
+# fixture, and that is exactly how run 34488512808 captured no wake lock at all.
+filter_power_sample() {
+  awk -v n="$1" -v pkg="${PKG}" -v wl="${WAKE_LOCK_LINE_ERE}" '
+    NR == 1 { print "=== SAMPLE n=" n " device-clock=" $0 " ==="; next }
+    $0 ~ wl { print; next }
+    index($0, pkg) && index($0, " Request[") { print }
+  '
+}
+
 # The index of every sample the sampler actually WROTE in [lo, hi], ascending.
 sample_indices() {
   local samplefile="$1" lo="$2" hi="$3"
@@ -589,7 +644,7 @@ sample_indices() {
 # absent (so a caller can tell the two apart).
 last_sample_before() {
   local logfile="$1" marker="$2"
-  awk -v m="${marker}" -v tag="${SAMPLE_TAG}: SAMPLE " '
+  awk -v m="${marker}" -v tag="${SAMPLE_STAMP}" '
     BEGIN { last = 0 }
     index($0, m) { print last; found = 1; exit }
     { i = index($0, tag); if (i > 0) last = substr($0, i + length(tag)) + 0 }
@@ -601,7 +656,7 @@ last_sample_before() {
 # <marker>; empty when there is none.
 first_sample_after() {
   local logfile="$1" marker="$2"
-  awk -v m="${marker}" -v tag="${SAMPLE_TAG}: SAMPLE " '
+  awk -v m="${marker}" -v tag="${SAMPLE_STAMP}" '
     !seen { if (index($0, m)) seen = 1; next }
     { i = index($0, tag); if (i > 0) { print substr($0, i + length(tag)) + 0; exit } }
   ' "${logfile}" 2>/dev/null || true
@@ -624,7 +679,7 @@ first_sample_after() {
 # the same round trip that takes the dump, so "which cycle was running when this
 # sample was taken" is a question about position in one capture.
 sample_trigger_context() {
-  awk -v tag="${SAMPLE_TAG}: SAMPLE " -v m='[BackgroundTask] cycle trigger=' '
+  awk -v tag="${SAMPLE_STAMP}" -v m='[BackgroundTask] cycle trigger=' '
     {
       i = index($0, m)
       if (i > 0) {
@@ -727,6 +782,21 @@ delivery_gaps_after_registration() {
   ' "$1" 2>/dev/null || true
 }
 
+# Why no sample could be placed after a marker. Samples on disk with no stamp
+# in the capture is a stamp-grammar mismatch, not a dead sampler — the cause
+# run 34488512808 reported as "the sampler died" while it had written 113.
+no_sample_cause() {
+  local logfile="$1" samplefile="$2" written stamped
+  written="$(grep -c '^=== SAMPLE n=' "${samplefile}" 2>/dev/null || true)"
+  stamped="$(grep -acF -- "${SAMPLE_STAMP}" "${logfile}" 2>/dev/null || true)"
+  if (( ${written:-0} > 0 && ${stamped:-0} == 0 )); then
+    printf "the sampler wrote %s sample(s) but the capture holds no '%s' stamp: \
+the stamp grammar changed, the sampler did not die\n" "${written}" "${SAMPLE_STAMP}"
+  else
+    printf 'the sampler died, or the hold ended inside one sample period\n'
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # Oracle step 5 — ONE long-interval platform request while backgrounded.
 #
@@ -755,9 +825,9 @@ registration oracle describes was never entered."
   fi
   post_min="$(first_sample_after "${logfile}" "${pub_line}")"
   if [[ -z "${post_min}" ]]; then
-    echo "FAIL: no power sample was taken after the first publish — the sampler died, \
-or the hold ended inside one sample period. Every steady-state assertion below would \
-be vacuous."
+    echo "FAIL: no power sample was taken after the first publish — \
+$(no_sample_cause "${logfile}" "${samplefile}"). Every steady-state assertion below \
+would be vacuous."
     return 1
   fi
   hold_max="$(last_sample_before "${logfile}" "${MARK_HOLD_DONE}")"
@@ -885,8 +955,9 @@ assert_wake_lock_oracle() {
 
   first="$(first_sample_after "${logfile}" "${MARK_HANDOFF_OK}")"
   if [[ -z "${first}" ]]; then
-    echo "FAIL: no power sample was taken after the handoff, so nothing can be said \
-about the wake locks held while backgrounded."
+    echo "FAIL: no power sample was taken after the handoff \
+($(no_sample_cause "${logfile}" "${samplefile}")), so nothing can be said about the \
+wake locks held while backgrounded."
     return 1
   fi
   hold_max="$(last_sample_before "${logfile}" "${MARK_HOLD_DONE}")"
@@ -1118,8 +1189,15 @@ ${elapsed} s later (bound ${NO_FIX_BOUND_SECS} s)."
 # a red parser with a diff to look at, not as an oracle that silently stops
 # matching and passes everything.
 #
-# V-P2-1 (docs/POWER_EFFICIENCY_PLAN.md 7.5) is closed by these, in the SAME
-# commit as the oracle; the first CI run confirms them against the real image.
+# V-P2-1 (docs/POWER_EFFICIENCY_PLAN.md 7.5) is closed by these. The first CI
+# run (34488512808) checked them against the real image and disproved two: the
+# logcat stamp and the wake-lock level are both PADDED on the device, and the
+# single-space forms first transcribed here matched nothing there. The stamp and
+# the registration lines are now pinned by lines copied from that run's capture;
+# the wake-lock lines follow `getLockLevelString()`'s padded literal, because
+# that run's sampler filtered every one of them out before it wrote anything.
+# The request constants below keep a `gps ` provider token the API-34 image does
+# not print; the parser reads from `@`, so that token is inert.
 # ---------------------------------------------------------------------------
 # The foreground stream: 1 s interval, 1 m displacement. The distance suffix is
 # printed only when > 0, so it is the UI request's signature.
@@ -1153,9 +1231,13 @@ readonly FIX_REQ_LOG_EVENT='  gps provider +registration 10123/com.oblivioustech
 # The historical-aggregate section: a CallerIdentity at the start of the line,
 # with no request after it.
 readonly FIX_AGG_STATS='  10123/com.oblivioustech.haven: fixes=12 durationTotal=+1m0s0ms'
-readonly FIX_LOCK_PLUGIN="  PARTIAL_WAKE_LOCK 'ForegroundService:WakeLock' ACQ=-1m12s345ms (uid=10123 pid=1111)"
-readonly FIX_LOCK_PUBLISH="  PARTIAL_WAKE_LOCK 'Haven:publish' ACQ=-2s500ms (uid=10123 pid=1111)"
-readonly FIX_LOCK_PUBLISH_STUCK="  PARTIAL_WAKE_LOCK 'Haven:publish' ACQ=-31s000ms (uid=10123 pid=1111)"
+# `getLockLevelString()`'s PARTIAL_WAKE_LOCK literal, 30 columns wide; `dumpsys
+# power` prints "  " + level + " '" + tag + "'" (PowerManagerService :4710,
+# :5366-5396). The plugin lock carries ` LONG`: it has been held past a minute.
+readonly FIX_LOCK_LEVEL='PARTIAL_WAKE_LOCK             '
+readonly FIX_LOCK_PLUGIN="  ${FIX_LOCK_LEVEL} 'ForegroundService:WakeLock' ACQ=-1m12s345ms LONG (uid=10123 pid=1111)"
+readonly FIX_LOCK_PUBLISH="  ${FIX_LOCK_LEVEL} 'Haven:publish' ACQ=-2s500ms (uid=10123 pid=1111)"
+readonly FIX_LOCK_PUBLISH_STUCK="  ${FIX_LOCK_LEVEL} 'Haven:publish' ACQ=-31s000ms (uid=10123 pid=1111)"
 
 # Write a power-sample file: <out> <pre-handoff request line> <steady-state
 # request block>. Samples 1-2 are the foreground phase, 3-5 the steady state.
@@ -1215,18 +1297,18 @@ _fixture_delivery_cycle() {
 build_fixture_logcat() {
   local out="$1" cycles="$2" d1="$3" d2="$4" s5="$5"
   {
-    printf '08-02 04:40:00.000  1500  1500 I %s: SAMPLE 1\n' "${SAMPLE_TAG}"
+    printf '08-02 04:40:00.000  1500  1500 I %-8s: SAMPLE 1\n' "${SAMPLE_TAG}"
     printf '08-02 04:40:01.000  1111  1120 I flutter : %s pid=1111\n' "${MARK_PAUSE}"
-    printf '08-02 04:40:05.000  1500  1500 I %s: SAMPLE 2\n' "${SAMPLE_TAG}"
+    printf '08-02 04:40:05.000  1500  1500 I %-8s: SAMPLE 2\n' "${SAMPLE_TAG}"
     printf '08-02 04:40:06.000  1111  1120 I flutter : %s\n' "${MARK_HANDOFF_OK}"
     printf '08-02 04:40:07.000  1111  1140 I flutter : [BackgroundTask] cycle trigger=paused-signal\n'
     printf '08-02 04:40:08.000  1111  1140 I flutter : %s100s)\n' "${MARK_REG_ARMED}"
     printf '08-02 04:40:09.000  1111  1140 I flutter : [BackgroundTask] Published to 1/1 due circle(s) (1 eligible), fetched 1/1 circle(s).\n'
-    printf '08-02 04:40:10.000  1500  1500 I %s: SAMPLE 3\n' "${SAMPLE_TAG}"
+    printf '08-02 04:40:10.000  1500  1500 I %-8s: SAMPLE 3\n' "${SAMPLE_TAG}"
     (( cycles >= 1 )) && _fixture_delivery_cycle "${d1}"
-    printf '08-02 04:41:45.000  1500  1500 I %s: SAMPLE 4\n' "${SAMPLE_TAG}"
+    printf '08-02 04:41:45.000  1500  1500 I %-8s: SAMPLE 4\n' "${SAMPLE_TAG}"
     (( cycles >= 2 )) && _fixture_delivery_cycle "${d2}"
-    printf '08-02 %s.000  1500  1500 I %s: SAMPLE 5\n' "${s5}" "${SAMPLE_TAG}"
+    printf '08-02 %s.000  1500  1500 I %-8s: SAMPLE 5\n' "${s5}" "${SAMPLE_TAG}"
     printf '08-02 04:43:30.000  1111  1130 I flutter : %s\n' "${MARK_HOLD_DONE}"
   } > "${out}"
 }
@@ -1239,7 +1321,7 @@ build_fixture_idle_logcat() {
   {
     printf '08-02 04:43:30.000  1111  1130 I flutter : %s\n' "${MARK_HOLD_DONE}"
     printf '08-02 04:43:31.000  1111  1130 I flutter : %s\n' "${MARK_IDLE_BEGIN}"
-    printf '08-02 04:43:34.000  1500  1500 I %s: %s%s\n' \
+    printf '08-02 04:43:34.000  1500  1500 I %-8s: %s%s\n' \
       "${SAMPLE_TAG}" "${MARK_IDLE_FORCED}" "${state}"
     if [[ "${pub}" != "none" ]]; then
       printf '08-02 %s.000  1111  1140 I flutter : %s\n' \
@@ -1264,7 +1346,7 @@ run_self_test() {
   # Pinned by EQUALITY, never by a floor: the run used to end with a hard-coded
   # "all N fixtures passed" and no counter, so deleting a case left the message
   # — and the exit code — untouched. Mirrors check_android_location_power.sh.
-  local -r SELF_TEST_FIXTURES=54
+  local -r SELF_TEST_FIXTURES=65
   local tmp fail=0 checked=0 got
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
@@ -1455,10 +1537,11 @@ run_self_test() {
 
   # --- TimeUtils.formatDuration --------------------------------------------
   # Every interval and every wake-lock age in the power oracles is read through
-  # this one parser, so its grammar is pinned in both directions: the five
-  # shapes AOSP actually prints, and two shapes it does NOT (which is how a
-  # future platform that prints milliseconds, or drops the ms field, arrives as
-  # a red parser instead of as a silently-ignored line).
+  # this one parser, so its grammar is pinned in both directions: the shapes
+  # AOSP actually prints (these five, and the sub-second one at (61)), and
+  # shapes it does NOT (which is how a future platform that prints
+  # milliseconds, or drops the ms field, arrives as a red parser instead of as
+  # a silently-ignored line).
   local i=0
   local -a dur_ok_tok=('+1m40s0ms' '+1s0ms' '0' '-12s345ms' '+1h2m3s4ms')
   local -a dur_ok_ms=('100000' '1000' '0' '-12345' '3723004')
@@ -1714,7 +1797,7 @@ ${WAKE_LOCK_MAX_AGE_SECS} s ceiling" >&2
   # (40) A held lock whose ACQ= is missing must still be SEEN (so the plugin
   #      lock's presence is judged on its tag) and must still fail the bound (so
   #      an unreadable age is never an unchecked one).
-  sed "s|${FIX_LOCK_PUBLISH}|  PARTIAL_WAKE_LOCK 'Haven:publish' (uid=10123 pid=1111)|" \
+  sed "s|${FIX_LOCK_PUBLISH}|  ${FIX_LOCK_LEVEL} 'Haven:publish' (uid=10123 pid=1111)|" \
     "${tmp}/samples.ok" > "${tmp}/samples.noacq"
   _case
   if assert_wake_lock_oracle "${tmp}/power.ok.log" "${tmp}/samples.noacq" \
@@ -1898,6 +1981,176 @@ chain" >&2
     fail=1
   fi
 
+  # --- the real image's text (run 34488512808) ------------------------------
+  # Every capture above is built from this script's own idea of the grammar,
+  # which is how two wrong grammars passed 54 fixtures and failed the first real
+  # run. The stamp, registration, Event Log and position lines below are copied
+  # from that run's capture; the lock lines follow the AOSP literal (see
+  # FIX_LOCK_LEVEL), because that run's filter kept none of them.
+
+  # (55) The stamp with logcat's padded tag column. Verbatim, in capture order.
+  printf '%s\n' \
+    '09-10 14:54:58.142  4518  4518 I b1power : SAMPLE 8' \
+    '09-10 14:54:58.237  4190  4190 I flutter : [b1] HANDOFF_CONFIRMED' \
+    '09-10 14:54:58.512  4190  4190 I flutter : [BackgroundTask] Published to 1/1 due circle(s) (1 eligible), fetched 1/1 circle(s).' \
+    '09-10 14:55:03.310  4530  4530 I b1power : SAMPLE 9' \
+    > "${tmp}/real.log"
+  _case
+  got="$(last_sample_before "${tmp}/real.log" "${MARK_HANDOFF_OK}")/$(first_sample_after \
+    "${tmp}/real.log" "${MARK_PUBLISHED_PREFIX}")"
+  if [[ "${got}" != "8/9" ]]; then
+    echo "SELF-TEST FAIL (55): the real capture's stamps placed the handoff/publish at \
+'${got}', expected '8/9' — the stamp grammar no longer matches the device" >&2
+    fail=1
+  fi
+
+  # (56)/(57) The anti-vacuity guard names its cause. Samples on disk whose
+  #      stamps the capture does not contain are a stamp-grammar change, which
+  #      the old message reported as a dead sampler; with no samples on disk it
+  #      must not claim a grammar change either.
+  sed 's/b1power : SAMPLE/b1power: SAMPLE/' "${tmp}/power.ok.log" \
+    > "${tmp}/power.unstamped.log"
+  : > "${tmp}/samples.none"
+  _case
+  if got="$(assert_registration_oracle "${tmp}/power.unstamped.log" "${tmp}/samples.ok" \
+       "${tmp}/power.ok.window")" || [[ "${got}" != *"stamp grammar changed"* ]]; then
+    echo "SELF-TEST FAIL (56): unrecognised stamps beside written samples were not \
+reported as a stamp-grammar change: '${got}'" >&2
+    fail=1
+  fi
+  _case
+  if got="$(assert_registration_oracle "${tmp}/power.unstamped.log" "${tmp}/samples.none" \
+       "${tmp}/power.ok.window")" || [[ "${got}" != *"sampler died"* ]]; then
+    echo "SELF-TEST FAIL (57): an empty sample file was not reported as a dead sampler: \
+'${got}'" >&2
+    fail=1
+  fi
+
+  # The sampler's own filter over two raw dumps: the foreground's, then the
+  # first background one.
+  {
+    printf '%s\n' '09-10 14:54:52.000' \
+      '        10192/com.oblivioustech.haven/BA8E03C9 Request[@+1s0ms HIGH_ACCURACY, minUpdateDistance=1.0, WorkSource{10192 com.oblivioustech.haven}]' \
+      '      last location=Location[fused 52.370215,4.895167 hAcc=5.0 et=+9m1s978ms alt=0.0 vAcc=0.5 vel=0.0 sAcc=0.5]' \
+      'Wake Locks: size=0' | filter_power_sample 7
+    printf '%s\n' '09-10 14:54:58.000' \
+      '        10192/com.oblivioustech.haven/4E055D0E Request[@+2m24s79ms HIGH_ACCURACY, WorkSource{10192 com.oblivioustech.haven}]' \
+      '      last location=Location[fused 52.370215,4.895167 hAcc=5.0 et=+9m1s978ms alt=0.0 vAcc=0.5 vel=0.0 sAcc=0.5]' \
+      '    09-10 14:54:51.171: fused provider +registration 10192/com.oblivioustech.haven/BA8E03C9 -> Request[@+1s0ms HIGH_ACCURACY, minUpdateDistance=1.0, WorkSource{10192 com.oblivioustech.haven}]' \
+      'Wake Locks: size=2' \
+      "  ${FIX_LOCK_LEVEL} 'ForegroundService:WakeLock' ACQ=-4s98ms (uid=10192 pid=4190)" \
+      "  ${FIX_LOCK_LEVEL} 'Haven:publish' ACQ=-326ms (uid=10192 pid=4190)" \
+      | filter_power_sample 8
+  } > "${tmp}/samples.real"
+
+  # (58) Both locks survive the filter and parse — the second one sampled
+  #      inside its first second, where TimeUtils drops the seconds field.
+  _case
+  got="$(wake_lock_records "${tmp}/samples.real" 7 8 | tr '\n' ' ')"
+  if [[ "${got}" != "8|ForegroundService:WakeLock|4098 8|Haven:publish|326 " ]]; then
+    echo "SELF-TEST FAIL (58): the padded lock lines did not survive the sampler's \
+filter and parse, got '${got}'" >&2
+    fail=1
+  fi
+
+  # (59) Exactly the two live registrations, read through the WorkSource suffix
+  #      the real image appends — and not the Event Log's replay beside them.
+  _case
+  got="$(location_request_records "${tmp}/samples.real" 7 8 | cut -d'|' -f1-3 \
+    | tr '\n' ' ')"
+  if [[ "${got}" != "7|1000|1.0 8|144079|- " ]]; then
+    echo "SELF-TEST FAIL (59): the real registrations parsed as '${got}', expected \
+'7|1000|1.0 8|144079|- '" >&2
+    fail=1
+  fi
+
+  # (60) No position reaches the uploaded sample file.
+  _case
+  if grep -qF '52.370215' "${tmp}/samples.real"; then
+    echo "SELF-TEST FAIL (60): the sampler's filter let a coordinate through" >&2
+    fail=1
+  fi
+
+  # (61) TimeUtils' sub-second form is a duration, not a grammar change…
+  _case
+  got="$(formatted_duration_ms '-326ms' || echo 'REJECTED')"
+  if [[ "${got}" != "-326" ]]; then
+    echo "SELF-TEST FAIL (61): '-326ms' should be -326 ms, got '${got}'" >&2
+    fail=1
+  fi
+  # (62) …but only under a second: past one, AOSP always prints the seconds.
+  _case
+  if formatted_duration_ms '+1500ms' >/dev/null 2>&1; then
+    echo "SELF-TEST FAIL (62): '+1500ms' (a seconds field AOSP would have printed) was \
+accepted" >&2
+    fail=1
+  fi
+
+  # --- the failure path shows its evidence ----------------------------------
+  # Line numbers of the non-comment lines that silence stderr BEFORE pointing
+  # stdout at it. Redirections bind left to right, so that order sends both to
+  # /dev/null: run 34488512808's "last power samples" dump printed nothing over
+  # a 151 KB sample file. Every stage reads to EOF, so nothing can SIGPIPE.
+  _silenced_dumps() {
+    { grep -nE '2>[[:space:]]*/dev/null[[:space:]]*1?>&2' "$1" || true; } \
+      | { grep -vE '^[0-9]+:[[:space:]]*#' || true; } | cut -d: -f1 | tr '\n' ' '
+  }
+  # Assembled at run time, so the scan of this file in (64) never sees it.
+  local silenced="tail -30 file 2>/dev/null"
+  {
+    printf '%s\n' 'tail -30 file >&2 2>/dev/null'
+    printf '%s\n' "${silenced} >&2"
+    printf '%s\n' "  # ${silenced} >&2, described in a comment"
+    printf '%s\n' "${silenced}>&2"
+  } > "${tmp}/redirects.sh"
+
+  # (63) The detector flags both spellings of the bad order, and neither the
+  #      good order nor a comment.
+  _case
+  got="$(_silenced_dumps "${tmp}/redirects.sh")"
+  if [[ "${got}" != "2 4 " ]]; then
+    echo "SELF-TEST FAIL (63): the redirect-order detector flagged lines '${got}', \
+expected '2 4 '" >&2
+    fail=1
+  fi
+
+  # (64) …and this script has no such line.
+  _case
+  got="$(_silenced_dumps "${BASH_SOURCE[0]}")"
+  if [[ -n "${got}" ]]; then
+    echo "SELF-TEST FAIL (64): line(s) ${got}of this script send a dump's own output \
+to /dev/null (write \`>&2 2>/dev/null\`, stdout first)" >&2
+    fail=1
+  fi
+
+  # (65) The sampler is stopped at a sample boundary AND waited for before any
+  #      oracle reads its file. The stop is inline in the main flow, so this pins
+  #      its shape, in order: the loop that checks SAMPLER_STOP, the `touch`,
+  #      the bounded wait, the only `kill` (its fallback), the `wait`, the first
+  #      oracle read. A `kill` anywhere earlier brings the read-before-exit race
+  #      back; losing the fallback lets a sampler stuck in adb hang the lane.
+  local self="${BASH_SOURCE[0]}" loop_at stop_at bound_at kill_at wait_at read_at
+  # Anchored at the line start, or these very lines would be the matches.
+  loop_at="$(grep -m1 -nE '^  until \[\[ -e "\$\{SAMPLER_STOP\}" \]\]; do$' "${self}" \
+    | cut -d: -f1 || true)"
+  stop_at="$(grep -m1 -nE '^touch "\$\{SAMPLER_STOP\}"$' "${self}" | cut -d: -f1 || true)"
+  bound_at="$(grep -m1 -nE '^for \(\( waited = 0; ' "${self}" | cut -d: -f1 || true)"
+  kill_at="$(awk -v from="${loop_at:-0}" \
+    'NR > from && index($0, "kill \"${SAMPLE_PID}\"") { print NR; exit }' "${self}")"
+  wait_at="$(grep -m1 -nE '^wait "\$\{SAMPLE_PID\}"' "${self}" | cut -d: -f1 || true)"
+  read_at="$(grep -m1 -nE '^if ! oracle_out="\$\(assert_registration_oracle ' "${self}" \
+    | cut -d: -f1 || true)"
+  _case
+  if [[ -z "${loop_at}" || -z "${stop_at}" || -z "${bound_at}" || -z "${kill_at}" \
+        || -z "${wait_at}" || -z "${read_at}" ]] \
+     || (( loop_at > stop_at || stop_at > bound_at || bound_at > kill_at \
+           || kill_at > wait_at || wait_at > read_at )); then
+    echo "SELF-TEST FAIL (65): the sampler is no longer stopped between samples and \
+waited for before the oracles read (loop ${loop_at:-?}, stop ${stop_at:-?}, bounded \
+wait ${bound_at:-?}, kill ${kill_at:-?}, wait ${wait_at:-?}, read ${read_at:-?})" >&2
+    fail=1
+  fi
+
   if (( checked != SELF_TEST_FIXTURES )); then
     echo "SELF-TEST FAIL: ran ${checked} fixture(s), expected ${SELF_TEST_FIXTURES}" >&2
     fail=1
@@ -1931,11 +2184,18 @@ readonly TARGET="${2:-integration_test/b1_fgs_live_foreground_test.dart}"
 # kLocationPublishMaxInterval plus slack, 200 s: the latest a delivery-driven
 # publish can land after the handoff cycle) and the forced-idle one (332 s: the
 # no-fix chain's own length, step 8) — plus RustLib/keyring/SQLCipher boot under
-# the emulator's mlock pressure, plus GPS and relay slack. The drive target's own
-# `Timeout` is 14m and fires first with an attributable message; this is the
-# belt. The shell holds no timeouts of its own — by the time it reads, the
-# capture is complete, so Phase 5 is a set of reads rather than live polls.
+# the emulator's mlock pressure, plus GPS and relay slack, plus the broadcast
+# barrier below. The drive target's own `Timeout` is 14m and fires first with an
+# attributable message; this is the belt. Phase 5 holds no timeouts of its own —
+# by the time it reads, the capture is complete, so it is a set of reads rather
+# than live polls.
 readonly DRIVE_TIMEOUT="${B1_DRIVE_TIMEOUT:-20m}"
+
+# The bound on `am wait-for-broadcast-barrier` (Phase 4): ~3.5x the 34 s the
+# install broadcasts took to reach LocationManagerService in run 34488512808.
+# The drive's own wait (`_broadcastBarrierWait`, 150 s) outlasts it, so a
+# barrier that never drains is reported HERE, by name.
+readonly BARRIER_TIMEOUT_SECS=120
 
 # Synthetic coordinates fed to the emulator's GPS: Dam Square, Amsterdam — a
 # well-known public landmark, chosen precisely BECAUSE it is obviously not a
@@ -1958,6 +2218,7 @@ LOGCAT_PID=""
 GEO_PID=""
 SAMPLE_PID=""
 IDLE_PID=""
+BARRIER_PID=""
 
 mkdir -p "${LOG_DIR}"
 readonly LOGCAT_FILE="${LOG_DIR}/logcat.b1.log"
@@ -1982,6 +2243,9 @@ cleanup() {
   fi
   if [[ -n "${IDLE_PID}" ]] && kill -0 "${IDLE_PID}" 2>/dev/null; then
     kill "${IDLE_PID}" 2>/dev/null || true
+  fi
+  if [[ -n "${BARRIER_PID}" ]] && kill -0 "${BARRIER_PID}" 2>/dev/null; then
+    kill "${BARRIER_PID}" 2>/dev/null || true
   fi
   if [[ -n "${LOGCAT_PID}" ]] && kill -0 "${LOGCAT_PID}" 2>/dev/null; then
     kill "${LOGCAT_PID}" 2>/dev/null || true
@@ -2052,14 +2316,19 @@ fail() {
   # AVD runs a `google_apis` image where geolocator may resolve to FUSED location
   # while `geo fix` documents only the LocationManager provider.
   echo "---- emulator location state ----" >&2
+  # `sed`, not `head`: under pipefail a `head` that stops reading SIGPIPEs grep,
+  # and run 34488512808 printed forty lines and then "(dumpsys location
+  # unavailable)".
   adb -s "${DEVICE}" shell dumpsys location 2>/dev/null \
-    | grep -aiA 4 'last location\|fused\|gps provider' | head -40 >&2 || \
+    | grep -aiA 4 'last location\|fused\|gps provider' | sed -n '1,40p' >&2 || \
     echo "(dumpsys location unavailable)" >&2
   # The last few power samples, for the steps-5/6 findings: which requests and
   # locks were actually seen is the whole evidence base for those, and reading
   # the parser's verdict without them is guesswork.
   echo "---- last power samples ----" >&2
-  tail -30 "${SAMPLE_FILE}" 2>/dev/null >&2 || \
+  # Stdout to stderr FIRST: the reverse order sends both to /dev/null, which is
+  # why run 34488512808 printed nothing here from a 151 KB sample file.
+  tail -30 "${SAMPLE_FILE}" >&2 2>/dev/null || \
     echo "(no power samples were captured)" >&2
   exit 1
 }
@@ -2207,35 +2476,25 @@ LOGCAT_PID=$!
 # ONE `adb shell` per sample, deliberately: the logcat stamp, the device clock
 # and both dumps come from the same device round trip, so the sample cannot be
 # mis-ordered against the drive's markers by host scheduling. The stamp is
-# written FIRST, so the dumps describe the instant just after it.
-#
-# The output is filtered HERE rather than on the device: `dumpsys location`
-# prints the active position, and the artifact this uploads has no business
-# carrying coordinates when the assertions only need registration and wake-lock
-# lines. The filter is deliberately LOOSER than the parser — it keeps every line
-# naming the package beside a `Request[`, including the Event Log's replays of
-# registrations that are long cancelled — so the artifact still shows the
-# registration history for triage while the parser (which anchors on the caller
-# identity at the start of a line) counts only the live ones.
+# written FIRST, so the dumps describe the instant just after it. What survives
+# of each dump is `filter_power_sample`'s decision (see there, and --self-test).
 #
 # Each sample is assembled into a scratch file OUTSIDE the uploaded directory
-# and appended whole. Killing the sampler when the drive ends would otherwise
-# be able to sever a line mid-`Request[`, and a half-written request is
-# indistinguishable, to the parser, from the grammar change it is there to
-# catch.
+# and appended whole, and the loop stops only BETWEEN samples, when
+# SAMPLER_STOP appears. A `kill` could land inside the append — severing a line
+# mid-`Request[`, which the parser cannot tell from a grammar change — and would
+# leave the append running after the orchestrator had moved on to read the file.
 sample_part="${LOG_DIR}.part"
+readonly SAMPLER_STOP="${LOG_DIR}.stop-sampler"
+rm -f "${SAMPLER_STOP}"
 (
   n=0
-  while :; do
+  until [[ -e "${SAMPLER_STOP}" ]]; do
     n=$((n + 1))
     {
       adb -s "${DEVICE}" shell \
         "log -p i -t ${SAMPLE_TAG} 'SAMPLE ${n}'; date '+%m-%d %H:%M:%S.000'; dumpsys location; dumpsys power" \
-        2>/dev/null | tr -d '\r' | awk -v n="${n}" -v pkg="${PKG}" -v q="'" '
-          NR == 1 { print "=== SAMPLE n=" n " device-clock=" $0 " ==="; next }
-          index($0, "WAKE_LOCK " q) { print; next }
-          index($0, pkg) && index($0, " Request[") { print }
-        ' > "${sample_part}" \
+        2>/dev/null | tr -d '\r' | filter_power_sample "${n}" > "${sample_part}" \
         && cat "${sample_part}" >> "${SAMPLE_FILE}"
     } || true
     sleep "${SAMPLE_PERIOD_SECS}"
@@ -2283,6 +2542,52 @@ SAMPLE_PID=$!
 ) &
 IDLE_PID=$!
 
+# The broadcast barrier.
+#
+# `flutter drive` force-stops and reinstalls the app immediately before it
+# launches it, and LocationManagerService answers both broadcasts
+# (PACKAGE_RESTARTED, and PACKAGE_REMOVED for the replaced install) by deleting
+# every location registration the package holds — with no callback, no stream
+# error and, on a user build, no log line (SystemPackageResetHelper ->
+# LocationProviderManager.onPackageReset). A freshly booted emulator's queue is
+# backed up: in run 34488512808 they arrived 34 s after the install, 8 s after
+# the FGS armed its first registration, which vanished between two samples and
+# left the 200 s proof window with nothing that could deliver. That run stopped
+# at step 5; replayed through the fixed parsers, its step 7 fails a product
+# that did nothing wrong.
+#
+# So the drive waits, before it mounts anything that can register, for this
+# script to flush them. `am wait-for-broadcast-barrier` (a latch with no timeout
+# of its own) returns once every broadcast enqueued before it has been handed to
+# its receiver, and `flutter drive`'s were enqueued before the launch that
+# printed the marker. The reset itself then crosses up to three in-process hops
+# (FgThread, main looper, FgThread) that nothing outside system_server can wait
+# on: a margin of one app bootstrap, not a barrier. Losing it can only redden
+# the lane — the registration vanishes — never pass it.
+(
+  until grep -aqF -- "${MARK_BARRIER_AWAIT}" "${LOGCAT_FILE}" 2>/dev/null; do
+    sleep 1
+  done
+  barrier_rc=0
+  timeout "${BARRIER_TIMEOUT_SECS}" \
+    adb -s "${DEVICE}" shell am wait-for-broadcast-barrier >/dev/null 2>&1 \
+    || barrier_rc=$?
+  if (( barrier_rc == 124 )); then
+    barrier_state="NOT flushed within ${BARRIER_TIMEOUT_SECS} s"
+  elif (( barrier_rc != 0 )); then
+    barrier_state="am wait-for-broadcast-barrier failed (rc=${barrier_rc})"
+  elif ! adb -s "${DEVICE}" shell run-as "${PKG}" touch "${BARRIER_FILE}" \
+       >/dev/null 2>&1; then
+    barrier_state="flushed, but run-as could not create ${BARRIER_FILE}"
+  else
+    barrier_state="flushed"
+  fi
+  # The drive fails on its own bounded wait when this is not "flushed"; this
+  # line is what names why.
+  echo "Phase 4/5 — broadcast barrier: ${barrier_state}"
+) &
+BARRIER_PID=$!
+
 drc=0
 ( cd "${HAVEN_DIR}" && timeout --kill-after=30s "${DRIVE_TIMEOUT}" flutter drive \
     --no-pub \
@@ -2292,18 +2597,33 @@ drc=0
     --driver "${DRIVER_FILE}" \
     --target "${TARGET}" ) > "${DRIVE_LOG}" 2>&1 || drc=$?
 
-# Stop sampling the instant the drive ends. Everything the oracles read happened
-# inside it; the teardown after it is not evidence, and a sample taken there
-# would only widen what the "one registration, no fast request" rows have to
-# explain away.
-if [[ -n "${SAMPLE_PID}" ]] && kill -0 "${SAMPLE_PID}" 2>/dev/null; then
+# Stop sampling when the drive ends, and WAIT until the sampler has exited
+# before anything reads its file: signalling it and reading at once is the
+# read-before-exit race the KPR lane hit in run 34488512808. Everything the
+# oracles read happened inside the drive, and the teardown after it is not
+# evidence. The bound is three sample periods — two for the sample in flight
+# (sub-second in that run) and the sleep it then finishes. A sampler still alive
+# past that is blocked in `adb`, not in its append, so killing it is safe.
+touch "${SAMPLER_STOP}"
+for (( waited = 0; waited < 3 * SAMPLE_PERIOD_SECS; waited++ )); do
+  kill -0 "${SAMPLE_PID}" 2>/dev/null || break
+  sleep 1
+done
+if kill -0 "${SAMPLE_PID}" 2>/dev/null; then
+  echo "WARN: the power sampler did not stop within $((3 * SAMPLE_PERIOD_SECS)) s; \
+killed while blocked in adb." >&2
   kill "${SAMPLE_PID}" 2>/dev/null || true
 fi
+wait "${SAMPLE_PID}" 2>/dev/null || true
 SAMPLE_PID=""
 if [[ -n "${IDLE_PID}" ]] && kill -0 "${IDLE_PID}" 2>/dev/null; then
   kill "${IDLE_PID}" 2>/dev/null || true
 fi
 IDLE_PID=""
+if [[ -n "${BARRIER_PID}" ]] && kill -0 "${BARRIER_PID}" 2>/dev/null; then
+  kill "${BARRIER_PID}" 2>/dev/null || true
+fi
+BARRIER_PID=""
 rm -f "${sample_part}"
 # Scan BEFORE echoing. The EXIT trap's scan runs far too late to protect this:
 # GitHub Actions step logs have no retention control and cannot be redacted

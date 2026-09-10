@@ -93,6 +93,9 @@
 /// `Published to N/M`. What this drive DOES do, all inside one continuous,
 /// uninterrupted run:
 ///
+///   0. waits, before mounting anything that can hold a platform location
+///      registration, for the shell to flush the broadcasts its own install
+///      queued (see [kBroadcastBarrierAwaitMarker]);
 ///   1. persists a REAL identity (Alice) under the production
 ///      secure-storage key, loads it, and confirms `identityProvider`
 ///      resolved non-null;
@@ -224,6 +227,10 @@
 /// Owned by THIS file — change here AND in the shell together, or the lane
 /// silently stops finding them:
 ///
+///   * [kBroadcastBarrierAwaitMarker] (`[b1] AWAITING_BROADCAST_BARRIER`) —
+///     printed before anything is mounted; the shell's cue to flush the
+///     package broadcasts its own install queued, then create
+///     [kBroadcastBarrierFileName]. Nothing after it runs until then.
 ///   * [kPauseDeliveredMarker] (`[b1] PAUSE_DELIVERED`, printed with a
 ///     trailing `pid=<pid>`) — the instant this drive dispatches the REAL
 ///     pause. Everything the shell attributes to "after the handoff"
@@ -252,7 +259,7 @@
 ///     window, immediately before the lifecycle is restored to `resumed`.
 library;
 
-import 'dart:io' show Platform, pid;
+import 'dart:io' show File, Platform, pid;
 
 import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter/widgets.dart' show AppLifecycleState;
@@ -296,6 +303,8 @@ import 'package:haven/src/services/fresh_secret.dart' show withFreshSecret;
 import 'package:haven/src/services/nostr_circle_service.dart'
     show NostrCircleService;
 import 'package:integration_test/integration_test.dart';
+import 'package:path_provider/path_provider.dart'
+    show getApplicationSupportDirectory;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'e2e/_lib/circle_creation.dart' show createCircleConfirmed;
@@ -307,6 +316,29 @@ import 'e2e/_lib/synthetic_user.dart' show SyntheticUser;
 import 'e2e/_lib/test_relay.dart' show defaultStrfryUrl;
 import 'e2e/_lib/test_user.dart' show TestUser, aliceSeed, bytesToHex;
 import 'e2e/_lib/throw_time_error_capture.dart';
+
+/// Verbatim marker printed before this drive mounts anything that can hold a
+/// platform location registration; it then waits for the shell to create
+/// [kBroadcastBarrierFileName].
+///
+/// `flutter drive` force-stops and reinstalls the app right before launching
+/// it, and LocationManagerService answers both broadcasts by deleting every
+/// location registration the package holds, without telling the app. On a
+/// freshly booted emulator they arrived 34 s late in run 34488512808 and wiped
+/// the FGS's registration 8 s into the proof window. The shell answers this
+/// marker with `am wait-for-broadcast-barrier`, and creates the file only once
+/// that has returned.
+const String kBroadcastBarrierAwaitMarker = '[b1] AWAITING_BROADCAST_BARRIER';
+
+/// The file the shell creates, through `run-as`, in this app's
+/// `getApplicationSupportDirectory()` once its broadcast barrier has returned.
+const String kBroadcastBarrierFileName = 'b1_broadcast_barrier';
+
+/// How long this drive waits for [kBroadcastBarrierFileName]: the shell's own
+/// 120 s bound on the barrier (`BARRIER_TIMEOUT_SECS`) plus 30 s for its `adb`
+/// round trips, so a barrier that never drains is reported by the shell first,
+/// and by name.
+const Duration _broadcastBarrierWait = Duration(seconds: 150);
 
 /// Verbatim marker printed the instant this drive dispatches a REAL
 /// `AppLifecycleState.paused` to every `WidgetsBindingObserver` — i.e. the
@@ -402,6 +434,25 @@ void main() {
         );
         return;
       }
+
+      // --- Broadcast barrier, before anything can register location (see
+      // [kBroadcastBarrierAwaitMarker]). `getApplicationSupportDirectory()` is
+      // `Context.getFilesDir()`, which also creates it: the directory the
+      // shell's `run-as` writes into.
+      final barrier = File(
+        '${(await getApplicationSupportDirectory()).path}/'
+        '$kBroadcastBarrierFileName',
+      );
+      debugPrint(kBroadcastBarrierAwaitMarker);
+      await waitUntilAsync(
+        barrier.exists,
+        description: 'the shell flushed the install broadcasts that would '
+            "delete this app's location registrations mid-proof "
+            '($kBroadcastBarrierFileName created)',
+        timeout: _broadcastBarrierWait,
+        pollInterval: const Duration(seconds: 1),
+      );
+      debugPrint('[b1] broadcast barrier passed');
 
       // --- Harness: Rust bridge, in-memory keyring, hermetic relay
       // override. See the "Process-sharing" doc above for why the
@@ -836,9 +887,11 @@ void main() {
     },
     // Two holds now, not one: _postPauseHoldDuration (200 s) +
     // _forcedIdleHoldDuration (332 s) = 532 s (8.9 min) of deliberate waiting,
-    // leaving ~5 min for the bootstrap, the circle creation and Bob's join. It
-    // stays under the shell's own 20 m drive bound so a wedge is attributed
-    // HERE, by this test's own message, rather than by an anonymous outer 124.
+    // plus at most _broadcastBarrierWait (150 s) before either, leaves 158 s
+    // for the bootstrap, the circle creation and Bob's join — 12 s in run
+    // 34488512808. It stays under the shell's own 20 m drive bound so a wedge
+    // is attributed HERE, by this test's own message, rather than by an
+    // anonymous outer 124.
     timeout: const Timeout(Duration(minutes: 14)),
   );
 }

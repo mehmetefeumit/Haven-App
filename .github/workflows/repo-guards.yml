@@ -1000,9 +1000,10 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_delta_alphabet_parity.sh
 
-      # The reviewer's mutation, run at each of the four manifest sites plus
-      # SECURITY.md, `constants/location.dart` and the code file's own doc
-      # comment — including the site that states the alphabet's SIZE as an
+      # The reviewer's mutation, run at each of the three DURABLE manifest
+      # sites plus SECURITY.md, `constants/location.dart` and the code file's
+      # own doc comment — never `ratchet_override.reason`, which is deleted
+      # after every merge — including the site that states the alphabet's SIZE as an
       # English word rather than as a set, which drifts independently. Plus
       # the opposite direction, which is the one nobody touches the docs for:
       # the CODE's tables and bounds moving under prose that then quotes a

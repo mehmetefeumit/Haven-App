@@ -132,8 +132,10 @@ import 'package:haven/src/providers/onboarding_provider.dart'
         onboardingControllerProvider;
 import 'package:haven/src/providers/service_providers.dart'
     show
+        IosIndicatorSentence,
         circleServiceProvider,
         iosBackgroundSessionServiceProvider,
+        iosIndicatorSentenceProvider,
         iosLocationPermissionProvider,
         locationServiceProvider;
 import 'package:haven/src/rust/api.dart'
@@ -347,52 +349,22 @@ void main() {
       // The REAL iosLocationAuthServiceProvider and backgroundSharingProvider
       // must run here — overriding either would replace the subject of the
       // test with a fake and prove only that the fake agrees with itself.
-      await tester.pumpWidget(
-        const ProviderScope(
-          child: MaterialApp(
-            localizationsDelegates: AppLocalizations.localizationsDelegates,
-            supportedLocales: AppLocalizations.supportedLocales,
-            home: LocationSettingsPage(),
-          ),
-        ),
-      );
-      await pumpUntilFound(
-        tester,
-        find.byType(LocationSettingsPage),
-        description: 'LocationSettingsPage after pumpWidget',
-      );
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
 
-      final pageElement = tester.element(find.byType(LocationSettingsPage));
-      final container = ProviderScope.containerOf(pageElement, listen: false);
-
-      // Both async reads must have landed before the copy is inspected: the
-      // toggle drives whether the note renders at all, and the permission
-      // future drives WHICH branch renders.
+      // The toggle is loaded BEFORE the page mounts, as in the app, where the
+      // location stream and the Settings hub watch it long before anyone
+      // opens this page. The order is load-bearing: the page reads the
+      // session handler once, on its first build, and a first build that
+      // constructed the toggle itself would send that `status` ahead of
+      // `_load()`'s `arm()` on the same channel and read a handler that is not
+      // armed yet — an order the app never has.
       await pumpUntilCondition(
         tester,
-        () {
-          final tile = tester.widget<SwitchListTile>(
-            find.byKey(WidgetKeys.backgroundSharingTile),
-          );
-          return tile.value &&
-              container.read(iosLocationPermissionProvider).hasValue;
-        },
+        () => container.read(backgroundSharingProvider),
         description:
-            'the background-sharing toggle read back true from real '
-            'SharedPreferences AND iosLocationPermissionProvider resolved',
-      );
-
-      // The provider the UI actually branches on must agree with native.
-      // A drift here would mean the note is driven by something other than
-      // the authorization the user granted.
-      expect(
-        container.read(iosLocationPermissionProvider).valueOrNull,
-        tier,
-        reason:
-            'iosLocationPermissionProvider disagrees with the production '
-            'MethodChannel bridge. LocationSettingsPage branches on the '
-            'provider, so the user would be shown copy for a tier they do '
-            'not hold.',
+            'backgroundSharingProvider loaded true from real '
+            'SharedPreferences, i.e. `_load()` armed the session handler',
       );
 
       // --- The tier -> SESSION POLICY mapping, at runtime, on a real
@@ -456,6 +428,78 @@ void main() {
                   'the two policies.',
       );
 
+      // The page opens on the posture just measured, as it does for a user who
+      // opens Location settings on this device.
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: LocationSettingsPage(),
+          ),
+        ),
+      );
+      await pumpUntilFound(
+        tester,
+        find.byType(LocationSettingsPage),
+        description: 'LocationSettingsPage after pumpWidget',
+      );
+      final pageElement = tester.element(find.byType(LocationSettingsPage));
+
+      // All three async reads must have landed before the copy is inspected:
+      // the toggle drives whether the note renders at all, the permission
+      // future drives WHICH branch renders, and the indicator reading gates
+      // the Always card and picks its second sentence. The last of them can
+      // resolve after the final iteration's frame was built, and this binding
+      // does not rebuild on its own (documented on `waitUntilAsync` in
+      // pump_helpers.dart), so the trailing pump applies that rebuild.
+      await pumpUntilCondition(
+        tester,
+        () {
+          final tile = tester.widget<SwitchListTile>(
+            find.byKey(WidgetKeys.backgroundSharingTile),
+          );
+          return tile.value &&
+              container.read(iosLocationPermissionProvider).hasValue &&
+              container.read(iosIndicatorSentenceProvider).hasValue;
+        },
+        description:
+            'the background-sharing toggle rendered true AND both '
+            'iosLocationPermissionProvider and iosIndicatorSentenceProvider '
+            'resolved',
+      );
+      await tester.pump();
+
+      // The provider the UI actually branches on must agree with native.
+      // A drift here would mean the note is driven by something other than
+      // the authorization the user granted.
+      expect(
+        container.read(iosLocationPermissionProvider).valueOrNull,
+        tier,
+        reason:
+            'iosLocationPermissionProvider disagrees with the production '
+            'MethodChannel bridge. LocationSettingsPage branches on the '
+            'provider, so the user would be shown copy for a tier they do '
+            'not hold.',
+      );
+
+      // Likewise the indicator reading, against the posture measured above:
+      // it is what the card's second sentence is selected from. Under
+      // When-In-Use it also makes the card's absence below the tier gate's
+      // doing, not a missing reading's.
+      expect(
+        container.read(iosIndicatorSentenceProvider).valueOrNull,
+        tier == IosAuthStatus.always
+            ? IosIndicatorSentence.arrow
+            : IosIndicatorSentence.bar,
+        reason:
+            'iosIndicatorSentenceProvider disagrees with the session posture '
+            'measured above (alwaysConfirmed=${posture.alwaysConfirmed}). The '
+            'card names the indicator from this reading, so the user would be '
+            'told about an indicator the OS is not showing.',
+      );
+
       // Resolve the strings from the real localisation rather than hardcoding
       // English, so this stays true under a non-English device locale.
       final l10n = AppLocalizations.of(pageElement);
@@ -516,6 +560,20 @@ void main() {
               'location bar once that Always is confirmed. The card does NOT '
               'repeat the "grant Always" advice — it renders only for users '
               'who already hold it. $honesty',
+        );
+        expect(
+          find.text(
+            '${l10n.locationSettingsIosGuidance} '
+            '${l10n.locationSettingsIosIndicatorArrow}',
+          ),
+          findsOneWidget,
+          reason:
+              'The posture above is a CONFIRMED Always holding no activity '
+              'session, so the OS arrow is the whole signal. The card must be '
+              'the base sentence then the ARROW sentence and nothing else — '
+              'pinned by equality, as the host widget tests pin it, so '
+              'neither the blue-bar sentence nor an appended third sentence '
+              'can pass. $honesty',
         );
       }
 

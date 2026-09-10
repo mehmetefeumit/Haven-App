@@ -216,11 +216,10 @@ cannot distinguish them. Fix _expectedDeltaAlphabet or the pricing rule first."
   # read from the code above, which is what makes this a parity check rather
   # than a spell-check.
   local sites=() label text want_a want_c got_a got_c
-  local f_summary f_statement f_reason
+  local f_summary f_statement
   f_summary="$(json_field "${manifest}" '"id": "PUB-COALESCE"' summary)"
   f_statement="$(json_field "${manifest}" \
     '"id": "INV-R-PER-CIRCLE-PUBLISH-DECORRELATED"' statement)"
-  f_reason="$(json_field "${manifest}" '"ratchet_override"' reason)"
 
   local site_missing=0
   [[ -n "${f_summary}" ]] || { fail_msg "manifest: no \"summary\" within 12 lines of the \
@@ -229,14 +228,13 @@ guard would check nothing. Re-point the json_field anchor."; site_missing=1; }
   [[ -n "${f_statement}" ]] || { fail_msg "manifest: no \"statement\" within 12 lines of \
 the INV-R-PER-CIRCLE-PUBLISH-DECORRELATED entry — the entry moved or was renamed. \
 Re-point the json_field anchor."; site_missing=1; }
-  [[ -n "${f_reason}" ]] || { fail_msg "manifest: no \"reason\" within 12 lines of \
-\"ratchet_override\" — the block moved or was renamed. Re-point the json_field anchor."; \
-site_missing=1; }
   (( site_missing == 0 )) || return 1
 
   sites+=("PUB-COALESCE.summary|${f_summary}|2|1")
   sites+=("INV-R-PER-CIRCLE-PUBLISH-DECORRELATED.statement|${f_statement}|1|1")
-  sites+=("ratchet_override.reason|${f_reason}|1|1")
+  # Never `ratchet_override.reason`: it is PR-scoped justification that
+  # check_privacy_invariants.sh REQUIRES be deleted in the first commit after
+  # a merge, so pinning it made the two guards contradict each other.
   sites+=("${security#"${REPO_ROOT}/"}|$(cat "${security}")|2|1")
   sites+=("${stagger#"${REPO_ROOT}/"} (doc comment)|$(cat "${stagger}")|1|1")
 
@@ -410,10 +408,7 @@ DART
       "id": "INV-R-PER-CIRCLE-PUBLISH-DECORRELATED",
       "statement": "the ceiling shrinks to 3333 ms at kMaxCirclesPerAccount (10), so the alphabet is {2,3,4}; {2,3} is maxGapFor's answer at kMaxCirclesPerBurst (11)."
     }
-  ],
-  "ratchet_override": {
-    "reason": "and {2,3,4} at nine and ten (kMaxCirclesPerAccount (10)), so the {2,3} maxGapFor answers at kMaxCirclesPerBurst (11) is unreachable."
-  }
+  ]
 }
 JSON
     cat > "${d}/security.md" <<'MD'
@@ -454,13 +449,15 @@ DART
   _case "a record that quotes the account bound passes" 0
 
   # (2)-(5) THE CRITICAL FIXTURES — the account bound's alphabet replaced by
-  #         the cap's, at each manifest site that carries it.
+  #         the cap's, at each DURABLE manifest site that carries it; (4) is
+  #         the opposite direction, proving the PR-scoped override reason is
+  #         not one of them.
   _case "PUB-COALESCE.summary downgraded to the cap alphabet FAILS" 1 \
     manifest.json '/"summary"/ s/{2,3,4}/{2,3}/g'
   _case "the invariant statement downgraded to the cap alphabet FAILS" 1 \
     manifest.json '/"statement"/ s/{2,3,4}/{2,3}/g'
-  _case "ratchet_override.reason downgraded to the cap alphabet FAILS" 1 \
-    manifest.json '/"reason"/ s/{2,3,4}/{2,3}/g'
+  _case "a stale override reason is not a pinned site, so it never FAILS" 0 \
+    manifest.json '$ s/^}$/  ,"ratchet_override": {"reason": "justified the old cap alphabet {2,3}"}\n}/'
   _case "the forbidden claim's cardinality word downgraded FAILS" 1 \
     manifest.json 's/falls to three at/falls to two at/'
 

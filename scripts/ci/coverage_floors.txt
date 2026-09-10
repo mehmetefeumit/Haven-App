@@ -211,7 +211,7 @@ rust|src/relay/live_sync/session.rs|94       # measured 96.19% (1491/1550)
 rust|src/relay/publishers.rs|88              # measured 90.28% (260/288)
 rust|src/relay/maintenance/|96               # measured 98.46% (640/650)
 rust|src/relay/manager.rs|88                 # measured 90.52% (1777/1963)
-rust|src/relay/auto_commit.rs|100            # measured 100.00% (59/59)
+rust|src/relay/auto_commit.rs|100            # measured 100.00% (140/140)
 rust|src/relay/catchup.rs|96                 # measured 98.71% (996/1009); was 92 (94.61%) before the
                                              # fetch-window cursor anchor brought its own tests
 
@@ -244,11 +244,11 @@ rust|src/tiles/|94                           # measured 96.11% (642/668)
 # The clearest statement of why these floors exist: the whole service layer
 # sat at 48.96% — BELOW the 50% package gate — inside a package that gated
 # green, because the widget and provider suites paid for it out of the shared
-# budget. It has since climbed past 60%, but with ~3600 instrumented lines one
-# percentage point is 36 lines, so a single new uncovered file still moves this
+# budget. It has since climbed past 70%, but with ~4200 instrumented lines one
+# percentage point is 42 lines, so a single new uncovered file still moves this
 # row several points. That is exactly what the two points of headroom are for,
 # and why this row must never be pinned tight.
-flutter|lib/src/services/|65                 # measured 67.08% (2411/3594); was 46 (48.96%) before the
+flutter|lib/src/services/|70                 # measured 72.13% (3044/4220); was 46 (48.96%) before the
                                              # location-access gate, clock-skew detector and
                                              # session/cursor work brought their own tests
 
@@ -264,8 +264,8 @@ flutter|lib/src/services/mls_session_handover.dart|91       # measured 93.75% (1
 flutter|lib/src/services/foreground_liveness_probe.dart|58  # measured 60.98% (25/41)
 
 # --- Location send/receive pipeline -----------------------------------------
-flutter|lib/src/services/location_sharing_service.dart|86   # measured 88.04% (346/393)
-flutter|lib/src/services/geolocator_location_service.dart|85 # measured 87.86% (123/140)
+flutter|lib/src/services/location_sharing_service.dart|87   # measured 89.51% (384/429)
+flutter|lib/src/services/geolocator_location_service.dart|88 # measured 90.95% (181/199)
 flutter|lib/src/services/live_sync_resubscriber.dart|100    # measured 100.00% (117/117)
 flutter|lib/src/services/subscription_service.dart|100      # measured 100.00% (58/58)
 
@@ -279,7 +279,7 @@ flutter|lib/src/services/subscription_service.dart|100      # measured 100.00% (
 # behavioural tests. What remains uncovered is `onStart`'s bridge-bound
 # prologue (RustLib init, keyring, data dir, identity load) and
 # `backgroundCallback`.
-flutter|lib/src/services/background_location_task.dart|80   # measured 82.95% (287/346)
+flutter|lib/src/services/background_location_task.dart|85   # measured 87.32% (420/481)
 # NO ROW YET for lib/src/services/background_burst_coordinator.dart either,
 # for the same reason and with the same instruction. It is P4's whole receive
 # plane on iOS — one bounded burst per publish tick, and the file whose ORDER
@@ -301,7 +301,7 @@ flutter|lib/src/services/background_location_task.dart|80   # measured 82.95% (2
 # (18/22) on Flutter 3.41.0, which would pin at 79 — recorded as an ORDER OF
 # MAGNITUDE, not as provenance. Add the row with `--repin flutter <lcov>` from
 # the next CI coverage artifact.
-flutter|lib/src/services/background_location_manager.dart|52 # measured 54.08% (53/98)
+flutter|lib/src/services/background_location_manager.dart|53 # measured 55.47% (71/128)
 flutter|lib/src/services/background_catchup_worker.dart|26  # measured 28.40% (23/81)
 
 # --- MLS / relay / identity / profile FFI seams -----------------------------
@@ -310,7 +310,7 @@ flutter|lib/src/services/background_catchup_worker.dart|26  # measured 28.40% (2
 # nostr_relay_preferences_service.dart sat at literal 0.00% when first pinned
 # — 88 instrumented lines, none executed by any test, invisible to the 50%
 # gate — and has since been fully covered, so it is pinned exactly at 100.
-flutter|lib/src/services/nostr_circle_service.dart|19       # measured 21.23% (128/603)
+flutter|lib/src/services/nostr_circle_service.dart|24       # measured 26.22% (161/614)
 flutter|lib/src/services/nostr_identity_service.dart|52     # measured 54.62% (65/119)
 flutter|lib/src/services/nostr_profile_service.dart|41      # measured 43.61% (58/133)
 flutter|lib/src/services/nostr_relay_service.dart|18        # measured 20.31% (39/192); was 0 (0.63%, 1/158)

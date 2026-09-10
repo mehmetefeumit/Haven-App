@@ -651,8 +651,8 @@ later — the event timestamp advanced, the Lifetime did not."
 # harness that can silently stop doing its job, and a shape-scan would not
 # have caught run 32622119290 (a read-back that aborted the servo between
 # changing the device clock and recording that it had). They read DEVICE,
-# JUMP_LOG, SERVO_STOP and the servo tunables at CALL time, so their position
-# in the file is free.
+# JUMP_LOG, LOGCAT_FILE, SERVO_STOP, SERVO_PID and the servo tunables at CALL
+# time, so their position in the file is free.
 # ---------------------------------------------------------------------------
 
 # Sets the device wall clock to `host_now + <offset seconds>` and records what
@@ -679,10 +679,12 @@ apply_clock_offset() {
   if ! adb -s "${DEVICE}" shell "date -u ${stamp}" >/dev/null 2>&1; then
     status="error"
   fi
-  # Tell the framework the wall clock moved. Harmless if nothing listens; a few
-  # services cache "now" and would otherwise keep the old value.
-  adb -s "${DEVICE}" shell "am broadcast -a android.intent.action.TIME_SET" \
-    >/dev/null 2>&1 || true
+  # No `am broadcast … TIME_SET` here. The platform broadcasts TIME_SET itself
+  # the instant the clock moves (logcat shows it delivered before a shell
+  # broadcast is even enqueued), while a shell `am broadcast` is ORDERED and
+  # blocks until every receiver has run: 0.4-3 s on green runs, 15 s in CI run
+  # 34488512808 — long enough that the drive finished while this function
+  # still owed the record for a clock change the app had already observed.
 
   # The read-back must not be able to ABORT this function. Under
   # `set -Eeuo pipefail` a plain `device="$(adb … | tr …)"` assignment inherits
@@ -782,6 +784,21 @@ clock_servo() {
   done
 }
 
+# Stops the servo and WAITS for it to exit, so the record the oracle reads can
+# no longer change underneath it.
+#
+# The stop file alone is not a stop: the servo checks it once per poll, never
+# mid-attempt. In CI run 34488512808 the drive finished while an attempt was
+# still inside its adb calls with the device clock already moved; the oracle
+# read the record first and reported the change as never applied (''), and
+# cleanup's kill then ended the servo under an ordered stop, which by design
+# leaves no epitaph. Unbounded, like every adb call in this script: the step
+# deadline bounds it.
+stop_servo() {
+  touch "${SERVO_STOP}"
+  wait "${SERVO_PID}" || true
+}
+
 
 # ---------------------------------------------------------------------------
 # Self-test — hermetic fixtures, no device, no relay.
@@ -795,13 +812,19 @@ clock_servo() {
 # fail for a reason that is not about rotation at all.
 # ---------------------------------------------------------------------------
 run_self_test() {
-  local tmp fails=0
+  # Pinned by EQUALITY, never printed as prose: this used to end with a
+  # hard-coded "all 50 fixture groups passed" that no counter backed, so a
+  # deleted assertion changed neither the message nor the exit code. Every
+  # assertion helper below counts itself.
+  local -r SELF_TEST_ASSERTIONS=78
+  local tmp fails=0 checked=0
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
   trap "rm -rf '${tmp}'" RETURN
 
   _case() { # _case <label> <expected-rc> <actual-rc>
     local label="$1" want="$2" got="$3"
+    checked=$(( checked + 1 ))
     if [[ "${got}" -eq "${want}" ]]; then
       printf '  \033[1;32mPASS\033[0m %s\n' "${label}"
     else
@@ -813,6 +836,7 @@ run_self_test() {
 
   _eq_case() { # _eq_case <label> <expected> <actual>
     local label="$1" want="$2" got="$3"
+    checked=$(( checked + 1 ))
     if [[ "${got}" == "${want}" ]]; then
       printf '  \033[1;32mPASS\033[0m %s\n' "${label}"
     else
@@ -824,6 +848,7 @@ run_self_test() {
 
   _names_case() { # _names_case <label> <needle>
     local label="$1" needle="$2"
+    checked=$(( checked + 1 ))
     if [[ "${KPR_FINDINGS[*]}" == *"${needle}"* ]]; then
       printf '  \033[1;32mPASS\033[0m %s\n' "${label}"
     else
@@ -1141,10 +1166,8 @@ run_self_test() {
   rc=0
   kpr_run_oracle "${tmp}/truncated.log" "${tmp}/ok.servo" >/dev/null || rc=1
   _case "truncated capture fails the lane" 1 "${rc}"
-  if (( rc == 1 )) && [[ "${KPR_FINDINGS[0]}" != *"${MARK_COMPLETE}"* ]]; then
-    printf '  \033[1;31mFAIL\033[0m truncated capture does not report the drive first\n' >&2
-    fails=1
-  fi
+  rc=0; [[ "${KPR_FINDINGS[0]:-}" == *"${MARK_COMPLETE}"* ]] || rc=1
+  _case "truncated capture reports the drive FIRST" 0 "${rc}"
 
   # (32) An EMPTY log proves nothing. It must read as "every checkpoint
   #      missing", never as "nothing wrong here".
@@ -1298,22 +1321,23 @@ run_self_test() {
   local JUMP_LOG="${jump}"
   local SERVO_MAX_ATTEMPTS=3
   local SERVO_POLL_SECS=0
-  # Stub for the three `adb` calls the function makes, keyed on the last
-  # argument so the SET, the broadcast and the READ-BACK can differ. Shadows
-  # the binary by name; the self-test exits before any real device work.
+  # Stub for the two `adb` calls the function makes, keyed on the last
+  # argument so the SET and the READ-BACK can differ. Shadows the binary by
+  # name; the self-test exits before any real device work.
   #
-  # The three shapes are distinguishable BY ARGUMENT and the catch-all fails
-  # loudly, so a future edit that changes how one of them is invoked cannot
-  # quietly route through the wrong branch and leave these fixtures passing
-  # for a reason that is not the one written on them.
+  # The two shapes are distinguishable BY ARGUMENT and every other call lands
+  # in a LEDGER that (43b) asserts is empty — a file, not a stderr line,
+  # because `apply_clock_offset` discards the output of its device calls, so a
+  # "loud" catch-all would be heard by nobody.
   local stub_readback_rc=0 stub_readback_out='' stub_set_rc=0
+  local adb_ledger="${tmp}/adb-unexpected.log"
+  : > "${adb_ledger}"
   adb() {
     local last="${*: -1}"
     case "${last}" in
       '+%s')      printf '%s\n' "${stub_readback_out}"; return "${stub_readback_rc}" ;;
-      *TIME_SET*) return 0 ;;
       'date -u '*) return "${stub_set_rc}" ;;
-      *)          echo "self-test adb stub: unrecognised call 'adb $*'" >&2; return 127 ;;
+      *)          echo "adb $*" >> "${adb_ledger}"; return 127 ;;
     esac
   }
 
@@ -1367,6 +1391,16 @@ run_self_test() {
   _eq_case "…and is recorded as status=error" "1" \
     "$(grep -acE '^seq=10 .*status=error' "${jump}" || true)"
   stub_set_rc=0
+
+  # (43b) Across (40)-(43), the function made NO device call but the set and
+  #       its read-back. CI run 34488512808: a TIME_SET `am broadcast` between
+  #       the two blocked for 15 s while every receiver ran, and the drive
+  #       finished before the record was written. Placed after the record
+  #       instead, the same call would hold the servo — and so `stop_servo` and
+  #       the oracle behind it — just as long, which is why this pins the whole
+  #       function, not one ordering.
+  _eq_case "apply_clock_offset makes no device call beyond the set and its read-back" \
+    "" "$(cat "${adb_ledger}")"
   unset -f adb
 
   # (44) The attempt LEDGER the retry bound reads.
@@ -1496,11 +1530,124 @@ run_self_test() {
   rc=0; kpr_run_oracle "${tmp}/ok.log" "${tmp}/ok.servo" >/dev/null || rc=1
   _case "a healthy run reports no dead servo" 0 "${rc}"
 
+  # --- THE STOP --------------------------------------------------------------
+  #
+  # CI run 34488512808 is why these exist. The drive finished while the servo
+  # was still inside an attempt whose clock change the app had already seen;
+  # the orchestrator touched the stop file and read the record at once, so the
+  # change read as never applied (''), and cleanup's kill ended the servo under
+  # an ordered stop, which leaves no epitaph.
+
+  # (51) BOTH DIRECTIONS, one scenario. The attempt is held open on a FIFO —
+  #      the stand-in for the adb call the real one was stuck in — and is
+  #      released only by a `wait` on the SERVO's own PID; any other `wait`
+  #      (bare, or on the wrong job) is refused, as it would be useless in the
+  #      real flow. So the outcome is decided by the stop alone, with no sleep
+  #      and no race: a stop that merely SIGNALS reads the record while the
+  #      attempt is provably still open (the failure, reproduced), and
+  #      `stop_servo` cannot return before the servo has written it and exited.
+  #
+  #      Legitimately the servo polls exactly ONCE — it is blocked from then
+  #      until the stop file already exists — so a poll budget converts a stop
+  #      that waits WITHOUT signalling (which in the real flow would wait for a
+  #      servo that never exits) into a marked failure instead of a hang.
+  _signal_only_stop() { touch "${SERVO_STOP}"; }
+  _stop_fixture() { # _stop_fixture <stop-fn> -> the seqs the oracle would read
+    local dir="${tmp}/stop$1"
+    mkdir -p "${dir}"
+    (
+      SERVO_STOP="${dir}/.stop"
+      JUMP_LOG="${dir}/jumps.log"
+      LOGCAT_FILE="${dir}/logcat.log"
+      SERVO_POLL_SECS=0
+      : > "${JUMP_LOG}"
+      : > "${dir}/polls"
+      mkfifo "${dir}/entered" "${dir}/gate"
+      # File-backed for the reason `_servo_fixture` gives: this runs inside a
+      # process substitution, so a shell counter would never advance.
+      kpr_req_clock_seqs() {
+        echo p >> "${dir}/polls"
+        if (( $(wc -l < "${dir}/polls") > 3 )); then
+          touch "${SERVO_STOP}" "${dir}/never-stopped"
+          return 0
+        fi
+        echo 1
+      }
+      apply_clock_offset() {
+        printf 'in\n' > "${dir}/entered"
+        read -r _ < "${dir}/gate"
+        echo "seq=$1 offset=0 expected=1 device=1 drift=0 status=ok" >> "${JUMP_LOG}"
+      }
+      ( trap - EXIT; trap 'servo_epitaph' EXIT; clock_servo ) >/dev/null &
+      SERVO_PID=$!
+      read -r _ < "${dir}/entered"
+      # Defined only now, after the fork, so the servo itself never sees it.
+      wait() {
+        [[ "$*" == "${SERVO_PID}" ]] || return 127
+        printf 'go\n' > "${dir}/gate"
+        builtin wait "$@"
+      }
+      "$1"
+      kpr_jump_ok_seqs "${JUMP_LOG}" | tr '\n' ' '
+      # A stop that did not wait left the servo blocked; end it as cleanup()
+      # does, so the fixture leaves nothing running.
+      if kill -0 "${SERVO_PID}" 2>/dev/null; then
+        kill "${SERVO_PID}" 2>/dev/null || true
+        builtin wait "${SERVO_PID}" 2>/dev/null || true
+      fi
+      if [[ -f "${dir}/never-stopped" ]]; then
+        printf 'never-stopped'
+      fi
+    )
+  }
+  _eq_case "a stop that only SIGNALS reads an in-flight change as never applied" \
+    "" "$(_stop_fixture _signal_only_stop)"
+  _eq_case "stop_servo waits, so the in-flight change is recorded first" \
+    "1 " "$(_stop_fixture stop_servo)"
+
+  # (52) THE WIRING, twin of (48). Nothing in (51) fails if the orchestrator
+  #      goes back to touching the stop file and reading the record at once,
+  #      which is exactly the sequence run 34488512808 died on — nor if the
+  #      launch stops recording the servo's PID, which turns `stop_servo`'s
+  #      `wait ""` into a swallowed error and the lane back into that race.
+  local stop_at oracle_at launch_at stop_wiring_rc=0
+  stop_at="$(grep -m1 -nE '^stop_servo$' "${self}" | cut -d: -f1 || true)"
+  oracle_at="$(grep -m1 -nE '^if ! kpr_run_oracle ' "${self}" | cut -d: -f1 || true)"
+  if [[ -z "${stop_at}" || -z "${oracle_at}" ]] || (( stop_at > oracle_at )); then
+    stop_wiring_rc=1
+  fi
+  if grep -qE '^touch "\$\{SERVO_STOP\}"' "${self}"; then
+    stop_wiring_rc=1
+  fi
+  launch_at="$(grep -m1 -nE "^\( *trap - EXIT; *trap 'servo_epitaph' EXIT; *clock_servo *\) *&\$" \
+    "${self}" | cut -d: -f1 || true)"
+  if [[ -z "${launch_at}" ]] \
+     || [[ "$(sed -n "$(( launch_at + 1 ))p" "${self}")" != 'SERVO_PID=$!' ]]; then
+    stop_wiring_rc=1
+  fi
+  _case "the servo is stopped AND waited for before the oracle reads its record" \
+    0 "${stop_wiring_rc}"
+
+  # (53) THE FAILURE DUMP SHOWS WHAT IT DUMPS. Redirections bind left to right,
+  #      so `2>/dev/null >&2` points stdout at /dev/null as well: in run
+  #      34488512808 `fail()` printed an EMPTY "clock servo records" section
+  #      over a record that held the seq=0 line, and an empty device clock —
+  #      hiding the one file this triage needed. Comments excluded; counted
+  #      rather than `grep -q`'d, so no early exit can SIGPIPE the pipeline.
+  _eq_case "no dump sends its own output to /dev/null (redirect order)" "0" \
+    "$(grep -vE '^[[:space:]]*#' "${self}" \
+         | grep -cE '2>[[:space:]]*/dev/null[[:space:]]*1?>&2' || true)"
+
+  if (( checked != SELF_TEST_ASSERTIONS )); then
+    printf '  \033[1;31mFAIL\033[0m ran %s assertion(s), expected exactly %s — an assertion was added or deleted without updating SELF_TEST_ASSERTIONS\n' \
+      "${checked}" "${SELF_TEST_ASSERTIONS}" >&2
+    fails=1
+  fi
   if (( fails )); then
     echo "run-kp-rotation.sh --self-test: FAILURES (see above)" >&2
     return 1
   fi
-  echo "run-kp-rotation.sh --self-test: all 50 fixture groups passed"
+  echo "run-kp-rotation.sh --self-test: ${checked} assertions passed"
   return 0
 }
 
@@ -1541,10 +1688,10 @@ readonly SERVO_POLL_SECS="${KPR_SERVO_POLL_SECS:-1}"
 # survival of a transient `adb` failure across a 70-day wall-clock
 # discontinuity, which is when adb is least healthy.
 #
-# Sized against the two windows it sits between. One attempt costs three adb
-# round trips plus SERVO_POLL_SECS, so eight of them is ~15-30 s — comfortably
+# Sized against the two windows it sits between. One attempt costs two adb
+# round trips plus SERVO_POLL_SECS, so eight of them is ~13-24 s — comfortably
 # longer than the transient observed in CI run 32622119290 (the read-back that
-# failed at 06:29:07 was healthy again by 06:29:22) and roughly six times
+# failed at 06:29:07 was healthy again by 06:29:22) and at least seven times
 # inside the drive's own 180 s clock rendezvous, which is the deadline that
 # actually matters: exhausting these attempts must still leave the drive time
 # to fail with its own attributable message.
@@ -1714,7 +1861,7 @@ fail() {
   grep -aF '[kpr] ' "${DRIVE_LOG}" "${LOGCAT_FILE}" 2>/dev/null | tail -40 >&2 \
     || echo "(none — the drive target reached no checkpoint at all)" >&2
   echo "---- clock servo records ----" >&2
-  cat "${JUMP_LOG}" 2>/dev/null >&2 || echo "(no servo records)" >&2
+  cat "${JUMP_LOG}" >&2 2>/dev/null || echo "(no servo records)" >&2
   echo "---- guest default-network handovers after the clock restore ----" >&2
   local handovers
   handovers="$(kpr_default_network_handovers "${LOGCAT_FILE}")"
@@ -1727,7 +1874,7 @@ fail() {
          "'relay did not respond' below as the handover, not as a defect." >&2
   fi
   echo "---- device clock now ----" >&2
-  adb -s "${DEVICE}" shell date -u 2>/dev/null >&2 || true
+  adb -s "${DEVICE}" shell date -u >&2 2>/dev/null || true
   exit 1
 }
 
@@ -1869,7 +2016,7 @@ drc=0
     --driver "${DRIVER_FILE}" \
     --target "${TARGET}" ) > "${DRIVE_LOG}" 2>&1 || drc=$?
 
-touch "${SERVO_STOP}"
+stop_servo
 
 # Scan BEFORE echoing. The EXIT trap's scan runs far too late to protect the
 # STEP log, which has no retention control and cannot be redacted after the
