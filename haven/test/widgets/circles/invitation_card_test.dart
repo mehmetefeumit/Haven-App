@@ -24,6 +24,8 @@ import 'package:haven/src/providers/key_package_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/profile_service.dart';
+import 'package:haven/src/services/publish_stagger.dart'
+    show kMaxCirclesPerAccount;
 import 'package:haven/src/services/relay_service.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/utils/npub_validator.dart';
@@ -226,6 +228,82 @@ void main() {
         reason: 'keyPackagePublisherProvider should be rebuilt after accept',
       );
     });
+
+    testWidgets(
+      'at the roster bound the refusal names the limit and the remedy, and '
+      'the card stays acceptable',
+      (tester) async {
+        // The service refuses before ingesting the held Welcome (see
+        // `test/services/nostr_circle_service_roster_bound_test.dart`), so the
+        // invitation is still there afterwards. What this pins is the half the
+        // user sees: not the generic "please try again", which would send them
+        // back to a button that can never succeed while they hold ten circles.
+        final circleService = _RosterFullCircleService();
+
+        await pumpLocalized(
+          tester,
+          Scaffold(body: InvitationCard(invitation: _invitation())),
+          overrides: [
+            circleServiceProvider.overrideWithValue(circleService),
+            profileServiceProvider.overrideWithValue(MockProfileService()),
+          ],
+        );
+        final l10n = l10nOf(tester, InvitationCard);
+
+        await tester.tap(find.text(l10n.invitationCardAccept));
+        await tester.pumpAndSettle();
+
+        final refusal = l10n.invitationRosterFullError(kMaxCirclesPerAccount);
+        expect(find.text(refusal), findsOneWidget);
+        // The copy itself, not only the key: `find.text(l10n...)` would pass
+        // for any wording at all, including the transient phrasing this
+        // snackbar must never carry. English only — the test pumps the default
+        // `en` locale; the other twelve are held by
+        // `test/l10n/roster_bound_copy_accuracy_test.dart`.
+        expect(
+          refusal,
+          contains('$kMaxCirclesPerAccount'),
+          reason: 'the user cannot act on a limit they are not told',
+        );
+        expect(
+          refusal,
+          matches(
+            RegExp(
+              'up to|at most|a maximum of|no more than|only',
+              caseSensitive: false,
+            ),
+          ),
+          reason: 'the ceiling must be MARKED: a bare positive ("you can be '
+              'in 10 circles") reads as capability, and eleven of the twelve '
+              'locales had to add a limiter to the unmarked wording',
+        );
+        expect(
+          refusal,
+          matches(RegExp(r'\bleave\b', caseSensitive: false)),
+          reason: 'the remedy is leaving a circle; without it the refusal is a '
+              'dead end',
+        );
+        expect(
+          refusal.toLowerCase(),
+          isNot(contains('try again')),
+          reason: 'retrying while the roster is full can never succeed',
+        );
+        expect(
+          find.text(l10n.invitationAcceptError),
+          findsNothing,
+          reason: 'a retry prompt for something that can never succeed',
+        );
+        // Security Rule 8: no exception text reaches the screen — the refusal
+        // is copy, not a rendered error.
+        expect(
+          find.textContaining('Exception', findRichText: true),
+          findsNothing,
+        );
+        // The card is still offering Accept, which is what makes "leave a
+        // circle, then accept this invitation" honest advice.
+        expect(find.text(l10n.invitationCardAccept), findsOneWidget);
+      },
+    );
   });
 
   // ========================================================================
@@ -885,6 +963,15 @@ void main() {
 // ==========================================================================
 // Mock Implementations
 // ==========================================================================
+
+/// A circle service at the account roster bound: every accept is refused.
+class _RosterFullCircleService extends MockCircleService {
+  @override
+  Future<Circle> acceptInvitation(List<int> mlsGroupId) async {
+    methodCalls.add('acceptInvitation');
+    throw const CircleRosterFullException();
+  }
+}
 
 /// A circle service that succeeds on acceptInvitation.
 class _AcceptingCircleService extends MockCircleService {

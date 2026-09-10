@@ -147,6 +147,16 @@ class _RecordingRelayService implements RelayService {
     );
   }
 
+  /// A removal is a COMMIT: it must take the retry ladder and its outcome
+  /// resolves a staged `PendingStateRef`, so reaching the one-shot location
+  /// publish from here would be the Rule-13 mistake this stub exists to
+  /// notice.
+  @override
+  Future<PublishResult> publishLocationEvent({
+    required String eventJson,
+    required List<String> relays,
+  }) => throw UnimplementedError();
+
   @override
   Future<void> publishEventFireAndForget({
     required String eventJson,

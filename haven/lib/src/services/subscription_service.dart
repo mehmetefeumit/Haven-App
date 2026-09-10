@@ -54,7 +54,76 @@ abstract class SubscriptionService {
   });
 
   /// Re-anchors the session after a background period / reconnect.
+  ///
+  /// The FOREGROUND re-anchor (app resume, whole-session repair): it always
+  /// carries the inbox REQ, so an open app can always receive an invitation.
+  /// A background burst must use [openBackgroundBurst] instead.
   Future<void> resumeAfterBackground();
+
+  /// Opens ONE background burst — the same re-anchor, plus the inbox fold that
+  /// puts the inbox REQ on only every k-th burst and advances the counter
+  /// deciding it.
+  ///
+  /// Separate from [resumeAfterBackground] because only a burst may consume a
+  /// fold position: routing bursts through the foreground entry point would
+  /// leave the fold permanently un-applied, and every burst would re-request
+  /// the bounded inbox window.
+  ///
+  /// THROWS on failure, unlike [resumeAfterBackground].
+  ///
+  /// The foreground re-anchor is one of several redundant repairs — the health
+  /// tick and the next app resume both retry it — so swallowing there costs
+  /// nothing. A burst open has no redundancy: a swallowed failure leaves this
+  /// burst holding no subscription at all, and a caller that went on to wait
+  /// for a backlog would spend its entire budget learning nothing.
+  ///
+  /// The caller must still pause in its `finally`. The engine clears its
+  /// paused flag before it touches a socket and RESTORES it on every failure
+  /// exit — the dominant one (a bucket no relay accepted) also sweeps the
+  /// registrations the open had already made, drains the publish gauge and
+  /// terminates every relay, while the early shutdown exit restores the flag
+  /// and deliberately leaves the radio alone. So a failed open leaves a
+  /// session that READS paused and may still hold sockets, and which of those
+  /// exits it took is not observable from here.
+  Future<void> openBackgroundBurst();
+
+  /// Waits for every endpoint the current burst opened to finish its stored
+  /// replay, so a peer commit received while paused is APPLIED before the burst
+  /// encrypts its location.
+  ///
+  /// Returns [BacklogOutcomeFfi.timedOut] when the wait's budget elapsed with
+  /// an endpoint still silent — a report, not a failure: the burst publishes
+  /// anyway, exactly as the foreground does with a slow REQ. With no session it
+  /// answers `timedOut`, which is the outcome that makes no promise.
+  Future<BacklogOutcomeFfi> waitBacklogSettled();
+
+  /// Holds the engine's sockets open until this burst's commit traffic has
+  /// quiesced, so the [pauseSubscriptions] that follows cannot cut a commit
+  /// between SEND and OK (Security Rule 13).
+  ///
+  /// A burst that saw no commit activity returns immediately.
+  ///
+  /// NEVER throws, and never carries a timeout. It sits immediately before the
+  /// pause on the same `finally` path, and both properties protect the same
+  /// thing: a throw here would skip the pause and leave the burst's sockets
+  /// open for the whole gap to the next one, while a caller-side bound would
+  /// let the process suspend with a commit still between SEND and OK — the
+  /// engine's own wait is bounded by the traffic it is settling, not by a
+  /// clock. Pinned by `test/lints/commit_critical_no_timeout_test.dart`.
+  Future<void> settleBeforePause();
+
+  /// Closes the burst: drops every standing REQ and disconnects the engine's
+  /// sockets, leaving the session alive and re-openable by the next burst.
+  ///
+  /// Call from a `finally`, after [settleBeforePause]. Never wrap it in a
+  /// `.timeout(` — its marker drain is bounded by backlog size, not by a clock,
+  /// and cutting it would leave the pause half-done: the Dart future would
+  /// complete, the caller would return, and the process could suspend with the
+  /// Rust future still holding a commit between SEND and OK (Security Rule
+  /// 13), which is a roster fork rather than a lost sample. A `.timeout(` here
+  /// does not even cancel that future. Pinned by
+  /// `test/lints/commit_critical_no_timeout_test.dart`.
+  Future<void> pauseSubscriptions();
 
   /// Subscribes the running session to ONE additional circle incrementally
   /// (delta only), without re-anchoring any other circle's subscription. Used
@@ -80,6 +149,31 @@ abstract class SubscriptionService {
 
   /// Whether a live session is currently running.
   bool get isRunning;
+
+  /// Whether the session has ENTERED the paused state.
+  ///
+  /// Orthogonal to [isRunning], which stays `true` across a pause: the session
+  /// is alive. A caller deciding whether to re-anchor must read this —
+  /// re-anchoring a paused engine would re-open standing REQs in the
+  /// background and undo the pause.
+  ///
+  /// Deliberately NOT "holds no REQ and no socket". The engine raises this
+  /// flag as the FIRST statement of its pause — before it drops the standing
+  /// REQs, before the router drain, before the publish-drain wait and before
+  /// the disconnect — so it reads `true` while every one of those steps is
+  /// still running or timing out.
+  ///
+  /// It is one bit and it cannot say how it got there: a completed pause, a
+  /// pause still draining, a burst that is part way through opening, and a
+  /// failed FFI read (which answers `false`) are indistinguishable. Read it as
+  /// "the engine has entered its paused state", never as "the radio is off" —
+  /// and never as an instruction, because the two production readers take
+  /// OPPOSITE actions from the same `true`. Backgrounded, a re-anchor would
+  /// undo the pause and must not happen (the engine's own health tick refuses
+  /// for that reason). On resume, [MapShell.reanchorOnResume] re-anchors
+  /// PRECISELY because it is `true`: a burst paused the engine behind the
+  /// foreground's first re-anchor, and nothing else recovers that.
+  bool get isPaused;
 }
 
 /// The pure, FFI-free router that maps one [FfiRelayEvent] to provider/persist
@@ -151,6 +245,21 @@ class LiveEventRouter {
   static String _shortGroupHex(Uint8List g) =>
       g.take(4).map((b) => b.toRadixString(16).padLeft(2, '0')).join();
 
+  /// Full hex of a `nostr_group_id`, for map keys (`Uint8List` has identity
+  /// equality, so the bytes themselves cannot key a map).
+  static String _groupKey(Uint8List g) =>
+      g.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+
+  /// Circles that have produced ONE unconfirmed wedge verdict, keyed by
+  /// [_groupKey], valued by the [_reanchorGeneration] it arrived in. Bounded by
+  /// the circle roster, and an entry leaves the moment its circle is blocked.
+  /// See [_handleUnrecoverable].
+  final Map<String, int> _unconfirmedWedges = {};
+
+  /// Counts engine re-anchors seen on this stream. Two wedge verdicts for one
+  /// circle only agree if they land in DIFFERENT generations.
+  int _reanchorGeneration = 0;
+
   Future<void> handleEvent(FfiRelayEvent event) async {
     // Diagnostic (M11 e2e triage): confirm the engine's bus event actually
     // reaches the Dart consumer (the Rust side logs `process_group_event …
@@ -170,7 +279,7 @@ class LiveEventRouter {
       case FfiRelayEventKind.welcome:
         await _handleWelcome(event);
       case FfiRelayEventKind.status:
-        _handleStatus(event);
+        await _handleStatus(event);
     }
   }
 
@@ -291,13 +400,123 @@ class LiveEventRouter {
     }
   }
 
-  void _handleStatus(FfiRelayEvent event) {
+  Future<void> _handleStatus(FfiRelayEvent event) async {
+    // A status event carries EITHER an ordinary session reason OR a terminal
+    // per-circle wedge verdict, never both (the FFI mapper's own invariant).
+    // The verdict comes first because it is the one that must not be lost: it
+    // used to flatten into the per-event, self-clearing `unprocessable`
+    // reason, which named no circle, so the one state needing a destructive
+    // repair was indistinguishable from a single bad message.
+    final wedged = event.unrecoverableNostrGroupId;
+    if (wedged != null) {
+      await _handleUnrecoverable(wedged);
+      return;
+    }
     final reason = event.statusReason;
     if (reason == null) return;
+    // OUTSIDE the guard below on purpose: a throwing `onStatus` must not cost
+    // the re-anchor boundary that `_handleUnrecoverable` counts on.
+    if (reason == FfiSyncStatusReason.backgroundResumed) {
+      _reanchorGeneration++;
+    }
     try {
       onStatus(reason);
     } on Object catch (e) {
       debugPrint('[Subscription] status callback failed: ${e.runtimeType}');
+    }
+  }
+
+  /// Routes ONE terminal per-circle wedge verdict to the blocked-circle
+  /// marker, which is what stops send/mutate for that circle alone and shows
+  /// the user the re-invite (`CircleService.isCircleBlocked`).
+  ///
+  /// ## Why TWO verdicts and not one
+  ///
+  /// A single verdict has a documented false positive. The engine reports a
+  /// circle whose parked eviction commit a peer has ALREADY healed but whose
+  /// next publish — the only thing that discharges the durable row — has not
+  /// run yet; the report sweep runs immediately after a re-anchor subscribes,
+  /// so it can race that healing commit. Acting on that one report would tell
+  /// the user to rebuild a circle that works, which is its own harm: the
+  /// repair costs them the whole roster's invitations.
+  ///
+  /// Two observations SHRINK that false positive; they do not eliminate it.
+  /// The row is discharged by a successful send for that circle
+  /// (`discharge_removal_deferral_after_send`), so a healed circle is reported
+  /// only once WHEN a publish lands between the two re-anchors — which is the
+  /// normal case, because `locationPublisherProvider` fires on cold start. It
+  /// is not the only case: with sharing off, with no usable fix, or with every
+  /// relay refusing, no send happens, the row survives, and a healed circle is
+  /// named again on the next foreground open and blocked. Nothing cheaper
+  /// closes it — at the pinned MDK rev no accessor reports whether a staged
+  /// commit is still present (`report_unrecoverable_circles`) — so the residual
+  /// is recorded here rather than described away.
+  ///
+  /// ## Why a generation counter and not a clock
+  ///
+  /// The engine emits [FfiSyncStatusReason.backgroundResumed] on THIS stream,
+  /// in order, at the head of every re-anchor, and one sweep names any circle
+  /// at most once — so "a verdict in a later generation" is exactly "a verdict
+  /// from a later re-anchor", with no wall clock, no timer and no ordering
+  /// assumption beyond the stream's own.
+  ///
+  /// ## What it costs
+  ///
+  /// The second verdict arrives on the next re-anchor: the next app resume for
+  /// the parked-eviction case (a healthy foregrounded session does not
+  /// re-anchor on its own), or the next background burst for a group the engine
+  /// itself declared terminal. So a real wedge can stay unannounced until the
+  /// user opens Haven again — which is also how long the state itself takes to
+  /// become redeemable, so nothing is lost by waiting for proof.
+  Future<void> _handleUnrecoverable(Uint8List nostrGroupId) async {
+    final circle = await _resolveCircle(nostrGroupId);
+    // Not a joined circle: nothing to block, and nothing to tell the user
+    // about. Dropped as quietly as an unknown circle's location is.
+    if (circle == null) return;
+
+    final key = _groupKey(nostrGroupId);
+    final bool alreadyBlocked;
+    try {
+      alreadyBlocked = circleService.isCircleBlocked(circle.mlsGroupId);
+    } on Object catch (e) {
+      debugPrint('[Subscription] blocked read failed: ${e.runtimeType}');
+      return;
+    }
+    if (alreadyBlocked) {
+      // Idempotent per circle, never counted: the poll path may have latched
+      // this circle already, and a wedge is terminal, so every later verdict
+      // for it is inert.
+      _unconfirmedWedges.remove(key);
+      return;
+    }
+
+    final firstSeen = _unconfirmedWedges[key];
+    if (firstSeen == null) {
+      _unconfirmedWedges[key] = _reanchorGeneration;
+      if (kDebugMode) {
+        debugPrint(
+          '[Subscription] wedge verdict unconfirmed — '
+          'group=${_shortGroupHex(nostrGroupId)}…',
+        );
+      }
+      return;
+    }
+    // A repeat inside the same re-anchor is the SAME observation.
+    if (firstSeen == _reanchorGeneration) return;
+
+    _unconfirmedWedges.remove(key);
+    try {
+      circleService.markCircleBlocked(circle.mlsGroupId);
+    } on Object catch (e) {
+      debugPrint('[Subscription] wedge mark failed: ${e.runtimeType}');
+      return;
+    }
+    // Rebuilds the circle surfaces that read the marker, so the banner and its
+    // re-invite appear without waiting for another user action.
+    try {
+      onGroupUpdated(circle);
+    } on Object catch (e) {
+      debugPrint('[Subscription] wedge refresh failed: ${e.runtimeType}');
     }
   }
 }

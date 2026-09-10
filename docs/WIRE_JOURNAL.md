@@ -73,6 +73,13 @@ HAVEN_WIRE_PROXY_ROUTES='7788=ws://127.0.0.1:7777,7789=ws://127.0.0.1:7778' \
 Running one proxy per relay instead would give each file its own sequence
 space, and no consumer could establish a total order across them.
 
+Each `<listen>` is a bare port (bound on 127.0.0.1) or an IP literal and port.
+A non-loopback one — `0.0.0.0:7788`, a LAN address — fails at startup and cannot
+be overridden: the journal is a full transcript of ciphertext, event ids and the
+identity pubkeys in REQ filters, so a recorder reachable from off-host is one
+that can be pointed at real traffic. Hostnames are refused rather than resolved,
+because a name that resolves to loopback today may not tomorrow.
+
 ## Record types
 
 Every line carries a `type`.
@@ -574,7 +581,7 @@ bash tooling/e2e/ci/start-wire-proxy.sh --self-test
 |---|---|---|
 | `HAVEN_WIRE_PROXY_PORT` | `7788` | Listen port (single-route shorthand). |
 | `HAVEN_WIRE_PROXY_UPSTREAM` | `ws://127.0.0.1:7777` | Upstream relay. |
-| `HAVEN_WIRE_PROXY_ROUTES` | — | `<listen>=<upstream>,…`; wins over the two above. |
+| `HAVEN_WIRE_PROXY_ROUTES` | — | `<listen>=<upstream>,…`; wins over the two above. `<listen>` is a bare port or an IP literal and port (never a hostname — the loopback rule must read a literal address). A NON-LOOPBACK `<listen>` is a hard startup failure with no override: this recorder writes a full transcript and must never accept an off-host connection. `HAVEN_WIRE_PROXY_ALLOW_REMOTE` covers upstreams only and does not reach it. |
 | `HAVEN_WIRE_JOURNAL` | `/tmp/haven-wire-journal.ndjson` | Journal path. Overrides the PER-INSTANCE default — do not export it when running more than one instance; the start script refuses rather than rotating a journal another live instance holds. |
 | `HAVEN_WIRE_PROXY_ALLOW_REMOTE` | `0` | Permit a non-loopback upstream (start script). |
 | `HAVEN_WIRE_PROXY_RUN_DIR` | `/tmp` | Where the start/stop scripts keep pid, log and journal-claim files. |

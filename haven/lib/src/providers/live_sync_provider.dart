@@ -71,6 +71,13 @@ enum SyncConnectionPhase {
 
   /// A relay dropped; the engine is reconnecting.
   disconnected,
+
+  /// Deliberately paused between background bursts: no standing REQ, no socket.
+  ///
+  /// Distinct from [disconnected] because it is a state the app chose, not a
+  /// fault: the health model must not date an outage from it, however long the
+  /// pause runs.
+  paused,
 }
 
 /// Immutable snapshot of the live-sync engine's status for the UI.
@@ -152,6 +159,11 @@ class SyncStatusNotifier extends Notifier<SyncStatus> {
         return current.copyWith(phase: SyncConnectionPhase.connecting);
       case FfiSyncStatusReason.disconnected:
         return current.copyWith(phase: SyncConnectionPhase.disconnected);
+      case FfiSyncStatusReason.paused:
+        // A state, not a recovery: the phase moves but a `lastIssue` the burst
+        // recorded is kept, because nothing about closing the sockets on
+        // purpose proves the issue is gone.
+        return current.copyWith(phase: SyncConnectionPhase.paused);
       case FfiSyncStatusReason.sessionStopped:
         return SyncStatus.idle;
       case FfiSyncStatusReason.unprocessable:

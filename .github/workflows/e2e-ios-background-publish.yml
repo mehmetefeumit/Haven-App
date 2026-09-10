@@ -15,15 +15,77 @@
 # session): the simulator suspends a backgrounded app just like a device, as
 # CI run 32646436116 proved when the drive still faked its location service.
 #
+# # The matrix: two axes, three legs
+#
+# The lane is a MATRIX because the legs assert things NO single job can, and
+# neither axis is observable from the other's job.
+#
+# `HAVEN_BGP_AUTH_TIER` is the CoreLocation grant, and it picks the `simctl
+# privacy grant` AND the shape the drive PINS (compiled in as
+# HAVEN_BGP_EXPECT_TIER) from one value — the drive never branches on the tier
+# it observes, because `requestAlwaysAuthorization()` reports .authorizedAlways
+# while the second prompt is unanswered, so a simulator that escalated the
+# When-In-Use grant would otherwise run the Always shape silently and pass. The
+# two tiers must produce OPPOSITE session postures (P1 below).
+#
+# `HAVEN_LIVE_SYNC` is the RECEIVE PLANE the app is compiled with, and it picks
+# which receive phase the drive runs: P2c (the burst) at `true`, P2d (the 90 s
+# catch-up timer) at `false`. The two planes are mutually exclusive in the
+# product — `MapShell._startIosBackgroundReceiveTimer` returns immediately when
+# `liveSyncEnabled` — so one lane cannot cover both in one job either.
+#
+#   leg                     tier         HAVEN_LIVE_SYNC   receive phase
+#   when-in-use-live-sync   when-in-use   true             P2c  (burst)
+#   always-live-sync        always        true             P2c  (burst)
+#   when-in-use-poll        when-in-use   false            P2d  (90 s timer)
+#
+# Three legs and not four. There is deliberately no (always, poll) leg: the
+# poll leg exists to cover the POLL RECEIVE PATH under a real backgrounding,
+# which has nothing to do with the authorization tier, and an Always poll leg
+# would buy a fourth ~62-minute macOS job for a second reading of a tier policy
+# the Always live-sync leg already proves.
+#
 # What the lane proves:
 #   P1  Enabling background sharing through the production setEnabled path
-#       arms the native HavenBackgroundSessionHandler (status reports
-#       supported==true && backgroundActivitySessionHeld==true on an iOS 17+
-#       sim, under a real When-In-Use grant from `simctl privacy grant
-#       location`) AND the position stream that flip rebuilds — the one
-#       carrying allowBackgroundLocationUpdates: true — delivers a fresh fix
-#       while the app is still foregrounded, which is the only moment iOS
-#       lets such a session be established.
+#       leaves CoreLocation reporting the PINNED tier, the native
+#       HavenBackgroundSessionHandler holding the session objects that tier
+#       calls for, and the position stream that flip rebuilds — the one
+#       carrying allowsBackgroundLocationUpdates: true — delivering a fresh
+#       fix while the app is still foregrounded, which is the only moment iOS
+#       lets such a session be established. The native status() is then read
+#       back: running, background-capable, at the Best profile, not yet
+#       backgrounded, and asking for the indicator only under When-In-Use.
+#
+#       The posture is INVERTED between the tiers, and that inversion is the
+#       tier->policy mapping the phase rests on. When-In-Use: a
+#       CLBackgroundActivitySession is held (the supported background-delivery
+#       claim on modern iOS, and the object whose absence produced the
+#       2026-08-20 field failure) and the blue bar is asked for — mandatory
+#       there, so the copy that names it is honest. Confirmed Always: a
+#       CLServiceSessionDiagnostic has positively confirmed the grant, the
+#       .always CLServiceSession is held, the activity session is released and
+#       no indicator is asked for. The confirmation is asynchronous, so the
+#       Always leg reads it through a bounded poll, and it prints its own
+#       terminal proof (ALWAYS_SESSION_OK) which only its completion gate
+#       accepts.
+#
+#       P1 also carries each leg's IDENTITY assertion, on one foreground read
+#       of the engine's standing-subscription count. On a live-sync leg that
+#       count must be non-zero (it is P2c's control arm — zero is the value
+#       P2c's promise is kept BY, so a counter that could only read zero would
+#       prove it for free). On the poll leg the same read must THROW, and with
+#       the NULL-HANDLE refusal specifically: the service never answers 0 for a
+#       missing session, so "no session" is the positive statement of why P2c
+#       cannot exist there, and it is the premise P2d's attribution rests on.
+#       The sibling message ("failed to read the pool subscription count") is
+#       raised only when a handle WAS held, so accepting any throw would accept
+#       a live session — the state the read exists to refute.
+#
+#       What that read does NOT catch: a leg whose HAVEN_LIVE_SYNC reached the
+#       wrapper but not the build. The drive branches on the same compiled
+#       `liveSyncEnabled` the app does, so in that mismatch it runs the
+#       live-sync arm and never reaches the throwing read. The COMPLETION GATE
+#       below is what refuses that shape, in both directions.
 #   P2a With the app OS-backgrounded, a per-circle tick driven through the
 #       production scheduler reaches the relay: the publish pipeline works
 #       from a backgrounded process, answered within seconds.
@@ -32,6 +94,89 @@
 #       two full 72-168 s per-circle intervals plus slack. P2a green with
 #       P2b red means the OS stopped scheduling the process — not that
 #       publishing broke.
+#
+#       P2b also polls the native session, from the backgrounded process, for
+#       the 100 m accuracy profile, and asserts it BEFORE the count. That is
+#       the only CI-checkable part of the phase's power claim: the poll reads
+#       the live manager.desiredAccuracy, so it says the coarse tier was
+#       really requested of CoreLocation rather than written to a Dart field,
+#       and the count beside it says publishing continued while it was. It is
+#       a bounded poll (kStationaryDwell + kStationaryConfirmMaxAge from the
+#       backgrounding) and never a single read, because with nothing delivered
+#       under the coarse tier the confirm deadline escalates back to Best
+#       every 84 s — the coarse profile is a window, not a steady state.
+#   P2c LIVE-SYNC LEGS ONLY. With the app OS-backgrounded, a burst RECEIVES —
+#       and holds nothing between bursts. A live peer publishes a kind-445 to
+#       the circle and has it acked by the relay; the burst driven afterwards
+#       must decrypt it into the app's member-location cache, coordinates
+#       compared (a cache ROW says a row was written; the coordinates say the
+#       ciphertext was peeled). Then the engine's relay pool must hold NO
+#       subscription at all.
+#
+#       This is the phase that closes the receive half of the background
+#       promise on the SHIPPED configuration. P2a/P2b measure publishing only,
+#       and since P4 every background publish tick IS a burst — open every REQ
+#       at its cursor, ingest, publish at the resulting epoch, settle, pause —
+#       so a lane that never exercised the ingest half was measuring half a
+#       mechanism. It is also why these two legs set HAVEN_LIVE_SYNC=true: with
+#       the receive engine compiled out, every burst's open fails, the
+#       coordinator takes its documented failed-open branch, and the burst
+#       degenerates to a publish.
+#
+#       The oracle is the engine's COUNT of registered pool subscriptions, and
+#       the choice is load-bearing: `isPaused` cannot stand in for it, because
+#       the core raises that flag as the FIRST statement of its pause — before
+#       `unsubscribe_all`, before the router drain, before the uncapped Rule-13
+#       publish gauge and before the disconnect — so it reads "paused" through
+#       every state this phase exists to catch. The flag asserts an intent; the
+#       count asserts the state.
+#
+#       What P2c does NOT prove: that no SOCKET is open between bursts. There
+#       is no in-process oracle for that — the count is of subscriptions, not
+#       connections — and this lane's host-native relay journals no REQ/CLOSE
+#       frames, so there is no relay-side one either. The socket half is pinned
+#       in-process in Rust (haven-core/tests/live_sync_burst_e2e.rs asserts
+#       relay health, i.e. every relay Terminated, after a pause). A green here
+#       means "no standing REQ between bursts", and nothing wider.
+#   P2d POLL LEG ONLY, and the reason that leg exists. With the app
+#       OS-backgrounded, the POLL path's background CATCH-UP runs: a peer
+#       publishes the same sentinel fix, and
+#       `MapShell._startIosBackgroundReceiveTimer`'s `Timer.periodic(90 s)` must
+#       reach `CatchupService.runCatchup(isBackgroundWake: true)` from the
+#       backgrounded process and land that peer's location in the PERSISTED
+#       last-known store — read back through `snapshotLastKnownForCircle`,
+#       coordinates compared, against a baseline taken before the peer
+#       published.
+#
+#       This phase drives NOTHING: the timer is the subject, so calling a tick
+#       would replace the mechanism under test. That is also what makes the row
+#       attributable — on this leg nothing else can write it. The publish
+#       tick's burst open fails with no engine (P1's throwing read is the proof
+#       there is none), the foreground fetch timer was cancelled at the pause,
+#       and no provider recomputes with frames off. Its window spans TWO timer
+#       ticks, not one: a sweep whose window opened in the same whole second
+#       the peer's event was stored can miss it and still advance the group
+#       cursor to that second, and it is the NEXT sweep's 60 s re-read below the
+#       cursor that recovers it.
+#
+#       A FOURTH premise holds that row attributable, and unlike the three
+#       above it is not a fact about Dart, so it is stated rather than assumed:
+#       the native catch-up channel handler (registered from main.dart
+#       regardless of the flag) reaches the SAME persist through the SAME
+#       runCatchup. HavenSLCHandler arms nothing without .authorizedAlways, so
+#       this leg's `tier: when-in-use` is what excludes it — which is the
+#       binding reason there is no (always, poll) leg, stronger than the cost
+#       argument below, and the reason this leg's tier may not be flipped.
+#       HavenBGTaskHandler is not tier-gated at all; only the Simulator
+#       excludes it (BGTaskScheduler.submit throws notPermitted there and the
+#       handler swallows it), the same simulator ceiling this header states for
+#       jetsam and SLC relaunch. On a device P2d would need a different oracle.
+#
+#       What P2d does NOT prove: anything about the burst plane, which this
+#       build does not have; and not the C3 chokepoint that must refuse a wake
+#       once consent is withdrawn — the C4 watcher cancels this timer on that
+#       edge before the chokepoint is reached, and host tests
+#       (haven/test/pages/map_shell_ios_receive_timer_test.dart) own both.
 #   P3  Flipping background sharing OFF while still OS-backgrounded
 #       deactivates the per-circle scheduler in-process AND stops publishing
 #       on the wire (an event-id DIFF over a bounded settle window, never a
@@ -43,19 +188,66 @@
 #       the window out and re-foregrounds Haven itself, early enough that a
 #       real leak has not yet aged past its 228 s kind-445 expiration.
 #
-# The wrapper's completion gate requires all four terminal proof markers, so
-# a drive that exited 0 over a skipped or early-returning body fails the lane
-# (CI_HARDENING_BACKLOG.md A3b).
+# The wrapper's completion gate requires an EXACT proof set per leg: four
+# shared, one for the leg's own receive plane (BACKGROUND_RECEIVE_OK at
+# live_sync=true, BACKGROUND_CATCHUP_OK at false), and one more under the Always
+# tier. Each of those three is REFUSED on the legs that must not produce it. So
+# a drive that exited 0 over a skipped or early-returning body fails the lane,
+# and so does a run whose grant, compiled tier and compiled receive path do not
+# all describe one leg (CI_HARDENING_BACKLOG.md A3b).
+#
+# # OD4-d, and what it closed
+#
+# P4-7 flipped this lane from HAVEN_LIVE_SYNC "false" to "true" — necessary,
+# because with the receive engine compiled out every burst's open failed and
+# P2a/P2b were measuring a degenerate burst. But it ended the only
+# real-OS-backgrounding coverage the POLL configuration had, and that
+# configuration is a shipped rollback path with its own distinct background
+# branch. Nothing substituted for it: `OVERLAY_BUNDLE_ID` /
+# com.apple.Preferences appear in no other workflow or harness in the repo,
+# e2e-ios runs its poll variant FOREGROUNDED, and
+# `check_ios_background_publish.sh` check 6 does NOT stand in — it pins the C4
+# disable-while-paused watcher and a negative about where that watcher may be
+# installed, and a tree with `_startIosBackgroundReceiveTimer` deleted outright
+# still passes it (mutation-verified). So for a while nothing pinned that the
+# poll path's background receive timer existed, fired, or reached
+# `_runBackgroundCatchUp`.
+#
+# The owner's decision on OD4-d (docs/POWER_EFFICIENCY_PLAN.md §4) was to buy
+# that coverage back, and the `when-in-use-poll` leg above IS it: P2d asserts
+# the timer, its sweep and the decrypt in one row of the persisted store.
+# OD4-d is therefore CLOSED here, at one extra ~62-minute macOS job.
+# CLAUDE.md's "CI Pipeline" description of this lane was the last carrier of the
+# open-gap framing; it was corrected on 2026-09-09 and now names the three legs.
 #
 # # What this lane does NOT prove
 #
 # A simulator has no jetsam, no Significant-Location-Change relaunch and no
 # BGTaskScheduler, so a background-execution bug only those surface will not
 # show up here. What the lane does prove is that the production background
-# stack — plist mode, the geolocator stream's AppleSettings, the native
-# session handler and the Dart publish pipeline — survives a genuinely fired
-# UIApplication background transition. B4 still owns coordinate fidelity;
-# this lane reads no coordinates. The physical-device checklist
+# stack — plist mode, HavenLocationStreamHandler's updates session, the native
+# session handler's tier posture, the Dart publish pipeline and whichever
+# receive plane the leg was built with — survives a genuinely fired
+# UIApplication background transition. It does not prove the absence of a SOCKET
+# between bursts (P2c, above, states why no oracle for that exists here). B4
+# still owns coordinate fidelity; the only coordinates any leg reads are the
+# sentinel pair a synthetic peer publishes for P2c/P2d to decrypt.
+#
+# The poll leg's ceiling is worth stating on its own, because a green there is
+# narrower than it looks: it shows the 90 s timer surviving ONE real
+# backgrounding for the length of the lane's window, on a simulator that cannot
+# be suspended the way a phone is. It says nothing about the timer across a
+# jetsam kill, across an SLC relaunch, or over an afternoon.
+#
+# Read the ALWAYS leg's green against that ceiling in particular. It shows the
+# confirmed-Always shape — no activity session held, no indicator asked for —
+# surviving a background transition and publishing for the lane's window. It
+# does NOT show that shape surviving an afternoon on a device: the simulator
+# cannot be suspended the way a phone is and cannot be run for two stationary
+# hours, and the closest physical neighbour of this configuration FAILED in
+# the field on 2026-08-20. "Hours stationary under confirmed Always" stays
+# UNKNOWN; M7 §6 item 0a is DEFERRED for want of hardware, not met, and
+# nothing here may be cited as having met it. The physical-device checklist
 # (docs/M7_BACKGROUND_SHARING.md §6, item 0) remains the final proof.
 #
 # One boundary is still open and P2a/P2b exist to close it. Apple lists "the
@@ -79,7 +271,6 @@
 # container cannot run here. The grant-between-install-and-launch ordering is
 # why the wrapper (not the shared runner) owns install + grant, exactly as B4
 # does.
-
 name: E2E iOS Background Publish
 
 on:
@@ -87,22 +278,103 @@ on:
 
 jobs:
   e2e_ios_bg_publish:
-    name: e2e_ios_bg_publish
+    name: e2e_ios_bg_publish (${{ matrix.leg }})
     runs-on: macos-latest # Apple Silicon; arm64 simulator (no Linux Docker).
-    # Envelope sized for a COLD first run: setup (~10-15m) + the boot step's
-    # 15m ceiling + the drive step's 95m ceiling. The drive step is the real
-    # bound; this is the outer backstop that must never fire first, because a
-    # job-cap SIGKILL skips every `if: always()` diagnostic — the worst red
-    # there is (scripts/ci/check_e2e_step_timeout_ordering.sh).
-    timeout-minutes: 115
+    strategy:
+      # Never fail-fast. The legs assert things none of the others can — two
+      # OPPOSITE session postures across the tier axis, two mutually exclusive
+      # receive planes across the live-sync one — so cancelling siblings on the
+      # first red would hide which leg broke, and a phase whose merge gate is
+      # "every leg green" cannot afford an unrun leg reported as a
+      # cancellation.
+      fail-fast: false
+      matrix:
+        # Explicit combinations rather than two crossed axes, because the cross
+        # would produce an (always, poll) leg nobody asked for: the poll leg's
+        # subject is the receive PLANE, which is orthogonal to the grant, and a
+        # fourth ~62-minute macOS job would only re-read a tier policy the
+        # always-live-sync leg already proves. `leg` is the human-readable name
+        # and the per-leg key for the cargo cache and the failure artifact —
+        # tier alone stopped being unique the moment the poll leg was added.
+        include:
+          # The tier most users hold, on the SHIPPED receive path.
+          - leg: when-in-use-live-sync
+            tier: when-in-use
+            live_sync: "true"
+          # `... grant location-always`, the confirmed-Always shape that
+          # removes the blue bar (OD1) and whose only physical neighbour failed
+          # in the field — which is why it is mandatory here rather than
+          # optional.
+          - leg: always-live-sync
+            tier: always
+            live_sync: "true"
+          # OD4-d: the POLL configuration under a real OS backgrounding. This
+          # lane is the only place in the repo that produces one, and the poll
+          # path's background receive branch (the 90 s catch-up timer) shipped
+          # with no runtime coverage at all between P4-7 and this leg. See the
+          # header's OD4-d section.
+          #
+          # `when-in-use` here is a CORRECTNESS constraint, not a sampling
+          # choice: P2d's oracle is the persisted last-known store, and under
+          # `always` the SLC wake reaches the same store through the same
+          # runCatchup, so the row would no longer be attributable to the timer
+          # (P2d, above). Do not flip it, and do not add an (always, poll) leg.
+          - leg: when-in-use-poll
+            tier: when-in-use
+            live_sync: "false"
+    # Envelope for a COLD first run, and it must EXCEED the sum of everything
+    # under it — including the steps that carry no cap of their own — because
+    # a job-cap SIGKILL skips every `if: always()` step, which here is the
+    # simulator diagnostics and the artifact upload: the worst red there is
+    # (scripts/ci/check_e2e_step_timeout_ordering.sh, whose C3 compares one
+    # step to the job and can never see this sum).
+    #   setup, UNCAPPED: checkout, Rust + Flutter toolchains, the cargo
+    #     cache restore, `flutter pub get`, and a cold `cargo build` of
+    #     the host-native relay                                      <= 15m
+    #   boot step cap                                                   15m
+    #   drive step cap                                       135m / poll 129m
+    #   diagnostics + artifact upload, UNCAPPED: a `log collect` and a
+    #     multi-GB .logarchive. Deliberately left uncapped — a step cap
+    #     that killed a diagnostic would turn a green run red, which is
+    #     the failure this whole ladder exists to avoid              <= 10m
+    #                                                       = 175m / poll 169m
+    # This was 155 while the same header sized setup at 10-15m, so by its own
+    # numbers the worst case was 160-165m and the cap could fire first. The
+    # drive step's own cap is still the bound that should fire on a wedged run;
+    # this is only the outer backstop.
+    #
+    # PER LEG, and the cheaper leg gets its own number rather than inheriting
+    # the larger: a cap sized for the expensive leg is a cap the cheap leg's
+    # own inner bounds can never reach, which is the inoperative-bound shape C3
+    # exists to name.
+    timeout-minutes: ${{ matrix.live_sync == 'true' && 175 || 169 }}
     env:
       HAVEN_E2E_RELAY: ws://localhost:7777
       FLUTTER_SUPPRESS_ANALYTICS: "true"
-      # Poll path, stated per JOB rather than inherited (S1 /
-      # CI_HARDENING_BACKLOG.md A7). This lane's subject is the PUBLISH side
-      # across a real background transition; the live-sync receive engine is
-      # an unrelated axis, and running it here would only add flake surface.
-      HAVEN_LIVE_SYNC: "false"
+      # Stated per JOB rather than inherited (S1 / CI_HARDENING_BACKLOG.md A7),
+      # and now a matrix AXIS rather than one value.
+      #
+      # This was "false" for the whole lane until P4-7, on the reasoning that
+      # the lane's subject was the publish side and the receive engine an
+      # unrelated axis. P4 ended that: the iOS background pause branch now runs
+      # every publish tick as a BURST over this engine — open, ingest, publish,
+      # settle, pause — so the engine is not an axis beside the subject, it is
+      # half of it. Compiled out, every burst's open fails and the lane measures
+      # a degenerate burst; P2c could not exist at all, since there would be no
+      # session to hold (or not hold) a subscription.
+      #
+      # But "false" is a SHIPPED configuration — the documented one-line
+      # rollback of a flag that defaults on — with its own background receive
+      # branch, and the flip left that branch with no real-backgrounding
+      # coverage anywhere. Hence the third leg (OD4-d): the shipped path is
+      # measured by two legs, the rollback path by one, and each leg's drive
+      # asserts the plane it was actually built with.
+      HAVEN_LIVE_SYNC: ${{ matrix.live_sync }}
+      # The tier axis, and the wrapper refuses to run without it — for the
+      # same reason HAVEN_LIVE_SYNC is mandatory there: the value is compiled
+      # into the artifact as well as acted on, so an unstated one would not be
+      # neutral, it would be a second When-In-Use job wearing this job's name.
+      HAVEN_BGP_AUTH_TIER: ${{ matrix.tier }}
 
     steps:
       - name: Checkout
@@ -120,7 +392,8 @@ jobs:
           workspaces: |
             haven-core
             tooling/e2e/local-relay
-          key: e2e-ios-bg-publish
+          # Per-leg, so the matrix jobs never race each other's cache save.
+          key: e2e-ios-bg-publish-${{ matrix.leg }}
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -154,20 +427,86 @@ jobs:
       # classified as the single admitted infrastructure signature (a
       # post-build, pre-first-test launch/attach stall). A genuine assertion
       # failure, a refused `simctl` grant, a failed handshake, or a drive
-      # that exited 0 without printing all four proof markers all stop on
-      # attempt 1 with their own exit code.
+      # that exited 0 without its leg's full proof set all stop on attempt 1
+      # with their own exit code.
       #
-      # Timeout arithmetic, worst case per attempt:
+      # Timeout arithmetic, worst case per attempt, and it is PER LEG because
+      # the receive planes do not cost the same. Every drive term below is an
+      # ENFORCED bound — the constant that produces it is named in the
+      # wrapper's DISABLE_WAIT derivation, which prices the same phases from
+      # the same sources; the two must move together.
+      #
+      # Shared by every leg:
       #   cold Xcode+pods+aarch64-Rust build   ~15m  (once, by the wrapper)
       #   incremental rebuild in `flutter test` ~3m
-      #   drive: in-test setup ~5m + P1 ~1m + background handshake <=3m
-      #          + P2 window 396s ~7m + P3 (grace + 200s settle + fetches +
-      #          disarm poll) ~6m + teardown ~2m                    ~24m
-      #   total                                                     ~42m
-      # -> 45 min/attempt (B7's cold-run envelope, same phases). The step cap
-      # (95) must exceed max_attempts x timeout_minutes (2 x 45 = 90) plus
-      # slack, or the step reaper fires mid-second-attempt and the retry buys
-      # nothing. 95 < 115 keeps the job cap the outer backstop.
+      #   install/grant/seed + launch/attach    ~2m
+      #   teardown                              ~2m               = 22m
+      # and that 22m of fixed overhead is what `check_ios_background_publish.sh`
+      # check 15 pins against the drive's own Timeout, branch by branch, so
+      # neither side of either pair can move alone.
+      #
+      # LIVE-SYNC legs. drive: in-test setup ~5m (its CoreLocation auth wait is
+      #          90s of it)
+      #          + P1 ~4m (60s stream-freshness + 95s standing-REQ control,
+      #            + <=60s for the Always leg's confirmed-Always poll)
+      #          + background handshake <=3m
+      #          + P2a <=267s ~4m  (a 65s wait for the publish MapShell's own
+      #            pause drives, so the anchor lands past it, plus an awaited
+      #            tick that is one link of the scheduler's FIFO chain and is
+      #            bounded by kPublishLinkTimeout — NOT by burstBound, which
+      #            by its own doc bounds no whole burst; the tick's 133s
+      #            collect runs inside it)
+      #          + P2b 417s ~7m
+      #          + P2c <=490s ~8m  (112s peer publish + 180s awaited tick
+      #            + 55s member-cache poll + a 143s between-bursts CEILING a
+      #            healthy run does not spend — that poll decides on the
+      #            engine's first answer)
+      #          + P3 (baseline + 200s settle + snapshot + disarm poll) ~5m
+      #                                                             ~36m
+      #   The drive target carries its own `Timeout(40 min)` on these legs and
+      #   it is the INNERMOST bound — the one that fires first and names the
+      #   test. Against the precise phase sum (~2280s ~ 38m, the ~36m above
+      #   plus the ~2m of teardown the Timeout also covers) that is ~5% of
+      #   headroom, not a comfortable margin; it is enough because every term
+      #   above is a ceiling reached only on a run that is already failing, and
+      #   the drive's own comment argues the same way for not raising it. So the
+      #   per-attempt deadline must clear 22m of overhead + that 40m = 62m, or
+      #   the retry would cut the bound that produces the better red.
+      #     -> 65 min/attempt.
+      #
+      # POLL leg. Same setup, handshake, P2a, P2b and P3, but:
+      #          + P1 ~1m instead of ~4m — no confirmed-Always poll (this leg
+      #            is When-In-Use) and no 95s standing-REQ wait, because the
+      #            leg's identity read is a pool count that THROWS at once
+      #          + P2d ~6m instead of ~8m: 112s peer publish (identical) + a
+      #            215s catch-up window (two 90s receive-timer ticks + the
+      #            sweep's own 20s maxDurationSecs + slack) + a 15s baseline
+      #            store read, and NO awaited tick at all, because P2d drives
+      #            nothing — the timer is its subject
+      #                                                             ~31m
+      #   -> the drive target's `Timeout(37 min)` on this leg: ~31m above plus
+      #      teardown is ~33m by this rounded list and ~34.6m summed in seconds
+      #      (the wrapper prices the middle of it at 1241 s and sets
+      #      DISABLE_WAIT_POLL_SECS to 1310), so 37 clears it by ~7% — more
+      #      headroom than the live-sync
+      #      legs have, because the rounding is coarser at this scale and the
+      #      next honest number down would sit inside the seconds-level sum.
+      #      Then a per-attempt deadline that clears 22 + 37 = 59m
+      #      -> 62 min/attempt, and 62 - 37 = 25 >= 22 keeps check 15 green on
+      #      this branch too.
+      #
+      # P2b's profile poll adds nothing to either sum: it is bounded by an
+      # absolute deadline 204s after the backgrounding, runs while the P2b
+      # collect is already running and is awaited before it, so it is inside a
+      # window already counted.
+      #
+      # The step cap must exceed max_attempts x timeout_minutes plus slack, or
+      # the step reaper fires mid-second-attempt and the retry buys nothing:
+      # 2 x 65 = 130 -> 135 on the live-sync legs, 2 x 62 = 124 -> 129 on the
+      # poll one. Each stays below its own job cap, keeping that the outer
+      # backstop, and both branches of every expression here key on the SAME
+      # condition in the same order, because check_e2e_step_timeout_ordering.sh
+      # pairs the deadline, step and job branches POSITIONALLY.
       #
       # The relay is restarted first so a retried attempt runs against a
       # CLEAN in-memory store (start-local-relay.sh stops any prior
@@ -177,11 +516,11 @@ jobs:
       # lets scripts/ci/check_e2e_step_timeout_ordering.sh classify this step
       # as a simulator drive (its classifier reads step bodies for the shared
       # runner's name; the wrapper's own name is not in its marker list).
-      - name: Run the iOS background-publish lane
-        timeout-minutes: 95
+      - name: Run the iOS background-publish lane (${{ matrix.leg }})
+        timeout-minutes: ${{ matrix.live_sync == 'true' && 135 || 129 }}
         uses: nick-fields/retry@v3
         with:
-          timeout_minutes: 45
+          timeout_minutes: ${{ matrix.live_sync == 'true' && 65 || 62 }}
           max_attempts: 2
           command: >-
             test -f tooling/e2e/ci/run-ios-sim-scenario.sh &&
@@ -199,7 +538,9 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v6
         with:
-          name: e2e-ios-bg-publish-${{ github.run_id }}
+          # Per-leg: two matrix jobs uploading one artifact name is an error,
+          # and the leg is the first thing anyone opening these logs needs.
+          name: e2e-ios-bg-publish-${{ matrix.leg }}-${{ github.run_id }}
           path: |
             /tmp/bg-publish-ios.log
             /tmp/flutter-ios-test.log

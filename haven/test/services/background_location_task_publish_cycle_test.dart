@@ -281,7 +281,7 @@ void main() {
         [BigInt.from(kLocationUpdateInterval.inSeconds)],
         reason:
             'the sampler is asked for jitter around the nominal cadence, '
-            'once per publish',
+            'once per burst',
       );
       final due = dueOf(harness, circle);
       expect(
@@ -332,12 +332,16 @@ void main() {
       );
       expect(
         harness.events.sampledNominals,
-        isEmpty,
-        reason: 'no re-arm was even attempted',
+        [BigInt.from(kLocationUpdateInterval.inSeconds)],
+        reason: 'the interval is pre-sampled once per BURST, before the engine '
+            'has answered — around the nominal cadence, never around '
+            'anything derived from the outcome. What proves the deferral did '
+            'not RE-ARM the circle is the untouched schedule asserted above, '
+            'not whether the CSPRNG was consulted',
       );
     });
 
-    test('rolls a staged commit back when no relay accepted it', () async {
+    test('leaves a staged commit owed when no relay accepted it', () async {
       final circle = circleFixture(seed: 1);
       final harness = await BackgroundTaskHarness.start(
         circles: [circle],
@@ -354,12 +358,14 @@ void main() {
         [BigInt.from(7)],
         reason:
             'confirming a commit no relay took applies state the group '
-            'never agreed to; dropping it pins the group in PendingPublish',
+            'never agreed to; dropping it pins the group in PendingPublish. '
+            'The fail rung is not a rollback for a peer eviction — Rust keeps '
+            'the removal owed for a foreground pass to publish',
       );
       expect(harness.manager.confirmedTokens, isEmpty);
     });
 
-    test('rolls a staged commit back when the relay throws', () async {
+    test('leaves a staged commit owed when the relay throws', () async {
       final circle = circleFixture(seed: 1);
       final harness = await BackgroundTaskHarness.start(
         circles: [circle],
@@ -375,7 +381,7 @@ void main() {
       expect(harness.manager.confirmedTokens, isEmpty);
     });
 
-    test('rolls a staged commit back without a publish when the circle has '
+    test('leaves a staged commit owed without a publish when the circle has '
         'no relays', () async {
       final circle = circleFixture(seed: 1, relays: const []);
       final harness = await BackgroundTaskHarness.start(circles: [circle]);
@@ -453,6 +459,55 @@ void main() {
         isNotNull,
         reason: 'losing a proposal costs a cycle, so it must not abort one',
       );
+    });
+  });
+
+  group('the two publish planes take different ladders', () {
+    test('a location takes the one-shot ladder', () async {
+      final circle = circleFixture(seed: 1);
+      final harness = await BackgroundTaskHarness.start(circles: [circle]);
+
+      await harness.tick(DateTime.now());
+
+      expect(
+        harness.relay.publishedLocations.map((e) => e.eventJson).toList(),
+        [locationEventOf(circle)],
+        reason:
+            'a location nobody acked is superseded by the next tick within '
+            'kLocationPublishMaxInterval, so it gets ONE bounded attempt — '
+            'and the radio sleeps instead of climbing a 49 s retry ladder',
+      );
+      expect(
+        harness.relay.publishedOnLadder,
+        isEmpty,
+        reason: 'nothing on this path is a commit',
+      );
+    });
+
+    test('a staged commit keeps the retry ladder', () async {
+      final circle = circleFixture(seed: 1);
+      final harness = await BackgroundTaskHarness.start(circles: [circle]);
+      harness.manager.encryptOutcome = (_) =>
+          deferralWith(commits: [stagedCommit(7)], proposals: const ['p1']);
+
+      await harness.tick(DateTime.now());
+
+      expect(
+        harness.relay.publishedOnLadder.map((e) => e.eventJson).toList(),
+        [stagedCommit(7).commitEventJson, 'p1'],
+        reason:
+            'a commit that is neither confirmed nor rolled back forks the '
+            'group (Rule 13); no later tick supersedes it, so it keeps the '
+            '3-attempt ladder — as does the proposal that rides with it',
+      );
+      expect(
+        harness.relay.publishedLocations,
+        isEmpty,
+        reason:
+            'the one-shot ladder must never carry an event whose outcome '
+            'resolves a PendingStateRef',
+      );
+      expect(harness.manager.confirmedTokens, [BigInt.from(7)]);
     });
   });
 
@@ -540,10 +595,113 @@ void main() {
       );
       expect(harness.sharing.fetched, isEmpty);
       expect(
-        await readLastPublishMs(),
-        isNull,
-        reason: 'the cycle returned rather than falling through to its tail',
+        harness.location.streamListeners,
+        0,
+        reason: 'the UI isolate holds its own 1 Hz registration the moment it '
+            'resumes, and two live platform requests coalesce at the provider '
+            'to the tighter one — so keeping this one until the next watchdog '
+            'tick quietly restores continuous GNSS. The top-of-cycle gate '
+            'stands down for exactly this reason; mid-loop is the same '
+            'handover, later',
       );
+      expect(
+        harness.handler.dueTrackerForTest.nextDueForTest,
+        isEmpty,
+        reason: 'and the schedules go with it, so the next handoff seeds '
+            'every circle due-now rather than waiting out a stale jittered '
+            'interval',
+      );
+      expect(
+        await readLastPublishMs(),
+        isNotNull,
+        reason: 'the burst is abandoned but the cycle still leaves through its '
+            'own tail — where the publish pool is closed — so the stamp for '
+            'the publish that DID land is written. It cannot mislead the '
+            'foreground into skipping a publish: the resume that caused this '
+            'sets `_lastPublishTime` to now on its own',
+      );
+    });
+
+    test('a foreground resume between the publishes and the fetch releases '
+        'the registration too', () async {
+      // The other mid-cycle exit: the burst finished on its own, and the
+      // resume lands in the gap before the peer fetch. Same handover, same
+      // two live requests if this path keeps its own.
+      final harness = await BackgroundTaskHarness.start(
+        circles: [circleFixture(seed: 1)],
+      );
+      harness.relay.onPublish = (_) =>
+          BackgroundLocationManager.markForegroundActive(active: true);
+
+      await harness.tick(DateTime.now());
+
+      expect(
+        harness.manager.encryptCalls,
+        hasLength(1),
+        reason: 'the only due circle published before the resume landed',
+      );
+      expect(harness.sharing.fetched, isEmpty);
+      expect(harness.location.streamListeners, 0);
+    });
+
+    /// A harness one full cycle in, re-armed and about to be interrupted
+    /// mid-burst on a cycle whose peer fetch is NOT due.
+    ///
+    /// The throttle is what makes this isolating: on a first cycle the fetch
+    /// loop runs, sees the same resume and stands down itself — so a mid-loop
+    /// path that kept its registration would still end with none, and the
+    /// assertion would pass against the defect it exists for.
+    Future<BackgroundTaskHarness> reclaimedMidBurst() async {
+      final harness = await BackgroundTaskHarness.start(
+        circles: [circleFixture(seed: 1), circleFixture(seed: 2)],
+      );
+      await harness.tick(DateTime.now());
+      expect(
+        harness.sharing.fetched,
+        isNotEmpty,
+        reason: 'the throttle is armed',
+      );
+      for (final seed in [1, 2]) {
+        harness.handler.dueTrackerForTest.markBurstPublished(
+          [scheduleKeyOf(circleFixture(seed: seed))],
+          DateTime.now(),
+        );
+      }
+      harness.relay.onPublish = (_) =>
+          BackgroundLocationManager.markForegroundActive(active: true);
+      return harness;
+    }
+
+    test('the mid-loop hand-back releases the registration on its own',
+        () async {
+      final harness = await reclaimedMidBurst();
+      final fetchesBefore = harness.sharing.fetched.length;
+
+      await harness.tick(DateTime.now());
+
+      expect(
+        harness.sharing.fetched,
+        hasLength(fetchesBefore),
+        reason: 'the fetch is throttled to its own cadence, so this cycle has '
+            'no fetch-side stand-down for the mid-loop one to hide behind',
+      );
+      expect(harness.location.streamListeners, 0);
+    });
+
+    test('a failed publish does not re-arm the registration the mid-loop '
+        'hand-back just released', () async {
+      // The two recovery paths meet here: a publish that fails pulls the next
+      // fix back to the watchdog period, and a foreground reclaim releases the
+      // request outright. Taken in that order the retry re-registers for an
+      // isolate that no longer owns publishing — and that request stands for
+      // the rest of the session, because every later cycle stops at the
+      // ownership gate above the only code that could cancel it.
+      final harness = await reclaimedMidBurst();
+      harness.relay.publishError = Exception('relay down');
+
+      await harness.tick(DateTime.now());
+
+      expect(harness.location.streamListeners, 0);
     });
 
     test('a service stop mid-loop drops the queued circles and hands the '
@@ -627,11 +785,22 @@ void main() {
         final circle = circleFixture(seed: 1);
         final harness = await BackgroundTaskHarness.start(circles: [circle]);
 
+        // Due again before every tick, stated rather than borrowed from a
+        // zero-second fake interval: a burst re-arms on `nextBurstDue`, which
+        // never re-arms a circle sooner than `kLocationPublishMinInterval`
+        // after its own publish. The subject here is the FETCH throttle, so
+        // the publish cadence is set up rather than assumed.
+        void dueNow() => harness.handler.dueTrackerForTest.markBurstPublished(
+              [scheduleKeyOf(circle)],
+              DateTime.now(),
+            );
+
         final base = DateTime.now();
         await harness.tick(base);
         expect(harness.manager.encryptCalls, hasLength(1));
         expect(harness.sharing.fetched, hasLength(1));
 
+        dueNow();
         await harness.tick(base.add(const Duration(seconds: 60)));
         expect(harness.manager.encryptCalls, hasLength(2));
         expect(
@@ -644,6 +813,7 @@ void main() {
               'throttle exists to avoid',
         );
 
+        dueNow();
         await harness.tick(base.add(kLocationUpdateInterval));
         expect(harness.manager.encryptCalls, hasLength(3));
         expect(
@@ -800,6 +970,171 @@ void main() {
       );
     });
 
+    test('which circle leads a burst varies across BURSTS on one harness',
+        () async {
+      // Coalescing makes every circle of a burst due in the same instant, so
+      // the order the cycle publishes them in is decided by the CSPRNG
+      // permutation the cycle asks for — on EVERY burst, not just the first.
+      //
+      // Iterating BURSTS rather than harnesses is the whole point. A fresh
+      // harness per seed only ever exercises the first burst after a seed,
+      // and the defect this covers lives after it: re-arming each circle off
+      // its OWN publish instant leaves no ties for the second burst, so
+      // `dueKeysUpTo` sorts by due, the shuffle becomes dead code, the same
+      // circle leads every burst for the whole session, and the delta between
+      // the two circles' `created_at` prints the same number every time.
+      //
+      // The re-arm to one shared instant below is the shape `nextBurstDue`
+      // records — pinned by the neighbouring test — driven directly so this
+      // test does not have to wait out a 72 s cadence floor per burst.
+      final one = circleFixture(seed: 1);
+      final two = circleFixture(seed: 2);
+      final harness = await BackgroundTaskHarness.start(
+        circles: [one, two],
+        // Zero gaps: the subject here is the ORDER, not the pacing.
+        stagger: PublishStagger(
+          rng: Random(4),
+          minGap: Duration.zero,
+          maxGap: Duration.zero,
+          maxSpread: Duration.zero,
+        ),
+      );
+
+      final leaders = <String>[];
+      for (var burst = 0; burst < 12; burst++) {
+        harness.handler.dueTrackerForTest.markBurstPublished(
+          [one, two].map(scheduleKeyOf).toList(),
+          DateTime.now(),
+        );
+        final before = harness.manager.encryptCalls.length;
+        await harness.tick(DateTime.now());
+        expect(
+          harness.manager.encryptCalls.length,
+          before + 2,
+          reason: 'burst $burst must still publish both circles',
+        );
+        leaders.add(hexOf(harness.manager.encryptCalls[before].mlsGroupId));
+      }
+
+      expect(
+        leaders.toSet().length,
+        greaterThan(1),
+        reason: 'a stable "who goes first" across a session is a second-order '
+            'fingerprint of the same burst; leaders were $leaders',
+      );
+    });
+
+    test('a burst samples ONE jittered interval and re-arms every circle it '
+        'published onto ONE due', () async {
+      // The wake claim on this plane: the roster is re-armed on ONE draw and
+      // ONE due, so the circles stay inside one selection window and one
+      // cycle keeps serving them all. An independent draw per circle scatters
+      // their dues across the whole [72 s, 168 s] band within a few cycles
+      // and the device is back to a wake apiece.
+      //
+      // A REAL gap, deliberately. With `PublishStagger.none()` the two
+      // publishes land ~0 ms apart, so a due-per-circle re-arm produces two
+      // dues ~0 ms apart too and every bound below is satisfied by an
+      // implementation that has none of these properties.
+      // A gap wide enough that the cadence FLOOR is the binding clause: with
+      // a 72 s draw and a 3 s spread, a due anchored only at the burst's
+      // first publish lands 3 s inside the floor, which clears the one second
+      // of measurement slack below by a factor of three.
+      const gap = Duration(seconds: 3);
+      const sampled = Duration(seconds: 72);
+      final one = circleFixture(seed: 1);
+      final two = circleFixture(seed: 2);
+      final harness = await BackgroundTaskHarness.start(
+        circles: [one, two],
+        stagger: PublishStagger(rng: Random(5), minGap: gap, maxGap: gap),
+        events: FakeLocationEventService(jitteredSecs: sampled.inSeconds),
+      );
+      // Recorded from inside the relay call, which sits just after the
+      // encrypt: close enough to the publish start that a 2 s violation is
+      // unambiguous, and the only observation point the fakes offer.
+      final publishedAt = <DateTime>[];
+      harness.relay.onPublish = (_) => publishedAt.add(DateTime.now());
+
+      await harness.tick(DateTime.now());
+
+      expect(harness.manager.encryptCalls, hasLength(2));
+      expect(
+        harness.events.sampledNominals,
+        [BigInt.from(kLocationUpdateInterval.inSeconds)],
+        reason: 'one draw for the burst, not one per circle',
+      );
+
+      final dueOne = dueOf(harness, one)!;
+      final dueTwo = dueOf(harness, two)!;
+      expect(
+        dueTwo,
+        dueOne,
+        reason: 'ONE due, exactly. Distinct dues make the next cycle order '
+            'by them instead of by the CSPRNG permutation, so the shuffle '
+            'becomes dead code from the second burst on and the two circles '
+            'carry a constant delta between their created_at stamps forever',
+      );
+
+      // The floor, from the LAST publish. A due anchored only at the burst's
+      // first publish re-arms the circle that published last a whole spread
+      // early — 42 s against the 72 s Haven discloses.
+      expect(publishedAt, hasLength(2));
+      expect(
+        dueOne.difference(publishedAt.last),
+        greaterThanOrEqualTo(
+          kLocationPublishMinInterval - const Duration(seconds: 1),
+        ),
+        reason: 'no circle may be re-armed sooner than the disclosed cadence '
+            'floor after its OWN publish. Measured from inside the relay '
+            'call, which sits after an unbounded encrypt, so the bound is the '
+            'floor less one second of measurement slack — a third of what the '
+            'first-publish anchor gets wrong here',
+      );
+      // ...and the ceiling, from the FIRST. A due anchored only at the last
+      // publish adds the spread on top of the sampled interval, which the
+      // 228 s retention has no room for.
+      expect(
+        dueOne.difference(publishedAt.first),
+        lessThanOrEqualTo(sampled + kPublishStaggerMaxSpread),
+        reason: 'the burst must not push its own spread on top of the '
+            'interval it sampled',
+      );
+    });
+
+    test('a circle flagged Unrecoverable MID-burst is not published by it',
+        () async {
+      // The roster is snapshotted at the top of the cycle — BEFORE the GPS
+      // acquisition and before the whole stagger spread — so without a
+      // re-read a circle the engine flags inside either is still sent to,
+      // which is the one thing `CircleService` says must never happen
+      // (Rule 8). Every other eligibility test here blocks the circle before
+      // the cycle starts, where the snapshot already answers correctly.
+      const gap = Duration(milliseconds: 300);
+      final one = circleFixture(seed: 1);
+      final two = circleFixture(seed: 2);
+      final harness = await BackgroundTaskHarness.start(
+        circles: [one, two],
+        stagger: PublishStagger(rng: Random(9), minGap: gap, maxGap: gap),
+      );
+      // Whichever circle the CSPRNG puts first, the OTHER is flagged while
+      // that publish is in flight.
+      harness.relay.onPublish = (_) async {
+        final firstOut = hexOf(harness.manager.encryptCalls.first.mlsGroupId);
+        final blocked = firstOut == hexOf(one.circle.mlsGroupId) ? two : one;
+        harness.handler.circleServiceForTest!
+            .markCircleBlocked(blocked.circle.mlsGroupId);
+      };
+
+      await harness.tick(DateTime.now());
+
+      expect(
+        harness.manager.encryptCalls,
+        hasLength(1),
+        reason: 'only the circle already in flight may go out; the one '
+            'flagged mid-burst must be skipped',
+      );
+    });
+
     test('a cycle whose stagger budget is spent defers the rest to the next '
         'tick', () async {
       final one = circleFixture(seed: 1);
@@ -819,32 +1154,56 @@ void main() {
       // same branch: the second slot cannot fit, and compressing it back to
       // zero is exactly what would put both circles in one wall-clock second.
       stagger.gap = kPublishStaggerMaxSpread + const Duration(seconds: 1);
-      final deferredDue = dueOf(harness, two);
+      // Both due again, stated rather than borrowed from a zero-second fake
+      // interval: `nextBurstDue` never re-arms a circle sooner than
+      // `kLocationPublishMinInterval` after its own publish, and the subject
+      // here is the SPREAD budget, not the cadence floor.
+      harness.handler.dueTrackerForTest.markBurstPublished(
+        [one, two].map(scheduleKeyOf).toList(),
+        DateTime.now(),
+      );
+      final dueBefore = {
+        for (final circle in [one, two])
+          hexOf(circle.circle.mlsGroupId): dueOf(harness, circle),
+      };
 
-      await harness.tick(base);
+      // A LATER tick than the publishes above. The repeat event is a watchdog
+      // now, and it only acts on a registration that is not delivering or on
+      // a circle that is already overdue — a tick stamped before the publish
+      // it is meant to follow is neither.
+      await harness.tick(base.add(const Duration(seconds: 1)));
 
       expect(
         harness.manager.encryptCalls,
         hasLength(3),
         reason: 'only the first due circle fits inside the budget',
       );
+      // WHICH circle takes the slot is a CSPRNG permutation — both circles are
+      // due in the same instant, so asserting an identity here would pin the
+      // stable burst order the shuffle exists to prevent.
+      final served = hexOf(harness.manager.encryptCalls.last.mlsGroupId);
+      final deferred = [one, two]
+          .map((c) => hexOf(c.circle.mlsGroupId))
+          .firstWhere((hex) => hex != served);
+
       expect(
-        hexOf(harness.manager.encryptCalls.last.mlsGroupId),
-        hexOf(one.circle.mlsGroupId),
-      );
-      expect(
-        dueOf(harness, two),
-        deferredDue,
+        dueOf(
+          harness,
+          [one, two].firstWhere(
+            (c) => hexOf(c.circle.mlsGroupId) == deferred,
+          ),
+        ),
+        dueBefore[deferred],
         reason: 'deferring is not re-arming: the circle stays overdue',
       );
-      expect(dueOf(harness, two)!.isAfter(DateTime.now()), isFalse);
+      expect(dueBefore[deferred]!.isAfter(DateTime.now()), isFalse);
 
-      await harness.tick(base);
+      await harness.tick(base.add(const Duration(seconds: 2)));
 
       expect(harness.manager.encryptCalls, hasLength(4));
       expect(
         hexOf(harness.manager.encryptCalls.last.mlsGroupId),
-        hexOf(two.circle.mlsGroupId),
+        deferred,
         reason: 'most-overdue-first, so a deferred circle is never starved',
       );
     });

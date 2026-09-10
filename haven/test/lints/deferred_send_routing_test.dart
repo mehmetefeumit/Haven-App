@@ -180,20 +180,29 @@ void main() {
             'the deferred-commit ladder was renamed or removed; update '
             'this guard rather than deleting it',
       );
-      final innerAt = code.indexOf(
-        'Future<void> _resolveDeferredCommitsInner(',
-        ladderAt,
-      );
-      expect(innerAt, greaterThan(ladderAt));
+      // The ladder itself moved to `background_deferred_send.dart` so that no
+      // file both resolves a staged commit and takes the one-shot location
+      // publish (Rule 13, `haven-core/tests/security_rule_gates.rs`); the
+      // registration stayed here, and the next declaration bounds its body.
+      final endAt = code.indexOf('Future<void> _publishCycle(', ladderAt);
+      expect(endAt, greaterThan(ladderAt));
+      final registration = code.substring(ladderAt, endAt);
       expect(
-        code.substring(ladderAt, innerAt),
+        registration,
+        contains('final work = publishStagedCommits('),
+        reason:
+            'the registered work must BE the ladder; registering anything '
+            'else makes the commit-critical window cover nothing',
+      );
+      expect(
+        registration,
         contains('_inFlightCommitCritical = work;'),
         reason:
             'the ladder must register itself as commit-critical BEFORE it '
             'is awaited, or teardown can abandon it mid-Rule-13',
       );
       expect(
-        code.substring(ladderAt, innerAt),
+        registration,
         contains('_inFlightCommitCritical = null;'),
         reason:
             'and must clear the registration, or a completed ladder would '
@@ -209,16 +218,22 @@ void main() {
       );
       expect(
         code,
-        contains('await _publishDeferredProposals(circle, deferred);'),
+        contains(
+          'await publishDeferredProposals( relayService: _relayService!, '
+          'circle: circle, deferred: deferred, );',
+        ),
         reason:
             'the FGS must publish a deferral\'s proposals, as the '
             'foreground does',
       );
-      final proposalsAt = code.indexOf(
-        'Future<void> _publishDeferredProposals(',
+      final deferredPlane = _code(
+        _read('lib/src/services/background_deferred_send.dart'),
+      );
+      final proposalsAt = deferredPlane.indexOf(
+        'Future<void> publishDeferredProposals(',
       );
       expect(proposalsAt, greaterThan(-1));
-      final body = code.substring(proposalsAt, proposalsAt + 900);
+      final body = deferredPlane.substring(proposalsAt);
       expect(
         body,
         isNot(contains('confirmPublished')),
@@ -231,14 +246,14 @@ void main() {
 
     test('the Rule-13 ladder in the FGS confirms only on an ack', () {
       final code = _code(
-        _read('lib/src/services/background_location_task.dart'),
+        _read('lib/src/services/background_deferred_send.dart'),
       );
       expect(code, contains('published = result.acceptedBy.isNotEmpty;'));
       expect(
         code,
         contains(
-          'if (published) { await _circleManager!.confirmPublished(pending: '
-          'commit.pending); } else { await _circleManager!.publishFailed('
+          'if (published) { await circleManager.confirmPublished(pending: '
+          'commit.pending); } else { await circleManager.publishFailed('
           'pending: commit.pending); }',
         ),
         reason:

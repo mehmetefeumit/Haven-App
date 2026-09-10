@@ -1,9 +1,15 @@
-//! Compile-time tuning constants for the persistent live-sync engine.
+//! Compile-time tuning constants for the persistent live-sync engine. They live
+//! in one module so a tuning pass touches a single file.
 //!
-//! These are reasoned defaults, not yet empirically measured against a real
-//! relay; M11 tunes the window/capacity values against observed strfry
-//! propagation latency. They live in one module so a tuning pass touches a
-//! single file.
+//! Most are reasoned defaults. A few carry LATENCY figures from M11's P-15
+//! propagation probe (2026-07-11), and those are **HISTORICAL**: the two suites
+//! that produced them — `tests/settle_window_tuning_test.rs` and
+//! `tests/settle_window_real_relay_test.rs` — are `DELETED-WITH-SUBJECT`
+//! tombstones under Dark Matter (DM-5a), so nothing in this tree reproduces
+//! them and no CI lane re-measures them. This header said "not yet empirically
+//! measured" while the body below said "measured 2026-07-11"; both readings
+//! were wrong, and the honest one is that the numbers were real when taken and
+//! have had no instrument behind them since.
 
 /// Capacity of the internal `LiveSyncEvent` broadcast bus.
 ///
@@ -64,49 +70,68 @@ pub const POOL_NOTIF_CAP: usize = 8192;
 /// later, and the two `N+1` branches fork PERMANENTLY — a twin with the same
 /// epoch number and member set but a different exporter secret, so cross-decrypt
 /// fails. Only when the window COLLECTS the competitor and feeds it to
-/// `converge_commit` do the admins converge (the loser adopts the winner). This
-/// is pinned by
-/// `circle::manager::tests::rev1_or_m11_two_admin_window_miss_forks_but_in_window_converges`.
-/// The window MUST therefore be `>= 2x` the p99 commit propagation — the framing
-/// in `docs/M11_ROLLOUT.md` §7/§H2, NOT the earlier "latency optimization"
-/// wording, is correct.
+/// `converge_commit` do the admins converge (the loser adopts the winner). The
+/// window MUST therefore be `>= 2x` the p99 commit propagation — the framing in
+/// `docs/M11_ROLLOUT.md` §7/§H2, NOT the earlier "latency optimization" wording,
+/// is correct.
 ///
-/// The "slower `Unprocessable -> clear -> adopt` path still converges" claim
-/// holds ONLY for regime-1 OBSERVERS (no own pending commit): carrying no
-/// un-snapshotted merge, they are reconciled by MDK's native rollback plus
-/// lossless cursor replay without a window (see
-/// `no_pending_observers_converge_on_sibling_commits_via_native_rollback`).
+/// **All of the above is PRE-DARK-MATTER and no longer describes this
+/// constant.** Haven's own commit settle window is deleted: the engine owns
+/// convergence, Haven installs `settlement_quiescence_ms = 0`
+/// (`crate::nostr::mls::manager::session_convergence_policy`, which explains
+/// why), `converge_commit` is gone with it, and both tests this paragraph used
+/// to cite —
+/// `rev1_or_m11_two_admin_window_miss_forks_but_in_window_converges` and
+/// `no_pending_observers_converge_on_sibling_commits_via_native_rollback` — no
+/// longer exist. Deterministic `CommitOrderingKey` branch selection plus durable
+/// out-of-order buffering replaced the window, and the surviving convergence
+/// proof is
+/// `live_sync_two_engine_converge_e2e::two_engines_converge_over_one_relay_via_the_engine_loop`.
+/// What `8 s` bounds TODAY is a background burst's socket lifetime after the last
+/// commit activity — `session::BURST_SETTLE_WINDOW`, fed to
+/// `settle_before_pause_with` — so the reasoning to re-derive it from is burst
+/// liveness, not fork safety. Rewriting that derivation is a separate change;
+/// this note exists so nobody reads the paragraphs above as current.
 ///
-/// # Measured propagation (P-15 / A6) — why `8` is defensible
+/// # HISTORICAL propagation figures (P-15 / A6) — why `8` was defensible
 ///
-/// The value sits in the defensible band `[2x p99 propagation, membership-op UX
-/// ceiling]`, confirmed at two relay tiers:
+/// **Both instruments below are gone.** `tests/settle_window_tuning_test.rs` and
+/// `tests/settle_window_real_relay_test.rs` are `DELETED-WITH-SUBJECT`
+/// tombstones (Dark Matter, DM-5a) — 13- and 23-line headers, no probe, no
+/// assertions. Nothing in this tree reproduces the percentiles below and no CI
+/// lane re-measures them, so they are a record of a run on 2026-07-11 and not a
+/// property this repo still checks. They are kept because they are the only
+/// evidence the value was ever sized against a relay; do not restate them
+/// anywhere as current.
 ///
-/// * `tests/settle_window_tuning_test.rs` samples publish->observe over an
-///   in-process relay: p50 ~= 2-3 ms, p99 ~= 3-5 ms. A loopback LOWER BOUND (the
-///   in-process relay cannot inject WAN fan-out latency) — it only proves `8 s`
-///   dwarfs the fastest-possible pipeline, not that it clears real propagation.
-/// * `tests/settle_window_real_relay_test.rs` — the authoritative real-relay
-///   MEASUREMENT the in-process numbers defer to (a reproducible on-demand
-///   instrument, env-gated on `HAVEN_E2E_RELAY`; the always-on regression backstop
-///   is the in-process test above plus the `<= 10` const-assert below, NOT this
-///   file — no CI lane runs it with the env set). It drives the SAME probe through
-///   a real `strfry` daemon (the pinned `dockurr/strfry` image the Flutter e2e
-///   lanes provision): p50 ~= 104 ms, p99 ~= 106 ms, so `2x p99 ~= 212 ms`; the
-///   `8000 ms` window clears it by ~38x (measured 2026-07-11 against a host-local
-///   strfry, debug build, idle single subscriber, n=100 x3, tightly clustered).
+/// The value sat in the band `[2x p99 propagation, membership-op UX ceiling]`,
+/// at two relay tiers:
+///
+/// * the in-process probe: p50 ~= 2-3 ms, p99 ~= 3-5 ms. A loopback LOWER BOUND
+///   (an in-process relay cannot inject WAN fan-out latency) — it only showed
+///   `8 s` dwarfs the fastest-possible pipeline, not that it clears real
+///   propagation.
+/// * the real-relay probe, then the authoritative one (env-gated on
+///   `HAVEN_E2E_RELAY`, never run by a CI lane): the SAME probe through a real
+///   `strfry` daemon gave p50 ~= 104 ms, p99 ~= 106 ms, so `2x p99 ~= 212 ms`
+///   and the `8000 ms` window cleared it by ~38x (host-local strfry, debug
+///   build, idle single subscriber, n=100 x3, tightly clustered).
 ///
 /// That sample includes strfry's real ingest->match->broadcast plus WebSocket
 /// framing but NOT wide-area RTT or relay fan-out under load. Those terms only
 /// widen p99, and the margin absorbs them generously: a congested `+1 s` RTT gives
 /// `2x p99 ~= 2.2 s` (~3.6x under the `8 s` window); a severe `+2 s` gives
 /// `2x p99 ~= 4.2 s`, still satisfying the fork-safety inequality `window > 2x p99`
-/// (`8 s` vs `4.2 s`, ~1.9x margin). So `8 s` holds its `>= 2x` fork-safety margin
-/// over realistic propagation while staying below the ~10 s window ceiling that
-/// keeps window + publish + converge within a responsive add/remove (~<= 12 s). Do
-/// NOT lower it; revisit upward only if a measured p99 exceeds ~4 s (then capped by
-/// the UX ceiling). To fold in true WAN RTT, point `HAVEN_E2E_RELAY` at a remote
-/// relay you operate and re-run the test.
+/// (`8 s` vs `4.2 s`, ~1.9x margin). So `8 s` held its `>= 2x` margin over
+/// realistic propagation while staying below the ~10 s window ceiling that keeps
+/// window + publish + converge within a responsive add/remove (~<= 12 s). Do NOT
+/// lower it; revisit upward only against a p99 someone has actually sampled,
+/// which today means writing a new probe, because the old one cannot be re-run.
+/// Note also that the ~10 s ceiling is reasoning and nothing more: NO
+/// const-assert bounds this constant from above (the two that name it —
+/// `STOP_DRAIN_TIMEOUT_SECS <` and `BURST_SETTLE_CAP_SECS >= ... + 10` — only
+/// relate it to two other constants). This doc used to cite a `<= 10`
+/// const-assert as the always-on backstop; there has never been one.
 pub const COMMIT_SETTLE_WINDOW_SECS: u64 = 8;
 
 /// Upper bound (seconds) on a single engine relay control-plane op before the
@@ -255,23 +280,166 @@ pub const DELIVERY_SILENCE_RETENTION_MULTIPLE: i64 = 3;
 /// re-issue's own `EOSE` resets that endpoint's window.
 ///
 /// It applies to GROUP REQs only. A silent inbox REQ is the normal state, and
-/// re-issuing it means asking for a seven-day gift-wrap replay keyed on this
-/// device's `#p`; see [`super::health`] for why that arm was removed rather than
-/// tuned.
+/// re-issuing it means asking for a 49-hour gift-wrap replay keyed on this
+/// device's `#p`, every quarter of an hour, forever; see [`super::health`] for
+/// why that arm was removed rather than tuned.
 #[must_use]
 pub const fn delivery_silence_window_secs() -> i64 {
     DELIVERY_SILENCE_RETENTION_MULTIPLE
         * crate::location::ttl::LOCATION_MESSAGE_RETENTION_SECS.cast_signed()
 }
 
-/// Scheduled health-check cadence (seconds, 15 minutes). Body lands in M8.
-pub const HEALTH_CHECK_SECS: u64 = 900;
-
-/// Scheduled relay-list maintenance cadence (seconds, 30 minutes). Body in M8.
-pub const RELAY_LIST_SECS: u64 = 1800;
-
 /// Bytes of the SHA-256 sub-id digest used as the subscription-id prefix.
 ///
 /// Eight bytes render to 16 lowercase-hex characters, sitting exactly at the
 /// `redact_hex_sequences` floor so a sub-id is auto-redacted if ever logged.
 pub const SUB_ID_PREFIX_BYTES: usize = 8;
+
+/// Upper bound (seconds) a background burst waits for its own REQs' backlog to
+/// drain before it publishes anyway.
+///
+/// A burst opens the sockets, re-issues every REQ at its persisted cursor and
+/// then waits for each `(relay, subscription)` ENDPOINT it issued to answer
+/// `EOSE` (or `CLOSED`), so a peer's commit that landed while the engine was
+/// paused is APPLIED before this device encrypts its own location — i.e. the
+/// location goes out at the current epoch.
+///
+/// Sized between the two bounds that matter: at least
+/// [`SUBSCRIBE_CONNECT_WAIT_SECS`] (a burst that spent its whole budget on the
+/// WebSocket handshake would never see a single `EOSE`), and far below the 10 s
+/// per-relay OK wait the publish that follows is bounded by (so the wait is a
+/// small fraction of the burst, not its dominant term). A relay that never
+/// `EOSE`s therefore costs one bounded wait and the burst publishes regardless —
+/// exactly what the foreground does today when a REQ is slow — and the outcome
+/// is reported as [`super::processor::BacklogOutcome::TimedOut`] rather than
+/// swallowed.
+///
+/// HISTORICAL context (I-P4-1): a host-local `strfry` answered a group REQ's
+/// `EOSE` in ~100 ms when the P-15 probe was run on 2026-07-11, so this bound is
+/// expected never to bind on a healthy relay. That probe lived in
+/// `tests/settle_window_real_relay_test.rs`, which is now a
+/// `DELETED-WITH-SUBJECT` tombstone (Dark Matter, DM-5a) — the figure is a
+/// record, not something the tree re-checks, and it is the SAME sample the
+/// [`COMMIT_SETTLE_WINDOW_SECS`] doc quotes rather than a second observation.
+pub const BURST_BACKLOG_WAIT_SECS: u64 = 5;
+
+/// The backlog wait must cover the handshake grace, or a burst could spend its
+/// whole budget connecting and never observe an `EOSE`.
+const _: () = assert!(BURST_BACKLOG_WAIT_SECS >= SUBSCRIBE_CONNECT_WAIT_SECS);
+
+/// Upper bound (seconds) on how long a background burst holds its sockets open
+/// after the last commit activity, waiting for FOLLOW-ON commit traffic to
+/// quiesce before it pauses.
+///
+/// The settle itself is [`COMMIT_SETTLE_WINDOW_SECS`] measured from the LAST
+/// commit activity; this caps the total. It bounds IDLE FOLLOW-ON ACTIVITY
+/// ONLY — never an in-flight publish. A commit between SEND and its OK is held
+/// by the in-flight publish gauge (`EngineProcessor::in_flight_publishes`),
+/// which has no cap at all, because cutting the socket there would make
+/// `wait_for_ok` return `Err` and roll a commit back that the relay may have
+/// stored and served: a roster fork every burst (Security Rule 13).
+///
+/// Sized so a commit landing at the very end of the settle still gets its FULL
+/// window: with the cap measured from the settle's start, a commit at
+/// `cap − window` still settles inside the cap, and the `+ 10` headroom below
+/// keeps that true with the crate's 10 s per-relay OK wait in front of it.
+pub const BURST_SETTLE_CAP_SECS: u64 = 18;
+
+/// The cap must leave a whole settle window plus the crate's 10 s OK wait, so
+/// it can never be the thing that cuts a commit's window short.
+const _: () = assert!(BURST_SETTLE_CAP_SECS >= COMMIT_SETTLE_WINDOW_SECS + 10);
+
+/// How many background bursts pass between two inbox (`kind:1059`) REQs.
+///
+/// `1` = every burst carries the inbox REQ, which is today's behaviour and the
+/// lowest invitation latency. The constant exists because inbox relays and
+/// circle relays are INDEPENDENT sets: a relay that carries this device's
+/// `kind:10050` inbox but none of its circles sees no `kind:445`, so a `#p` REQ
+/// on every burst is a "this pubkey is background-sharing right now" cadence
+/// signal for that relay class alone. Raising `k` so that
+/// `k × kLocationUpdateInterval >= 10 min` removes the cadence at the cost of up
+/// to that much background invitation latency.
+///
+/// Every statement that depends on this names the CONSTANT, never a value, so it
+/// stays true whichever way that decision goes.
+///
+/// BACKGROUND bursts only. A foreground re-anchor (the app-resume and the health
+/// tick) closes the standing inbox REQ with its own `unsubscribe_all`, so one
+/// that folded the inbox away would leave the device unable to receive an
+/// invitation for as long as the app stayed open — and it neither consumes nor
+/// reads a position in this period (`LiveSyncCore::resume_after_background`).
+pub const INBOX_BURSTS_PER_REQ: u32 = 1;
+
+/// A period of zero would divide by zero in [`burst_issues_inbox`].
+const _: () = assert!(INBOX_BURSTS_PER_REQ >= 1);
+
+/// Whether the `seq`-th background burst (0-based) carries the inbox REQ, for a
+/// fold period of `every`.
+///
+/// Pure so the "one inbox REQ per `k` bursts" arithmetic is unit-testable
+/// without a relay, and so the burst-open path has exactly one place to state
+/// it. Burst `0` always carries it: the first burst after a foreground session
+/// ends is the one most likely to be holding a real invitation backlog.
+#[must_use]
+pub const fn burst_issues_inbox(seq: u64, every: u32) -> bool {
+    every <= 1 || seq.is_multiple_of(every as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{burst_issues_inbox, INBOX_BURSTS_PER_REQ};
+
+    #[test]
+    fn every_burst_carries_the_inbox_req_at_the_shipped_period() {
+        // The shipped value is `1`, so the fold is a no-op today and background
+        // invitation latency is one publish interval. This pins the SHIPPED
+        // behaviour, not the arithmetic — the arithmetic is below.
+        assert_eq!(INBOX_BURSTS_PER_REQ, 1);
+        for seq in 0..8 {
+            assert!(
+                burst_issues_inbox(seq, INBOX_BURSTS_PER_REQ),
+                "burst {seq} must carry the inbox REQ at k = 1"
+            );
+        }
+    }
+
+    #[test]
+    fn a_longer_period_folds_the_inbox_req_onto_every_kth_burst() {
+        // The privacy lever: with k = 4 an inbox-only relay sees one `#p` REQ
+        // per four publish instants instead of one per publish, and the count
+        // over N bursts is exactly ceil(N / k).
+        let issued: Vec<u64> = (0..12).filter(|s| burst_issues_inbox(*s, 4)).collect();
+        assert_eq!(
+            issued,
+            vec![0, 4, 8],
+            "the fold must fire on burst 0 and every k-th burst after it"
+        );
+        assert_eq!(
+            issued.len(),
+            12_usize.div_ceil(4),
+            "N bursts at period k must issue ceil(N / k) inbox REQs"
+        );
+    }
+
+    #[test]
+    fn the_first_burst_always_carries_the_inbox_req() {
+        // Burst 0 is the first one after a foreground session ended, so it is the
+        // one most likely to hold a real invitation backlog. No period may skip
+        // it.
+        for every in 1..=16u32 {
+            assert!(
+                burst_issues_inbox(0, every),
+                "burst 0 must carry the inbox REQ at every period (k = {every})"
+            );
+        }
+    }
+
+    #[test]
+    fn a_zero_period_degrades_to_every_burst_rather_than_dividing_by_zero() {
+        // `INBOX_BURSTS_PER_REQ >= 1` is const-asserted, so this is unreachable
+        // in production; the guard is here because the failure mode of the
+        // obvious `seq % every` would be a panic in the burst-open path — a
+        // receive outage — rather than a wrong cadence.
+        assert!(burst_issues_inbox(3, 0));
+    }
+}

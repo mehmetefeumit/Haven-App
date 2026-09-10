@@ -207,6 +207,12 @@ class AppLocalizationsFa extends AppLocalizations {
   String get settingsLocationTitle => 'موقعیت مکانی';
 
   @override
+  String get settingsLocationSubtitleOn => 'اشتراک‌گذاری در پس‌زمینه روشن است';
+
+  @override
+  String get settingsLocationSubtitleOff => 'فقط تا وقتی Haven باز است';
+
+  @override
   String get settingsMapStyleTitle => 'سبک نقشه';
 
   @override
@@ -376,7 +382,7 @@ class AppLocalizationsFa extends AppLocalizations {
 
   @override
   String get locationSettingsIntro =>
-      'Haven هر وقت برنامه باز باشد موقعیت مکانی‌ات را با حلقه‌هایت به اشتراک می‌گذارد. این را روشن کن تا حلقه‌هایت وقتی Haven در پس‌زمینه است هم آن را ببینند. اگر سیستم Haven را ببندد، اشتراک‌گذاری متوقف می‌شود؛ برنامه در پس‌زمینه فقط برای گرفتن موقعیت حلقه‌هایت بیدار می‌شود، نه برای فرستادن موقعیت خودت. روی Android، اشتراک‌گذاری حتی بعد از کنار زدن Haven از فهرست برنامه‌های باز ادامه پیدا می‌کند و پس از راه‌اندازی دوبارهٔ دستگاه خودبه‌خود از سر گرفته می‌شود؛ روی iPhone تا وقتی Haven را باز نکنی متوقف می‌ماند.';
+      'هر وقت برنامه باز باشد، Haven موقعیت مکانی‌ات را با حلقه‌هایت به اشتراک می‌گذارد. این را روشن کن تا حلقه‌هایت وقتی Haven در پس‌زمینه است هم آن را ببینند. اگر سیستم Haven را ببندد، اشتراک‌گذاری خودت متوقف می‌شود: ممکن است Haven باز هم بیدار شود تا موقعیت حلقه‌هایت را بگیرد، اما هرگز برای فرستادن موقعیت خودت بیدار نمی‌شود. روی Android، اشتراک‌گذاری حتی بعد از کنار زدن Haven از فهرست برنامه‌های باز ادامه پیدا می‌کند و پس از راه‌اندازی دوبارهٔ دستگاه خودبه‌خود از سر گرفته می‌شود. روی iPhone، اشتراک‌گذاری تا وقتی Haven را باز نکنی متوقف می‌ماند.';
 
   @override
   String get locationSettingsToggleTitle => 'اشتراک‌گذاری در پس‌زمینه';
@@ -387,7 +393,7 @@ class AppLocalizationsFa extends AppLocalizations {
 
   @override
   String get locationSettingsIosLimitedNote =>
-      'اشتراک‌گذاری با همین مجوز فعلی همچنان در پس‌زمینه کار می‌کند. در تنظیمات، موقعیت مکانی Haven را روی «همیشه» بگذار تا Haven بتواند پس از آنکه iOS برنامه را بست هم خودش را با موقعیت حلقه‌هایت به‌روز کند. وقتی دوباره Haven را باز کنی، اشتراک‌گذاری موقعیت خودت از سر گرفته می‌شود.';
+      'اشتراک‌گذاری با همین مجوز فعلی همچنان در پس‌زمینه کار می‌کند و در این مدت iOS نوار آبی موقعیت مکانی را در بالای صفحه نشان می‌دهد. در تنظیمات، موقعیت مکانی Haven را روی «همیشه» بگذار تا Haven بتواند پس از آنکه iOS برنامه را بست هم خودش را با موقعیت حلقه‌هایت به‌روز کند. با «همیشه»، ممکن است iOS به‌جای آن نوار، پیکان موقعیت مکانی را در نوار وضعیت نشان بدهد. وقتی دوباره Haven را باز کنی، اشتراک‌گذاری موقعیت خودت از سر گرفته می‌شود.';
 
   @override
   String get locationSettingsAndroidHeader =>
@@ -407,7 +413,48 @@ class AppLocalizationsFa extends AppLocalizations {
 
   @override
   String get locationSettingsIosGuidance =>
-      'تا وقتی اشتراک‌گذاری در پس‌زمینه روشن است، Haven یک نشست پیوستهٔ موقعیت مکانی را فعال نگه می‌دارد و iOS یک نشانگر آبی در نوار وضعیت نمایش می‌دهد. اگر مجوز «همیشه» را هم بدهی، Haven می‌تواند پس از آنکه iOS برنامه را بست، خودش را با حلقه‌هایت به‌روز کند.';
+      'تا وقتی اشتراک‌گذاری در پس‌زمینه روشن است، Haven یک نشست موقعیت مکانی را فعال نگه می‌دارد تا حلقه‌هایت همچنان تو را ببینند.';
+
+  @override
+  String get locationSettingsIosIndicatorArrow =>
+      'iOS تا وقتی Haven از موقعیت مکانی‌ات استفاده می‌کند، خودش پیکان موقعیت مکانی را در نوار وضعیت نشان می‌دهد و تا مدتی پس از آن هم همان پیکان را در «Location Services» کنار Haven نگه می‌دارد.';
+
+  @override
+  String get locationSettingsIosIndicatorBar =>
+      'با مجوز «همیشه» که داده‌ای، تا وقتی Haven از موقعیت مکانی‌ات استفاده می‌کند، iOS خودش نوار آبی موقعیت مکانی را در بالای صفحه نشان می‌دهد.';
+
+  @override
+  String get locationDisclosureTitle => 'اشتراک‌گذاری موقعیت مکانی‌ات';
+
+  @override
+  String get locationDisclosureWhy =>
+      'Haven موقعیت مکانی لحظه‌ای تو را به افراد حلقه‌هایی که انتخاب می‌کنی نشان می‌دهد و موقعیت آن‌ها را روی نقشه به تو نشان می‌دهد. برای این کار، Haven به اجازهٔ استفاده از موقعیت مکانی دقیق دستگاهت نیاز دارد.';
+
+  @override
+  String get locationDisclosureHow =>
+      'موقعیت مکانی‌ات روی دستگاه خودت به‌صورت سرتاسری رمزگذاری می‌شود؛ برای همین فقط اعضای حلقه‌هایی که انتخاب می‌کنی می‌توانند آن را بخوانند، نه Haven. ‏Haven هیچ سروری از خودش ندارد: به‌روزرسانی‌های رمزگذاری‌شده‌ات از رله‌های مستقلی می‌گذرند که آدم‌های دیگری آن‌ها را اداره می‌کنند؛ این رله‌ها نشانی شبکه‌ات را می‌بینند، اما هرگز نمی‌بینند کجایی. برای کشیدن نقشه، محدوده‌های اطراف تو و حلقه‌ات از Stadia Maps خواسته می‌شود؛ پس این سرویس تقریباً می‌فهمد آنجا کجاست، اما هرگز نام تو، کلید تو یا اعضای حلقه‌هایت را نمی‌داند. Stadia Maps می‌گوید اطلاعات شخصی را نمی‌فروشد و مبادله نمی‌کند، هیچ کوکی‌ای روی دستگاهت نمی‌گذارد و گزارش‌های سرورش را حدود دو هفته نگه می‌دارد — این سیاست خودِ آن‌هاست، نه چیزی که Haven بتواند به آن‌ها تحمیل کند.';
+
+  @override
+  String get locationDisclosureSharing =>
+      'تا وقتی Haven باز است و تو در حلقه‌ای هستی، موقعیت مکانی‌ات هر چند دقیقه یک‌بار خودکار فرستاده می‌شود. هیچ حالت مکثی وجود ندارد. برای توقف اشتراک‌گذاری با یک حلقه، آن حلقه را ترک کن.';
+
+  @override
+  String get locationDisclosureBackgroundAndroid =>
+      'این برنامه از داده‌های موقعیت مکانی استفاده می‌کند تا اشتراک‌گذاری با حلقه‌هایت را ممکن کند، حتی وقتی برنامه بسته است یا از آن استفاده نمی‌کنی.';
+
+  @override
+  String get locationDisclosureBackgroundIos =>
+      'این برنامه از داده‌های موقعیت مکانی استفاده می‌کند تا اشتراک‌گذاری با حلقه‌هایت را ممکن کند، حتی وقتی Haven در پس‌زمینه است و تو از آن استفاده نمی‌کنی. اگر iOS برنامهٔ Haven را ببندد، اشتراک‌گذاری خودت تا وقتی دوباره بازش کنی متوقف می‌شود: ممکن است Haven باز هم بیدار شود تا موقعیت حلقه‌هایت را بگیرد، اما هرگز برای فرستادن موقعیت خودت بیدار نمی‌شود.';
+
+  @override
+  String get locationDisclosureManage =>
+      'هر وقت خواستی می‌توانی اشتراک‌گذاری در پس‌زمینه را از تنظیمات ← موقعیت مکانی خاموش کنی.';
+
+  @override
+  String get locationDisclosureAgree => 'موافقم';
+
+  @override
+  String get locationDisclosureNotNow => 'الان نه';
 
   @override
   String get fgsNotificationSharing =>
@@ -709,6 +756,15 @@ class AppLocalizationsFa extends AppLocalizations {
       'ساختن حلقه ناموفق بود. لطفاً دوباره تلاش کن.';
 
   @override
+  String nameCircleRosterFullError(int limit) {
+    final intl.NumberFormat limitNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String limitString = limitNumberFormat.format(limit);
+
+    return 'فقط می‌توانی در $limitString حلقه باشی. یکی از حلقه‌هایت را ترک کن تا برای یک حلقهٔ تازه جا باز شود.';
+  }
+
+  @override
   String addMemberTitle(String circleName) {
     return 'افزودن به $circleName';
   }
@@ -1003,6 +1059,15 @@ class AppLocalizationsFa extends AppLocalizations {
   @override
   String get invitationAcceptError =>
       'پذیرفتن دعوت ناموفق بود. لطفاً دوباره تلاش کن.';
+
+  @override
+  String invitationRosterFullError(int limit) {
+    final intl.NumberFormat limitNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String limitString = limitNumberFormat.format(limit);
+
+    return 'فقط می‌توانی در $limitString حلقه باشی. این دعوت در انتظار می‌ماند؛ یکی از حلقه‌هایت را ترک کن و بعد دعوت را بپذیر.';
+  }
 
   @override
   String get invitationDeclineError =>

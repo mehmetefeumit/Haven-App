@@ -12,23 +12,65 @@ import 'dart:io' show Platform;
 import 'package:flutter/foundation.dart';
 import 'package:geolocator/geolocator.dart' as geo;
 import 'package:haven/src/constants/location.dart';
+import 'package:haven/src/services/ios_location_source.dart';
 import 'package:haven/src/services/location_service.dart';
 
-/// The value that reaches `CLLocationManager.distanceFilter` as
-/// `kCLDistanceFilterNone` — every fix is delivered, none suppressed.
+/// Which Android platform registration a [GeolocatorLocationService
+/// .getLocationStream] subscription asks the plugin for.
 ///
-/// Apple's stated requirement for uninterrupted background location updates
-/// (iOS 16.4+) is `allowsBackgroundLocationUpdates` on, `desiredAccuracy` at
-/// or below 100 m, and NO distance filter; a metre-scale filter is part of the
-/// shape the OS is documented to suspend while the device is stationary.
+/// Two USE CASES over the one plugin boundary, never two streams (see the
+/// class doc): the map isolate's live registration, and the Android
+/// foreground service's single long-interval one. Ignored on iOS, where the
+/// session's shape follows the background-sharing intent instead.
+sealed class AndroidStreamProfile {
+  /// Const base constructor for the two profiles below.
+  const AndroidStreamProfile();
+
+  /// The map's live registration — see [ForegroundStreamProfile].
+  const factory AndroidStreamProfile.foreground() = ForegroundStreamProfile;
+
+  /// The foreground service's registration — see
+  /// [BackgroundServiceStreamProfile].
+  const factory AndroidStreamProfile.backgroundService({
+    required Duration interval,
+  }) = BackgroundServiceStreamProfile;
+}
+
+/// A responsive registration for a map somebody is looking at: a fix every
+/// metre, up to once a second.
 ///
-/// -1, not 0: geolocator's `LocationDistanceMapper` means to fold any
-/// non-positive value to the sentinel but compares the boxed `NSNumber`
-/// POINTER against zero (`geolocator_apple` 2.3.13,
-/// `Utils/LocationDistanceMapper.m`), so a non-nil 0 is forwarded verbatim as
-/// a 0 m filter instead. -1 IS `kCLDistanceFilterNone`, so it lands on the
-/// sentinel both today and under a fixed mapper.
-const int _kIosNoDistanceFilter = -1;
+/// Deliberately unchanged by the background work — this is what a live map
+/// needs, and `b5_permission_revocation_test.dart` tells a revoked
+/// permission from a granted one by the SILENCE of this stream, which only
+/// discriminates while deliveries are otherwise a second apart.
+final class ForegroundStreamProfile extends AndroidStreamProfile {
+  /// Creates the foreground profile.
+  const ForegroundStreamProfile();
+}
+
+/// The Android foreground service's registration: one fix per [interval],
+/// no distance filter, no `timeLimit`.
+///
+/// [interval] reaches `LocationRequest.intervalMillis` — and geolocator
+/// builds the request with `minUpdateInterval` equal to it
+/// (`LocationManagerClient.startPositionUpdates`), so no fix arrives early.
+/// That is what lets the platform duty-cycle GNSS between fixes instead of
+/// navigating continuously, which is the whole point of the profile. The
+/// publish is due on TIME, so a distance filter would only suppress the fix
+/// the cycle is waiting for while the device sits still.
+///
+/// No `timeLimit`, ever: on a STREAM geolocator's `timeLimit` is an
+/// inter-event timeout that CLOSES the stream, which this service reads as
+/// an access loss and answers by dropping the cached fix. A silent provider
+/// is the foreground service's watchdog to handle, not a reason to
+/// self-inflict a revocation.
+final class BackgroundServiceStreamProfile extends AndroidStreamProfile {
+  /// Creates a background-service profile requesting a fix per [interval].
+  const BackgroundServiceStreamProfile({required this.interval});
+
+  /// How often the platform is asked for a fix.
+  final Duration interval;
+}
 
 /// Abstraction for geolocator static methods.
 ///
@@ -122,19 +164,39 @@ class DefaultGeolocatorWrapper implements GeolocatorWrapper {
 /// - **Update frequency**: Continuous updates via stream
 /// - **User Experience**: Optimized for responsive, accurate location tracking
 ///
-/// ## Single unified stream (iOS background invariant)
+/// ## One stream owner per platform, per isolate
 ///
-/// geolocator supports exactly ONE active position stream: the Dart side
-/// caches it (`GeolocatorApple._positionStream`) and silently returns the
-/// cached stream — old settings and all — to any later `getPositionStream`
-/// call, while the native side rejects a second concurrent listen outright.
-/// Therefore this service exposes a single [getLocationStream] whose iOS
-/// `AppleSettings` are chosen by the caller-supplied
-/// `backgroundSharingEnabled` intent at subscription time. There must never
-/// be a second stream-returning API: a "background variant" stream would
-/// silently inherit the foreground session's settings (the exact defect that
-/// broke iOS background publishing). CI pins this invariant
+/// On **iOS** the position stream is not geolocator's at all: it is Haven's
+/// own `CLLocationManager`, reached through [IosLocationSource]. The plugin
+/// can only start and stop a session, and the accuracy profiles this app runs
+/// need `desiredAccuracy` written LIVE on a running manager. Only fixes the
+/// native owner delivered under the Best profile ever arrive here.
+///
+/// On **Android** it stays geolocator's, and geolocator supports exactly ONE
+/// active position stream per plugin instance: the Dart side caches it
+/// (`GeolocatorAndroid._positionStream`) and silently returns the cached
+/// stream — old settings and all — to any later `getPositionStream` call,
+/// while the native side rejects a second concurrent listen outright. Only
+/// cancelling the subscription clears that cache, so SETTINGS CAN ONLY
+/// CHANGE BY A NEW SUBSCRIPTION.
+///
+/// Therefore this service exposes a single [getLocationStream] with exactly
+/// one call site per platform, whose shape is chosen per subscription: on iOS
+/// by the caller-supplied `backgroundSharingEnabled` intent (which reaches
+/// `allowsBackgroundLocationUpdates` unchanged), on Android by the
+/// caller-supplied [AndroidStreamProfile]. There must never be a second
+/// stream-returning API: a "background variant" stream would silently inherit
+/// the first session's settings (the exact defect that broke iOS background
+/// publishing). CI pins this invariant
 /// (`scripts/ci/check_ios_background_publish.sh`).
+///
+/// A profile is not a second stream. Each Dart isolate has its own plugin
+/// instance and its own instance of this service, so the UI isolate and the
+/// Android foreground service can each own ONE registration — and they never
+/// hold one at the same time: the UI releases its subscription
+/// ([suspendStream]) before it hands ownership over at pause, and the
+/// foreground service releases its own before the UI takes it back. The two
+/// profiles are exclusive by LIFECYCLE, not by settings.
 ///
 /// ## Access gate (no coordinate outlives consent)
 ///
@@ -163,19 +225,28 @@ class DefaultGeolocatorWrapper implements GeolocatorWrapper {
 class GeolocatorLocationService implements LocationService {
   /// Creates a new [GeolocatorLocationService].
   ///
-  /// Optionally accepts a [GeolocatorWrapper] for testing. The optional
-  /// [isIOS] flag is a test seam overriding the [Platform.isIOS] check that
-  /// selects [geo.AppleSettings] vs [geo.AndroidSettings]; production callers
-  /// omit it and receive the real platform value.
-  GeolocatorLocationService({GeolocatorWrapper? geolocator, bool? isIOS})
-    : _geolocator = geolocator ?? const DefaultGeolocatorWrapper(),
-      _isIOS = isIOS ?? Platform.isIOS;
+  /// Optionally accepts a [GeolocatorWrapper] and an [IosLocationSource] for
+  /// testing. The optional [isIOS] flag is a test seam overriding the
+  /// [Platform.isIOS] check that routes the stream and the last-known read;
+  /// production callers omit all three.
+  GeolocatorLocationService({
+    GeolocatorWrapper? geolocator,
+    bool? isIOS,
+    IosLocationSource? iosSource,
+  }) : _geolocator = geolocator ?? const DefaultGeolocatorWrapper(),
+       _isIOS = isIOS ?? Platform.isIOS,
+       _iosSource = iosSource ?? createIosLocationSource();
 
   final GeolocatorWrapper _geolocator;
 
+  /// Haven's own iOS CoreLocation session — the stream owner and the
+  /// last-known source on that platform, and a no-op everywhere else.
+  final IosLocationSource _iosSource;
+
   /// Whether this device is running iOS.
   ///
-  /// Drives the [geo.AppleSettings] vs [geo.AndroidSettings] selection.
+  /// Routes the position stream and the last-known read to [_iosSource], and
+  /// selects [geo.AppleSettings] over [geo.AndroidSettings] for the one-shot.
   /// Passing [geo.AndroidSettings] on iOS is a latent bug: the
   /// `forceLocationManager` flag is meaningless to CLLocationManager and the
   /// wrong settings class can degrade the cold-start fix the location
@@ -292,10 +363,97 @@ class GeolocatorLocationService implements LocationService {
   /// `map_shell.dart` sets the flag `false` on pause.
   bool _foregroundActive = true;
 
-  /// Sets the foreground-active hint consulted by [getCurrentLocation] and
-  /// [_ensureAccessOrThrow].
+  /// Sets the foreground-active hint consulted by [_ensureAccessOrThrow], and
+  /// tells the iOS session which accuracy profile it may run at.
+  ///
+  /// Backgrounding starts the stationary dwell; foregrounding returns the
+  /// session to Best at once. Both are property writes on a running manager —
+  /// nothing is restarted, nothing is published, no socket is opened.
   // ignore: avoid_setters_without_getters
-  set foregroundActive(bool value) => _foregroundActive = value;
+  set foregroundActive(bool value) {
+    _foregroundActive = value;
+    _iosSource.onForeground(foregrounded: value);
+  }
+
+  /// The outer stream handed to the newest [getLocationStream] caller.
+  ///
+  /// One controller PER CALL, never one per service: Riverpod cancels the
+  /// outer on every toggle rebuild and the deferred rebuild asks for a new
+  /// one, so a shared single-subscription controller would throw
+  /// `StateError: Stream has already been listened to` on the second listen.
+  StreamController<Position>? _outer;
+
+  /// The plugin subscription feeding [_outer], or null while suspended.
+  ///
+  /// Released by [suspendStream], by [_outer]'s `onCancel`, and by the next
+  /// [getLocationStream] call — none of which the `cancel_subscriptions` lint
+  /// recognises, since it only looks for a `dispose()`.
+  // ignore: cancel_subscriptions
+  StreamSubscription<Position>? _inner;
+
+  /// Whether [_inner] has reported an error since it was created.
+  ///
+  /// An errored plugin subscription delivers nothing further, and while the
+  /// app is paused the access watchdog's recovery `invalidate` is suppressed
+  /// — so [resumeStream] is the only thing that can replace it.
+  bool _innerFailed = false;
+
+  /// The background-sharing intent [_outer] was created with, so a
+  /// [resumeStream] restart asks the iOS session for the same background
+  /// capability rather than the parameter default.
+  bool _streamBackgroundSharing = false;
+
+  /// The Android profile [_outer] was created with, for the same reason: a
+  /// restart that reverted to the default would put the map's 1 Hz
+  /// registration behind a backgrounded foreground service.
+  AndroidStreamProfile _streamProfile = const AndroidStreamProfile.foreground();
+
+  /// Releases the platform position subscription without ending the stream
+  /// its subscribers hold.
+  ///
+  /// Called directly (never through a provider rebuild) from the pause
+  /// handler: a watched-provider write cancels the old subscription at once
+  /// but defers the REBUILD to a frame, and frames are off while paused, so
+  /// a release that rides a rebuild happens at RESUME. Synchronous by
+  /// construction — the pause handler must not depend on anything running
+  /// after it returns.
+  ///
+  /// Cancel, not close: neither [_noteAccessLost] handler fires, so the
+  /// consent-bounded cache survives the pause (the caller clears it
+  /// separately when the user has not consented to background sharing).
+  ///
+  /// A no-op when the current outer has no listener — nothing is being
+  /// delivered to anybody, so there is nothing to release.
+  void suspendStream() {
+    final outer = _outer;
+    final inner = _inner;
+    if (outer == null || inner == null || !outer.hasListener) return;
+    _inner = null;
+    unawaited(inner.cancel());
+  }
+
+  /// Re-establishes the platform position subscription for the current
+  /// outer stream, with the settings that outer was created with.
+  ///
+  /// The ONLY restart site, and foregrounded by construction (it is called
+  /// from the resume handler): iOS refuses to start a background-capable
+  /// location session from the background, which is what the 2026-08-20
+  /// field failure was.
+  ///
+  /// A no-op when the current outer has no listener, and when its
+  /// subscription is still alive — the iOS background-sharing branch never
+  /// suspends, and restarting that session on every resume would tear down
+  /// the keep-alive holding the process executable. An inner that ERRORED is
+  /// not alive: it delivers nothing further, so it is replaced.
+  void resumeStream() {
+    final outer = _outer;
+    if (outer == null || outer.isClosed || !outer.hasListener) return;
+    final inner = _inner;
+    if (inner != null && !_innerFailed) return;
+    _inner = null;
+    if (inner != null) unawaited(inner.cancel());
+    _listenInner(outer);
+  }
 
   /// The platform permission request currently in flight, if any.
   ///
@@ -340,7 +498,87 @@ class GeolocatorLocationService implements LocationService {
   /// that produced them (mirrors `LocationSharingService.wipeAll`'s
   /// cache-wiping posture). Access-loss invalidation goes through
   /// [_noteAccessLost], which adds the presence-only log line.
-  void clearCachedPosition() => _lastStreamPosition = null;
+  ///
+  /// Clears the NATIVE copy too: on iOS the last Best fix also lives in the
+  /// stream handler's memory, and a coordinate that merely moved across the
+  /// channel boundary has not been dropped.
+  void clearCachedPosition() {
+    _lastStreamPosition = null;
+    unawaited(_iosSource.clearLastBestFix());
+  }
+
+  /// Whether a fix younger than [kStreamPositionMaxAge] is already in hand.
+  ///
+  /// The Android foreground service asks this before deciding whether its
+  /// cycle needs an acquisition at all; [now] is injectable so the boundary
+  /// is testable exactly.
+  ///
+  /// FRESHNESS, never consent. A `true` authorises nothing: whether the fix
+  /// may be produced is still decided per call by [_ensureAccessOrThrow] (and
+  /// on Android by [_platformStillPermitsLocation]) inside
+  /// [getCurrentLocation]. It reads the same field those paths clear, so it
+  /// can never report a fix that outlived its consent — but a caller must
+  /// never treat it as permission to skip them.
+  ///
+  /// It answers from memory: no platform read, and no coordinate leaves.
+  bool hasFreshStreamFix({DateTime Function()? now}) {
+    final fix = _lastStreamPosition;
+    return fix != null && _streamFixIsFresh(fix, (now ?? DateTime.now)());
+  }
+
+  /// The one freshness rule, shared by [hasFreshStreamFix] and the cache read
+  /// in [getCurrentLocation] so the predicate cannot disagree with what the
+  /// read will actually serve.
+  ///
+  /// Measured on the GPS fix time ([Position.timestamp]) rather than a
+  /// Dart-side arrival stamp: a chipset can hand over a fix it took minutes
+  /// ago, and it is the fix — not the delivery — that gets published — or,
+  /// where one exists, on the later instant at which that fix was CONFIRMED to
+  /// still describe where the device is ([_lastFixConfirmedAt]).
+  ///
+  /// Two clauses, because a confirmation may EXTEND the window but may not
+  /// remove it: the confirmed age is bounded by [kStreamPositionMaxAge] as
+  /// before, and the fix's own age by [kStationaryAnchorMaxAge] however many
+  /// confirmations have arrived (OD-P3-e). The second clause is slack whenever
+  /// nothing confirms — 168 s is then the tighter bound — so Android, where
+  /// nothing ever confirms, decides exactly as it always did.
+  ///
+  /// This is the SERVING half of that cap. `IosProfileController` escalates at
+  /// the same bound to go and take a real fix, but that escalation is carried
+  /// by a delivery or a timer, and neither is guaranteed to have run before the
+  /// next publish reads this. Both halves read the one constant, so the bound
+  /// cannot be enforced in two places at two values.
+  bool _streamFixIsFresh(Position fix, DateTime now) =>
+      now.difference(_lastFixConfirmedAt ?? fix.timestamp) <=
+          kStreamPositionMaxAge &&
+      now.difference(fix.timestamp) <= kStationaryAnchorMaxAge;
+
+  /// When the cached fix was last confirmed still to be where the device is,
+  /// or null when nothing has confirmed it since it was taken.
+  ///
+  /// iOS only, and only while a cached fix exists. While the session is
+  /// stationary at the 100 m tier it delivers no publishable fix at all, so
+  /// without this the cached Best coordinate would age out every
+  /// [kStreamPositionMaxAge] and a motionless user would pay a fresh GPS
+  /// acquisition to learn they had not moved. A confirming fix is one no
+  /// coarser than [kStationaryConfirmMaxAccuracyMeters] taken within
+  /// [kMotionTriggerDistanceMeters] of the anchor — see
+  /// [IosProfileController] for the rule and the 200 m bound it buys.
+  ///
+  /// It extends the window; it does not remove it. [_streamFixIsFresh] caps the
+  /// fix's own age at [kStationaryAnchorMaxAge] whatever this reads, so a
+  /// confirmation chain — including one a systematically biased coarse fix is
+  /// keeping alive — can never make a coordinate publishable indefinitely.
+  ///
+  /// It cannot outlive the coordinate it vouches for: it is read only from
+  /// [_streamFixIsFresh], which is only ever reached with one of the two
+  /// copies of that coordinate in hand, and every observation of lost access
+  /// drops both (along with the anchor the confirmation is measured against,
+  /// which is what nulls this). The native session resets its own confirmation
+  /// whenever the stream ends. On Android nothing confirms and this is always
+  /// null, which is the behaviour that shipped before the iOS session existed.
+  DateTime? get _lastFixConfirmedAt =>
+      _isIOS ? _iosSource.lastConfirmedAt : null;
 
   /// Drops the cached fix the instant location access is observed to be
   /// gone, rather than letting it age out of [kStreamPositionMaxAge].
@@ -349,7 +587,13 @@ class GeolocatorLocationService implements LocationService {
   /// ended would still hand out the user's last position for the rest of
   /// that window. [reason] is presence-only diagnostic text — never a
   /// coordinate, and never surfaced to the user (Security Rule 8).
+  ///
+  /// The native iOS copy goes first, and unconditionally: it is a separate
+  /// full-precision coordinate that this method has already emptied the Dart
+  /// side of on an earlier call, so gating it on the Dart cache would leave it
+  /// behind exactly when the loss repeats.
   void _noteAccessLost(String reason) {
+    unawaited(_iosSource.clearLastBestFix());
     if (_lastStreamPosition == null) return;
     _lastStreamPosition = null;
     debugPrint('[Location] access lost ($reason) — cached fix dropped');
@@ -620,57 +864,38 @@ class GeolocatorLocationService implements LocationService {
     );
   }
 
-  /// Builds the [geo.LocationSettings] for the single continuous stream.
+  /// Builds the [geo.AndroidSettings] for the single continuous stream.
   ///
-  /// Mirrors [_currentPositionSettings] platform handling. Android and the
-  /// iOS foreground-only stream use a 1 m distance filter for responsive,
-  /// precise tracking; the iOS background-capable stream drops the filter
-  /// entirely ([_kIosNoDistanceFilter]) because Apple's requirement for
-  /// uninterrupted background updates is that no distance filter is set. That
-  /// costs delivery frequency (and therefore battery) only for users who
-  /// asked for background sharing — opt-out users keep the 1 m filter, whose
-  /// stream never runs backgrounded anyway.
+  /// **Android only.** iOS never reaches here: its session belongs to
+  /// `HavenLocationStreamHandler`, which applies its own shape — no distance
+  /// filter, auto-pause off, and one of exactly two accuracy tiers — natively,
+  /// where those properties are actually set. (The `distanceFilter: -1`
+  /// workaround geolocator's pointer-comparing distance mapper used to need
+  /// went with it; do not reintroduce the constant.)
   ///
-  /// On iOS the background-capable flags are a pure function of the user's
-  /// background-sharing intent, NOT of lifecycle state:
-  /// - `backgroundSharingEnabled: true` → `allowBackgroundLocationUpdates`
-  ///   and `showBackgroundLocationIndicator` are both `true`, so the
-  ///   CLLocationManager session (necessarily started while foregrounded —
-  ///   the toggle lives in foreground-only UI) keeps the process alive and
-  ///   publishing when the app is backgrounded, with the indicator giving
-  ///   the user continuous transparency. When-In-Use authorization
-  ///   suffices for this foreground-started continuation; "Always" is only
-  ///   needed for the receive-only SLC relaunch path.
-  /// - `backgroundSharingEnabled: false` → both flags are EXPLICITLY
-  ///   `false`. `AppleSettings` defaults `allowBackgroundLocationUpdates`
-  ///   to `true`, which before this fix silently kept every user's GPS and
-  ///   app process alive in the background regardless of consent; the
-  ///   explicit `false` makes opt-out users suspend normally.
-  ///
-  /// `pauseLocationUpdatesAutomatically` is unconditionally `false`: an
-  /// auto-paused session stops delivering and (for a When-In-Use app) may
-  /// never resume until relaunch.
+  /// [profile] selects the arm (see [AndroidStreamProfile]); no arm names an
+  /// accuracy, so both inherit the plugin default `best`, which geolocator
+  /// maps to `LocationRequest.QUALITY_HIGH_ACCURACY`.
   geo.LocationSettings _streamSettings({
-    required bool backgroundSharingEnabled,
+    required AndroidStreamProfile profile,
   }) {
-    if (_isIOS) {
-      // Accuracy defaults to LocationAccuracy.best.
-      return geo.AppleSettings(
-        distanceFilter: backgroundSharingEnabled ? _kIosNoDistanceFilter : 1,
-        allowBackgroundLocationUpdates: backgroundSharingEnabled,
-        showBackgroundLocationIndicator: backgroundSharingEnabled,
-        // Explicit (despite matching the plugin default) because an
-        // auto-paused session is a liveness hazard — see the doc above —
-        // and the CI guard pins this exact assignment.
+    return switch (profile) {
+      ForegroundStreamProfile() => geo.AndroidSettings(
+        distanceFilter: 1, // Update when device moves 1+ meter for precision
+        forceLocationManager: true, // Bypass Google Play Services
+        // Maximum update frequency.
+        intervalDuration: const Duration(seconds: 1),
+      ),
+      BackgroundServiceStreamProfile(:final interval) => geo.AndroidSettings(
+        // Explicit despite matching the plugin default: the publish is due
+        // on TIME, so any filter here suppresses the very fix the cycle is
+        // waiting for while the device sits still.
         // ignore: avoid_redundant_argument_values
-        pauseLocationUpdatesAutomatically: false,
-      );
-    }
-    return geo.AndroidSettings(
-      distanceFilter: 1, // Update when device moves 1+ meter for precision
-      forceLocationManager: true, // Bypass Google Play Services
-      intervalDuration: const Duration(seconds: 1), // Maximum update frequency
-    );
+        distanceFilter: 0,
+        forceLocationManager: true, // Bypass Google Play Services
+        intervalDuration: interval, // The provider duty-cycles GNSS on this
+      ),
+    };
   }
 
   @override
@@ -697,30 +922,42 @@ class GeolocatorLocationService implements LocationService {
       // [_platformStillPermitsLocation].
       final cached = _lastStreamPosition;
       if (cached != null &&
-          DateTime.now().difference(cached.timestamp) <=
-              kStreamPositionMaxAge &&
+          _streamFixIsFresh(cached, DateTime.now()) &&
           await _platformStillPermitsLocation()) {
         return cached;
       }
 
-      // Backgrounded on iOS with no fresh stream fix: the one-shot below
-      // cannot deliver (its CLLocationManager never enables background
-      // updates) — skip straight to the last known fix instead of stalling
-      // for the 30 s timeout. Presence-only logging; never log
-      // coordinates.
-      if (_isIOS && !_foregroundActive) {
+      // Backgrounded on iOS: the one-shot below cannot deliver (its
+      // CLLocationManager never enables background updates) — serve the
+      // native owner's last Best fix, or REFUSE.
+      //
+      // The refusal is the point, and it is structural: this branch never
+      // falls through. `INV-L-IOS-WAKES-RECEIVE-ONLY` says a process
+      // relaunched into the background cannot publish, and a fall-through
+      // made that a coincidence rather than a rule — on a post-termination
+      // SLC/region/BGTask relaunch both caches are empty BY DESIGN, so
+      // "no cached fix" was exactly the state that reached the one-shot.
+      //
+      // The lifecycle is read from the NATIVE session, not from
+      // [_foregroundActive]: a background-launched process (an SLC/region
+      // relaunch, which builds this service before any lifecycle callback)
+      // would otherwise look foregrounded and start a one-shot that cannot
+      // complete. An unreadable status counts as backgrounded — fail closed.
+      if (_isIOS && (await _iosSource.status()).backgrounded) {
+        Position? lastPosition;
         try {
-          final lastPosition = await _geolocator.getLastKnownPosition();
-          if (lastPosition != null) {
-            return _convertPosition(lastPosition);
-          }
+          lastPosition = await _getLastKnownPosition();
         } on Exception catch (e) {
+          // Presence-only logging; never log coordinates.
           debugPrint(
             '[Location] backgrounded last-known lookup failed: '
             '${e.runtimeType}',
           );
-          // Fall through to the one-shot chain as a final attempt.
         }
+        if (lastPosition != null) return lastPosition;
+        throw LocationServiceException(
+          'Location unavailable while Haven is in the background.',
+        );
       }
     }
 
@@ -733,12 +970,12 @@ class GeolocatorLocationService implements LocationService {
     } on Exception catch (e) {
       // Fallback to last known position if fresh position unavailable
       try {
-        final lastPosition = await _geolocator.getLastKnownPosition();
+        final lastPosition = await _getLastKnownPosition();
         if (lastPosition != null) {
-          return _convertPosition(lastPosition);
+          return lastPosition;
         }
       } on Exception {
-        // Ignore error from getLastKnownPosition
+        // Ignore error from the last-known read
       }
 
       debugPrint('Failed to get location: ${e.runtimeType}');
@@ -774,10 +1011,12 @@ class GeolocatorLocationService implements LocationService {
 
   /// Returns the single continuous position stream.
   ///
-  /// [backgroundSharingEnabled] selects the iOS background-capable
-  /// `AppleSettings` (see [_streamSettings]); it is ignored on Android,
-  /// where background publishing is the foreground service's job. Adding an
-  /// optional named parameter to the parameterless
+  /// [backgroundSharingEnabled] reaches the iOS session's
+  /// `allowsBackgroundLocationUpdates` unchanged; it is ignored on Android,
+  /// where background publishing is the foreground service's job.
+  /// [profile] selects the Android registration and is ignored on iOS; it
+  /// defaults to the map's foreground one, so only the foreground service
+  /// ever names it. Adding optional named parameters to the parameterless
   /// [LocationService.getLocationStream] contract is a legal override —
   /// interface-typed callers are unaffected; `locationStreamProvider`
   /// passes the toggle state through the concrete type.
@@ -794,30 +1033,85 @@ class GeolocatorLocationService implements LocationService {
   /// a `locationStreamProvider` rebuild does — fires neither handler, so a
   /// settings flip keeps the warm fix (and the provider clears it
   /// explicitly on the background-sharing opt-out branch).
+  ///
+  /// The returned stream is an outer controller owned by this service, so
+  /// [suspendStream] and [resumeStream] can swap the platform subscription
+  /// underneath it without ending it. One controller per call (see [_outer]);
+  /// a new call releases the previous call's platform subscription.
   @override
-  Stream<Position> getLocationStream({bool backgroundSharingEnabled = false}) {
-    return _geolocator
-        .getPositionStream(
-          locationSettings: _streamSettings(
-            backgroundSharingEnabled: backgroundSharingEnabled,
-          ),
-        )
-        .map(_convertPosition)
-        .map((position) {
-          _lastStreamPosition = position;
-          return position;
-        })
-        .transform(
-          StreamTransformer<Position, Position>.fromHandlers(
-            handleError: (error, stackTrace, sink) {
-              _noteAccessLost('position stream error: ${error.runtimeType}');
-              sink.addError(error, stackTrace);
-            },
-            handleDone: (sink) {
-              _noteAccessLost('position stream closed');
-              sink.close();
-            },
-          ),
+  Stream<Position> getLocationStream({
+    bool backgroundSharingEnabled = false,
+    AndroidStreamProfile profile = const AndroidStreamProfile.foreground(),
+  }) {
+    // The previous outer is expected to be GONE by now: Riverpod cancels it
+    // before it rebuilds, and that cancel nulls `_outer`. A live one here
+    // would be a subscriber holding a stream this call is about to orphan —
+    // it would never receive another fix and never end, because only the
+    // current outer's `onCancel` releases anything.
+    assert(
+      _outer == null || !_outer!.hasListener,
+      'getLocationStream replaced an outer stream that still has a listener',
+    );
+    final previous = _inner;
+    _inner = null;
+    if (previous != null) unawaited(previous.cancel());
+
+    // `sync: true` is the documented-safe case (events are only ever added
+    // from another stream's callbacks) and it keeps the forwarding
+    // synchronous, exactly as the `.map()`/`.transform()` chain this replaced
+    // was: an async controller inserts a microtask between the platform fix
+    // and every subscriber, which is one turn for a rebuild to cancel the
+    // subscription in and lose the fix.
+    final outer = StreamController<Position>(sync: true);
+    _outer = outer;
+    _streamBackgroundSharing = backgroundSharingEnabled;
+    _streamProfile = profile;
+    outer.onCancel = () {
+      // Only the CURRENT outer owns the fields; a late cancellation of a
+      // superseded one must not release the live subscription.
+      if (!identical(_outer, outer)) return null;
+      final inner = _inner;
+      _inner = null;
+      _outer = null;
+      return inner?.cancel();
+    };
+    _listenInner(outer);
+    return outer.stream;
+  }
+
+  /// Subscribes the single platform position stream — Haven's own session on
+  /// iOS, geolocator's on Android — and pipes it into [outer].
+  ///
+  /// The one routing site, because [resumeStream] has to re-subscribe with the
+  /// same intent the outer was created with.
+  void _listenInner(StreamController<Position> outer) {
+    _innerFailed = false;
+    final backgroundSharingEnabled = _streamBackgroundSharing;
+    final source = _isIOS
+        ? _iosSource.positions(
+            allowsBackgroundLocationUpdates: backgroundSharingEnabled,
+          )
+        : _geolocator
+              .getPositionStream(
+                locationSettings: _streamSettings(profile: _streamProfile),
+              )
+              .map(_convertPosition);
+    _inner = source
+        .listen(
+          (position) {
+            _lastStreamPosition = position;
+            outer.add(position);
+          },
+          onError: (Object error, StackTrace stackTrace) {
+            _innerFailed = true;
+            _noteAccessLost('position stream error: ${error.runtimeType}');
+            outer.addError(error, stackTrace);
+          },
+          onDone: () {
+            _inner = null;
+            _noteAccessLost('position stream closed');
+            unawaited(outer.close());
+          },
         );
   }
 
@@ -855,6 +1149,33 @@ class GeolocatorLocationService implements LocationService {
       _noteAccessLost('permission read denied');
     }
     return _convertPermissionStatus(permission);
+  }
+
+  /// The platform's last known position — the native owner's last BEST fix on
+  /// iOS, the plugin's on Android.
+  ///
+  /// iOS cannot use the plugin's: under Haven's own updates owner the plugin's
+  /// `CLLocationManager` is never started, so what its `location` property
+  /// holds is undefined. The native answer is deterministic and carries the
+  /// only-Best guarantee — a coordinate taken at the 100 m tier is never
+  /// stored there, so it can never be served here.
+  ///
+  /// The iOS answer is AGE-BOUNDED by the same [_streamFixIsFresh] rule the
+  /// cache read uses, because it is the same coordinate: every Best fix is
+  /// teed into [_lastStreamPosition] and cached natively on the same
+  /// delivery. Without the bound a fix rejected as stale by the read above
+  /// was served verbatim by the read below. The plugin's Android answer keeps
+  /// its unbounded behaviour: it is the SYSTEM-wide last known position, which
+  /// any app on the device keeps current, and it is the only last-known source
+  /// Android has.
+  Future<Position?> _getLastKnownPosition() async {
+    if (_isIOS) {
+      final fix = await _iosSource.lastBestFix();
+      if (fix == null || !_streamFixIsFresh(fix, DateTime.now())) return null;
+      return fix;
+    }
+    final position = await _geolocator.getLastKnownPosition();
+    return position == null ? null : _convertPosition(position);
   }
 
   /// Converts geolocator Position to our Position type.

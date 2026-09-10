@@ -14,10 +14,12 @@ import 'package:flutter/foundation.dart';
 // ---------------------------------------------------------------------------
 // PLACEHOLDERS — replace before any public release.
 //
-// Haven does not yet own a public domain or contact mailbox. These values are
-// embedded in the OpenStreetMap-fallback User-Agent and surfaced in the
-// privacy policy / About page. Tracked in docs/MAP_AND_PRIVACY_BACKLOG.md
-// (register domain + mailbox, then replace these two constants).
+// Haven does not yet own a public domain or contact mailbox. Their only
+// production use is the OpenStreetMap-fallback User-Agent below; nothing
+// renders them (`about_page.dart:71-73` states why there is no privacy-policy
+// entry). Register a domain + mailbox, then replace these two constants —
+// nothing else tracks that, and the docs/MAP_AND_PRIVACY_BACKLOG.md this
+// comment used to cite does not exist in this tree.
 // ---------------------------------------------------------------------------
 
 /// PLACEHOLDER public website URL. See file header.

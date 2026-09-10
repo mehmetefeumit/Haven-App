@@ -57,6 +57,21 @@
 /// A lane budgeted for the fast path would report a product defect every
 /// time the slow path legitimately ran.
 ///
+/// ## The two relay pools are configured DIFFERENTLY, so both are checked
+///
+/// All three mechanisms above are about the ENGINE's client, which keeps
+/// `RelayOptions::default()` — ping on, reconnect on. The PUBLISH pool
+/// (`RelayManager`, `publish_relay_options()`) does not: keepalives off,
+/// `reconnect(false)`, `sleep_when_idle(true)` with a 10 s idle timeout, so
+/// its socket closes ~60–70 s after the last send and an outage leaves it
+/// `Terminated` with no retry loop to bring it back. Nothing recovers it
+/// except the next publish re-driving `add_relays_and_connect`, and a
+/// LOCATION gets exactly ONE bounded attempt to do that
+/// (`LOCATION_PUBLISH_ATTEMPTS == 1`). A run where receive comes back and
+/// publishing does not is sharing that has silently stopped, so
+/// [kPublishAfterIdleMarker] is asserted alongside the receive verdict
+/// rather than recorded as evidence.
+///
 /// ## The assertion is a DECRYPTED PEER EVENT, not a reopened socket
 ///
 /// A socket that comes back proves nothing a user cares about. This target
@@ -195,6 +210,7 @@ import 'package:haven/src/providers/service_providers.dart'
     show
         circleServiceProvider,
         locationServiceProvider,
+        relayServiceProvider,
         subscriptionServiceProvider;
 import 'package:haven/src/rust/api.dart'
     show CircleCreationResultFfi, MemberKeyPackageFfi, RelayManagerFfi;
@@ -324,6 +340,25 @@ const String kBacklogReplayedMarker = '[b9] BACKLOG_REPLAYED';
 /// particular is not `expired`: an event the relay never served was not
 /// removed by the TTL, and its finding is [kBacklogOnRelayMarker]'s.
 const String kBacklogMissedMarker = '[b9] BACKLOG_MISSED';
+
+/// THE PUBLISH-PLANE HEADLINE, with `accepted=<n>`: a location published
+/// through the production ONE-SHOT ladder after the outage was acked by at
+/// least one relay, so the ping-less publish pool still wakes.
+///
+/// This is the liveness half of the receive verdict above, and it exists
+/// because the publish pool is the thing the power work changed: it sends no
+/// keepalive, sleeps ~60–70 s after its last send, and never reconnects on
+/// its own (`reconnect(false)`). Alice's app has held that pool since the
+/// startup KeyPackage publish and has not used it since, so this publish is
+/// the first thing to ask a socket the blackout left `Terminated` to come
+/// back — with `LOCATION_PUBLISH_ATTEMPTS == 1` there is no second attempt to
+/// hide a failed wake behind.
+const String kPublishAfterIdleMarker = '[b9] PUBLISH_AFTER_IDLE_OK';
+
+/// The negative twin, with `reason=<deferred|unacked|error>`: the post-outage
+/// location publish did not reach a relay. Every value is a finding — the
+/// pool that must wake for the app to keep sharing did not.
+const String kPublishAfterIdleDeadMarker = '[b9] PUBLISH_AFTER_IDLE_DEAD';
 
 /// Closes the capture. Printed unconditionally, before the final assertion,
 /// so the shell's oracle always reads a complete window.
@@ -602,14 +637,21 @@ void main() {
       );
 
       await container.read(identityProvider.future);
+      final aliceIdentity = container.read(identityProvider).valueOrNull;
       expect(
-        container.read(identityProvider).valueOrNull,
+        aliceIdentity,
         isNotNull,
         reason: 'identityProvider resolved to null after '
             'preSeedIdentityAndSkipOnboarding — MapShell gates its whole '
             'startup (including _startLiveSync) on it, so there would be no '
             'receive plane to disconnect.',
       );
+      final alicePubkeyHex = aliceIdentity!.pubkeyHex;
+
+      // Also the first use of the app's own publish pool: the KeyPackage
+      // publish is what connects it, so the post-outage publish below is
+      // asking an ESTABLISHED-then-idle socket to wake, not a fresh one to
+      // connect.
       await container.read(keyPackagePublisherProvider.future);
 
       final circleService = container.read(circleServiceProvider);
@@ -1118,6 +1160,64 @@ void main() {
         }
 
         debugPrint('$kEngineRecoveredMarker running=${engine.isRunning}');
+
+        // The PUBLISH plane, on the same idle socket the receive verdict
+        // above just exercised. Alice's own location never reaches
+        // `memberLocationsProvider` — Haven does not surface its own
+        // publishes — so the relay's ACK is the only observable, and it is
+        // read from the production service, not from a fresh
+        // `RelayManagerFfi` (a new manager would connect for the first time
+        // and prove nothing about waking a pool that went idle).
+        try {
+          final outcome = await manager.encryptLocation(
+            mlsGroupId: creation.circle.mlsGroupId,
+            senderPubkeyHex: alicePubkeyHex,
+            latitude: _postLatitude,
+            longitude: _postLongitude,
+            // Matches the production call site: kLocationPublishMaxInterval
+            // 168 s + kTtlNetworkBufferSeconds 30 s.
+            updateIntervalSecs: BigInt.from(198),
+          );
+          final sent = outcome.sent;
+          if (sent == null) {
+            debugPrint('$kPublishAfterIdleDeadMarker reason=deferred');
+            failures.add(
+              'the MLS engine DEFERRED the post-outage location instead of '
+              'encrypting it, so the publish pool was never asked to wake '
+              'and the liveness proof could not run. Nothing here is a '
+              'statement about the socket',
+            );
+          } else {
+            final result = await container
+                .read(relayServiceProvider)
+                .publishLocationEvent(
+                  eventJson: sent.eventJson,
+                  relays: sent.relays,
+                );
+            if (result.acceptedBy.isEmpty) {
+              debugPrint('$kPublishAfterIdleDeadMarker reason=unacked');
+              failures.add(
+                'a location published after connectivity returned reached NO '
+                'relay. The publish pool sends no keepalive and does not '
+                'reconnect on its own, so an outage leaves its socket '
+                'Terminated; a single bounded attempt must still re-drive '
+                'the connect. This is sharing silently stopping after any '
+                'network blip',
+              );
+            } else {
+              debugPrint(
+                '$kPublishAfterIdleMarker accepted=${result.acceptedBy.length}',
+              );
+            }
+          }
+        } on Object catch (e) {
+          // Security Rule 8: the runtime type, never the message.
+          debugPrint('$kPublishAfterIdleDeadMarker reason=${e.runtimeType}');
+          failures.add(
+            'the post-outage location publish threw (${e.runtimeType}) — the '
+            'publish pool did not come back from the blackout',
+          );
+        }
 
         if (postRelay != null) {
           try {

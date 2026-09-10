@@ -17,6 +17,8 @@ import 'package:haven/src/providers/location_sharing_provider.dart';
 import 'package:haven/src/providers/member_profile_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
+import 'package:haven/src/services/publish_stagger.dart'
+    show kMaxCirclesPerAccount;
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/utils/member_display.dart';
@@ -218,6 +220,21 @@ class _InvitationCardState extends ConsumerState<InvitationCard> {
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(SnackBar(content: Text(l10n.invitationAcceptedSnack)));
+      }
+    } on CircleRosterFullException catch (_) {
+      // A refusal, not a failure: the generic message below tells the user to
+      // try again, which can never work here. The held Welcome is untouched, so
+      // the invitation is still waiting once they leave a circle.
+      debugPrint('[Accept] roster full');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              l10n.invitationRosterFullError(kMaxCirclesPerAccount),
+            ),
+            backgroundColor: Theme.of(context).colorScheme.error,
+          ),
+        );
       }
     } on Object catch (e) {
       // Catch all throwables including FFI errors (which throw Error, not

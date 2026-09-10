@@ -11,6 +11,13 @@
 #   4. the network comes back
 #   5. a peer publishes                          (something to receive)
 #   6. that peer's NEW coordinates surface       (THE HEADLINE)
+#   7. a location publish is acked afterwards    (the OTHER pool woke)
+#
+# Step 7 is a separate pool, not a formality: the engine's client keeps
+# `RelayOptions::default()`, while the PUBLISH pool sends no keepalive, never
+# reconnects on its own and sleeps ~60-70 s after its last send, so an outage
+# leaves its socket `Terminated` and one bounded attempt has to re-drive the
+# connect. Receive coming back says nothing about it.
 #
 # # The backlog item's mechanism does not exist
 #

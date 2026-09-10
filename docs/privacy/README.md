@@ -63,12 +63,12 @@ no longer wired fails.
   **non-removable**: the ratchet rejects a diff that drops one.
 * **`attributed_arb_keys`** — the string reports a THIRD PARTY's claim that
   Haven cannot enforce, and must never be collapsed into an unattributed
-  assertion. **No ARB key is attributed any more**: the one that was — the VPN
-  paragraph — went with the Privacy page on 2026-08-29. The remaining attributed
-  claim is not an ARB string at all: the Stadia Maps policy sentence inside the
-  Play consent dialog is a `non_arb_claims` entry with `kind: "attributed"`,
-  which is why the label still exists on both sides of the ARB boundary. The
-  invariant carrying it also carries an
+  assertion. Exactly one ARB key is attributed: `locationDisclosureHow`, the
+  Play consent dialog's Stadia Maps policy sentence. It was a `non_arb_claims`
+  entry with `kind: "attributed"` until OD-P3-g localized that dialog, and the
+  label exists on both sides of the ARB boundary because it has lived on both.
+  The other one — the VPN paragraph — went with the Privacy page on 2026-08-29.
+  The invariant carrying it also carries an
   `attribution` block with a provenance date, because an attributed claim's
   truth is "they said this, on this date", and that is what must be
   re-checkable.
@@ -86,16 +86,19 @@ the first thing to do if an explanation surface returns.
 
 Each declared deviation mirrors a section of some document in this repository,
 and rule 15 checks that the citation resolves — but **not that the document is
-`SECURITY.md`**, and two of them are not. Thirteen are: P1–P7 (profile-plane
+`SECURITY.md`**, and three of them are not. Fourteen are: P1–P7 (profile-plane
 relay separation), M5 (self-update disabled), RC1 (relay-session correlation),
+`PUB-COALESCE` (one coalesced publish burst per interval, owner decision OD3),
 and the ones added after review found them unregistered — `IOS-KEYCHAIN`,
 `CONV-BUFFER`, `TTL-FINGERPRINT` and `LEAVE-GHOST`. `R10` (the owner-directed
 public-profile reversal) sources to `CLAUDE.md#privacy-model`, because the
-direction came from the owner rather than from a threat-model argument, and
+direction came from the owner rather than from a threat-model argument;
 `KP-SLOT-WIDTH` sources to `MARMOT_PROTOCOL_KNOWLEDGE.md`, because what it
-deviates from is a transport binding rather than a Haven decision. Do not read
+deviates from is a transport binding rather than a Haven decision; and
+`IOS-BACKUP` sources to `docs/MEMBER_PICKER_PLAN.md`, because the acceptance is
+an owner decision recorded in that plan. Do not read
 "declared deviation" as "argued in `SECURITY.md`" — check the `source`. Both the
-membership and the 13/2 split above are a snapshot, not a fact to maintain: this
+membership and the 14/3 split above are a snapshot, not a fact to maintain: this
 register grows every time somebody reads a design document against the manifest,
 which is the point of it.
 `jq -r '.accepted_deviations[] | "\(.id) -> \(.source)"' docs/privacy/privacy_invariants.json`
@@ -178,21 +181,31 @@ invariant.
 
 Workstream F's sharpest finding was that a claim register scoped to the
 localization files cannot see the claims a user is most likely to believe.
-`non_arb_claims[]` carries sixteen such strings — thirteen stating a fact, three
-classified `kind: "none"` — and they are not one screen but four: the four iOS
-`Info.plist` usage descriptions, the nine `LocationDisclosureStrings` fields of
-the Play consent dialog, the Android foreground-service notification's channel
+`non_arb_claims[]` carries seven such strings — five stating a fact, two
+warning — and they are not one screen but three: the four iOS `Info.plist`
+usage descriptions, the Android foreground-service notification's channel
 description and body, and one relay-storage error string. **The iOS permission
 prompt and the Play consent dialog are the two screens where the user is
-actively deciding whether to trust the app**, and neither is localized. Rule 12
-enumerates those two carriers — and only those two — so a new usage description
-or a new consent sentence cannot land unclassified. The remaining carriers are
-classified but not enumerated; see "What the gate cannot prove".
+actively deciding whether to trust the app.**
 
-`non_arb_claims[].kind` also admits `"none"`, with a mandatory reason, for the
-three genuinely claim-free fields (`title`, `agree`, `notNow`). `"none"` never
-satisfies a disclosure requirement and never counts toward the ratchet —
-otherwise it would be a laundering route for exactly what E3 forbids.
+Nine more of those strings used to be the consent dialog's — hard-coded English
+`LocationDisclosureStrings` constants, so twelve locales were asked to consent
+in a language they may not read. OD-P3-g moved that copy into the ARB as the
+`locationDisclosure*` group: nine keys, re-listed on the same eleven invariants
+that carried the constants, six of them claims and three declared to make none.
+Rule 12 enumerates the dialog's RENDER SITE in their place — it may declare no
+hard-coded copy, and every localization key it renders must be classified — so
+the iOS prompt is the one carrier left that is both unlocalized and enumerated,
+and a new usage description or a new consent sentence still cannot land
+unclassified. The remaining carriers are classified but not enumerated; see
+"What the gate cannot prove".
+
+`non_arb_claims[].kind` also admits `"none"`, with a mandatory reason, for a
+genuinely claim-free string. `"none"` never satisfies a disclosure requirement
+and never counts toward the ratchet — otherwise it would be a laundering route
+for exactly what E3 forbids. The consent dialog's three claim-free strings (its
+heading and two button labels) kept that judgement across the move: they are
+`non_claim_arb_keys` entries now, with the same reasons.
 
 ## `non_claim_arb_keys`, and the strings that are correct by omission
 
@@ -271,6 +284,38 @@ exist:
   manifest names the enforcing workflow with the `#workflow=` suffix — and one
   with no enforcing run anywhere is not proof of anything and must not be cited.
   No count is written here: it was "four" for as long as it took to add two more.
+* **Native configuration is guard-pinned, not test-pinned.** The Swift and
+  Kotlin that carry the background-location and presence promises —
+  `HavenLocationStreamHandler.swift`, `HavenBackgroundSessionHandler.swift`,
+  `PublishWakeLock.kt` and the manifest entries beside them — have no unit-test
+  surface in this repository at all: `haven/ios/RunnerTests/RunnerTests.swift`
+  is still the Flutter template's empty `testExample`, nothing in
+  `.github/workflows/` runs `xcodebuild test`, and there is no `test` or
+  `androidTest` source set under `haven/android`. So every native value an
+  invariant names — `allowsBackgroundLocationUpdates`, the two admissible
+  `desiredAccuracy` tiers, `kCLDistanceFilterNone`,
+  `pausesLocationUpdatesAutomatically = false`, the acquire-and-release policy
+  of the publish wake lock — is held by a REGEX over the source text
+  (`check_ios_background_publish.sh`'s `check_native_stream_handler`,
+  `check_android_location_power.sh`, `check_m7_native_wake_guards.sh` check 10)
+  plus the fact that it compiles. The Dart tests cited on those same invariants
+  exercise the Dart half of the channel — which arguments are sent, under which
+  gate — never the `CLLocationManager` or the `PowerManager` object. Two
+  consequences, and they are the ones to hold in mind when reading a native
+  citation as proof: a guard reds on a deleted or reshaped **token**, not on
+  wrong behaviour, so a value that is written but never reaches the OS — set on
+  a second manager instance, or silently clamped by the platform — passes every
+  rule here. (Where that gap was closed, it was closed by adding another token:
+  the P2a review found the publish wake lock silently deletable — drop the
+  `onEngineCreate` wiring and every `acquire` becomes a swallowed
+  `MissingPluginException` — and the answer was a guard pinning that wiring **by
+  name**, with fixtures, not a test of the behaviour.) And the only runtime reads of these values anywhere are the
+  simulator/emulator lanes — `e2e-ios-background-publish`'s bounded poll of the
+  live `manager.desiredAccuracy` from the backgrounded process, and the
+  `dumpsys location` / `dumpsys power` samplers in the FGS lane — which observe
+  what the OS was handed on a virtual device, and are not rules this gate
+  evaluates: the manifest cites no `haven/integration_test/` target at all, so a
+  lane's observation is evidence a reviewer has to go and read.
 * **"You cannot silently delete a privacy warning" is key-level, and English
   only.** `enumerate_weakenings` compares the manifest's key LISTS; it never
   reads an ARB value, and every rule that reads one reads `app_en.arb` alone.
@@ -279,9 +324,9 @@ exist:
   languages, which the gate does not open. What the ratchet holds is that the
   KEY cannot vanish; that the string behind it still warns is a review duty.
 * **Rule 12's carrier enumeration is narrower than the manifest's own
-  content.** It enumerates exactly two non-ARB carriers — the iOS
-  `NS*UsageDescription` keys and the `LocationDisclosureStrings` fields — while
-  the manifest already classifies three claims from files nothing enumerates:
+  content.** It enumerates one non-ARB carrier — the iOS `NS*UsageDescription`
+  keys — plus the consent dialog's render site, while the manifest already
+  classifies three claims from files nothing enumerates:
   `background_location_manager.dart`'s `channelDescription` and
   `notificationText` (the Android foreground-service notification, which is what
   a user sees the whole time background sharing is on) and

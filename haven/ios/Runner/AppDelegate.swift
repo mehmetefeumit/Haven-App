@@ -33,6 +33,13 @@ import UIKit
   // INVALIDATES the held sessions, ending background location access.
   private let backgroundSessionHandler = HavenBackgroundSessionHandler()
 
+  // Haven's own CLLocationManager for the position stream, with the two live
+  // accuracy profiles. Retained for the app's lifetime: the manager, its
+  // delegate and the live event sink must survive every background
+  // transition, and a local would deallocate the stream when
+  // didFinishLaunching returns.
+  private let locationStreamHandler = HavenLocationStreamHandler()
+
   override func application(
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
@@ -58,6 +65,22 @@ import UIKit
 
       // Register the background-session arm/disarm/status channel.
       backgroundSessionHandler.register(with: messenger)
+
+      // The two handlers share one tier decision: the session handler owns the
+      // Always-confirmed predicate, the stream handler applies the indicator
+      // half of it and re-arms from its authorization delegate. Both wirings
+      // are assigned AFTER the session handler is registered, so the
+      // authorization callback CoreLocation fires when the stream handler's
+      // manager was created (before this method ran) finds nothing to call and
+      // the synchronous arm() below keeps its documented meaning.
+      locationStreamHandler.sessionHandler = backgroundSessionHandler
+      backgroundSessionHandler.onAlwaysConfirmedChanged = { [weak self] in
+        self?.locationStreamHandler.applyIndicatorPolicy()
+      }
+      locationStreamHandler.register(with: messenger)
+      locationStreamHandler.onAuthorizationChanged = { [weak self] in
+        self?.backgroundSessionHandler.arm()
+      }
     }
 
     let result = super.application(application, didFinishLaunchingWithOptions: launchOptions)

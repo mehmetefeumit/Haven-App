@@ -174,3 +174,11 @@ haven/dart_defines/*.json
 # symbols dir explicitly in case split-debug-info is pointed elsewhere.
 **/symbols/
 *.symbols
+
+# Local reference checkouts of the upstream projects Haven reads against
+# (Marmot reference app + BLE-mesh prior art). They are independent git
+# repositories sitting in this tree, so an untargeted `git add` records them as
+# gitlinks pointing at commits nobody else can resolve. Ignore them by name.
+/bitchat/
+/whitenoise/
+/whitenoise-rs/

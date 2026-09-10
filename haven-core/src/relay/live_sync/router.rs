@@ -30,6 +30,14 @@ pub struct SubCtx {
 #[derive(Debug, Default)]
 pub struct Router {
     subs: HashMap<(String, SubscriptionId), SubCtx>,
+    /// How many REQ registrations this router has recorded, ever.
+    ///
+    /// The pause's drain marker travels through the ingest queue and can be
+    /// ABANDONED (its ack is bounded, the lifecycle lock is not held until it
+    /// is processed), so the worker may reach a marker after a LATER burst has
+    /// already registered its own REQs. The count is what tells those two
+    /// apart; see [`Self::clear_if_unchanged`].
+    registrations: u64,
 }
 
 impl Router {
@@ -41,6 +49,7 @@ impl Router {
 
     /// Registers `ctx` for `(relay_url, sub_id)`, replacing any prior entry.
     pub fn register(&mut self, relay_url: &str, sub_id: &SubscriptionId, ctx: SubCtx) {
+        self.registrations = self.registrations.wrapping_add(1);
         self.subs
             .insert((relay_url.to_string(), sub_id.clone()), ctx);
     }
@@ -104,6 +113,40 @@ impl Router {
     /// Removes every registered subscription (session teardown).
     pub fn clear(&mut self) {
         self.subs.clear();
+    }
+
+    /// How many REQ registrations this router has recorded.
+    ///
+    /// Read by [`super::session::LiveSyncCore::pause_subscriptions`] under the
+    /// lifecycle lock, carried on its drain marker, and compared here.
+    #[must_use]
+    pub const fn registrations(&self) -> u64 {
+        self.registrations
+    }
+
+    /// Clears every entry IF nothing has been registered since `seen`, and
+    /// reports whether it did.
+    ///
+    /// The pause's drain marker rides the ingest queue behind that burst's
+    /// backlog, and the pause's wait for its ack is BOUNDED — a worker still
+    /// draining after [`super::config::RELAY_LIFECYCLE_OP_TIMEOUT_SECS`] leaves
+    /// the marker queued while the pause clears the router itself and returns,
+    /// releasing the lifecycle lock. The next burst then opens and registers its
+    /// own REQs; if the abandoned marker cleared the router at THAT point, the
+    /// burst would route nothing at all — every event and every `EOSE` would
+    /// find no context — while believing it was subscribed. The lifecycle lock
+    /// cannot prevent this: it orders the two CALLS, and the marker outlives the
+    /// one that sent it.
+    ///
+    /// So the authority to clear is scoped to the registration state the pause
+    /// observed. A marker that names an older count is stale by construction and
+    /// clears nothing.
+    pub fn clear_if_unchanged(&mut self, seen: u64) -> bool {
+        if self.registrations != seen {
+            return false;
+        }
+        self.subs.clear();
+        true
     }
 
     /// Number of registered `(relay, sub)` entries.
@@ -187,6 +230,34 @@ mod tests {
         );
         assert_eq!(r.rollback_subscription(&id), 2);
         assert!(r.is_empty(), "no context may leak after rollback");
+    }
+
+    #[test]
+    fn a_clear_is_authorised_only_for_the_registration_state_it_named() {
+        let mut r = Router::new();
+        let id = sub("abc_group_0");
+        r.register_group(&["wss://r1".to_string()], &id, &group_ids(&["aa00"]));
+        let seen = r.registrations();
+
+        // A later burst registers its own REQ: the marker the earlier pause
+        // abandoned must clear nothing, or that burst routes no event at all.
+        r.register_group(
+            &["wss://r1".to_string()],
+            &sub("abc_group_1"),
+            &group_ids(&["bb11"]),
+        );
+        assert!(
+            !r.clear_if_unchanged(seen),
+            "a marker naming an older registration count must not clear a later \
+             burst's router"
+        );
+        assert_eq!(r.len(), 2, "and it must leave every entry in place");
+
+        // The same marker against the state it WAS authorised for still clears,
+        // so this is a generation check and not a blanket refusal.
+        let now = r.registrations();
+        assert!(r.clear_if_unchanged(now));
+        assert!(r.is_empty());
     }
 
     #[test]

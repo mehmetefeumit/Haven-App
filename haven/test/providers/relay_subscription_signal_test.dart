@@ -187,6 +187,11 @@ void main() {
     // not an outage), and a per-event failure says nothing about whether the
     // REQ still exists. Routing either here would fire the banner on ordinary
     // roaming — and clearing on one would hide a genuinely dead plane.
+    //
+    // `paused` is the deliberate ABSENCE of a subscription between background
+    // bursts: raising on it would tell a user whose sharing is working that it
+    // has stopped, and clearing on it would erase a real loss with a signal
+    // that inspected nothing.
     for (final reason in const [
       FfiSyncStatusReason.connecting,
       FfiSyncStatusReason.reconnecting,
@@ -195,6 +200,7 @@ void main() {
       FfiSyncStatusReason.inboxError,
       FfiSyncStatusReason.sessionStarted,
       FfiSyncStatusReason.sessionStopped,
+      FfiSyncStatusReason.paused,
     ]) {
       final raises = _Harness()
         ..status(reason)
@@ -307,6 +313,27 @@ void main() {
       expect((await h.settle()).state, SharingHealthState.paused);
 
       h.maintenance.outcome = const SubscriptionHealthResult.empty();
+      await h.runHealthTick();
+
+      expect(
+        (await h.settle()).pausedReason,
+        SharingPausedReason.receiveSubscriptionLost,
+      );
+    });
+
+    test('a paused tick clears nothing', () async {
+      // A paused engine holds no REQ at all, so the tick short-circuited
+      // before the connectivity probe and inspected nothing. Treating it as
+      // proof would let every background burst interval silently clear a real
+      // lost-subscription verdict.
+      final h = _TickHarness()
+        ..status(FfiSyncStatusReason.relayError)
+        ..advance(kSharingFaultConfirmationWindow + const Duration(seconds: 1));
+      expect((await h.settle()).state, SharingHealthState.paused);
+
+      h.maintenance.outcome = const SubscriptionHealthResult(
+        action: SubscriptionHealthAction.paused,
+      );
       await h.runHealthTick();
 
       expect(

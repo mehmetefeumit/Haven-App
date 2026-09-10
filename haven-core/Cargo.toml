@@ -236,8 +236,18 @@ nostr-relay-builder = "0.44"
 # — `net` via feature unification with the lib, `io-util` transitively through
 # nostr-sdk — so they are declared here to say so, not to add anything. An
 # undeclared feature that arrives by unification disappears without warning the
-# day a dependency stops asking for it. Dev-only.
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "io-util"] }
+# day a dependency stops asking for it. `test-util` is what `start_paused = true`
+# needs: a timing assertion measured against a live socket races the handshake,
+# so every one of them runs on pure futures under a paused clock instead.
+# Dev-only.
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "time",
+    "net",
+    "io-util",
+    "test-util",
+] }
 nostr-sdk = { version = "0.44", default-features = false, features = ["nip44", "nip59"] }
 # Basic MLS credential + signer, for the ONE test that drives OpenMLS directly
 # (`ratchet_forward_distance_e2e`): the sender-ratchet exhaustion boundary cannot

@@ -137,8 +137,8 @@ void main() {
             'these production files call the rolling-back `decryptLocation` '
             'shim on what looks like a receive path: $offenders. Use '
             '`decryptLocationCollectingCommits` and publish + confirm each '
-            'surfaced auto-commit (see '
-            'LocationSharingService._publishAutoCommits).',
+            'surfaced auto-commit (see `resolveAutoCommits` in '
+            'lib/src/services/location_auto_commit.dart).',
       );
     });
   });

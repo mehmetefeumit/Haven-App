@@ -53,12 +53,16 @@ void main() {
           'supported': true,
           'backgroundActivitySessionHeld': true,
           'serviceSessionHeld': false,
+          'alwaysConfirmed': true,
+          'armed': true,
         },
       );
       final status = await service.status();
       expect(status.supported, isTrue);
       expect(status.backgroundActivitySessionHeld, isTrue);
       expect(status.serviceSessionHeld, isFalse);
+      expect(status.alwaysConfirmed, isTrue);
+      expect(status.armed, isTrue);
     });
 
     test('status treats missing keys as not held (fail-closed)', () async {
@@ -67,6 +71,18 @@ void main() {
       expect(status.supported, isFalse);
       expect(status.backgroundActivitySessionHeld, isFalse);
       expect(status.serviceSessionHeld, isFalse);
+      expect(
+        status.alwaysConfirmed,
+        isFalse,
+        reason: 'an unconfirmed Always keeps the When-In-Use posture — the '
+            'direction that cannot silently lose background publishing',
+      );
+      expect(
+        status.armed,
+        isFalse,
+        reason: 'a handler that reported no arming has measured no tier, and '
+            'the settings copy names no indicator without one',
+      );
     });
 
     test('status reports nothing held on a PlatformException', () async {
@@ -75,6 +91,12 @@ void main() {
       expect(status.supported, isFalse);
       expect(status.backgroundActivitySessionHeld, isFalse);
       expect(status.serviceSessionHeld, isFalse);
+      expect(status.alwaysConfirmed, isFalse);
+      expect(
+        status.armed,
+        isFalse,
+        reason: 'a failed round trip is not evidence about the tier',
+      );
     });
 
     test('status reports nothing held when no native handler exists', () async {
@@ -82,6 +104,7 @@ void main() {
       expect(status.supported, isFalse);
       expect(status.backgroundActivitySessionHeld, isFalse);
       expect(status.serviceSessionHeld, isFalse);
+      expect(status.armed, isFalse);
     });
   });
 
@@ -98,6 +121,13 @@ void main() {
       expect(status.supported, isFalse);
       expect(status.backgroundActivitySessionHeld, isFalse);
       expect(status.serviceSessionHeld, isFalse);
+      expect(status.alwaysConfirmed, isFalse);
+      expect(
+        status.armed,
+        isFalse,
+        reason: 'no CoreLocation session exists off iOS, so nothing about an '
+            'iOS indicator is ever knowable here',
+      );
     });
   });
 }

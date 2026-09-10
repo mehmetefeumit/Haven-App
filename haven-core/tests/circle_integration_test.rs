@@ -1625,35 +1625,44 @@ mod mls_dependent_tests {
         assert_eq!(alice_members.len(), 2, "alice and charlie remain");
 
         // ── Receiver B (Charlie): the shim, on the SAME proposal. ──
-        // `decrypt_location` rolls the staged auto-commit back rather than
-        // surfacing it, so Charlie's roster is UNCHANGED. This is the trap:
-        // no error, no result, no removal — just a leaver who never leaves.
+        // `decrypt_location` surfaces NOTHING to its caller, and that is the
+        // trap: no error, no result, nothing to publish — a receive path built
+        // on it broadcasts no eviction and the group waits on somebody else.
         c.charlie_manager
             .decrypt_location(&proposal)
             .await
             .expect("charlie ingests the same proposal via the shim");
+        assert_eq!(
+            c.charlie_manager.owed_removal_commits().len(),
+            1,
+            "what the shim must NOT do is drop the eviction. It reports the \
+             publish failed, and that rung leaves the commit staged and the \
+             publish OWED — a rollback would put the leaver back in Charlie's \
+             roster with nothing able to re-derive the commit, and would record \
+             nothing anywhere"
+        );
         assert!(
-            member_hex_set(&c.charlie_manager, &c.group_id)
+            c.charlie_manager
+                .encrypt_location(
+                    &c.group_id,
+                    &c.charlie_keys.public_key(),
+                    &sentinel_location(1.0, 2.0),
+                    300,
+                )
                 .await
-                .contains(&bob_hex),
-            "the `decrypt_location` shim must roll the auto-commit back — if \
-             this ever starts removing the peer, the shim has begun applying \
-             an unpublished commit (a Rule-13 violation), and the receive \
-             paths that rely on the rollback need revisiting"
+                .is_err(),
+            "and the cost of that is visible rather than silent: Charlie's \
+             circle refuses to send while the eviction is owed, which is the \
+             ONLY thing that distinguishes a staged commit from a merged one \
+             (every projected read already shows the post-eviction roster)"
         );
 
-        // Charlie converges the normal way: by applying Alice's PUBLISHED
-        // eviction commit. This proves the rollback above stranded nothing —
-        // the group still converges through the one confirmed branch.
-        c.charlie_manager
-            .decrypt_location(&auto_commit.commit_event)
-            .await
-            .expect("charlie applies alice's published eviction commit");
-        assert_eq!(
-            member_hex_set(&c.charlie_manager, &c.group_id).await,
-            alice_members,
-            "charlie must converge on alice's post-eviction roster"
-        );
+        // A third member converging on Alice's PUBLISHED eviction is proven in
+        // `selfremove_autopublish_e2e::auto_commit_is_published_then_confirmed_and_a_third_member_converges`,
+        // on a receiver with no staged commit of its own — it cannot be shown
+        // here, because a group holding a staged commit BUFFERS every inbound
+        // commit until that resolves.
+        let _ = alice_members;
 
         c.cleanup();
     }

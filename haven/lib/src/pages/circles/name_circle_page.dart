@@ -18,6 +18,8 @@ import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/fresh_secret.dart';
 import 'package:haven/src/services/identity_service.dart';
+import 'package:haven/src/services/publish_stagger.dart'
+    show kMaxCirclesPerAccount;
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/widgets/circles/selected_members_list.dart';
@@ -200,15 +202,27 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
                       // Creation progress
                       if (_isCreating) _buildProgress(),
 
-                      // Error message
+                      // Error message. `liveRegion` is what makes a refusal
+                      // AUDIBLE (WCAG 2.1 SC 4.1.3): the same setState that
+                      // sets `_errorMessage` clears `_isCreating`, which
+                      // takes `_buildProgress` — the page's only other live
+                      // region — out of the tree, so without this the
+                      // message appears in silence. It is an INSERTED node
+                      // carrying its label, the shape Flutter's own SnackBar
+                      // uses, and never a mounted node whose text changes:
+                      // `_createCircle` clears the message before every
+                      // retry, so each refusal is a fresh insertion.
                       if (_errorMessage != null)
                         Padding(
                           padding: const EdgeInsets.only(
                             bottom: HavenSpacing.base,
                           ),
-                          child: Text(
-                            _errorMessage!,
-                            style: TextStyle(color: colorScheme.error),
+                          child: Semantics(
+                            liveRegion: true,
+                            child: Text(
+                              _errorMessage!,
+                              style: TextStyle(color: colorScheme.error),
+                            ),
                           ),
                         ),
 
@@ -373,6 +387,18 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
         Navigator.of(context)
           ..pop() // Pop NameCirclePage
           ..pop(); // Pop CreateCirclePage
+      }
+    } on CircleRosterFullException catch (_) {
+      // A refusal, not a failure: the generic "please try again" copy below
+      // would send the user back to a button that can never succeed. Must
+      // precede the CircleServiceException clause — it is a subtype.
+      debugPrint('[CircleCreate] roster full');
+      if (mounted) {
+        setState(() {
+          _errorMessage = l10n.nameCircleRosterFullError(kMaxCirclesPerAccount);
+          _isCreating = false;
+          _stage = CreationStage.idle;
+        });
       }
     } on IdentityServiceException catch (_) {
       debugPrint('[CircleCreate] Identity error');

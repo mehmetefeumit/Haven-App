@@ -352,15 +352,14 @@ void main() {
   });
 
   // ---------------------------------------------------------------------------
-  // The recurring per-circle scheduler. Its per-circle phases are independent,
-  // but both are sampled from the same 97-value window, so two ticks can land
-  // in one second by chance and the FIFO chain would run them back to back.
+  // The recurring scheduler. One tick publishes every eligible circle, so the
+  // circles of a burst are dispatched back to back by construction — the gap
+  // between them is the only thing keeping their `created_at`s apart.
   // ---------------------------------------------------------------------------
 
-  group('LocationPublishSchedulerNotifier — chained ticks are spaced', () {
+  group('LocationPublishSchedulerNotifier — one burst, spaced publishes', () {
     test(
-      'two ticks that fire in the same instant publish more than a second '
-      'apart',
+      'the two circles of one burst are published more than a second apart',
       () async {
         SharedPreferences.setMockInitialValues({
           kLocationDisclosureAcceptedKey: true,
@@ -390,18 +389,18 @@ void main() {
         await container.read(circlesProvider.future);
         await pumpEventQueue();
 
-        // Fire BOTH circles' ticks in the same instant — the coincidence the
-        // chain used to serialise into a single second.
-        unawaited(notifier.triggerTickForTest(_hex([1])));
-        await notifier.triggerTickForTest(_hex([2]));
+        // ONE tick, both circles: the burst dispatches them as fast as the
+        // chain will take them, which is the coincidence that used to need a
+        // pair of ticks to reproduce.
+        await notifier.triggerTickForTest();
 
         expect(mock.encryptCallTimes.length, 2);
         expect(
           _separationsMs(mock).single,
           greaterThan(1000),
           reason:
-              'serialising two coincident ticks is not enough — back-to-back '
-              'is still one whole-second created_at for both circles',
+              'serialising a burst is not enough — back-to-back is still one '
+              'whole-second created_at for both circles',
         );
       },
       timeout: const Timeout(Duration(seconds: 90)),

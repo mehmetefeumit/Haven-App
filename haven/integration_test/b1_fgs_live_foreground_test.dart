@@ -74,9 +74,9 @@
 /// `_observers` and calls `didChangeAppLifecycleState(state)` on each) — so
 /// calling it runs `MapShell`'s genuine, UNMODIFIED `_onPaused()`, not a
 /// hand-written stand-in. This function then HOLDS — polling, never a
-/// blind sleep — for [_postPauseHoldDuration] so the FGS gets at least two
-/// full `kBackgroundRepeatInterval` (72 s) ticks to publish WHILE the tree
-/// is still mounted and `aliceManager` (the SAME `CircleManagerFfi`
+/// blind sleep — for [_postPauseHoldDuration] so the FGS gets a full
+/// maximum publish interval in which to run a delivery-driven cycle WHILE
+/// the tree is still mounted and `aliceManager` (the SAME `CircleManagerFfi`
 /// `circleServiceProvider` opened) is still open — i.e. while the Rule-14
 /// contention this whole lane exists to observe is genuinely, continuously
 /// live. Only once that hold completes does this function return; whatever
@@ -113,7 +113,13 @@
 ///      completion, not merely that the event was dispatched;
 ///   7. HOLDS the mounted tree + open manager for [_postPauseHoldDuration]
 ///      so the FGS's own publish cycles happen while the contention is
-///      real, before returning and letting the framework's own
+///      real;
+///   8. closes the P2a proof window and then holds a SECOND time, for
+///      [_forcedIdleHoldDuration], during which the shell stops the
+///      emulator's `geo fix` drip and forces the device into deep idle —
+///      so the no-fix chain (stale stream fix -> one-shot timeout ->
+///      `getLastKnownPosition()`) has to carry publishing on its own,
+///      before returning and letting the framework's own
 ///      `runApp(Container(...))` unmount everything.
 ///
 /// ## Process-sharing (verified, not assumed)
@@ -230,12 +236,20 @@
 ///     [kPauseDeliveredMarker] if the shell wants the narrowest possible
 ///     window.
 ///   * [kHoldCompleteMarker] (`[b1] HOLD_COMPLETE`) — printed the instant the
-///     hold ends and BEFORE the lifecycle is restored to `resumed`, so it
-///     closes the window the two markers above open. Everything after it is
-///     teardown, where the FGS is EXPECTED to be destroyed: resuming takes the
-///     MLS session back (which stops the service), and `flutter_test`'s own
-///     post-test unmount disposes the `ProviderScope` and stops it again. An
-///     oracle windowed to EOF reads those as the service dying mid-proof.
+///     FIRST hold ends, so it closes the window the two markers above open.
+///     The steady-state P2a assertions belong to that window and to nothing
+///     else: after it come the forced-idle phase (a deliberately abnormal
+///     span) and then teardown, where the FGS is EXPECTED to be destroyed —
+///     resuming takes the MLS session back (which stops the service), and
+///     `flutter_test`'s own post-test unmount disposes the `ProviderScope` and
+///     stops it again. An oracle windowed to EOF reads those as the service
+///     dying mid-proof.
+///   * [kIdlePhaseBeginMarker] (`[b1] IDLE_PHASE_BEGIN`) — printed AFTER
+///     [kHoldCompleteMarker], and the shell's cue to stop the `geo fix` drip
+///     and force the device into deep idle. The lifecycle is still `paused`
+///     throughout, so the FGS still owns publishing.
+///   * [kIdlePhaseEndMarker] (`[b1] IDLE_PHASE_END`) — closes the forced-idle
+///     window, immediately before the lifecycle is restored to `resumed`.
 library;
 
 import 'dart:io' show Platform, pid;
@@ -246,7 +260,14 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/main.dart';
 import 'package:haven/src/constants/location.dart'
-    show kBackgroundSharingKey, kForegroundActiveAtMsKey;
+    show
+        kBackgroundRepeatInterval,
+        kBackgroundSharingKey,
+        kFirstDeliveryWait,
+        kForegroundActiveAtMsKey,
+        kLocationPublishMaxInterval,
+        kOneShotLocationTimeout,
+        kStreamPositionMaxAge;
 import 'package:haven/src/pages/map_shell.dart';
 import 'package:haven/src/providers/background_location_provider.dart'
     show backgroundSharingProvider;
@@ -312,15 +333,55 @@ const String kHandoffConfirmedMarker = '[b1] HANDOFF_CONFIRMED';
 /// service dying inside the window it was supposed to publish in.
 const String kHoldCompleteMarker = '[b1] HOLD_COMPLETE';
 
+/// Verbatim marker opening the forced-idle phase: the shell's cue to stop the
+/// emulator's `geo fix` drip and put the device into deep idle.
+///
+/// Printed AFTER [kHoldCompleteMarker] on purpose. The P2a steady-state
+/// oracles are bounded by that marker, so everything the forced-idle phase
+/// does — a `getCurrentLocation()` one-shot, a watchdog-driven cycle, a
+/// platform registration going quiet — is outside the span they read, and the
+/// abnormality this phase deliberately creates can never be mistaken for the
+/// steady state.
+const String kIdlePhaseBeginMarker = '[b1] IDLE_PHASE_BEGIN';
+
+/// Verbatim marker closing the forced-idle phase, printed immediately before
+/// the lifecycle is restored to `resumed`.
+const String kIdlePhaseEndMarker = '[b1] IDLE_PHASE_END';
+
 /// How long this drive keeps `MapShell` mounted (and `aliceManager` open)
-/// AFTER the confirmed handoff, so the FGS gets at least two full
-/// `kBackgroundRepeatInterval` (72 s) ticks — the FGS's master polling
-/// cadence, `haven/lib/src/constants/location.dart:98` — to run a publish
-/// cycle before this function is allowed to return (and the framework's
-/// own post-test teardown unmounts everything — see the class doc's "The
-/// framework unmounts on success" section). 200 s covers 2 ticks (144 s)
-/// plus generous GPS-fix / relay-round-trip / loaded-CI-emulator slack.
-const Duration _postPauseHoldDuration = Duration(seconds: 200);
+/// AFTER the confirmed handoff, before it is allowed to return (and the
+/// framework's own post-test teardown unmounts everything — see the class
+/// doc's "The framework unmounts on success" section).
+///
+/// Sized off the cadence itself, not off the watchdog: the FGS no longer
+/// polls for a publish, it publishes when the platform delivers the fix it
+/// asked for, and the LATEST that can be is one full
+/// [kLocationPublishMaxInterval] after the handoff cycle (the CSPRNG draw's
+/// ceiling). So one max interval plus slack for GPS acquisition, the relay
+/// round trip and a loaded CI emulator is exactly "at least one
+/// delivery-driven publish, whatever the draw". The old derivation — two
+/// `kBackgroundRepeatInterval` ticks — described a poll that P2a removed.
+final Duration _postPauseHoldDuration =
+    kLocationPublishMaxInterval + const Duration(seconds: 32);
+
+/// How long this drive holds AFTER [kHoldCompleteMarker], with the shell having
+/// stopped the emulator's `geo fix` drip and forced the device into deep idle.
+///
+/// Sized off the chain it has to contain, term by term:
+/// [kStreamPositionMaxAge] (the cached stream fix must age out before a cycle
+/// stops being served from it) + [kBackgroundRepeatInterval] (the watchdog can
+/// only start a cycle on a tick) + [kFirstDeliveryWait] (the cold-cache wait
+/// for a platform answer that will not come) + [kOneShotLocationTimeout] (the
+/// one-shot that cannot succeed, before `getLastKnownPosition()` answers), plus
+/// 60 s for the publish, the relay ack and the shell's own force-idle round
+/// trip. The shell asserts the same sum with a 30 s margin instead of this
+/// one's 60, so the publish it is looking for always falls inside this hold.
+final Duration _forcedIdleHoldDuration =
+    kStreamPositionMaxAge +
+    kBackgroundRepeatInterval +
+    kFirstDeliveryWait +
+    kOneShotLocationTimeout +
+    const Duration(seconds: 60);
 
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
@@ -621,6 +682,51 @@ void main() {
       // of `flutter_test` internals, not an invariant this file should rest
       // on, and it would silently stop holding if that cleanup ever ran
       // unconditionally.
+      // Idempotent, because the window has to close exactly once whether the
+      // hold below completes or throws: the `finally` closes it as a backstop,
+      // and the normal path closes it earlier, before the forced-idle phase.
+      var holdWindowClosed = false;
+      void closeHoldWindow() {
+        if (holdWindowClosed) return;
+        holdWindowClosed = true;
+        debugPrint(kHoldCompleteMarker);
+      }
+
+      // Hold the body open, polling (never a single blind sleep) so a genuinely
+      // wedged run still produces periodic evidence in the CI log instead of
+      // silence.
+      //
+      // NEVER pump a frame in this loop. `tester.pump()` here DEADLOCKS, and
+      // it did: CI run 30753193231 hung from the handoff until the 10-minute
+      // test timeout, emitting not one heartbeat, and tore down on
+      // `'!_expectingFrame': is not true` — the assertion that fires when a
+      // pump is still outstanding. The cause is the pause delivered below:
+      // `SchedulerBinding.handleAppLifecycleStateChanged`
+      // (flutter/lib/src/scheduler/binding.dart:414-427) calls
+      // `_setFramesEnabledState(false)` for `paused`, `hidden` and `detached`,
+      // so `scheduleFrame()` stops producing frames and a `pump()` awaits one
+      // that can never arrive. A plain `Future.delayed` loop is both sufficient
+      // and correct: nothing this loop waits on is in the widget tree — the FGS
+      // is a different isolate — and real timers, platform-channel replies and
+      // Rust callbacks all keep running regardless of frame production.
+      Future<void> holdMounted(Duration duration, String label) async {
+        final deadline = DateTime.now().add(duration);
+        var elapsedHeartbeats = 0;
+        while (DateTime.now().isBefore(deadline)) {
+          await Future<void>.delayed(const Duration(seconds: 10));
+          elapsedHeartbeats += 1;
+          if (elapsedHeartbeats.isEven) {
+            final lastPublish =
+                await BackgroundLocationManager.readLastPublishTime();
+            debugPrint(
+              '[b1] $label (~${elapsedHeartbeats * 10}s of '
+              '${duration.inSeconds}s) — lastBackgroundPublish='
+              '${lastPublish?.toIso8601String() ?? "none yet"}',
+            );
+          }
+        }
+      }
+
       tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
       debugPrint('$kPauseDeliveredMarker pid=$pid');
       try {
@@ -643,55 +749,50 @@ void main() {
         );
         debugPrint(kHandoffConfirmedMarker);
 
-        // --- Hold the body open. The tree stays mounted, the
+        // --- PHASE 1: the P2a steady state. The tree stays mounted, the
         // ProviderContainer stays alive, and `aliceManager` stays open for
         // this entire window — the Rule-14 contention this lane exists to
         // observe is real and CONTINUOUS throughout, not merely at the
-        // instant "ARMED" printed. Poll (never a single blind sleep) so a
-        // genuinely wedged run still produces periodic evidence in the CI log
-        // instead of silence.
+        // instant "ARMED" printed.
+        await holdMounted(_postPauseHoldDuration, 'holding');
+
+        // Close the proof window BEFORE the forced-idle phase, not after.
         //
-        // NEVER pump a frame in this loop. `tester.pump()` here DEADLOCKS, and
-        // it did: CI run 30753193231 hung from the handoff until the 10-minute
-        // test timeout, emitting not one heartbeat, and tore down on
-        // `'!_expectingFrame': is not true` — the assertion that fires when a
-        // pump is still outstanding. The cause is the pause we just delivered:
-        // `SchedulerBinding.handleAppLifecycleStateChanged`
-        // (flutter/lib/src/scheduler/binding.dart:414-427) calls
-        // `_setFramesEnabledState(false)` for `paused`, `hidden` and
-        // `detached`, so `scheduleFrame()` stops producing frames and a
-        // `pump()` awaits one that can never arrive. A plain `Future.delayed`
-        // loop is both sufficient and correct: nothing this loop waits on is in
-        // the widget tree — the FGS is a different isolate — and real timers,
-        // platform-channel replies and Rust callbacks all keep running
-        // regardless of frame production.
-        final holdDeadline = DateTime.now().add(_postPauseHoldDuration);
-        var elapsedHeartbeats = 0;
-        while (DateTime.now().isBefore(holdDeadline)) {
-          await Future<void>.delayed(const Duration(seconds: 10));
-          elapsedHeartbeats += 1;
-          if (elapsedHeartbeats.isEven) {
-            final lastPublish =
-                await BackgroundLocationManager.readLastPublishTime();
-            debugPrint(
-              '[b1] holding (~${elapsedHeartbeats * 10}s of '
-              '${_postPauseHoldDuration.inSeconds}s) — lastBackgroundPublish='
-              '${lastPublish?.toIso8601String() ?? "none yet"}',
-            );
-          }
-        }
+        // Everything the shell asserts about the steady state — one
+        // long-interval registration, no one-shot outside a watchdog cycle, a
+        // delivery-driven cadence — is true of the span that ends here and is
+        // deliberately NOT true of the span that follows, where the whole point
+        // is that no fix can arrive. Leaving the window open across both would
+        // make the abnormality this drive creates on purpose look like a
+        // regression.
+        closeHoldWindow();
+
+        // --- PHASE 2: the no-fix chain (POWER_EFFICIENCY_PLAN.md 5.2 step 8,
+        // the Doze-policy half). The lifecycle stays `paused`, so the FGS still
+        // owns publishing; the shell, on seeing this marker, kills the
+        // emulator's `geo fix` drip and forces the device into deep idle. From
+        // here on the delivery-driven path has nothing to run on, and the only
+        // way another location reaches the relay is the watchdog noticing the
+        // silence, spending `kOneShotLocationTimeout` on a one-shot that cannot
+        // be answered, and falling back to `getLastKnownPosition()`.
+        //
+        // This drive asserts nothing about it: it has no logcat access (see the
+        // class doc), so the shell remains the assertion authority. What it
+        // owns is the WINDOW — holding the tree, the manager and the paused
+        // lifecycle open for long enough that the chain has time to complete.
+        debugPrint(kIdlePhaseBeginMarker);
+        await holdMounted(_forcedIdleHoldDuration, 'holding (forced idle)');
+        debugPrint(kIdlePhaseEndMarker);
       } finally {
-        // Close the proof window FIRST — before the resume below, not after.
-        //
-        // Restoring `resumed` runs the production `_onResumed()`, which takes
-        // the MLS session back from the foreground service; on Android that
-        // means STOPPING the service (`mls_session_handover.dart`), which emits
-        // `[BackgroundTask] onDestroy`. The framework's post-test unmount then
-        // stops it a second time. Both are correct, and both would read as "the
-        // service did not survive its publish window" to an oracle bounded by
-        // EOF instead of by this marker. Printed in the `finally` so a failed
-        // hold still closes the window rather than leaving it open to EOF.
-        debugPrint(kHoldCompleteMarker);
+        // Backstop: a hold that threw must still close the window rather than
+        // leaving it open to EOF, where teardown's two legitimate service stops
+        // read as the service dying mid-proof. Restoring `resumed` below runs
+        // the production `_onResumed()`, which takes the MLS session back from
+        // the foreground service; on Android that means STOPPING the service
+        // (`mls_session_handover.dart`), which emits
+        // `[BackgroundTask] onDestroy`, and the framework's post-test unmount
+        // then stops it a second time.
+        closeHoldWindow();
 
         // Restore the lifecycle state before returning. This is NOT cosmetic.
         //
@@ -724,14 +825,20 @@ void main() {
         );
 
         debugPrint(
-          '[b1] hold complete (lifecycle restored to resumed) — returning now '
+          '[b1] holds complete (lifecycle restored to resumed) — returning now '
           "hands control to flutter_test's own post-test teardown (see class "
-          'doc). The shell scopes its logcat window to '
-          '[$kHandoffConfirmedMarker, $kHoldCompleteMarker), so everything '
-          'from here on is outside it.',
+          'doc). The shell scopes its steady-state window to '
+          '[$kHandoffConfirmedMarker, $kHoldCompleteMarker) and its no-fix '
+          'window to [$kIdlePhaseBeginMarker, $kIdlePhaseEndMarker), so '
+          'everything from here on is outside both.',
         );
       }
     },
-    timeout: const Timeout(Duration(minutes: 10)),
+    // Two holds now, not one: _postPauseHoldDuration (200 s) +
+    // _forcedIdleHoldDuration (332 s) = 532 s (8.9 min) of deliberate waiting,
+    // leaving ~5 min for the bootstrap, the circle creation and Bob's join. It
+    // stays under the shell's own 20 m drive bound so a wedge is attributed
+    // HERE, by this test's own message, rather than by an anonymous outer 124.
+    timeout: const Timeout(Duration(minutes: 14)),
   );
 }

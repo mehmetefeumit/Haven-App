@@ -1,0 +1,19 @@
+# Exemptions from scripts/ci/check_estimate_integrity.sh.
+#
+# Format, tab-separated:   <repo-relative path>\t<literal substring>\t<reason>
+#
+# The substring is matched against the CLAIM'S OWN SENTENCE, so an entry cannot
+# reach a neighbouring claim and survives edits above it in the file. An entry
+# that stops matching FAILS the guard: a rotted exemption is a permanent hole,
+# and the fix for a claim that was corrected is to delete its entry, not to
+# leave it standing.
+#
+# An entry needs a reason a reader can evaluate. "It is noisy" is not one.
+#
+# THIS FILE IS EMPTY, AND THAT IS THE INTENDED STATE. Its two entries (the
+# 100 % GNSS duty below `LocationProviderManager.MIN_REQUEST_DELAY_MS`, in
+# `constants/location.dart` and its test) were deleted on 2026-09-09: both
+# rested on a "definitional, not model E" argument, which the guard now
+# expresses as PLATFORM-SOURCE attribution — a named framework symbol plus a
+# locus, in the prose where a reader can check it. An exemption that can be
+# turned into a citation should be.

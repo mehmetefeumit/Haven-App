@@ -199,6 +199,12 @@ class AppLocalizationsJa extends AppLocalizations {
   String get settingsLocationTitle => '位置情報';
 
   @override
+  String get settingsLocationSubtitleOn => 'バックグラウンド共有はオンです';
+
+  @override
+  String get settingsLocationSubtitleOff => 'Haven を開いている間だけ';
+
+  @override
   String get settingsMapStyleTitle => '地図のスタイル';
 
   @override
@@ -359,7 +365,7 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get locationSettingsIntro =>
-      'Haven は、アプリを開いている間は常に、あなたの位置情報をサークルに共有します。これをオンにすると、Haven がバックグラウンドにある間もサークルのメンバーは位置情報を見続けられます。システムが Haven を終了させた場合は共有が停止します。バックグラウンドでの起動時に行われるのはサークルの位置情報の受信だけで、あなたの位置情報が送信されることはありません。Android では、Haven をスワイプして最近使ったアプリから消しても共有は動き続け、端末を再起動したあとには共有が自動的にまた始まります。iPhone では、あなたが Haven を開くまで共有は停止したままです。';
+      'Haven は、アプリを開いている間は常に、あなたの位置情報をサークルに共有します。これをオンにすると、Haven がバックグラウンドにある間もサークルのメンバーは位置情報を見続けられます。システムが Haven を終了させると、あなた自身の共有は停止し、その後も Haven はサークルの位置情報を受け取るために起動することはありますが、あなたの位置情報を送るために起動することはありません。Android では、Haven をスワイプして最近使ったアプリから消しても共有は動き続け、端末を再起動したあとには共有が自動的にまた始まります。iPhone では、あなたが Haven を開くまで共有は停止したままです。';
 
   @override
   String get locationSettingsToggleTitle => 'バックグラウンドで共有';
@@ -369,7 +375,7 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get locationSettingsIosLimitedNote =>
-      '現在の権限のままでも、バックグラウンドでの共有は継続されます。設定で Haven の位置情報を「常に許可」にすると、iOS がアプリを終了した後も、Haven がサークルの位置情報に追いつけるようになります。あなた自身の位置情報の共有は、Haven を開き直したときに再開されます。';
+      '現在の権限のままでも、バックグラウンドでの共有は継続され、その間 iOS は画面上部に青い位置情報バーを表示します。設定で Haven の位置情報を「常に」にすると、iOS がアプリを終了した後も、Haven がサークルの位置情報に追いつけるようになります。ただし「常に」では、iOS はこの位置情報バーの代わりに、ステータスバーに位置情報の矢印を表示することがあります。あなた自身の位置情報の共有は、Haven を開き直したときに再開されます。';
 
   @override
   String get locationSettingsAndroidHeader => '確実に動かすためのOS設定';
@@ -388,7 +394,47 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get locationSettingsIosGuidance =>
-      'バックグラウンド共有がオンの間、Haven は位置情報の取得を継続するため、iOS のステータスバーに青い表示が出ます。さらに「常に許可」を選ぶと、iOS がアプリを終了した後も、Haven がサークルの更新に追いつけるようになります。';
+      'バックグラウンド共有がオンの間、Haven は位置情報のセッションを維持し、サークルのメンバーがあなたを見失わないようにします。';
+
+  @override
+  String get locationSettingsIosIndicatorArrow =>
+      'iOS は、Haven が位置情報を使用している間、ステータスバーに位置情報の矢印を表示します。その後もしばらくの間、「位置情報サービス」の設定で Haven の隣に同じ矢印が表示されたままになります。';
+
+  @override
+  String get locationSettingsIosIndicatorBar =>
+      '位置情報の権限が「常に」になっている場合、Haven が位置情報を使用している間、iOS は画面上部に青い位置情報バーを表示します。';
+
+  @override
+  String get locationDisclosureTitle => '位置情報の共有について';
+
+  @override
+  String get locationDisclosureWhy =>
+      'Haven は、あなたが選んだサークルのメンバーに、あなたの現在地をリアルタイムで表示します。メンバーの現在地も、地図上であなたに表示します。そのため Haven には、端末の正確な位置情報を使用する権限が必要です。';
+
+  @override
+  String get locationDisclosureHow =>
+      'あなたの位置情報は端末上でエンドツーエンドで暗号化されます。そのため、読めるのはあなたが選んだサークルのメンバーだけで、Haven には読めません。Haven には自前のサーバーがありません。暗号化されたあなたの更新は、ほかの人たちが運営する独立したリレーを経由します。リレーはあなたのネットワークアドレスを見ることはできますが、あなたがどこにいるかを知ることはありません。地図を描くために、Haven は Stadia Maps にあなたとサークルの周辺の地域を要求します。そのため Stadia Maps はその場所をおおまかに知ることになりますが、あなたの名前も、あなたの鍵も、サークルのメンバーが誰かも知ることはありません。Stadia Maps は、個人情報を販売も交換もしないこと、端末にクッキーを保存しないこと、サーバーのログを約2週間保持することを表明しています。これは Stadia Maps 自身の方針であり、Haven がその順守を強制することはできません。';
+
+  @override
+  String get locationDisclosureSharing =>
+      'Haven を開いていて、あなたがサークルに参加している間、あなたの位置情報は数分おきに自動で送信されます。一時停止する方法はありません。あるサークルとの共有をやめるには、そのサークルを退出してください。';
+
+  @override
+  String get locationDisclosureBackgroundAndroid =>
+      'このアプリは、アプリが閉じているときや使用していないときでも、サークルとの共有を可能にするために位置情報データを使用します。';
+
+  @override
+  String get locationDisclosureBackgroundIos =>
+      'このアプリは、Haven がバックグラウンドにあって使用していないときでも、サークルとの共有を可能にするために位置情報データを使用します。iOS が Haven を終了させると、あなたが開き直すまで共有は停止し、その後も Haven はサークルの位置情報を受け取るために起動することはありますが、あなたの位置情報を送るために起動することはありません。';
+
+  @override
+  String get locationDisclosureManage => 'バックグラウンド共有は、設定 → 位置情報 からいつでもオフにできます。';
+
+  @override
+  String get locationDisclosureAgree => '同意する';
+
+  @override
+  String get locationDisclosureNotNow => '今はしない';
 
   @override
   String get fgsNotificationSharing => 'Haven が位置情報を送受信しています';
@@ -670,6 +716,15 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get nameCircleCreateError => 'サークルを作成できませんでした。もう一度お試しください。';
+
+  @override
+  String nameCircleRosterFullError(int limit) {
+    final intl.NumberFormat limitNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String limitString = limitNumberFormat.format(limit);
+
+    return '同時に参加できるサークルは$limitString個までです。新しく作るには、いずれかのサークルを退出してください。';
+  }
 
   @override
   String addMemberTitle(String circleName) {
@@ -956,6 +1011,15 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get invitationAcceptError => '招待を承認できませんでした。もう一度お試しください。';
+
+  @override
+  String invitationRosterFullError(int limit) {
+    final intl.NumberFormat limitNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String limitString = limitNumberFormat.format(limit);
+
+    return '同時に参加できるサークルは$limitString個までです。この招待はそのまま残るので、いずれかのサークルを退出してから承認してください。';
+  }
 
   @override
   String get invitationDeclineError => '招待を辞退できませんでした。もう一度お試しください。';

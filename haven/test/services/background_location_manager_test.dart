@@ -19,6 +19,7 @@
 /// The staleness threshold is 2 * kBackgroundRepeatInterval = 144 seconds.
 library;
 
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/services/background_location_manager.dart';
@@ -458,5 +459,55 @@ void main() {
         expect(await BackgroundLocationManager.isBackgroundIdle(), isFalse);
       },
     );
+  });
+
+  group('BackgroundLocationManager.signalTask', () {
+    // The plugin's own channel, so the assertion is on what really crosses to
+    // the service rather than on a seam invented for the test.
+    const channel = MethodChannel('flutter_foreground_task/methods');
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    final calls = <MethodCall>[];
+
+    setUp(() {
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        calls.add(call);
+        return null;
+      });
+    });
+
+    tearDown(() {
+      messenger.setMockMethodCallHandler(channel, null);
+      calls.clear();
+    });
+
+    test('the signal string is the WHOLE payload', () async {
+      BackgroundLocationManager.signalTask(kForegroundPausedSignal);
+      await pumpEventQueue();
+
+      expect(calls, hasLength(1), reason: 'one signal, one send');
+      expect(calls.single.method, 'sendData');
+      expect(
+        calls.single.arguments,
+        kForegroundPausedSignal,
+        reason: 'presence-only: the payload carries no identity, no '
+            'coordinate, no circle and no timestamp — everything the task '
+            'acts on it re-reads from its own gates',
+      );
+    });
+
+    test('each signal is forwarded verbatim, in order', () async {
+      BackgroundLocationManager.signalTask(kForegroundPausedSignal);
+      BackgroundLocationManager.signalTask(kForegroundResumedSignal);
+      await pumpEventQueue();
+
+      expect(
+        calls.map((c) => c.arguments).toList(),
+        [kForegroundPausedSignal, kForegroundResumedSignal],
+        reason: 'the task distinguishes the two by string alone, so a sender '
+            'that rewrote, coalesced or reordered them would silently invert '
+            'which isolate owns the platform location request',
+      );
+    });
   });
 }

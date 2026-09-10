@@ -433,8 +433,10 @@ final backgroundServiceLifecycleProvider = Provider<void>((ref) {
   // Fix 5: Do not change service state during a transient identity reload.
   // ref.invalidate(identityProvider) briefly produces AsyncLoading before
   // resolving — treating loading as null would stop/restart the service on
-  // every invalidation, wasting battery and risking Android 12+ background-
-  // start rejection if the restart happens off the visible-activity window.
+  // every invalidation, paying a teardown and a re-acquisition per reload (an
+  // ESTIMATED cost, model E E-A1/E-A2, `docs/POWER_EFFICIENCY_PLAN.md` §6.5a)
+  // and risking Android 12+ background-start rejection if the restart happens
+  // off the visible-activity window.
   if (identityAsync.isLoading) return;
 
   // Error state (identity corrupt / keyring failure) → stop the service.

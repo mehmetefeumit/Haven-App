@@ -111,7 +111,7 @@
 #
 # Usage:
 #   check_m7_native_wake_guards.sh              # check the repo
-#   check_m7_native_wake_guards.sh --self-test  # hermetic fixtures for check 9b
+#   check_m7_native_wake_guards.sh --self-test  # hermetic fixtures, checks 9b + 10
 #
 # Exit codes:
 #   0  all checks pass
@@ -136,6 +136,14 @@ PUBSPEC="${REPO_ROOT}/haven/pubspec.yaml"
 IOS_DIR="${REPO_ROOT}/haven/ios/Runner"
 LIVE_SYNC="${REPO_ROOT}/haven/lib/src/providers/live_sync_provider.dart"
 MAIN="${REPO_ROOT}/haven/lib/main.dart"
+BG_SESSION="${REPO_ROOT}/haven/ios/Runner/HavenBackgroundSessionHandler.swift"
+LOC_AUTH="${REPO_ROOT}/haven/ios/Runner/HavenLocationAuthHandler.swift"
+STREAM_HANDLER="${REPO_ROOT}/haven/ios/Runner/HavenLocationStreamHandler.swift"
+IOS_SOURCE="${REPO_ROOT}/haven/lib/src/services/ios_location_source.dart"
+KOTLIN_DIR="${REPO_ROOT}/haven/android/app/src/main/kotlin/com/oblivioustech/haven"
+WAKE_LOCK_KT="${KOTLIN_DIR}/PublishWakeLock.kt"
+HAVEN_APP_KT="${KOTLIN_DIR}/HavenApplication.kt"
+WAKE_LOCK_DART="${REPO_ROOT}/haven/lib/src/services/publish_wake_lock.dart"
 
 FAILED=0
 fail() {
@@ -191,6 +199,72 @@ fn_slice() {
       if (seen && depth <= 0) exit
       if (o > 0) seen = 1
     }' <<<"$v"
+}
+
+# --- check 10: the presence-only logging scan ------------------------------
+# One file, comment-stripped. Factored out of a hard-coded six-file loop so
+# `--self-test` can drive it against fixtures, and because that loop was
+# Swift/Dart-shaped: `LOG_FN` could not match a single Kotlin `Log.d(...)`, so
+# every Kotlin line in the background path was scanned by nothing at all while
+# this guard reported green.
+LOG_FN='(NSLog|os_log|print|debugPrint|debugLog|Log\.[deiwv]\()'
+# `\blocation\b` (word-boundaried) so the safe `locations=${result.locations
+# Applied}` counter marker does NOT false-positive, while a real `${location}`
+# still trips.
+SENS='coordinate|latitude|longitude|coord|\blocation\b|geohash|pubkey|npub|nsec|privkey|seckey|secret|exporter|nostr_group|group_id|\blat\b|\blng\b|\blon\b'
+# Error internals, in the three shapes the three languages actually write:
+#   * Swift  — `\(error)`, `\(err)`, `.localizedDescription`.
+#   * ANY    — a bare throwable as the LAST argument of a log call, i.e. the
+#              3-argument `Log.e(TAG, "msg", e)`. Android prints the whole
+#              stack trace for it, and no interpolation pattern can see it,
+#              because the throwable never enters the format string.
+#   * Kotlin — `$e` / `${t...}`: a string template renders the whole Throwable,
+#              message and all. The redacted class-name idiom
+#              (`${t::class.java.simpleName}`, the Kotlin twin of Dart's
+#              `${e.runtimeType}`) is deliberately permitted.
+# Dart is NOT scanned for `$e` here: `haven/test/lints/
+# caught_error_interpolation_test.dart` parses the AST for exactly that, and
+# permits the two release-safe sinks (`debugPrint`, `assert`) a grep cannot
+# distinguish — it is strictly stronger than a pattern on this line would be.
+ERR_ANY='localizedDescription|\\\(error\)|\\\(err\)|,[[:space:]]*(e|err|error|t)[[:space:]]*\)'
+ERR_KT='\$\{?(e|err|error|t|throwable)\b'
+ERR_KT_REDACTED='\$\{[A-Za-z_]+::class|\$\{[A-Za-z_]+\.javaClass'
+presence_only_log_scan() { # <file>
+  local f="$1" rc=0
+  if [[ ! -f "$f" ]]; then
+    fail "check 10: expected file not found: $f (a moved or renamed file is a guard failure, never a clean tree)"
+    return 1
+  fi
+
+  local code
+  code="$(code_view "$f")"
+  if [[ -z "${code//[[:space:]]/}" ]]; then
+    fail "check 10: $(basename "$f") holds no code to scan — an emptied or fully commented-out file must not read as a clean one"
+    return 1
+  fi
+
+  local logs intp pub errl
+  logs="$(printf '%s\n' "$code" | grep -nE "$LOG_FN")"
+  # L2: the sensitive-INTERPOLATION scan runs over the WHOLE file (not just the
+  # log-fn line) so a value interpolated on a CONTINUATION line of a multi-line
+  # log call is caught. In these privacy-critical wake files any string
+  # interpolation of a sensitive value is suspect, so a file-wide scan is the
+  # right (stricter) stance — it does not depend on the interpolation sharing a
+  # physical line with the log call.
+  intp="$(printf '%s\n' "$code" | grep -niE '\\\([^)]*('"$SENS"')|\$\{[^}]*('"$SENS"')|\$('"$SENS"')' | head -1)"
+  # %{public}-specifier + error-internals checks stay log-line-scoped (they are
+  # about HOW a log call renders, not where a value appears).
+  pub="$(printf '%s\n' "$logs" | grep -F '%{public}' | grep -iE "$SENS" | head -1)"
+  errl="$(printf '%s\n' "$logs" | grep -E "$ERR_ANY" | head -1)"
+  if [[ -z "$errl" && "$f" == *.kt ]]; then
+    errl="$(printf '%s\n' "$logs" | grep -E "$ERR_KT" | grep -vE "$ERR_KT_REDACTED" | head -1)"
+  fi
+
+  [[ -z "$intp" ]] || { fail "$(basename "$f") interpolates a sensitive value into a string (likely a log leak): $intp"; rc=1; }
+  [[ -z "$pub"  ]] || { fail "$(basename "$f") logs a sensitive value via os_log %{public}: $pub"; rc=1; }
+  [[ -z "$errl" ]] || { fail "$(basename "$f") logs error internals (whole error / .localizedDescription / a throwable argument): $errl"; rc=1; }
+
+  return "$rc"
 }
 
 # ===========================================================================
@@ -996,9 +1070,249 @@ XML
   printf '\033[1;34m[check_m7_native_wake_guards]\033[0m OK: check 9b self-test passed (%d fixtures).\n' "${checked}"
 }
 
+# ---------------------------------------------------------------------------
+# Self-test for check 10 — hermetic fixtures, no repo state.
+#
+# Its own block because check 10 grew a second language: until 2026-09-03
+# `LOG_FN` could not match a Kotlin `Log.d(...)` at all, so a Kotlin file in
+# the list would have been scanned by a pattern set that could never fire on
+# it. Every pattern below therefore gets a fixture that fires for its OWN
+# reason, and both false-positive directions (the redacted class-name idiom,
+# a commented-out leak) are pinned too — a guard that forbids the safe idiom
+# gets the safe idiom deleted instead of the unsafe one.
+# ---------------------------------------------------------------------------
+
+# An EXACT pin, not a floor — see EXPECTED_FIXTURES above for why.
+EXPECTED_LOG_FIXTURES=22
+
+log_scan_self_test() {
+  local tmp fails=0 checked=0
+  tmp="$(mktemp -d)"
+  # shellcheck disable=SC2064
+  trap "rm -rf '${tmp}'" RETURN
+
+  _log_case() { # _log_case <label> <want-rc> <filename>; file body on stdin
+    local label="$1" want="$2" name="$3" got=0
+    checked=$(( checked + 1 ))
+    cat > "${tmp}/${name}"
+    ( presence_only_log_scan "${tmp}/${name}" ) >/dev/null 2>&1 || got=$?
+    if [[ "${got}" -eq "${want}" ]]; then
+      printf '  \033[1;32mPASS\033[0m %s (rc=%d)\n' "${label}" "${got}"
+    else
+      printf '  \033[1;31mFAIL\033[0m %s (want rc=%d, got rc=%d)\n' \
+        "${label}" "${want}" "${got}" >&2
+      fails=1
+    fi
+  }
+
+  printf '\033[1;34m[check_m7_native_wake_guards]\033[0m self-test: check 10, the presence-only logging scan\n'
+
+  # (1) Positive control first: a scan hard-coded to fail passes every negative
+  #     fixture below and looks perfect.
+  _log_case 'a Kotlin file whose logs name only the method passes' 0 'A.kt' <<'KOTLIN'
+object PublishWakeLock {
+    fun onMethodCall(method: String) {
+        Log.d(TAG, "acquire")
+        Log.i(TAG, method)
+    }
+}
+KOTLIN
+
+  # -- Kotlin: the language the old LOG_FN could not see at all --------------
+  _log_case 'Log.d interpolating a latitude FAILS' 1 'B.kt' <<'KOTLIN'
+object Leaky {
+    fun report(lat: Double) {
+        Log.d(TAG, "lat=$lat")
+    }
+}
+KOTLIN
+
+  _log_case 'Log.e with a Throwable as the last argument FAILS' 1 'C.kt' <<'KOTLIN'
+object Leaky {
+    fun report(e: Throwable) {
+        Log.e(TAG, "acquire failed", e)
+    }
+}
+KOTLIN
+
+  _log_case 'Log.w interpolating the whole Throwable FAILS' 1 'D.kt' <<'KOTLIN'
+object Leaky {
+    fun report(e: Throwable) {
+        Log.w(TAG, "acquire failed: $e")
+    }
+}
+KOTLIN
+
+  _log_case 'Log.i interpolating a group id FAILS' 1 'E.kt' <<'KOTLIN'
+object Leaky {
+    fun report(group_id: String) {
+        Log.i(TAG, "publishing to $group_id")
+    }
+}
+KOTLIN
+
+  _log_case 'Log.v interpolating an exporter secret FAILS' 1 'F.kt' <<'KOTLIN'
+object Leaky {
+    fun report(exporter: ByteArray) {
+        Log.v(TAG, "key=$exporter")
+    }
+}
+KOTLIN
+
+  # Both false-positive directions. The redacted class-name idiom is the Kotlin
+  # twin of Dart's `${e.runtimeType}` and is what a caught Throwable is SUPPOSED
+  # to be logged as; forbidding it would leave "log nothing" as the only legal
+  # option, and the next author would pass the whole throwable instead.
+  _log_case 'the redacted class-name idiom passes' 0 'G.kt' <<'KOTLIN'
+object Safe {
+    fun report(t: Throwable) {
+        Log.e(TAG, "init failed: ${t::class.java.simpleName}")
+    }
+}
+KOTLIN
+
+  _log_case 'a commented-out leaking Kotlin log passes' 0 'H.kt' <<'KOTLIN'
+object Safe {
+    fun report(lat: Double) {
+        // Never do this: Log.d(TAG, "lat=$lat")
+        Log.d(TAG, "reporting")
+    }
+}
+KOTLIN
+
+  # -- Swift: the half that already worked, re-run through the factored scan --
+  _log_case 'a Swift NSLog interpolating a coordinate FAILS' 1 'I.swift' <<'SWIFT'
+final class Handler {
+    func report(_ location: CLLocation) {
+        NSLog("[SLC] fix \(location.coordinate)")
+    }
+}
+SWIFT
+
+  _log_case 'a Swift log of the whole error FAILS' 1 'J.swift' <<'SWIFT'
+final class Handler {
+    func report(_ error: Error) {
+        NSLog("[SLC] failed \(error)")
+    }
+}
+SWIFT
+
+  _log_case 'a Swift os_log %{public} of a pubkey FAILS' 1 'K.swift' <<'SWIFT'
+final class Handler {
+    func report(_ pubkey: String) {
+        os_log("[SLC] %{public}@", pubkey)
+    }
+}
+SWIFT
+
+  _log_case "a Swift file with today's safe logs passes" 0 'L.swift' <<'SWIFT'
+final class Handler {
+    func report(_ error: Error) {
+        NSLog("[SLC] failed \(type(of: error))")
+    }
+}
+SWIFT
+
+  # -- Dart: unchanged, and the boundary is pinned in both directions ---------
+  _log_case 'a Dart debugPrint of the runtimeType passes' 0 'M.dart' <<'DART'
+void report(Object e) {
+  debugPrint('[Catchup] sweep failed: ${e.runtimeType}');
+}
+DART
+
+  _log_case 'a Dart debugPrint interpolating a coordinate FAILS' 1 'N.dart' <<'DART'
+void report(Position p) {
+  debugPrint('[Catchup] fix ${p.latitude}');
+}
+DART
+
+  # NOT this guard's job, deliberately: `caught_error_interpolation_test.dart`
+  # parses the AST for a bare `$e` and permits the two release-safe sinks
+  # (debugPrint, assert) that a line-based pattern cannot tell apart — one of
+  # them is a documented, release-stripped diagnostic in the catch-up worker.
+  # A pattern here would report that as a violation and get itself relaxed.
+  _log_case 'a bare $e in Dart is left to the AST lint' 0 'O.dart' <<'DART'
+void report(Object e) {
+  assert(() {
+    debugPrint('[Catchup] detail: $e');
+    return true;
+  }(), 'debug-only diagnostic');
+}
+DART
+
+  _log_case 'a Dart log passing the error as its last argument FAILS' 1 'P.dart' <<'DART'
+void report(Object e) {
+  debugLog('[Catchup] sweep failed', e);
+}
+DART
+
+  # -- anti-vacuity: nothing to scan is a failure, never a clean tree ---------
+  # The two files the iOS native location owner added on 2026-09-04, planted
+  # under their REAL names. Both are dense location surfaces: the Swift handler
+  # holds every CLLocation the device produces, and the Dart source is the other
+  # end of the same channel. The point of naming them here is the false-positive
+  # direction as much as the leak: the sink map's "lat"/"lon" dictionary KEYS
+  # are string literals, so a scan that fired on them would get the map deleted
+  # instead of the leak.
+  _log_case 'HavenLocationStreamHandler.swift: a planted coordinate log FAILS' 1 \
+    'HavenLocationStreamHandler.swift' <<'SWIFT'
+final class HavenLocationStreamHandler {
+  func didUpdate(_ loc: CLLocation) {
+    NSLog("[HavenStream] fix %@", "\(loc.coordinate)")
+  }
+}
+SWIFT
+
+  _log_case 'HavenLocationStreamHandler.swift: the fix map keys alone pass' 0 \
+    'HavenLocationStreamHandler.swift' <<'SWIFT'
+final class HavenLocationStreamHandler {
+  private func fixMap(_ loc: CLLocation, profile: String) -> [String: Any] {
+    return ["lat": loc.coordinate.latitude, "lon": loc.coordinate.longitude]
+  }
+}
+SWIFT
+
+  _log_case 'ios_location_source.dart: a planted coordinate log FAILS' 1 \
+    'ios_location_source.dart' <<'DART'
+void _onNativeEvent(IosFix fix) {
+  debugPrint('[IosLocationSource] fix ${fix.latitude}');
+}
+DART
+
+  _log_case 'an emptied file FAILS' 1 'Q.kt' < /dev/null
+
+  _log_case 'a fully commented-out file FAILS' 1 'R.swift' <<'SWIFT'
+// final class Handler {
+//     func report() {}
+// }
+SWIFT
+
+  local missing_rc=0
+  checked=$(( checked + 1 ))
+  ( presence_only_log_scan "${tmp}/does_not_exist.kt" ) >/dev/null 2>&1 || missing_rc=$?
+  if [[ "${missing_rc}" -eq 1 ]]; then
+    printf '  \033[1;32mPASS\033[0m a missing file FAILS (rc=1)\n'
+  else
+    printf '  \033[1;31mFAIL\033[0m a missing file FAILS (want rc=1, got rc=%d)\n' "${missing_rc}" >&2
+    fails=1
+  fi
+
+  if (( checked != EXPECTED_LOG_FIXTURES )); then
+    printf '\033[1;31m[check_m7_native_wake_guards] FAIL:\033[0m the check-10 self-test ran %d fixture(s) and EXPECTED_LOG_FIXTURES pins %d. Adding or removing a fixture is a deliberate act: change it here in the same commit.\n' \
+      "${checked}" "${EXPECTED_LOG_FIXTURES}" >&2
+    fails=1
+  fi
+  if (( fails )); then
+    printf '\033[1;31m[check_m7_native_wake_guards] FAIL:\033[0m self-test failed — this guard cannot be trusted until it is fixed\n' >&2
+    exit 2
+  fi
+  printf '\033[1;34m[check_m7_native_wake_guards]\033[0m OK: check 10 self-test passed (%d fixtures).\n' "${checked}"
+}
+
 # --- dispatch (before any repo read, so --self-test stays hermetic) --------
 if [[ "${1:-}" == "--self-test" ]]; then
   telemetry_self_test
+  log_scan_self_test
   exit 0
 fi
 if (( $# != 0 )); then
@@ -1154,30 +1468,26 @@ telemetry_dependency_scan "$REPO_ROOT" || FAILED=1
 # 10. No secret/location/error-internal logging in the native wake files (a log
 #     that interpolates a sensitive value, logs it via an os_log %{public}
 #     specifier, or logs an error's whole value / .localizedDescription).
-#     Conservative: current logs use \(type(of: error)) / %@ .code — not flagged.
+#     Conservative: current logs use \(type(of: error)) / %@ .code — not
+#     flagged. The scan itself lives in `presence_only_log_scan` (above), driven
+#     by fixtures in `--self-test`; this loop only names the files it runs on.
+#
+#     THE LIST IS THE CHECK. A native file that is not named here is not
+#     scanned, and nothing else in CI looks at native logging at all — which is
+#     how the four files added on 2026-09-03 (both iOS handlers, the Kotlin wake
+#     lock and its Dart client) sat outside a green guard. A new Swift/Kotlin
+#     file in the background path belongs in this list in the commit that adds
+#     it. The two added by the iOS native location owner are the densest
+#     location surfaces in the app: HavenLocationStreamHandler.swift holds every
+#     CLLocation the device produces, and ios_location_source.dart is the Dart
+#     side of the same channel. Their fixtures are planted below (a `\(loc` in
+#     Swift, a `${fix` in Dart), because the sink map's "lat"/"lon" dictionary
+#     KEYS are string literals, not interpolation, and must not false-positive.
 # ---------------------------------------------------------------------------
-LOG_FN='(NSLog|os_log|print|debugPrint|debugLog)'
-# `\blocation\b` (word-boundaried) so the safe `locations=${result.locations
-# Applied}` counter marker does NOT false-positive, while a real `${location}`
-# still trips.
-SENS='coordinate|latitude|longitude|coord|\blocation\b|geohash|pubkey|npub|nsec|privkey|seckey|secret|exporter|nostr_group|group_id|\blat\b|\blng\b|\blon\b'
-for f in "$SLC" "$BGT" "$WORKER" "$IOS_DART" "$APPDELEGATE" "$MGR"; do
-  code="$(code_view "$f")"
-  logs="$(printf '%s\n' "$code" | grep -nE "$LOG_FN")"
-  # L2: the sensitive-INTERPOLATION scan runs over the WHOLE file (not just the
-  # log-fn line) so a value interpolated on a CONTINUATION line of a multi-line
-  # log call is caught. In these privacy-critical wake files any string
-  # interpolation of a sensitive value is suspect, so a file-wide scan is the
-  # right (stricter) stance — it does not depend on the interpolation sharing a
-  # physical line with the log call.
-  intp="$(printf '%s\n' "$code" | grep -niE '\\\([^)]*('"$SENS"')|\$\{[^}]*('"$SENS"')|\$('"$SENS"')' | head -1)"
-  # %{public}-specifier + error-internals checks stay log-line-scoped (they are
-  # about HOW a log call renders, not where a value appears).
-  pub="$(printf '%s\n' "$logs" | grep -F '%{public}' | grep -iE "$SENS" | head -1)"
-  errl="$(printf '%s\n' "$logs" | grep -E 'localizedDescription|\\\(error\)|\\\(err\)' | head -1)"
-  [[ -z "$intp" ]] || fail "$(basename "$f") interpolates a sensitive value into a string (likely a log leak): $intp"
-  [[ -z "$pub"  ]] || fail "$(basename "$f") logs a sensitive value via os_log %{public}: $pub"
-  [[ -z "$errl" ]] || fail "$(basename "$f") logs error internals (whole error / .localizedDescription): $errl"
+for f in "$SLC" "$BGT" "$WORKER" "$IOS_DART" "$APPDELEGATE" "$MGR" \
+  "$BG_SESSION" "$LOC_AUTH" "$WAKE_LOCK_KT" "$HAVEN_APP_KT" "$WAKE_LOCK_DART" \
+  "$STREAM_HANDLER" "$IOS_SOURCE"; do
+  presence_only_log_scan "$f" || FAILED=1
 done
 
 # ---------------------------------------------------------------------------
@@ -1215,12 +1525,38 @@ done
 # ---------------------------------------------------------------------------
 # 13. AppDelegate MUST retain the handlers as STORED PROPERTIES (a local would
 #     deallocate when didFinishLaunching returns → BGTask [weak self] sees nil
-#     → every task marked failed).
+#     → every task marked failed; for the location stream handler, the
+#     CLLocationManager and the live event sink would go with it and the iOS
+#     position stream would simply end mid-session).
+#
+#     And the location stream handler, the one native file that HOLDS every
+#     coordinate the device produces, must contain NO PUBLISH SITE. Its only
+#     two ways to reach the network are a networking API of its own or a
+#     native→Dart trigger, so both are banned by name: it talks to Dart through
+#     the event sink and its channel replies ONLY. That keeps a background wake
+#     receive-only by construction — unlike the SLC and BGTask handlers, whose
+#     ONE sanctioned trigger (`invokeMethod("runCatchup", arguments: nil)`) is
+#     pinned payload-free by check 12.
 # ---------------------------------------------------------------------------
 code_has_e 'private +(lazy +)?(let|var) +bgTaskHandler' "$APPDELEGATE" ||
   fail "AppDelegate does not retain bgTaskHandler as a stored property"
 code_has_e 'private +(lazy +)?(let|var) +slcHandler' "$APPDELEGATE" ||
   fail "AppDelegate does not retain slcHandler as a stored property"
+code_has_e 'private +(lazy +)?(let|var) +locationStreamHandler' "$APPDELEGATE" ||
+  fail "AppDelegate does not retain locationStreamHandler as a stored property — a local would deallocate when didFinishLaunching returns, taking the CLLocationManager and the live event sink with it, and the iOS position stream would end mid-session with no error anywhere"
+
+if [[ ! -f "$STREAM_HANDLER" ]]; then
+  fail "check 13: expected file not found: $STREAM_HANDLER"
+else
+  stream_view="$(code_view "$STREAM_HANDLER")"
+  if [[ -z "${stream_view//[[:space:]]/}" ]]; then
+    fail "check 13: $(basename "$STREAM_HANDLER") holds no code to scan"
+  fi
+  publish_surface="$(grep -nE 'URLSession|URLRequest|NWConnection|NWListener|NWBrowser|CFStream|URLSessionWebSocketTask|invokeMethod\(' <<<"$stream_view" || true)"
+  if [[ -n "$publish_surface" ]]; then
+    fail "$(basename "$STREAM_HANDLER") gained a network API or a native→Dart invoke: ${publish_surface} — the location stream handler holds every coordinate the device produces and must have NO publish site. It reaches Dart through the event sink and its channel replies only; a networking call would publish from native code that no Dart consent gate can see, and an invokeMethod would be a second wake→work trigger outside the payload-free runCatchup chokepoint (check 12)"
+  fi
+fi
 
 # ===========================================================================
 # RELEASED-STATE PINS (M7-E + M11 LIVE) — checks 14a-14i. A regression that

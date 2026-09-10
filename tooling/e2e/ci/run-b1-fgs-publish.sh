@@ -32,6 +32,45 @@
 #      handoff→hold-complete span and PARSED, never grepped.
 #   4. ASSERT the publishing PID equals the PID that handed off, and that the
 #      service was not destroyed inside that same span.
+#   5. ASSERT, from `dumpsys location`, that from the first background publish
+#      onward Haven holds exactly ONE platform location request; that it is
+#      never shorter than `kLocationPublishMinInterval - kBackgroundFixLeadTime`;
+#      that it carries neither the foreground 1 m distance filter nor a
+#      `minUpdateInterval=` suffix; and that any interval-0 one-shot beside it
+#      belongs to a `trigger=watchdog` cycle — having first seen the foreground
+#      1 s / 1 m request while the app WAS in the foreground.
+#   6. ASSERT, from `dumpsys power`, that the scoped `Haven:publish` lock is
+#      never held past `kPublishWakeLockTimeout`, and that the plugin's
+#      permanent lock — which P2a keeps on purpose — is held throughout.
+#   7. ASSERT the publishes are delivery-driven and spaced: at least two in the
+#      window, at least one of them driven by a platform delivery, and every
+#      such delivery at least 90 % of the registered-interval floor after the
+#      registration that asked for it.
+#   8. ASSERT the no-fix chain: with the GPS drip stopped and the device forced
+#      into DEEP IDLE, a `trigger=watchdog` cycle still publishes — from the
+#      last known position, after the one-shot it cannot answer — inside
+#      `kStreamPositionMaxAge + kBackgroundRepeatInterval + kFirstDeliveryWait
+#      + kOneShotLocationTimeout` plus slack.
+#
+# Steps 5-8 are the runtime proof of Phase P2a (docs/POWER_EFFICIENCY_PLAN.md
+# 5.2). Before it, backgrounded Haven held a 1 Hz / 1 m stream AND took a 30 s
+# HIGH_ACCURACY one-shot every 72 s tick; after it, the platform duty-cycles
+# GNSS between publishes and the CPU hold is Haven's own and bounded. Every
+# bound is derived from the Dart constants at load time, and every `dumpsys`
+# grammar is pinned by a fixture in --self-test.
+#
+# Step 8 is the Doze-POLICY half of POWER_EFFICIENCY_PLAN.md 5.2 step (8), and
+# deliberately only that half. It runs as a SECOND hold, opened by
+# `[b1] IDLE_PHASE_BEGIN` AFTER `[b1] HOLD_COMPLETE` has closed the P2a window,
+# so steps 5-7 still read exactly the steady-state span they always did and the
+# forced-idle span is never mistaken for one.
+#
+# Not assertable here, in step 8 or anywhere else: AP SUSPENSION. The emulator
+# never suspends its application processor, so "a delivery still wakes Dart once
+# the AP is genuinely asleep" — the merge gate for P2b's removal of the
+# permanent wake lock — stays a handset question (POWER_EFFICIENCY_PLAN.md 2.5).
+# Doze POLICY and AP SUSPEND are different claims: the first is software the
+# emulator really applies, the second is silicon it does not have.
 #
 # Each step exists to close a specific false-green route found in adversarial
 # review:
@@ -80,6 +119,115 @@ set -Eeuo pipefail
 # hermetic self-test runs against a fully-wired script.
 # shellcheck source=tooling/e2e/ci/drive-log-lib.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/drive-log-lib.sh"
+
+# ---------------------------------------------------------------------------
+# Paths, package identity, and the power-oracle constants.
+#
+# Hoisted ABOVE the --self-test dispatch on purpose: the power oracles are
+# pure functions over a logcat capture and a `dumpsys` sample file, the
+# hermetic self-test drives them END TO END, and the constants they compare
+# against are READ OUT OF THE DART SOURCE. All three have to be wired before
+# the dispatch or the self-test would be validating a half-built script.
+# ---------------------------------------------------------------------------
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR="${script_dir}"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+readonly REPO_ROOT
+readonly PKG="com.oblivioustech.haven"
+
+# logcat tag the power sampler stamps each sample with. It is what puts the
+# samples and the drive's own markers on ONE ordered timeline, on the DEVICE's
+# clock, without any host-side clock arithmetic (the B8 lane's trap).
+readonly SAMPLE_TAG="b1power"
+readonly SAMPLE_PERIOD_SECS=5
+
+readonly LOCATION_CONSTANTS_SRC="${REPO_ROOT}/haven/lib/src/constants/location.dart"
+
+# Read `const Duration <name> = Duration(seconds: N);` out of the Dart source.
+#
+# Every bound below is DERIVED rather than typed here. A hand-typed 62 keeps
+# passing after a deliberate change to the cadence — checking nothing, while
+# looking exactly like a check. Empty output is a hard error at load time
+# (below) rather than a silent 0.
+dart_duration_secs() {
+  local name="$1" depth="${2:-0}" secs alias
+  secs="$(sed -n \
+    "s/^const Duration ${name} = Duration(seconds: \([0-9]\{1,\}\));\$/\1/p" \
+    "${LOCATION_CONSTANTS_SRC}" 2>/dev/null | head -1)"
+  if [[ -n "${secs}" ]]; then
+    printf '%s\n' "${secs}"
+    return 0
+  fi
+  # `const Duration kStreamPositionMaxAge = kLocationPublishMaxInterval;` — the
+  # ALIAS is the point of that declaration (the two constants are one number by
+  # construction, and the Dart doc says so), so following it keeps the bound
+  # derived instead of re-typing the number the alias exists to avoid. Depth-
+  # bounded, so a cyclic edit fails at load time rather than recursing.
+  (( depth < 4 )) || return 1
+  alias="$(sed -n \
+    "s/^const Duration ${name} = \([A-Za-z_][A-Za-z0-9_]*\);\$/\1/p" \
+    "${LOCATION_CONSTANTS_SRC}" 2>/dev/null | head -1)"
+  [[ -n "${alias}" ]] || return 1
+  dart_duration_secs "${alias}" "$((depth + 1))"
+}
+
+if ! PUBLISH_MIN_INTERVAL_SECS="$(dart_duration_secs kLocationPublishMinInterval)" \
+   || ! FIX_LEAD_SECS="$(dart_duration_secs kBackgroundFixLeadTime)" \
+   || ! WAKE_LOCK_MAX_AGE_SECS="$(dart_duration_secs kPublishWakeLockTimeout)" \
+   || ! STREAM_MAX_AGE_SECS="$(dart_duration_secs kStreamPositionMaxAge)" \
+   || ! WATCHDOG_PERIOD_SECS="$(dart_duration_secs kBackgroundRepeatInterval)" \
+   || ! FIRST_DELIVERY_WAIT_SECS="$(dart_duration_secs kFirstDeliveryWait)" \
+   || ! ONE_SHOT_TIMEOUT_SECS="$(dart_duration_secs kOneShotLocationTimeout)"
+then
+  echo "run-b1-fgs-publish.sh: could not read the publish-cadence constants from \
+${LOCATION_CONSTANTS_SRC}. The declarations moved or changed shape, so every bound \
+below would be scanning nothing. Fix the extraction, never the bound." >&2
+  exit 2
+fi
+readonly PUBLISH_MIN_INTERVAL_SECS FIX_LEAD_SECS WAKE_LOCK_MAX_AGE_SECS
+readonly STREAM_MAX_AGE_SECS WATCHDOG_PERIOD_SECS FIRST_DELIVERY_WAIT_SECS
+readonly ONE_SHOT_TIMEOUT_SECS
+
+# The floor on the FGS's registered interval once it has published.
+#
+# `_ensureRegistration` aims at `earliestDue - kBackgroundFixLeadTime`, and for
+# the circle that just published `earliestDue = publishStart + J` with the
+# CSPRNG draw J in [kLocationPublishMinInterval, kLocationPublishMaxInterval].
+# So the interval it asks for is `J - lead - delta` — [62, 158] s here, and a
+# RETRY registration after a failed publish is `kBackgroundRepeatInterval -
+# lead` = 62 s exactly. 72 would therefore red a CORRECT implementation on
+# every draw below 82 s, about one in ten.
+readonly MIN_FIX_INTERVAL_SECS=$((PUBLISH_MIN_INTERVAL_SECS - FIX_LEAD_SECS))
+
+# The floor on the spacing between two delivery-driven publishes: 90 % of the
+# registered-interval floor, because the interval is what the platform is ASKED
+# for and delivery lands at `>= interval` minus nothing but measurement noise.
+# floor(0.9 x 62) = 55; a healthy boundary run lands at ~55.8 s, so 56 would be
+# a false-red generator.
+readonly MIN_DELIVERY_GAP_SECS=$((MIN_FIX_INTERVAL_SECS * 9 / 10))
+
+# Step 8's bound: how long the no-fix chain may take to publish once the GPS
+# drip has stopped and the device is in deep idle.
+#
+# Every term is the length of one link in that chain, and every one of them is
+# read out of the Dart source above:
+#
+#   kStreamPositionMaxAge     the cached stream fix must age out before the
+#                             cycle stops being served from it,
+#   kBackgroundRepeatInterval the watchdog tick granularity — the cycle can only
+#                             start on a tick,
+#   kFirstDeliveryWait        the cold-cache wait for a platform answer that
+#                             will not come,
+#   kOneShotLocationTimeout   the one-shot that cannot succeed, before
+#                             `getLastKnownPosition()` finally answers.
+#
+# The last term is a MARGIN, not a bound: the encrypt, the relay ack and the
+# shell's own force-idle round trip on a loaded emulator. It is the only
+# hand-chosen number here, and it is deliberately additive so that no derived
+# term can be quietly widened by tuning it.
+readonly NO_FIX_SLACK_SECS=30
+readonly NO_FIX_BOUND_SECS=$((STREAM_MAX_AGE_SECS + WATCHDOG_PERIOD_SECS \
+  + FIRST_DELIVERY_WAIT_SECS + ONE_SHOT_TIMEOUT_SECS + NO_FIX_SLACK_SECS))
 
 # ---------------------------------------------------------------------------
 # VERBATIM markers (haven/lib/src/services/background_location_task.dart).
@@ -138,6 +286,29 @@ readonly MARK_HANDOFF_OK='[b1] HANDOFF_CONFIRMED'
 # the window it was supposed to publish in" and fails a passing lane. MUST match
 # `kHoldCompleteMarker` in the drive target VERBATIM.
 readonly MARK_HOLD_DONE='[b1] HOLD_COMPLETE'
+# Step 8's own window. Printed by the drive AFTER MARK_HOLD_DONE — the P2a
+# window is closed by then, so the forced-idle span is never read as steady
+# state — and it is what tells THIS script to stop the GPS drip and force the
+# device into deep idle. MUST match `kIdlePhaseBeginMarker` /
+# `kIdlePhaseEndMarker` in the drive target VERBATIM.
+readonly MARK_IDLE_BEGIN='[b1] IDLE_PHASE_BEGIN'
+readonly MARK_IDLE_END='[b1] IDLE_PHASE_END'
+# This script's own device-stamped record that deep idle actually ENGAGED,
+# carrying the authoritative `dumpsys deviceidle get deep` read-back.
+#
+# The read-back is the whole point. `dumpsys deviceidle force-idle` answers a
+# device whose deep idle is disabled with "Unable to go deep idle; not enabled"
+# and exits 0 all the same, so keying step 8 on the command instead of on the
+# state would let a lane that never dozed report the ordinary watchdog as a Doze
+# result — a green row proving nothing, which is the failure mode this file
+# spends most of its length avoiding.
+readonly MARK_IDLE_FORCED='IDLE_FORCED state='
+readonly MARK_TRIGGER_WATCHDOG='[BackgroundTask] cycle trigger=watchdog'
+# The registration the cadence oracle measures its deliveries from. Logged in
+# step 7c of `_publishCycle`, BEFORE the fix and the publish of the same cycle,
+# so the registration that produced a delivery is the one logged in the cycle
+# BEFORE it.
+readonly MARK_REG_ARMED='[BackgroundTask] registration armed ('
 
 # Extract the publish COUNT (N of "Published to N/M due circle(s)") from the
 # highest-N line in a log. Emits nothing when no line matches; callers treat
@@ -193,6 +364,893 @@ pid_of_marker() {
   { awk -v m="${marker}" 'index($0, m) { print $3; exit }' "${logfile}" 2>/dev/null; } || true
 }
 
+# ===========================================================================
+# POWER ORACLES (steps 5-7) — the `dumpsys` half of the lane.
+#
+# ## What they read
+#
+# One power SAMPLE is one `adb shell` invocation that stamps logcat, prints the
+# DEVICE clock, and dumps `location` and `power`. The stamp is what makes the
+# samples orderable against the drive's own markers without any host-side clock
+# arithmetic: `[b1] HANDOFF_CONFIRMED` and `b1power: SAMPLE 17` are two lines in
+# ONE logcat capture, so "which samples are before the handoff" is a question
+# about line order, not about two clocks agreeing. (A host-clock sampler is the
+# trap B8 was built around.)
+#
+# ## The grammars, and why they are fixtures
+#
+# Both dumps are `toString()` output of AOSP classes, i.e. an unversioned
+# interface that can change under us:
+#
+#   `LocationProviderManager.Registration.toString` (android14-release :705-726)
+#       <uid>/<package>[/<listener>] [bg] <LocationRequest>
+#   `LocationRequest.toString` (:844-905)
+#       Request[<provider> @<TimeUtils.formatDuration> HIGH_ACCURACY
+#               (, minUpdateInterval=<duration> only when < interval)
+#               (, minUpdateDistance=<meters> only when > 0)]
+#   `PowerManagerService.WakeLock.toString` (:5366-5396)
+#       PARTIAL_WAKE_LOCK 'Haven:publish' ACQ=-12s345ms (uid=… pid=…)
+#   `TimeUtils.formatDuration` (fieldLen 0)
+#       (+|-)(Nd)?(Nh)?(Nm)?Ns Nms, and the bare string "0" for a zero duration
+#
+# Every one of those is pinned by a fixture in --self-test, so a platform text
+# change lands as a red parser rather than as an oracle that quietly stops
+# matching anything. At RUN time the same shape is protected twice over: an
+# unparseable `Request[…]` is a hard failure (never a skipped line), and the
+# anti-vacuity check below fails a capture in which the parser found no
+# foreground request at all.
+#
+# ## What is NOT proven here
+#
+# AP suspension. The emulator never suspends its application processor, so this
+# lane can show that the FGS asks the platform for a long-interval fix and that
+# the scoped lock is bounded — it cannot show that a delivery still wakes Dart
+# once the AP is genuinely asleep. That question belongs to a handset
+# (docs/POWER_EFFICIENCY_PLAN.md 2.5), and it is why the permanent plugin wake
+# lock is still held here and asserted PRESENT rather than absent.
+# ===========================================================================
+
+# `TimeUtils.formatDuration` token -> integer milliseconds.
+#
+# Returns 1 (printing nothing) on anything that is not that grammar, which is
+# how a platform text change reaches the caller as a failure. Note the trailing
+# field really is "<millis>ms": `printFieldLocked(…, millis, 'm', …)` then a
+# literal 's'.
+formatted_duration_ms() {
+  local tok="$1" sign=1 body d h m s ms
+  if [[ "${tok}" == "0" ]]; then
+    printf '0\n'
+    return 0
+  fi
+  case "${tok}" in
+    -*) sign=-1 ;;
+    +*) sign=1 ;;
+    *) return 1 ;;
+  esac
+  body="${tok:1}"
+  [[ "${body}" =~ ^(([0-9]+)d)?(([0-9]+)h)?(([0-9]+)m)?([0-9]+)s([0-9]+)ms$ ]] || return 1
+  d=$((10#${BASH_REMATCH[2]:-0}))
+  h=$((10#${BASH_REMATCH[4]:-0}))
+  m=$((10#${BASH_REMATCH[6]:-0}))
+  s=$((10#${BASH_REMATCH[7]}))
+  ms=$((10#${BASH_REMATCH[8]}))
+  printf '%d\n' "$((sign * ((((d * 24 + h) * 60 + m) * 60 + s) * 1000 + ms)))"
+}
+
+# Split every LIVE Haven LocationManager registration in samples [lo, hi] into
+# "<sample>\t<duration-token>\t<minUpdateDistance|->\t<request>".
+#
+# Two lines in `dumpsys location` look exactly like a registration of ours and
+# are not one, and BOTH would break the oracles rather than merely add noise:
+#
+#   * `service: ProviderRequest[@… WorkSource{<uid> <pkg>}]` — the provider's
+#     MERGED request. It names our package and contains "Request[" as a
+#     substring, so it would read as a second concurrent registration. The
+#     leading SPACE in " Request[" excludes it (`ProviderRequest[` has none).
+#   * `gps provider +registration <uid>/<pkg> -> Request[gps @+1s0ms …
+#     minUpdateDistance=1.0]` — the Event Log REPLAYING a registration that has
+#     since been cancelled. It keeps printing the foreground 1 s / 1 m request
+#     for the rest of the run, so it would resurrect the very request the
+#     background assertion says is gone. Anchoring on `CallerIdentity.toString`
+#     at the START of the line — which is where `Registration.toString` puts it
+#     and where the event log does not — excludes it.
+#
+# An `(inactive)` suffix is deliberately NOT excluded: a registration that still
+# exists is still one Haven has not released.
+#
+# The package match is anchored at BOTH ends. A prefix match would count
+# `<pkg>.test` — the instrumentation package this very lane installs alongside
+# the app — as one of ours, and a second "Haven" registration is a hard failure
+# in the oracle below. `CallerIdentity.toString` puts an attribution tag behind
+# a `/`, the historical-aggregate line a `:`, and nothing else can follow the
+# package name but a space or the end of the line.
+_location_request_fields() {
+  local samplefile="$1" lo="$2" hi="$3"
+  awk -v pkg="${PKG}" -v lo="${lo}" -v hi="${hi}" '
+    /^=== SAMPLE n=/ {
+      n = $0
+      sub(/^=== SAMPLE n=/, "", n)
+      sub(/[^0-9].*$/, "", n)
+      n += 0
+      inrange = (n >= lo && n <= hi)
+      next
+    }
+    !inrange { next }
+    match($0, /^[ \t]*[0-9]+\//) == 0 { next }
+    { identity = substr($0, RSTART + RLENGTH) }
+    index(identity, pkg) != 1 { next }
+    { after = substr(identity, length(pkg) + 1, 1) }
+    after != "" && after != "/" && after != ":" && after != " " { next }
+    { at = index($0, " Request[") }
+    at == 0 { next }
+    {
+      req = substr($0, at + 9)
+      closing = index(req, "]")
+      if (closing == 0) { print n "\tGRAMMAR\t-\t" $0; next }
+      req = substr(req, 1, closing - 1)
+      a = index(req, "@")
+      if (a == 0) { print n "\tGRAMMAR\t-\t" req; next }
+      tail = substr(req, a + 1)
+      sp = index(tail, " ")
+      dur = (sp == 0) ? tail : substr(tail, 1, sp - 1)
+      dist = "-"
+      k = index(req, "minUpdateDistance=")
+      if (k > 0) {
+        dist = substr(req, k + 18)
+        c = index(dist, ",")
+        if (c > 0) dist = substr(dist, 1, c - 1)
+      }
+      print n "\t" dur "\t" dist "\t" req
+    }
+  ' "${samplefile}" 2>/dev/null || true
+}
+
+# As above, with the duration token resolved to milliseconds:
+# "<sample>|<interval-ms>|<minUpdateDistance|->|<request>". An interval of
+# "GRAMMAR" means the line did not parse and is a hard failure for every caller.
+location_request_records() {
+  local samplefile="$1" lo="$2" hi="$3" n tok dist req ms
+  while IFS=$'\t' read -r n tok dist req; do
+    if ms="$(formatted_duration_ms "${tok}")"; then
+      printf '%s|%s|%s|%s\n' "${n}" "${ms}" "${dist}" "${req}"
+    else
+      printf '%s|GRAMMAR|%s|%s\n' "${n}" "${dist}" "${req}"
+    fi
+  done < <(_location_request_fields "${samplefile}" "${lo}" "${hi}")
+}
+
+# "<sample>\t<tag>\t<ACQ token>" for every HELD wake lock in samples [lo, hi].
+#
+# Keyed on the LOCK LEVEL plus the quoted tag ("PARTIAL_WAKE_LOCK 'x'"), which
+# `WakeLock.toString` always prints, rather than on `ACQ=`, which it prints only
+# once the lock has been notified. Keying on `ACQ=` would make a lock that
+# printed without one DISAPPEAR, and "the plugin lock went away" is a very
+# different finding from "we could not read its age".
+_wake_lock_fields() {
+  local samplefile="$1" lo="$2" hi="$3"
+  awk -v lo="${lo}" -v hi="${hi}" -v q="'" '
+    /^=== SAMPLE n=/ {
+      n = $0
+      sub(/^=== SAMPLE n=/, "", n)
+      sub(/[^0-9].*$/, "", n)
+      n += 0
+      inrange = (n >= lo && n <= hi)
+      next
+    }
+    !inrange { next }
+    index($0, "WAKE_LOCK " q) == 0 { next }
+    {
+      q1 = index($0, q)
+      rest = substr($0, q1 + 1)
+      q2 = index(rest, q)
+      if (q2 == 0) { print n "\tGRAMMAR\t" $0; next }
+      a = index($0, "ACQ=")
+      if (a == 0) { print n "\t" substr(rest, 1, q2 - 1) "\tNOACQ"; next }
+      tail = substr($0, a + 4)
+      sp = index(tail, " ")
+      print n "\t" substr(rest, 1, q2 - 1) "\t" ((sp == 0) ? tail : substr(tail, 1, sp - 1))
+    }
+  ' "${samplefile}" 2>/dev/null || true
+}
+
+# "<sample>|<tag>|<held-for-ms>" per held wake lock. `ACQ=` is the acquire time
+# MINUS now, so the age is the negation.
+wake_lock_records() {
+  local samplefile="$1" lo="$2" hi="$3" n tag tok ms
+  while IFS=$'\t' read -r n tag tok; do
+    if [[ "${tag}" == "GRAMMAR" ]]; then
+      printf '%s|GRAMMAR|%s\n' "${n}" "${tok}"
+    elif ms="$(formatted_duration_ms "${tok}")"; then
+      printf '%s|%s|%s\n' "${n}" "${tag}" "$((-ms))"
+    else
+      # The tag survives an unreadable age, so "the lock is held" and "we can
+      # read how long for" stay separate findings.
+      printf '%s|%s|UNREADABLE\n' "${n}" "${tag}"
+    fi
+  done < <(_wake_lock_fields "${samplefile}" "${lo}" "${hi}")
+}
+
+# The index of every sample the sampler actually WROTE in [lo, hi], ascending.
+sample_indices() {
+  local samplefile="$1" lo="$2" hi="$3"
+  awk -v lo="${lo}" -v hi="${hi}" '
+    /^=== SAMPLE n=/ {
+      n = $0
+      sub(/^=== SAMPLE n=/, "", n)
+      sub(/[^0-9].*$/, "", n)
+      n += 0
+      if (n >= lo && n <= hi) print n
+    }
+  ' "${samplefile}" 2>/dev/null || true
+}
+
+# Highest sample index whose logcat stamp precedes the FIRST line containing
+# <marker>; 0 when no sample precedes it, nothing at all when <marker> is
+# absent (so a caller can tell the two apart).
+last_sample_before() {
+  local logfile="$1" marker="$2"
+  awk -v m="${marker}" -v tag="${SAMPLE_TAG}: SAMPLE " '
+    BEGIN { last = 0 }
+    index($0, m) { print last; found = 1; exit }
+    { i = index($0, tag); if (i > 0) last = substr($0, i + length(tag)) + 0 }
+    END { if (!found) exit 1 }
+  ' "${logfile}" 2>/dev/null || true
+}
+
+# Lowest sample index whose logcat stamp FOLLOWS the first line containing
+# <marker>; empty when there is none.
+first_sample_after() {
+  local logfile="$1" marker="$2"
+  awk -v m="${marker}" -v tag="${SAMPLE_TAG}: SAMPLE " '
+    !seen { if (index($0, m)) seen = 1; next }
+    { i = index($0, tag); if (i > 0) { print substr($0, i + length(tag)) + 0; exit } }
+  ' "${logfile}" 2>/dev/null || true
+}
+
+# "<sample>|<trigger>" for every sample stamp in the capture: the trigger of the
+# most recent `[BackgroundTask] cycle trigger=` line at or before that stamp, or
+# `none` when no cycle had started yet.
+#
+# What makes the interval-0 carve-out safe rather than a hole.
+# `getCurrentLocation()`'s one-shot carries no interval at all and so prints as
+# `Request[gps @0 …]`; P2a keeps it, but ONLY as the cache-miss fallback the
+# watchdog falls back to. The request P2a retired — a 30 s HIGH_ACCURACY
+# one-shot on EVERY cycle, delivery-driven ones included — has exactly the same
+# printed shape, so excluding `@0` from the concurrency count without asking
+# WHICH cycle it belongs to lets that regression sit beside the long
+# registration with the lane still green.
+#
+# Line order, not clock arithmetic: the sampler stamps logcat from the device in
+# the same round trip that takes the dump, so "which cycle was running when this
+# sample was taken" is a question about position in one capture.
+sample_trigger_context() {
+  awk -v tag="${SAMPLE_TAG}: SAMPLE " -v m='[BackgroundTask] cycle trigger=' '
+    {
+      i = index($0, m)
+      if (i > 0) {
+        last = substr($0, i + length(m))
+        sub(/[ \t\r].*$/, "", last)
+        next
+      }
+    }
+    {
+      i = index($0, tag)
+      if (i > 0) {
+        print (substr($0, i + length(tag)) + 0) "|" (last == "" ? "none" : last)
+      }
+    }
+  ' "$1" 2>/dev/null || true
+}
+
+# The first `Published to N/M` line with N >= 1, verbatim. Used as the opening
+# boundary of the steady-state assertions: before the first publish the FGS is
+# legitimately allowed a short registration (everything is already due, so the
+# interval formula floors), and asserting the steady state across that would be
+# asserting it where it does not hold.
+first_successful_publish_line() {
+  awk '
+    { i = index($0, "Published to ") }
+    i == 0 { next }
+    { n = substr($0, i + 13); sub(/\/.*$/, "", n); if (n + 0 >= 1) { print; exit } }
+  ' "$1" 2>/dev/null || true
+}
+
+# How many cycles reported a publish to at least one circle.
+successful_publish_count() {
+  awk '
+    { i = index($0, "Published to ") }
+    i == 0 { next }
+    { n = substr($0, i + 13); sub(/\/.*$/, "", n); if (n + 0 >= 1) c++ }
+    END { print c + 0 }
+  ' "$1" 2>/dev/null || echo 0
+}
+
+# Milliseconds from the registration that PRODUCED a delivery to that delivery,
+# one line per delivery-driven cycle that went on to publish.
+#
+# Anchored on the REGISTRATION, not on the previous delivery. A
+# delivery-to-delivery measurement needs TWO delivery-driven publishes inside
+# one window, and a healthy hold contains exactly one: the hold is sized for
+# ">= 1 delivery-driven publish" (`kLocationPublishMaxInterval` plus slack), and
+# a second one needs two CSPRNG draws summing under that, which J ~ U[72, 168]
+# does on roughly one run in six. Seeding `prev` on the first publish therefore
+# yielded N-1 = 0 gaps and an empty loop on ~83 % of HEALTHY runs — an oracle
+# that self-disables rather than flaking, which is worse, because it reports a
+# check it never ran. The registration precedes its own delivery by
+# construction, so this pair exists on every delivery-driven publish there is.
+#
+# Anchored on the ARM rather than on the publish of the same cycle: the publish
+# line trails the arm by that cycle's fix + encrypt + ack + fetch latency, and
+# at the boundary draw (I = 62 s) that latency would spend the entire 7 s the
+# 90 % floor allows and red a correct run under emulator load. The arm is also
+# the honest subject — the interval is what the platform was ASKED for.
+#
+# A delivery that did not lead to a publish is not a cadence point, and neither
+# is any other trigger (`watchdog`, `paused-signal`, `pending-delivery`) — the
+# whole claim is about the delivery-driven path. A delivery-driven publish with
+# NO registration before it in the window is emitted as `NOARM`: unmeasurable,
+# which the caller FAILS rather than skips.
+delivery_gaps_after_registration() {
+  awk '
+    function ts(dm, hms,   md, t, mo, dy, cum, i) {
+      split(dm, md, "-"); split(hms, t, ":")
+      mo = md[1] + 0; dy = md[2] + 0; cum = 0
+      for (i = 1; i < mo; i++) cum += mlen[i]
+      return (cum + dy) * 86400 + t[1] * 3600 + t[2] * 60 + t[3]
+    }
+    BEGIN {
+      # Day lengths only ever resolve a midnight rollover inside one ~20-minute
+      # run, so the year (and the leap day) cannot matter. A run that somehow
+      # produced a NEGATIVE gap is reported as one and fails the caller rather
+      # than being wrapped into a plausible number.
+      split("31 28 31 30 31 30 31 31 30 31 30 31", mlen, " ")
+      armed = -1; pending = -1; pending_arm = -1
+    }
+    index($0, "[BackgroundTask] registration armed (") { armed = ts($1, $2); next }
+    index($0, "[BackgroundTask] cycle trigger=") {
+      if (index($0, "trigger=delivery") > 0) {
+        pending = ts($1, $2); pending_arm = armed
+      } else {
+        pending = -1
+      }
+      next
+    }
+    {
+      i = index($0, "Published to ")
+      if (i == 0 || pending < 0) next
+      n = substr($0, i + 13); sub(/\/.*$/, "", n)
+      if (n + 0 < 1) next
+      if (pending_arm < 0) print "NOARM"
+      else printf "%d\n", int((pending - pending_arm) * 1000 + 0.5)
+      pending = -1
+    }
+  ' "$1" 2>/dev/null || true
+}
+
+# ---------------------------------------------------------------------------
+# Oracle step 5 — ONE long-interval platform request while backgrounded.
+#
+# Prints `FAIL: …` for each violation and returns 1 if there was any; prints
+# `  ` -prefixed evidence otherwise. Split out from Phase 5 so --self-test can
+# drive it end to end over synthetic captures rather than per-predicate.
+# ---------------------------------------------------------------------------
+assert_registration_oracle() {
+  local logfile="$1" samplefile="$2" windowfile="$3"
+  local rc=0 pre_max post_min hold_max pub_line
+  local n ms dist req ui_seen=0 long_seen=0
+  local ctx_n ctx_trigger
+  local -A trigger_at=()
+
+  pre_max="$(last_sample_before "${logfile}" "${MARK_HANDOFF_OK}")"
+  if [[ -z "${pre_max}" ]]; then
+    echo "FAIL: no '${MARK_HANDOFF_OK}' in the capture, so no sample can be classified \
+as before or after the handoff."
+    return 1
+  fi
+  pub_line="$(first_successful_publish_line "${windowfile}")"
+  if [[ -z "${pub_line}" ]]; then
+    echo "FAIL: no successful publish in the proof window, so the steady state the \
+registration oracle describes was never entered."
+    return 1
+  fi
+  post_min="$(first_sample_after "${logfile}" "${pub_line}")"
+  if [[ -z "${post_min}" ]]; then
+    echo "FAIL: no power sample was taken after the first publish — the sampler died, \
+or the hold ended inside one sample period. Every steady-state assertion below would \
+be vacuous."
+    return 1
+  fi
+  hold_max="$(last_sample_before "${logfile}" "${MARK_HOLD_DONE}")"
+  # No close marker means the drive died mid-hold; run to the end of the
+  # capture, which is the conservative direction (more samples asserted over).
+  [[ -n "${hold_max}" ]] || hold_max=999999
+
+  # (a) ANTI-VACUITY. A dump in which the parser sees NOTHING must never read as
+  #     "no fast request": it reads as a broken parser. The foreground stream is
+  #     1 s / 1 m, so it is the positive control, and the whole background claim
+  #     is that this exact request is gone afterwards.
+  while IFS='|' read -r n ms dist req; do
+    if [[ "${ms}" == "GRAMMAR" ]]; then
+      echo "FAIL: could not parse a Haven location request in sample ${n}: '${req}'. \
+The dumpsys grammar changed; fix the parser and its fixtures, never the assertion."
+      rc=1
+    elif [[ "${dist}" == "1.0" && "${ms}" == "1000" ]]; then
+      ui_seen=1
+    fi
+  done < <(location_request_records "${samplefile}" 1 "${pre_max}")
+  if (( ui_seen == 0 )); then
+    echo "FAIL: no sample before the handoff showed the foreground 1 s / 1 m request \
+(@+1s0ms … minUpdateDistance=1.0) in samples 1-${pre_max}. Either the UI never held \
+the stream, or the sampler/parser saw nothing — in which case every 'no fast request' \
+finding below would be vacuous."
+    rc=1
+  fi
+
+  # Which cycle each sample was taken during — the input to the interval-0
+  # attribution below. Read over the WHOLE capture, because a sample's cycle is
+  # whichever one last announced itself before it, regardless of window.
+  while IFS='|' read -r ctx_n ctx_trigger; do
+    trigger_at[${ctx_n}]="${ctx_trigger}"
+  done < <(sample_trigger_context "${logfile}")
+
+  # (b)-(d) The steady state, from the first publish to the close of the window.
+  local -a positive_per_sample=()
+  while IFS='|' read -r n ms dist req; do
+    if [[ "${ms}" == "GRAMMAR" ]]; then
+      echo "FAIL: could not parse a Haven location request in sample ${n}: '${req}'. \
+The dumpsys grammar changed; fix the parser and its fixtures, never the assertion."
+      rc=1
+      continue
+    fi
+    if [[ "${dist}" == "1.0" ]]; then
+      echo "FAIL: sample ${n} still shows the foreground 1 m distance filter while \
+backgrounded: '${req}'. The UI stream was not released at the handoff, so the FGS's \
+long-interval request is running ON TOP of a 1 Hz one."
+      rc=1
+    fi
+    # `LocationRequest.toString` prints `minUpdateInterval=` ONLY when the
+    # fastest interval is below the interval, and geolocator's background
+    # profile sets the two equal (`LocationManagerClient.java:182-185`). Its
+    # presence therefore means the platform has been given permission to deliver
+    # faster than the duty cycle the interval buys — the duty cycle IS the
+    # saving, so a faster-than-asked delivery spends it.
+    if [[ "${req}" == *"minUpdateInterval="* ]]; then
+      echo "FAIL: sample ${n} shows a Haven location request carrying a \
+minUpdateInterval= suffix: '${req}'. That suffix is printed only when the fastest \
+interval is BELOW the interval, so the platform may deliver faster than the \
+registration's own duty cycle."
+      rc=1
+    fi
+    if (( ms > 0 && ms < MIN_FIX_INTERVAL_SECS * 1000 )); then
+      echo "FAIL: sample ${n} shows a Haven location request at $((ms / 1000)) s, below \
+the ${MIN_FIX_INTERVAL_SECS} s floor (kLocationPublishMinInterval ${PUBLISH_MIN_INTERVAL_SECS} s \
+- kBackgroundFixLeadTime ${FIX_LEAD_SECS} s): '${req}'. The FGS is asking the platform \
+to run GNSS faster than the publish cadence can ever use."
+      rc=1
+    fi
+    if (( ms >= MIN_FIX_INTERVAL_SECS * 1000 )); then
+      long_seen=1
+    fi
+    # An interval of exactly 0 is the ONE-SHOT (`getCurrentLocation()`, whose
+    # request carries no interval at all), not a stream. P2a keeps it as the
+    # cache-miss fallback the watchdog falls back to, so it is deliberately not
+    # counted as a concurrent registration — but ONLY when it is attributable to
+    # that fallback. The request P2a retired (a 30 s HIGH_ACCURACY one-shot per
+    # tick) prints identically, so an unattributed carve-out would let the whole
+    # runtime half of this phase's saving regress with the lane still green.
+    if (( ms == 0 )) && [[ "${trigger_at[${n}]:-none}" != "watchdog" ]]; then
+      echo "FAIL: sample ${n} shows an interval-0 one-shot ('${req}') while the most \
+recent background cycle was 'trigger=${trigger_at[${n}]:-none}'. P2a keeps \
+getCurrentLocation() ONLY as the watchdog's cache-miss fallback; a one-shot on a \
+delivery-driven cycle is the per-tick 30 s HIGH_ACCURACY request this phase retired, \
+running again beside the long registration."
+      rc=1
+    fi
+    if (( ms > 0 )); then
+      positive_per_sample[n]=$(( ${positive_per_sample[n]:-0} + 1 ))
+    fi
+  done < <(location_request_records "${samplefile}" "${post_min}" "${hold_max}")
+
+  if (( long_seen == 0 )); then
+    echo "FAIL: no sample between ${post_min} and ${hold_max} showed a Haven location \
+request of at least ${MIN_FIX_INTERVAL_SECS} s. Haven's own \
+'[BackgroundTask] registration armed' line is not enough — this is the PLATFORM's copy \
+of the request, and its absence means the registration never reached LocationManager."
+    rc=1
+  fi
+  for n in "${!positive_per_sample[@]}"; do
+    if (( positive_per_sample[n] > 1 )); then
+      echo "FAIL: sample ${n} shows ${positive_per_sample[n]} concurrent Haven location \
+registrations. Exactly one owner per isolate, exclusive by lifecycle, is the whole \
+Android power claim."
+      rc=1
+    fi
+  done
+
+  if (( rc == 0 )); then
+    echo "  registration: 1 s / 1 m seen pre-handoff (samples 1-${pre_max}); from \
+sample ${post_min} on, one request only, never under ${MIN_FIX_INTERVAL_SECS} s, no \
+distance filter, no minUpdateInterval=, no unattributed one-shot."
+  fi
+  return "${rc}"
+}
+
+# ---------------------------------------------------------------------------
+# Oracle step 6 — wake locks.
+# ---------------------------------------------------------------------------
+assert_wake_lock_oracle() {
+  local logfile="$1" samplefile="$2"
+  local rc=0 first hold_max n tag age publish_seen=0
+  local -a plugin_held=()
+
+  first="$(first_sample_after "${logfile}" "${MARK_HANDOFF_OK}")"
+  if [[ -z "${first}" ]]; then
+    echo "FAIL: no power sample was taken after the handoff, so nothing can be said \
+about the wake locks held while backgrounded."
+    return 1
+  fi
+  hold_max="$(last_sample_before "${logfile}" "${MARK_HOLD_DONE}")"
+  [[ -n "${hold_max}" ]] || hold_max=999999
+
+  while IFS='|' read -r n tag age; do
+    if [[ "${tag}" == "GRAMMAR" ]]; then
+      echo "FAIL: could not parse a wake-lock line in sample ${n} (ACQ token '${age}'). \
+The dumpsys power grammar changed; fix the parser and its fixtures."
+      rc=1
+      continue
+    fi
+    case "${tag}" in
+      'ForegroundService:WakeLock')
+        plugin_held[n]=1
+        ;;
+      'Haven:publish')
+        publish_seen=$((publish_seen + 1))
+        if [[ "${age}" == "UNREADABLE" ]]; then
+          echo "FAIL: sample ${n} holds 'Haven:publish' with no readable ACQ= age. The \
+bound on that hold is the only thing only a device can show, so an unreadable age is a \
+grammar failure, not a lock to pass over."
+          rc=1
+        elif (( age > WAKE_LOCK_MAX_AGE_SECS * 1000 )); then
+          echo "FAIL: sample ${n} shows 'Haven:publish' held for $((age / 1000)) s, past \
+its own ${WAKE_LOCK_MAX_AGE_SECS} s ceiling (kPublishWakeLockTimeout, coerced natively by \
+PublishWakeLock.MAX_TIMEOUT_MS). A cycle re-acquires between stagger, publish and fetch, \
+which RE-POSTS the timeout, so reaching the ceiling at all means Dart's finally did not \
+release."
+          rc=1
+        fi
+        ;;
+    esac
+  done < <(wake_lock_records "${samplefile}" "${first}" "${hold_max}")
+
+  # Asserted over the samples that were actually TAKEN, not over an index range:
+  # a sample the sampler never wrote must not read as "the lock was absent", and
+  # a range walked blindly would invent thousands of them when the drive died
+  # before printing the close marker.
+  local taken=0
+  while read -r n; do
+    taken=$((taken + 1))
+    if [[ -z "${plugin_held[n]:-}" ]]; then
+      echo "FAIL: sample ${n} does not hold 'ForegroundService:WakeLock'. P2a KEEPS the \
+plugin's permanent lock deliberately — it is the wake source of the no-fix watchdog and \
+of the armed-but-never-delivered recovery — so its absence means the service died or \
+allowWakeLock was turned off. (P2b inverts this row; do not invert it early.)"
+      rc=1
+    fi
+  done < <(sample_indices "${samplefile}" "${first}" "${hold_max}")
+  if (( taken == 0 )); then
+    echo "FAIL: no power sample exists between ${first} and ${hold_max}, so the \
+wake-lock assertions have nothing to read."
+    rc=1
+  fi
+
+  if (( rc == 0 )); then
+    # Sightings are EVIDENCE, not a gate. A cycle can complete inside one
+    # ${SAMPLE_PERIOD_SECS} s sample period, so "the scoped lock was seen at
+    # least once" would be a coin flip; that the lock is taken at all is pinned
+    # by the host tests and by check_android_location_power.sh, and what only a
+    # device can add is the BOUND, asserted above.
+    echo "  wake locks: plugin lock held throughout; 'Haven:publish' seen in \
+${publish_seen} sample(s), none older than ${WAKE_LOCK_MAX_AGE_SECS} s."
+  fi
+  return "${rc}"
+}
+
+# ---------------------------------------------------------------------------
+# Oracle step 7 — the cadence is delivery-driven, and spaced.
+# ---------------------------------------------------------------------------
+assert_cadence_oracle() {
+  local windowfile="$1" rc=0 publishes gap measured=0
+  publishes="$(successful_publish_count "${windowfile}")"
+  if (( publishes < 2 )); then
+    echo "FAIL: only ${publishes} successful publish(es) in the proof window. The hold \
+covers a full kLocationPublishMaxInterval past the handoff cycle, so the delivery-driven \
+publish that follows it is not optional — one publish means the platform delivered once \
+and never again."
+    rc=1
+  fi
+  while read -r gap; do
+    [[ -n "${gap}" ]] || continue
+    measured=$((measured + 1))
+    if [[ "${gap}" == "NOARM" ]]; then
+      echo "FAIL: a delivery-driven publish in the window had no \
+'${MARK_REG_ARMED}' line before it, so the interval that was supposed to space it \
+cannot be read from this capture at all."
+      rc=1
+    elif (( gap < 0 )); then
+      echo "FAIL: a delivery landed ${gap} ms after the registration that asked for it \
+— the device clock moved backwards inside the window, so no spacing can be read from \
+this capture."
+      rc=1
+    elif (( gap < MIN_DELIVERY_GAP_SECS * 1000 )); then
+      echo "FAIL: a delivery landed only $((gap / 1000)) s after the registration that \
+asked for it, under the ${MIN_DELIVERY_GAP_SECS} s floor (90 % of \
+${MIN_FIX_INTERVAL_SECS} s). The FGS is being woken by something other than its own \
+registered interval."
+      rc=1
+    fi
+  done < <(delivery_gaps_after_registration "${windowfile}")
+  # The anti-vacuity half, and the reason this oracle is anchored on the
+  # registration at all: with nothing measured there is no spacing claim, only
+  # a loop that did not run.
+  if (( measured == 0 )); then
+    echo "FAIL: not one publish in the window was delivery-driven, so the spacing this \
+step exists to measure was never measured. ${publishes} publish(es) reached the relay, \
+none of them behind a '[BackgroundTask] cycle trigger=delivery' — either the cadence is \
+back on the watchdog poll P2a replaced, or the platform never delivered."
+    rc=1
+  fi
+  (( rc == 0 )) && echo "  cadence: ${publishes} publish(es), ${measured} \
+delivery-driven, each at least ${MIN_DELIVERY_GAP_SECS} s after the registration that \
+produced it."
+  return "${rc}"
+}
+
+# ---------------------------------------------------------------------------
+# Oracle step 8 — the no-fix chain under deep idle.
+#
+# With the `geo fix` drip stopped, the registration steps 5-7 just proved has
+# nothing left to deliver. The claim is that publishing does not stop with it:
+# the watchdog notices (the circle falls due, or the silence outlasts
+# `kStreamPositionMaxAge`), runs a cycle, finds no fresh stream fix, spends
+# `kOneShotLocationTimeout` on a one-shot that cannot be answered, falls back to
+# `getLastKnownPosition()` and publishes anyway — with Doze's POLICY applied to
+# the app throughout.
+#
+# Three things keep it from being decoration:
+#
+#   * `state=IDLE` is required from `dumpsys deviceidle get deep`, the
+#     authoritative read. Without it a device that refused to doze would report
+#     the ordinary watchdog — already proven, on an awake device — as a Doze
+#     result.
+#   * The publish must be behind a `trigger=watchdog` marker. A delivery-driven
+#     publish here would mean the drip did not actually stop, so the no-fix
+#     chain never ran.
+#   * The bound is measured from the instant idle ENGAGED, not from the drive's
+#     request to engage it.
+#
+# It does NOT prove the AP-suspend half; see this file's header.
+# ---------------------------------------------------------------------------
+assert_no_fix_chain_oracle() {
+  local logfile="$1" verdict state elapsed
+  verdict="$(awk -v forced="${MARK_IDLE_FORCED}" -v endm="${MARK_IDLE_END}" \
+                 -v wd="${MARK_TRIGGER_WATCHDOG}" '
+    function ts(dm, hms,   md, t, mo, dy, cum, i) {
+      split(dm, md, "-"); split(hms, t, ":")
+      mo = md[1] + 0; dy = md[2] + 0; cum = 0
+      for (i = 1; i < mo; i++) cum += mlen[i]
+      return (cum + dy) * 86400 + t[1] * 3600 + t[2] * 60 + t[3]
+    }
+    BEGIN {
+      split("31 28 31 30 31 30 31 31 30 31 30 31", mlen, " ")
+      t0 = -1; state = "ABSENT"; pending = 0
+    }
+    t0 < 0 {
+      i = index($0, forced)
+      if (i == 0) next
+      t0 = ts($1, $2)
+      state = substr($0, i + length(forced))
+      sub(/[ \t\r].*$/, "", state)
+      next
+    }
+    index($0, endm) { exit }
+    index($0, wd) { pending = 1; next }
+    index($0, "[BackgroundTask] cycle trigger=") { pending = 0; next }
+    {
+      i = index($0, "Published to ")
+      if (i == 0 || !pending) next
+      n = substr($0, i + 13); sub(/\/.*$/, "", n)
+      if (n + 0 < 1) next
+      printf "%s|%d\n", state, ts($1, $2) - t0
+      found = 1
+      exit
+    }
+    END { if (!found) printf "%s|none\n", state }
+  ' "${logfile}" 2>/dev/null)"
+  state="${verdict%%|*}"
+  elapsed="${verdict##*|}"
+
+  if [[ "${state}" == "ABSENT" ]]; then
+    echo "FAIL: the forced-idle phase never started — no '${MARK_IDLE_FORCED}' stamp in \
+the capture. Either the drive never printed '${MARK_IDLE_BEGIN}' or this script's idle \
+watcher died before it could act, so the no-fix chain was never exercised."
+    return 1
+  fi
+  if [[ "${state}" != "IDLE" ]]; then
+    echo "FAIL: the device did not enter deep idle ('dumpsys deviceidle get deep' read \
+back '${state}'). Anything that publishes after this is the ordinary watchdog on an \
+awake device, which steps 1-7 already cover; none of it would be a Doze result."
+    return 1
+  fi
+  if [[ "${elapsed}" == "none" ]]; then
+    echo "FAIL: no '${MARK_TRIGGER_WATCHDOG}' cycle published after the device entered \
+deep idle. With the GPS drip stopped the delivery-driven path has nothing to run on, so \
+background publishing STOPS here unless the no-fix chain (stale stream fix -> one-shot \
+timeout -> getLastKnownPosition) carries it."
+    return 1
+  fi
+  if (( elapsed < 0 )); then
+    echo "FAIL: the no-fix watchdog publish is stamped ${elapsed} s BEFORE deep idle \
+engaged — the device clock moved backwards, so nothing can be read from this capture."
+    return 1
+  fi
+  if (( elapsed > NO_FIX_BOUND_SECS )); then
+    echo "FAIL: the no-fix watchdog publish landed ${elapsed} s after deep idle engaged, \
+past the ${NO_FIX_BOUND_SECS} s bound (kStreamPositionMaxAge ${STREAM_MAX_AGE_SECS} s + \
+kBackgroundRepeatInterval ${WATCHDOG_PERIOD_SECS} s + kFirstDeliveryWait \
+${FIRST_DELIVERY_WAIT_SECS} s + kOneShotLocationTimeout ${ONE_SHOT_TIMEOUT_SECS} s + \
+${NO_FIX_SLACK_SECS} s slack). Publishing recovered, but late enough that a peer's \
+228 s marker retention had already lapsed."
+    return 1
+  fi
+  echo "  no-fix chain: deep idle engaged; a ${MARK_TRIGGER_WATCHDOG} cycle published \
+${elapsed} s later (bound ${NO_FIX_BOUND_SECS} s)."
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Self-test fixtures: the AOSP grammars, VERBATIM.
+#
+# These lines are the contract between this script and the platform. They are
+# transcribed from `LocationRequest.toString`, `CallerIdentity.toString`,
+# `ProviderRequest.toString` and `PowerManagerService.WakeLock.toString`
+# (android14-release — the lane's API-34 image), and the fixtures below assert
+# that the parsers read exactly them. A platform text change therefore lands as
+# a red parser with a diff to look at, not as an oracle that silently stops
+# matching and passes everything.
+#
+# V-P2-1 (docs/POWER_EFFICIENCY_PLAN.md 7.5) is closed by these, in the SAME
+# commit as the oracle; the first CI run confirms them against the real image.
+# ---------------------------------------------------------------------------
+# The foreground stream: 1 s interval, 1 m displacement. The distance suffix is
+# printed only when > 0, so it is the UI request's signature.
+readonly FIX_REQ_UI='  10123/com.oblivioustech.haven/A1B2C3D4 Request[gps @+1s0ms HIGH_ACCURACY, minUpdateDistance=1.0]'
+# The FGS stream: minUpdateInterval == interval and distance 0, so NEITHER
+# suffix is printed. 100 s.
+readonly FIX_REQ_FGS='  10123/com.oblivioustech.haven/B2C3D4E5 Request[gps @+1m40s0ms HIGH_ACCURACY]'
+# The same at 61 s and at exactly the 62 s floor.
+readonly FIX_REQ_61S='  10123/com.oblivioustech.haven/B2C3D4E5 Request[gps @+1m1s0ms HIGH_ACCURACY]'
+readonly FIX_REQ_62S='  10123/com.oblivioustech.haven/B2C3D4E5 Request[gps @+1m2s0ms HIGH_ACCURACY]'
+# `getCurrentLocation()`'s one-shot: no interval at all, which TimeUtils prints
+# as the bare "0". Legitimate in P2a as the cache-miss fallback.
+readonly FIX_REQ_ONESHOT='  10123/com.oblivioustech.haven/C3D4E5F6 Request[gps @0 HIGH_ACCURACY]'
+# A fastest-interval below the interval. geolocator sets the two EQUAL
+# (`LocationManagerClient.java:182-185`), so this suffix cannot appear on a
+# request Haven asked for — its presence means the platform may deliver faster
+# than the duty cycle, which is the saving itself.
+readonly FIX_REQ_FASTEST='  10123/com.oblivioustech.haven/B2C3D4E5 Request[gps @+1m40s0ms HIGH_ACCURACY, minUpdateInterval=+30s0ms]'
+# A DIFFERENT package that merely starts with ours — the instrumentation package
+# this very lane installs beside the app. A prefix match counts it as a second
+# Haven registration, and a foreground-shaped one at that.
+readonly FIX_REQ_SIBLING_PKG='  10123/com.oblivioustech.haven.test/D4E5F6A7 Request[gps @+1s0ms HIGH_ACCURACY, minUpdateDistance=1.0]'
+# The provider's MERGED request. It names our package in its WorkSource and
+# contains "Request[" as a substring, so it is the false-positive the leading
+# space in " Request[" exists to exclude.
+readonly FIX_REQ_MERGED='  service: ProviderRequest[@+1m40s0ms, HIGH_ACCURACY, WorkSource{10123 com.oblivioustech.haven}]'
+# The Event Log replaying a registration that was CANCELLED at the handoff. It
+# keeps printing the foreground request for the rest of the capture, so it is
+# the line that would make "the 1 s / 1 m stream is gone" impossible to prove.
+readonly FIX_REQ_LOG_EVENT='  gps provider +registration 10123/com.oblivioustech.haven/A1B2C3D4 -> Request[gps @+1s0ms HIGH_ACCURACY, minUpdateDistance=1.0]'
+# The historical-aggregate section: a CallerIdentity at the start of the line,
+# with no request after it.
+readonly FIX_AGG_STATS='  10123/com.oblivioustech.haven: fixes=12 durationTotal=+1m0s0ms'
+readonly FIX_LOCK_PLUGIN="  PARTIAL_WAKE_LOCK 'ForegroundService:WakeLock' ACQ=-1m12s345ms (uid=10123 pid=1111)"
+readonly FIX_LOCK_PUBLISH="  PARTIAL_WAKE_LOCK 'Haven:publish' ACQ=-2s500ms (uid=10123 pid=1111)"
+readonly FIX_LOCK_PUBLISH_STUCK="  PARTIAL_WAKE_LOCK 'Haven:publish' ACQ=-31s000ms (uid=10123 pid=1111)"
+
+# Write a power-sample file: <out> <pre-handoff request line> <steady-state
+# request block>. Samples 1-2 are the foreground phase, 3-5 the steady state.
+# An empty request argument writes a sample with wake locks and no request,
+# which is how the anti-vacuity fixture is built.
+build_fixture_samples() {
+  local out="$1" pre="$2" steady="$3" i
+  {
+    for i in 1 2; do
+      printf '=== SAMPLE n=%s device-clock=08-02 04:40:%02d.000 ===\n' "${i}" "$(( (i - 1) * 5 ))"
+      if [[ -n "${pre}" ]]; then printf '%s\n' "${pre}"; fi
+      printf '%s\n' "${FIX_LOCK_PLUGIN}"
+    done
+    for i in 3 4 5; do
+      printf '=== SAMPLE n=%s device-clock=08-02 04:4%s:00.000 ===\n' "${i}" "${i}"
+      if [[ -n "${steady}" ]]; then printf '%s\n' "${steady}"; fi
+      # The three impostors ride in EVERY steady-state sample, so every oracle
+      # fixture below — the passing ones especially — is asserted against them.
+      printf '%s\n%s\n%s\n%s\n%s\n' "${FIX_REQ_MERGED}" "${FIX_REQ_LOG_EVENT}" \
+        "${FIX_AGG_STATS}" "${FIX_LOCK_PLUGIN}" "${FIX_LOCK_PUBLISH}"
+    done
+  } > "${out}"
+}
+
+# `hh:mm:ss` plus N seconds, so every fixture stamp that has to sit at a BOUND
+# is computed from the bound rather than transcribed beside it. Pure arithmetic
+# (no `date -d`) so the self-test stays hermetic and portable.
+_fixture_bump() {
+  local hms="$1" add="$2" h m s t
+  IFS=: read -r h m s <<< "${hms}"
+  t=$(( (10#${h} * 3600 + 10#${m} * 60 + 10#${s} + add) % 86400 ))
+  printf '%02d:%02d:%02d\n' "$(( t / 3600 ))" "$(( t % 3600 / 60 ))" "$(( t % 60 ))"
+}
+
+# One delivery-driven cycle, in the order the FGS really logs it: the trigger,
+# then the registration for the NEXT fix (step 7c aims it BEFORE the publish),
+# then the publish. The registration that PRODUCED a delivery is therefore the
+# one logged by the cycle before it, which is what the cadence oracle measures.
+_fixture_delivery_cycle() {
+  local d="$1"
+  printf '08-02 %s.000  1111  1140 I flutter : [BackgroundTask] cycle trigger=delivery\n' "${d}"
+  printf '08-02 %s.000  1111  1140 I flutter : %s100s)\n' \
+    "$(_fixture_bump "${d}" 1)" "${MARK_REG_ARMED}"
+  printf '08-02 %s.000  1111  1140 I flutter : [BackgroundTask] Published to 1/1 due circle(s) (1 eligible), fetched 1/1 circle(s).\n' \
+    "$(_fixture_bump "${d}" 2)"
+}
+
+# Write the matching logcat capture:
+#   <out> <delivery-driven cycles: 0, 1 or 2> <1st delivery> <2nd delivery> <sample-5>
+#
+# The paused-signal cycle arms at 04:40:08 and publishes at 04:40:09, so the
+# first delivery's spacing is measured from 04:40:08 and the second's from one
+# second after the first delivery.
+#
+# Sample stamps and drive markers share ONE ordered capture — that, not any
+# host-side clock arithmetic, is what puts a sample before or after the handoff.
+build_fixture_logcat() {
+  local out="$1" cycles="$2" d1="$3" d2="$4" s5="$5"
+  {
+    printf '08-02 04:40:00.000  1500  1500 I %s: SAMPLE 1\n' "${SAMPLE_TAG}"
+    printf '08-02 04:40:01.000  1111  1120 I flutter : %s pid=1111\n' "${MARK_PAUSE}"
+    printf '08-02 04:40:05.000  1500  1500 I %s: SAMPLE 2\n' "${SAMPLE_TAG}"
+    printf '08-02 04:40:06.000  1111  1120 I flutter : %s\n' "${MARK_HANDOFF_OK}"
+    printf '08-02 04:40:07.000  1111  1140 I flutter : [BackgroundTask] cycle trigger=paused-signal\n'
+    printf '08-02 04:40:08.000  1111  1140 I flutter : %s100s)\n' "${MARK_REG_ARMED}"
+    printf '08-02 04:40:09.000  1111  1140 I flutter : [BackgroundTask] Published to 1/1 due circle(s) (1 eligible), fetched 1/1 circle(s).\n'
+    printf '08-02 04:40:10.000  1500  1500 I %s: SAMPLE 3\n' "${SAMPLE_TAG}"
+    (( cycles >= 1 )) && _fixture_delivery_cycle "${d1}"
+    printf '08-02 04:41:45.000  1500  1500 I %s: SAMPLE 4\n' "${SAMPLE_TAG}"
+    (( cycles >= 2 )) && _fixture_delivery_cycle "${d2}"
+    printf '08-02 %s.000  1500  1500 I %s: SAMPLE 5\n' "${s5}" "${SAMPLE_TAG}"
+    printf '08-02 04:43:30.000  1111  1130 I flutter : %s\n' "${MARK_HOLD_DONE}"
+  } > "${out}"
+}
+
+# Write a step-8 capture: <out> <deep-idle state read-back> <watchdog publish
+# hh:mm:ss, or `none`>. The publish is preceded by its trigger two seconds
+# earlier, as the real cycle logs it.
+build_fixture_idle_logcat() {
+  local out="$1" state="$2" pub="$3"
+  {
+    printf '08-02 04:43:30.000  1111  1130 I flutter : %s\n' "${MARK_HOLD_DONE}"
+    printf '08-02 04:43:31.000  1111  1130 I flutter : %s\n' "${MARK_IDLE_BEGIN}"
+    printf '08-02 04:43:34.000  1500  1500 I %s: %s%s\n' \
+      "${SAMPLE_TAG}" "${MARK_IDLE_FORCED}" "${state}"
+    if [[ "${pub}" != "none" ]]; then
+      printf '08-02 %s.000  1111  1140 I flutter : %s\n' \
+        "$(_fixture_bump "${pub}" -2)" "${MARK_TRIGGER_WATCHDOG}"
+      printf '08-02 %s.000  1111  1140 I flutter : [BackgroundTask] Published to 1/1 due circle(s) (1 eligible), fetched 1/1 circle(s).\n' \
+        "${pub}"
+    fi
+    printf '08-02 04:52:00.000  1111  1130 I flutter : %s\n' "${MARK_IDLE_END}"
+  } > "${out}"
+}
+
 # ---------------------------------------------------------------------------
 # --self-test — validate max_published_count against synthetic fixtures WITHOUT
 # a device (mirrors run-single-avd-scenario.sh / scan-logs-for-secrets.sh). CI
@@ -203,10 +1261,17 @@ pid_of_marker() {
 # which a hermetic self-test must never touch.
 # ---------------------------------------------------------------------------
 run_self_test() {
-  local tmp fail=0 got
+  # Pinned by EQUALITY, never by a floor: the run used to end with a hard-coded
+  # "all N fixtures passed" and no counter, so deleting a case left the message
+  # — and the exit code — untouched. Mirrors check_android_location_power.sh.
+  local -r SELF_TEST_FIXTURES=54
+  local tmp fail=0 checked=0 got
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
   trap "rm -rf '${tmp}'" RETURN
+
+  # Every case calls this exactly once, immediately before it asserts.
+  _case() { checked=$((checked + 1)); }
 
   # (1) THE CRITICAL FIXTURE — P0-1's actual signature. The marker substring is
   #     present but the count is 0. A `grep -q 'Published to'` oracle would pass
@@ -215,6 +1280,7 @@ run_self_test() {
     '08-02 04:41:02.001  1234  1300 I flutter : [BackgroundTask] onStart (starter=developer)' \
     '08-02 04:42:14.552  1234  1300 I flutter : [BackgroundTask] Published to 0/1 due circle(s) (1 eligible), fetched 0/1 circle(s).' \
     > "${tmp}/zero.log"
+  _case
   got="$(max_published_count "${tmp}/zero.log")"
   if [[ "${got}" != "0" ]]; then
     echo "SELF-TEST FAIL (1): expected 0 from a 0/1 line, got '${got}'" >&2
@@ -225,6 +1291,7 @@ run_self_test() {
   printf '%s\n' \
     '08-02 04:42:14.552  1234  1300 I flutter : [BackgroundTask] Published to 1/1 due circle(s) (1 eligible), fetched 1/1 circle(s).' \
     > "${tmp}/one.log"
+  _case
   got="$(max_published_count "${tmp}/one.log")"
   if [[ "${got}" != "1" ]]; then
     echo "SELF-TEST FAIL (2): expected 1, got '${got}'" >&2
@@ -238,6 +1305,7 @@ run_self_test() {
     '08-02 04:42:14.552  1234  1300 I flutter : [BackgroundTask] Published to 2/2 due circle(s) (2 eligible), fetched 2/2 circle(s).' \
     '08-02 04:43:26.552  1234  1300 I flutter : [BackgroundTask] Published to 0/0 due circle(s) (2 eligible), fetched 0/2 circle(s).' \
     > "${tmp}/multi.log"
+  _case
   got="$(max_published_count "${tmp}/multi.log")"
   if [[ "${got}" != "2" ]]; then
     echo "SELF-TEST FAIL (3): expected 2 across cycles, got '${got}'" >&2
@@ -249,6 +1317,7 @@ run_self_test() {
   printf '%s\n' \
     '08-02 04:41:02.001  1234  1300 I flutter : [BackgroundTask] onStart (starter=developer)' \
     > "${tmp}/none.log"
+  _case
   got="$(max_published_count "${tmp}/none.log")"
   if [[ -n "${got}" ]]; then
     echo "SELF-TEST FAIL (4): expected empty from a log with no publish line, got '${got}'" >&2
@@ -261,6 +1330,7 @@ run_self_test() {
     '08-02 04:42:14.552  1234  1300 I flutter : [BackgroundTask] Published to 9/12 due circle(s) (12 eligible), fetched 9/12 circle(s).' \
     '08-02 04:43:26.552  1234  1300 I flutter : [BackgroundTask] Published to 12/12 due circle(s) (12 eligible), fetched 12/12 circle(s).' \
     > "${tmp}/wide.log"
+  _case
   got="$(max_published_count "${tmp}/wide.log")"
   if [[ "${got}" != "12" ]]; then
     echo "SELF-TEST FAIL (5): expected 12, got '${got}'" >&2
@@ -280,6 +1350,7 @@ run_self_test() {
   # (6) A publish from BEFORE the handoff must not count. Without the window
   #     the parser would return 9 and the lane would pass on a foreground
   #     publish — which is a Rule-14 single-writer violation, not a success.
+  _case
   got="$(window_between_markers "${tmp}/window.log" '[b1] HANDOFF_CONFIRMED' \
     '[b1] HOLD_COMPLETE' | { max_published_count /dev/stdin; })"
   if [[ "${got}" != "1" ]]; then
@@ -289,6 +1360,7 @@ run_self_test() {
 
   # (7) No open marker at all ⇒ empty window, so a missing handoff can never be
   #     silently treated as "the whole log counts".
+  _case
   got="$(window_between_markers "${tmp}/window.log" '[b1] NEVER_HAPPENED' \
     '[b1] HOLD_COMPLETE' | wc -l | tr -d ' ')"
   if [[ "${got}" != "0" ]]; then
@@ -297,6 +1369,7 @@ run_self_test() {
   fi
 
   # (8) PID extraction from the `logcat -v threadtime` column layout.
+  _case
   got="$(pid_of_marker "${tmp}/window.log" '[b1] HANDOFF_CONFIRMED')"
   if [[ "${got}" != "1111" ]]; then
     echo "SELF-TEST FAIL (8): expected PID 1111, got '${got}'" >&2
@@ -309,6 +1382,7 @@ run_self_test() {
     '08-02 04:41:00.000  1111  1130 I flutter : [b1] HANDOFF_CONFIRMED' \
     '08-02 04:44:00.000  2222  2230 I flutter : [BackgroundTask] Published to 1/1 due circle(s) (1 eligible), fetched 1/1 circle(s).' \
     > "${tmp}/restart.log"
+  _case
   if [[ "$(pid_of_marker "${tmp}/restart.log" '[b1] HANDOFF_CONFIRMED')" == \
         "$(pid_of_marker "${tmp}/restart.log" '[BackgroundTask] Published to ')" ]]; then
     echo "SELF-TEST FAIL (9): a cross-process publish was reported as same-PID" >&2
@@ -327,6 +1401,7 @@ run_self_test() {
     > "${tmp}/closed.log"
 
   # (10) A teardown destroy must fall OUTSIDE the window.
+  _case
   if window_between_markers "${tmp}/closed.log" '[b1] HANDOFF_CONFIRMED' \
        '[b1] HOLD_COMPLETE' | grep -aqF -- '[BackgroundTask] onDestroy'; then
     echo "SELF-TEST FAIL (10): a post-hold onDestroy leaked into the window" >&2
@@ -335,6 +1410,7 @@ run_self_test() {
 
   # (11) …while the publish inside it still counts. A close that swallowed the
   #      window's contents would turn every assertion vacuous.
+  _case
   got="$(window_between_markers "${tmp}/closed.log" '[b1] HANDOFF_CONFIRMED' \
     '[b1] HOLD_COMPLETE' | { max_published_count /dev/stdin; })"
   if [[ "${got}" != "1" ]]; then
@@ -349,6 +1425,7 @@ run_self_test() {
     '08-02 04:42:00.000  1111  1140 I flutter : [BackgroundTask] onDestroy (isTimeout=true)' \
     '08-02 04:45:00.000  1111  1130 I flutter : [b1] HOLD_COMPLETE' \
     > "${tmp}/died.log"
+  _case
   if ! window_between_markers "${tmp}/died.log" '[b1] HANDOFF_CONFIRMED' \
        '[b1] HOLD_COMPLETE' | grep -aqF -- '[BackgroundTask] onDestroy'; then
     echo "SELF-TEST FAIL (12): a mid-window onDestroy was not caught" >&2
@@ -358,6 +1435,7 @@ run_self_test() {
   # (13) No close marker (a drive killed mid-hold) must fall back to EOF, never
   #      to an empty window — an empty one would make every assertion pass
   #      vacuously on exactly the runs that are least trustworthy.
+  _case
   got="$(window_between_markers "${tmp}/closed.log" '[b1] HANDOFF_CONFIRMED' \
     '[b1] NEVER_PRINTED' | wc -l | tr -d ' ')"
   if [[ "${got}" != "4" ]]; then
@@ -367,6 +1445,7 @@ run_self_test() {
 
   # (14) An end marker BEFORE the start must not open the window backwards —
   #      the close is only ever the first one at or after the open.
+  _case
   got="$(window_between_markers "${tmp}/closed.log" '[BackgroundTask] Published to ' \
     '[b1] HANDOFF_CONFIRMED' | wc -l | tr -d ' ')"
   if [[ "${got}" != "3" ]]; then
@@ -374,11 +1453,460 @@ run_self_test() {
     fail=1
   fi
 
+  # --- TimeUtils.formatDuration --------------------------------------------
+  # Every interval and every wake-lock age in the power oracles is read through
+  # this one parser, so its grammar is pinned in both directions: the five
+  # shapes AOSP actually prints, and two shapes it does NOT (which is how a
+  # future platform that prints milliseconds, or drops the ms field, arrives as
+  # a red parser instead of as a silently-ignored line).
+  local i=0
+  local -a dur_ok_tok=('+1m40s0ms' '+1s0ms' '0' '-12s345ms' '+1h2m3s4ms')
+  local -a dur_ok_ms=('100000' '1000' '0' '-12345' '3723004')
+  for i in "${!dur_ok_tok[@]}"; do
+    _case
+    got="$(formatted_duration_ms "${dur_ok_tok[$i]}" || echo 'REJECTED')"
+    if [[ "${got}" != "${dur_ok_ms[$i]}" ]]; then
+      echo "SELF-TEST FAIL ($((15 + i))): formatted_duration_ms '${dur_ok_tok[$i]}' should be \
+${dur_ok_ms[$i]} ms, got '${got}'" >&2
+      fail=1
+    fi
+  done
+
+  # (20) A millisecond print is a grammar CHANGE, not a duration to guess at.
+  _case
+  if formatted_duration_ms '100000' >/dev/null 2>&1; then
+    echo "SELF-TEST FAIL (20): a bare millisecond count was accepted as a formatDuration token" >&2
+    fail=1
+  fi
+  # (21) …and so is dropping the trailing ms field.
+  _case
+  if formatted_duration_ms '+1m40s' >/dev/null 2>&1; then
+    echo "SELF-TEST FAIL (21): '+1m40s' (no ms field) was accepted" >&2
+    fail=1
+  fi
+
+  # --- dumpsys line splitting ----------------------------------------------
+  build_fixture_samples "${tmp}/samples.ok" "${FIX_REQ_UI}" "${FIX_REQ_FGS}"
+
+  # (22) The steady-state sample's ONE Haven registration parses to 100 s with
+  #      no distance filter.
+  # Taken from the whole output rather than through `head -1`: the reader is a
+  # shell loop, and a closed pipe would kill it with SIGPIPE mid-fixture.
+  _case
+  got="$(location_request_records "${tmp}/samples.ok" 3 5)"
+  got="${got%%$'\n'*}"
+  if [[ "${got}" != "3|100000|-|"* ]]; then
+    echo "SELF-TEST FAIL (22): expected sample 3 to yield one 100000 ms request with no \
+distance filter, got '${got}'" >&2
+    fail=1
+  fi
+
+  # (23) …and it is the ONLY one. The merged ProviderRequest beside it names our
+  #      package and contains "Request[", the Event Log replays a registration
+  #      cancelled at the handoff, and the historical-aggregate line starts with
+  #      a CallerIdentity: counting any of them reports two owners on a healthy
+  #      run.
+  _case
+  got="$(location_request_records "${tmp}/samples.ok" 3 3 | wc -l | tr -d ' ')"
+  if [[ "${got}" != "1" ]]; then
+    echo "SELF-TEST FAIL (23): sample 3 yielded ${got} requests; the merged \
+ProviderRequest, the Event Log's replayed +registration and the historical-aggregate \
+identity line must none of them be counted as ours" >&2
+    fail=1
+  fi
+
+  # (24) The foreground request keeps its distance suffix — the token the
+  #      background assertion is keyed on.
+  _case
+  got="$(location_request_records "${tmp}/samples.ok" 1 1)"
+  if [[ "${got}" != "1|1000|1.0|"* ]]; then
+    echo "SELF-TEST FAIL (24): expected the 1 s / 1 m request to parse as 1000 ms with \
+minUpdateDistance 1.0, got '${got}'" >&2
+    fail=1
+  fi
+
+  # (25) Wake-lock tag + ACQ age. `ACQ=` is acquire-minus-now, so the AGE is its
+  #      negation — the sign flip is exactly what a count-of-samples oracle
+  #      would never have to get right, and what makes the bound assertable.
+  _case
+  got="$(wake_lock_records "${tmp}/samples.ok" 3 3 | tr '\n' ' ')"
+  if [[ "${got}" != "3|ForegroundService:WakeLock|72345 3|Haven:publish|2500 " ]]; then
+    echo "SELF-TEST FAIL (25): wake-lock parse mismatch, got '${got}'" >&2
+    fail=1
+  fi
+
+  # (26) A package that merely STARTS with ours — the instrumentation package
+  #      this lane installs beside the app — is not ours. Under a prefix match
+  #      it reads as a second, foreground-shaped Haven registration and reds a
+  #      healthy run.
+  build_fixture_samples "${tmp}/samples.sibling" "${FIX_REQ_UI}" \
+    "$(printf '%s\n%s' "${FIX_REQ_FGS}" "${FIX_REQ_SIBLING_PKG}")"
+  _case
+  got="$(location_request_records "${tmp}/samples.sibling" 3 3 | wc -l | tr -d ' ')"
+  if [[ "${got}" != "1" ]]; then
+    echo "SELF-TEST FAIL (26): a '<pkg>.test' registration was counted as Haven's \
+(${got} requests in sample 3)" >&2
+    fail=1
+  fi
+
+  # --- the oracles, end to end ---------------------------------------------
+  # The healthy capture: two delivery-driven cycles, the second landing exactly
+  # on the delivery-spacing floor after the registration that produced it.
+  local d1_ok='04:41:40' d2_ok d2_tight arm2_ok
+  arm2_ok="$(_fixture_bump "${d1_ok}" 1)"
+  d2_ok="$(_fixture_bump "${arm2_ok}" "${MIN_DELIVERY_GAP_SECS}")"
+  d2_tight="$(_fixture_bump "${arm2_ok}" "$((MIN_DELIVERY_GAP_SECS - 1))")"
+  build_fixture_logcat "${tmp}/power.ok.log" 2 "${d1_ok}" "${d2_ok}" '04:42:45'
+  window_between_markers "${tmp}/power.ok.log" "${MARK_HANDOFF_OK}" "${MARK_HOLD_DONE}" \
+    > "${tmp}/power.ok.window"
+
+  # A capture whose most recent cycle before every steady-state sample is the
+  # WATCHDOG — the one cycle a `getCurrentLocation()` one-shot is legitimate on.
+  awk -v wd='08-02 04:41:39.000  1111  1140 I flutter : [BackgroundTask] cycle trigger=watchdog' '
+    /SAMPLE [345]$/ { print wd }
+    { print }
+  ' "${tmp}/power.ok.log" > "${tmp}/power.watchdog.log"
+  window_between_markers "${tmp}/power.watchdog.log" "${MARK_HANDOFF_OK}" \
+    "${MARK_HOLD_DONE}" > "${tmp}/power.watchdog.window"
+
+  # (27) The healthy capture passes.
+  _case
+  if ! assert_registration_oracle "${tmp}/power.ok.log" "${tmp}/samples.ok" \
+       "${tmp}/power.ok.window" >/dev/null; then
+    echo "SELF-TEST FAIL (27): the registration oracle failed a HEALTHY capture" >&2
+    assert_registration_oracle "${tmp}/power.ok.log" "${tmp}/samples.ok" \
+      "${tmp}/power.ok.window" >&2 || true
+    fail=1
+  fi
+
+  # (28) The UI's 1 m filter still present while backgrounded — the P1 release
+  #      regressing, which is the whole point of keying on that suffix.
+  build_fixture_samples "${tmp}/samples.ui" "${FIX_REQ_UI}" "${FIX_REQ_UI}"
+  _case
+  if assert_registration_oracle "${tmp}/power.ok.log" "${tmp}/samples.ui" \
+       "${tmp}/power.ok.window" >/dev/null 2>&1; then
+    echo "SELF-TEST FAIL (28): a 1 s / 1 m request surviving the handoff was accepted" >&2
+    fail=1
+  fi
+
+  # (29) ANTI-VACUITY. No foreground request anywhere before the handoff means
+  #      the sampler or the parser saw nothing, and "no fast request afterwards"
+  #      would then be true of an empty file.
+  build_fixture_samples "${tmp}/samples.blind" "" "${FIX_REQ_FGS}"
+  _case
+  if assert_registration_oracle "${tmp}/power.ok.log" "${tmp}/samples.blind" \
+       "${tmp}/power.ok.window" >/dev/null 2>&1; then
+    echo "SELF-TEST FAIL (29): a capture with no pre-handoff 1 s / 1 m request passed" >&2
+    fail=1
+  fi
+
+  # (30) Two concurrent Haven stream registrations in one sample.
+  build_fixture_samples "${tmp}/samples.two" "${FIX_REQ_UI}" \
+    "$(printf '%s\n%s' "${FIX_REQ_FGS}" "${FIX_REQ_62S}")"
+  _case
+  if assert_registration_oracle "${tmp}/power.ok.log" "${tmp}/samples.two" \
+       "${tmp}/power.ok.window" >/dev/null 2>&1; then
+    echo "SELF-TEST FAIL (30): two concurrent Haven registrations were accepted" >&2
+    fail=1
+  fi
+
+  # (31) The one-shot beside the long request must NOT red the lane when the
+  #      cycle it belongs to is the WATCHDOG: P2a keeps `getCurrentLocation()`
+  #      as that cycle's cache-miss fallback, and its request carries no
+  #      interval at all.
+  build_fixture_samples "${tmp}/samples.oneshot" "${FIX_REQ_UI}" \
+    "$(printf '%s\n%s' "${FIX_REQ_FGS}" "${FIX_REQ_ONESHOT}")"
+  _case
+  if ! assert_registration_oracle "${tmp}/power.watchdog.log" "${tmp}/samples.oneshot" \
+       "${tmp}/power.watchdog.window" >/dev/null; then
+    echo "SELF-TEST FAIL (31): a legitimate one-shot on a watchdog cycle was reported \
+as a violation" >&2
+    assert_registration_oracle "${tmp}/power.watchdog.log" "${tmp}/samples.oneshot" \
+      "${tmp}/power.watchdog.window" >&2 || true
+    fail=1
+  fi
+
+  # (32) …and the SAME one-shot on a delivery-driven cycle must red the lane.
+  #      That is the pre-P2a per-tick 30 s HIGH_ACCURACY request, which prints
+  #      identically; without the attribution the carve-out in (31) hides it.
+  _case
+  if assert_registration_oracle "${tmp}/power.ok.log" "${tmp}/samples.oneshot" \
+       "${tmp}/power.ok.window" >/dev/null 2>&1; then
+    echo "SELF-TEST FAIL (32): a one-shot on a delivery-driven cycle was accepted — the \
+per-tick one-shot P2a retired can regress unseen" >&2
+    fail=1
+  fi
+
+  # (33)/(34) The floor is kLocationPublishMinInterval - kBackgroundFixLeadTime,
+  #      and it is INCLUSIVE: a retry registration after a failed publish asks
+  #      for exactly that. 61 s is a real regression; 62 s is a correct run that
+  #      a 72 s bound would have failed on every draw under 82 s.
+  build_fixture_samples "${tmp}/samples.61" "${FIX_REQ_UI}" "${FIX_REQ_61S}"
+  _case
+  if assert_registration_oracle "${tmp}/power.ok.log" "${tmp}/samples.61" \
+       "${tmp}/power.ok.window" >/dev/null 2>&1; then
+    echo "SELF-TEST FAIL (33): a 61 s registration passed a ${MIN_FIX_INTERVAL_SECS} s floor" >&2
+    fail=1
+  fi
+  build_fixture_samples "${tmp}/samples.62" "${FIX_REQ_UI}" "${FIX_REQ_62S}"
+  _case
+  if ! assert_registration_oracle "${tmp}/power.ok.log" "${tmp}/samples.62" \
+       "${tmp}/power.ok.window" >/dev/null; then
+    echo "SELF-TEST FAIL (34): a registration at exactly ${MIN_FIX_INTERVAL_SECS} s was \
+rejected — the bound must be inclusive" >&2
+    fail=1
+  fi
+
+  # (35) Grammar drift is a FAILURE, never a skipped line.
+  build_fixture_samples "${tmp}/samples.drift" "${FIX_REQ_UI}" \
+    '  10123/com.oblivioustech.haven/B2C3D4E5 Request[gps every 100000 millis]'
+  _case
+  if assert_registration_oracle "${tmp}/power.ok.log" "${tmp}/samples.drift" \
+       "${tmp}/power.ok.window" >/dev/null 2>&1; then
+    echo "SELF-TEST FAIL (35): an unparseable Request[...] was passed over silently" >&2
+    fail=1
+  fi
+
+  # (36) A fastest-interval below the interval. The plan names the ABSENCE of
+  #      `minUpdateInterval=` as the FGS request's signature: with it, the
+  #      platform may deliver faster than the duty cycle that IS the saving.
+  build_fixture_samples "${tmp}/samples.fastest" "${FIX_REQ_UI}" "${FIX_REQ_FASTEST}"
+  _case
+  if assert_registration_oracle "${tmp}/power.ok.log" "${tmp}/samples.fastest" \
+       "${tmp}/power.ok.window" >/dev/null 2>&1; then
+    echo "SELF-TEST FAIL (36): a request carrying minUpdateInterval= was accepted" >&2
+    fail=1
+  fi
+
+  # (37) Wake locks on the healthy capture.
+  _case
+  if ! assert_wake_lock_oracle "${tmp}/power.ok.log" "${tmp}/samples.ok" >/dev/null; then
+    echo "SELF-TEST FAIL (37): the wake-lock oracle failed a HEALTHY capture" >&2
+    assert_wake_lock_oracle "${tmp}/power.ok.log" "${tmp}/samples.ok" >&2 || true
+    fail=1
+  fi
+
+  # (38) A `Haven:publish` older than its own ceiling. Asserted on the AGE, not
+  #      on how many samples it appears in: a legitimate cycle re-acquires
+  #      across stagger, publish and fetch, and a 30 s hold spans six samples at
+  #      ${SAMPLE_PERIOD_SECS} s — a count would be boundary-flaky in both
+  #      directions.
+  sed "s|${FIX_LOCK_PUBLISH}|${FIX_LOCK_PUBLISH_STUCK}|" "${tmp}/samples.ok" \
+    > "${tmp}/samples.stucklock"
+  _case
+  if assert_wake_lock_oracle "${tmp}/power.ok.log" "${tmp}/samples.stucklock" \
+       >/dev/null 2>&1; then
+    echo "SELF-TEST FAIL (38): a 31 s 'Haven:publish' hold passed a \
+${WAKE_LOCK_MAX_AGE_SECS} s ceiling" >&2
+    fail=1
+  fi
+
+  # (39) The plugin's permanent lock disappearing mid-window. P2a keeps it on
+  #      purpose; P2b is the phase that inverts this row.
+  grep -v "ForegroundService:WakeLock" "${tmp}/samples.ok" > "${tmp}/samples.nolock" || true
+  _case
+  if assert_wake_lock_oracle "${tmp}/power.ok.log" "${tmp}/samples.nolock" \
+       >/dev/null 2>&1; then
+    echo "SELF-TEST FAIL (39): a window without 'ForegroundService:WakeLock' passed" >&2
+    fail=1
+  fi
+
+  # (40) A held lock whose ACQ= is missing must still be SEEN (so the plugin
+  #      lock's presence is judged on its tag) and must still fail the bound (so
+  #      an unreadable age is never an unchecked one).
+  sed "s|${FIX_LOCK_PUBLISH}|  PARTIAL_WAKE_LOCK 'Haven:publish' (uid=10123 pid=1111)|" \
+    "${tmp}/samples.ok" > "${tmp}/samples.noacq"
+  _case
+  if assert_wake_lock_oracle "${tmp}/power.ok.log" "${tmp}/samples.noacq" \
+       >/dev/null 2>&1; then
+    echo "SELF-TEST FAIL (40): a 'Haven:publish' lock with no readable ACQ= age passed" >&2
+    fail=1
+  fi
+
+  # (41)/(42) The delivery-spacing floor, pinned on both sides of itself, on the
+  #      SECOND delivery-driven cycle (its registration is the one the first
+  #      delivery's cycle armed). ${MIN_DELIVERY_GAP_SECS} s is a correct run;
+  #      one second under it is a real regression.
+  _case
+  if ! assert_cadence_oracle "${tmp}/power.ok.window" >/dev/null; then
+    echo "SELF-TEST FAIL (41): a ${MIN_DELIVERY_GAP_SECS} s delivery gap was rejected" >&2
+    assert_cadence_oracle "${tmp}/power.ok.window" >&2 || true
+    fail=1
+  fi
+  build_fixture_logcat "${tmp}/power.tight.log" 2 "${d1_ok}" "${d2_tight}" '04:42:45'
+  window_between_markers "${tmp}/power.tight.log" "${MARK_HANDOFF_OK}" "${MARK_HOLD_DONE}" \
+    > "${tmp}/power.tight.window"
+  _case
+  if assert_cadence_oracle "${tmp}/power.tight.window" >/dev/null 2>&1; then
+    echo "SELF-TEST FAIL (42): a $((MIN_DELIVERY_GAP_SECS - 1)) s delivery gap passed" >&2
+    fail=1
+  fi
+
+  # (43) One publish in the whole window: the platform delivered once and never
+  #      again, which is the failure mode the delivery-driven cadence replaced a
+  #      poll with.
+  build_fixture_logcat "${tmp}/power.none.log" 0 "${d1_ok}" "${d2_ok}" '04:42:45'
+  window_between_markers "${tmp}/power.none.log" "${MARK_HANDOFF_OK}" "${MARK_HOLD_DONE}" \
+    > "${tmp}/power.none.window"
+  _case
+  if assert_cadence_oracle "${tmp}/power.none.window" >/dev/null 2>&1; then
+    echo "SELF-TEST FAIL (43): a window with a single publish passed the cadence oracle" >&2
+    fail=1
+  fi
+
+  # (44) A delivery that led to NO publish is not a cadence point. Inserted 35 s
+  #      before the second real one: counting it would measure the gap from the
+  #      wrong end and red a healthy run.
+  awk -v ins='08-02 04:42:00.000  1111  1140 I flutter : [BackgroundTask] cycle trigger=delivery' '
+    { print }
+    index($0, "SAMPLE 4") { print ins }
+  ' "${tmp}/power.ok.log" > "${tmp}/power.barren.log"
+  window_between_markers "${tmp}/power.barren.log" "${MARK_HANDOFF_OK}" "${MARK_HOLD_DONE}" \
+    > "${tmp}/power.barren.window"
+  _case
+  if ! assert_cadence_oracle "${tmp}/power.barren.window" >/dev/null; then
+    echo "SELF-TEST FAIL (44): a delivery that produced no publish was counted as a \
+cadence point" >&2
+    assert_cadence_oracle "${tmp}/power.barren.window" >&2 || true
+    fail=1
+  fi
+
+  # (45)/(46) THE SHAPE OF A REAL HEALTHY RUN, and the reason this oracle is
+  #      anchored on the registration. A 200 s hold contains the paused-signal
+  #      publish plus ONE delivery-driven publish — a second needs two CSPRNG
+  #      draws summing under the hold, about one run in six — so a
+  #      delivery-to-delivery measurement produced ZERO gaps and an empty loop
+  #      on ~83 % of healthy runs. (46) is that exact window with the delivery
+  #      one second inside the floor: it MUST fail, and under the old anchor it
+  #      passed while measuring nothing.
+  local d1_floor d1_tight
+  d1_floor="$(_fixture_bump '04:40:08' "${MIN_DELIVERY_GAP_SECS}")"
+  d1_tight="$(_fixture_bump '04:40:08' "$((MIN_DELIVERY_GAP_SECS - 1))")"
+  build_fixture_logcat "${tmp}/power.single.log" 1 "${d1_floor}" "${d2_ok}" '04:42:45'
+  window_between_markers "${tmp}/power.single.log" "${MARK_HANDOFF_OK}" \
+    "${MARK_HOLD_DONE}" > "${tmp}/power.single.window"
+  _case
+  if ! assert_cadence_oracle "${tmp}/power.single.window" >/dev/null; then
+    echo "SELF-TEST FAIL (45): the one-delivery window a healthy 200 s hold actually \
+produces was rejected at exactly the ${MIN_DELIVERY_GAP_SECS} s floor" >&2
+    assert_cadence_oracle "${tmp}/power.single.window" >&2 || true
+    fail=1
+  fi
+  build_fixture_logcat "${tmp}/power.singletight.log" 1 "${d1_tight}" "${d2_ok}" '04:42:45'
+  window_between_markers "${tmp}/power.singletight.log" "${MARK_HANDOFF_OK}" \
+    "${MARK_HOLD_DONE}" > "${tmp}/power.singletight.window"
+  _case
+  if assert_cadence_oracle "${tmp}/power.singletight.window" >/dev/null 2>&1; then
+    echo "SELF-TEST FAIL (46): a one-delivery window \
+$((MIN_DELIVERY_GAP_SECS - 1)) s after its registration passed — the oracle is silent \
+on the window a healthy run actually produces" >&2
+    fail=1
+  fi
+
+  # (47) Two publishes, neither of them delivery-driven. Nothing is measurable,
+  #      and "nothing measurable" must never read as "every pair was fine".
+  sed 's/trigger=delivery/trigger=watchdog/' "${tmp}/power.single.window" \
+    > "${tmp}/power.nodelivery.window"
+  _case
+  if assert_cadence_oracle "${tmp}/power.nodelivery.window" >/dev/null 2>&1; then
+    echo "SELF-TEST FAIL (47): a window with no delivery-driven publish at all passed \
+the cadence oracle" >&2
+    fail=1
+  fi
+
+  # (48) A delivery-driven publish with no registration before it. Unmeasurable
+  #      for a different reason, and equally not a pass.
+  grep -vF -- "${MARK_REG_ARMED}" "${tmp}/power.single.window" \
+    > "${tmp}/power.noarm.window" || true
+  _case
+  if assert_cadence_oracle "${tmp}/power.noarm.window" >/dev/null 2>&1; then
+    echo "SELF-TEST FAIL (48): a delivery with no '${MARK_REG_ARMED}' before it passed" >&2
+    fail=1
+  fi
+
+  # --- step 8: the no-fix chain under deep idle ----------------------------
+  local pub_ok pub_late
+  pub_ok="$(_fixture_bump '04:43:34' "${NO_FIX_BOUND_SECS}")"
+  pub_late="$(_fixture_bump '04:43:34' "$((NO_FIX_BOUND_SECS + 1))")"
+
+  # (49) Idle engaged, and a watchdog cycle published at exactly the bound.
+  build_fixture_idle_logcat "${tmp}/idle.ok.log" 'IDLE' "${pub_ok}"
+  _case
+  if ! assert_no_fix_chain_oracle "${tmp}/idle.ok.log" >/dev/null; then
+    echo "SELF-TEST FAIL (49): a watchdog publish at exactly the ${NO_FIX_BOUND_SECS} s \
+bound was rejected" >&2
+    assert_no_fix_chain_oracle "${tmp}/idle.ok.log" >&2 || true
+    fail=1
+  fi
+
+  # (50) Publishing simply stops once the fixes do — the thing step 8 exists to
+  #      catch, and the P2b failure mode.
+  build_fixture_idle_logcat "${tmp}/idle.silent.log" 'IDLE' 'none'
+  _case
+  if assert_no_fix_chain_oracle "${tmp}/idle.silent.log" >/dev/null 2>&1; then
+    echo "SELF-TEST FAIL (50): a forced-idle phase with no publish at all passed" >&2
+    fail=1
+  fi
+
+  # (51) ANTI-VACUITY. `force-idle` exits 0 on a device that refuses to doze, so
+  #      a publish under `state=ACTIVE` is the ordinary watchdog on an awake
+  #      device — already covered by steps 1-7, and no kind of Doze result.
+  build_fixture_idle_logcat "${tmp}/idle.awake.log" 'ACTIVE' "${pub_ok}"
+  _case
+  if assert_no_fix_chain_oracle "${tmp}/idle.awake.log" >/dev/null 2>&1; then
+    echo "SELF-TEST FAIL (51): a publish on a device that never entered deep idle passed" >&2
+    fail=1
+  fi
+
+  # (52) The phase never ran at all (no stamp): also not a pass.
+  grep -vF -- "${MARK_IDLE_FORCED}" "${tmp}/idle.ok.log" > "${tmp}/idle.absent.log" || true
+  _case
+  if assert_no_fix_chain_oracle "${tmp}/idle.absent.log" >/dev/null 2>&1; then
+    echo "SELF-TEST FAIL (52): a capture with no '${MARK_IDLE_FORCED}' stamp passed" >&2
+    fail=1
+  fi
+
+  # (53) One second past the bound. Publishing recovered, but late enough that a
+  #      peer's 228 s marker retention had already lapsed.
+  build_fixture_idle_logcat "${tmp}/idle.late.log" 'IDLE' "${pub_late}"
+  _case
+  if assert_no_fix_chain_oracle "${tmp}/idle.late.log" >/dev/null 2>&1; then
+    echo "SELF-TEST FAIL (53): a watchdog publish $((NO_FIX_BOUND_SECS + 1)) s after \
+idle engaged passed a ${NO_FIX_BOUND_SECS} s bound" >&2
+    fail=1
+  fi
+
+  # (54) A DELIVERY-driven publish under idle proves the opposite of step 8: the
+  #      drip did not stop, so the no-fix chain never ran.
+  # `index`/`substr`, not sed: the marker's `[...]` is a character class in a
+  # BRE, so a sed pattern would match nothing and hand this fixture back its own
+  # passing input — a mutation test that mutates nothing.
+  awk -v wd="${MARK_TRIGGER_WATCHDOG}" '
+    {
+      i = index($0, wd)
+      if (i > 0) {
+        $0 = substr($0, 1, i - 1) "[BackgroundTask] cycle trigger=delivery" \
+             substr($0, i + length(wd))
+      }
+      print
+    }
+  ' "${tmp}/idle.ok.log" > "${tmp}/idle.delivery.log"
+  _case
+  if assert_no_fix_chain_oracle "${tmp}/idle.delivery.log" >/dev/null 2>&1; then
+    echo "SELF-TEST FAIL (54): a delivery-driven publish was accepted as the no-fix \
+chain" >&2
+    fail=1
+  fi
+
+  if (( checked != SELF_TEST_FIXTURES )); then
+    echo "SELF-TEST FAIL: ran ${checked} fixture(s), expected ${SELF_TEST_FIXTURES}" >&2
+    fail=1
+  fi
   if (( fail != 0 )); then
     echo "run-b1-fgs-publish.sh --self-test: FAILED" >&2
     return 1
   fi
-  echo "run-b1-fgs-publish.sh --self-test: all 14 fixtures passed"
+  echo "run-b1-fgs-publish.sh --self-test: ${checked} fixtures passed"
   return 0
 }
 
@@ -390,22 +1918,24 @@ fi
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-readonly PKG="com.oblivioustech.haven"
 readonly DEVICE="emulator-5554"
 readonly DRIVER_FILE="test_driver/integration_test.dart"
 readonly LOG_DIR="/tmp/b1-logs"
 readonly APK="${1:-/tmp/integration-apks/b1_fgs_live_foreground_test.apk}"
 readonly TARGET="${2:-integration_test/b1_fgs_live_foreground_test.dart}"
 
-# The drive now owns the whole timeline: arm, deliver the lifecycle pause, and
-# HOLD the widget tree mounted while the FGS runs its cycles (the tree must stay
-# up, or flutter_test's post-test unmount stops the service — see Phase 4). So
-# this bounds arming + the FGS master tick (kBackgroundRepeatInterval = 72s,
-# haven/lib/src/constants/location.dart:98) x2, plus RustLib/keyring/SQLCipher
-# boot under the emulator's mlock pressure, plus GPS and relay slack. The shell
-# holds no timeouts of its own any more — by the time it reads, the capture is
-# complete, so Phase 5 is a set of reads rather than live polls.
-readonly DRIVE_TIMEOUT="${B1_DRIVE_TIMEOUT:-18m}"
+# The drive owns the whole timeline: arm, deliver the lifecycle pause, and HOLD
+# the widget tree mounted while the FGS runs its cycles (the tree must stay up,
+# or flutter_test's post-test unmount stops the service — see Phase 4). So this
+# bounds arming + BOTH of the drive's holds — the steady-state one (one
+# kLocationPublishMaxInterval plus slack, 200 s: the latest a delivery-driven
+# publish can land after the handoff cycle) and the forced-idle one (332 s: the
+# no-fix chain's own length, step 8) — plus RustLib/keyring/SQLCipher boot under
+# the emulator's mlock pressure, plus GPS and relay slack. The drive target's own
+# `Timeout` is 14m and fires first with an attributable message; this is the
+# belt. The shell holds no timeouts of its own — by the time it reads, the
+# capture is complete, so Phase 5 is a set of reads rather than live polls.
+readonly DRIVE_TIMEOUT="${B1_DRIVE_TIMEOUT:-20m}"
 
 # Synthetic coordinates fed to the emulator's GPS: Dam Square, Amsterdam — a
 # well-known public landmark, chosen precisely BECAUSE it is obviously not a
@@ -419,9 +1949,6 @@ readonly DRIVE_TIMEOUT="${B1_DRIVE_TIMEOUT:-18m}"
 readonly GEO_LON="${B1_GEO_LON:-4.895168}"
 readonly GEO_LAT="${B1_GEO_LAT:-52.370216}"
 
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-readonly SCRIPT_DIR="${script_dir}"
-readonly REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 readonly HAVEN_DIR="${REPO_ROOT}/haven"
 readonly START_STRFRY="${SCRIPT_DIR}/start-strfry.sh"
 readonly STOP_STRFRY="${SCRIPT_DIR}/stop-strfry.sh"
@@ -429,10 +1956,13 @@ readonly SECRET_SCAN="${SCRIPT_DIR}/scan-logs-for-secrets.sh"
 
 LOGCAT_PID=""
 GEO_PID=""
+SAMPLE_PID=""
+IDLE_PID=""
 
 mkdir -p "${LOG_DIR}"
 readonly LOGCAT_FILE="${LOG_DIR}/logcat.b1.log"
 readonly DRIVE_LOG="${LOG_DIR}/flutter-drive.log"
+readonly SAMPLE_FILE="${LOG_DIR}/dumpsys-power-samples.log"
 
 # ---------------------------------------------------------------------------
 # Cleanup (EXIT trap): stop the background helpers, run the MANDATORY secret
@@ -447,9 +1977,22 @@ cleanup() {
   if [[ -n "${GEO_PID}" ]] && kill -0 "${GEO_PID}" 2>/dev/null; then
     kill "${GEO_PID}" 2>/dev/null || true
   fi
+  if [[ -n "${SAMPLE_PID}" ]] && kill -0 "${SAMPLE_PID}" 2>/dev/null; then
+    kill "${SAMPLE_PID}" 2>/dev/null || true
+  fi
+  if [[ -n "${IDLE_PID}" ]] && kill -0 "${IDLE_PID}" 2>/dev/null; then
+    kill "${IDLE_PID}" 2>/dev/null || true
+  fi
   if [[ -n "${LOGCAT_PID}" ]] && kill -0 "${LOGCAT_PID}" 2>/dev/null; then
     kill "${LOGCAT_PID}" 2>/dev/null || true
   fi
+  # Leave the device as we found it. Both are no-ops on a run that never
+  # reached step 8, and both must run even on a failed phase: the workflow's
+  # `if: failure()` diagnostics step talks to this device afterwards, and a
+  # forced-idle, battery-unplugged emulator answers some of those questions
+  # differently for no reason connected to the failure being triaged.
+  adb -s "${DEVICE}" shell dumpsys deviceidle unforce >/dev/null 2>&1 || true
+  adb -s "${DEVICE}" shell dumpsys battery reset >/dev/null 2>&1 || true
   docker logs strfry > "${LOG_DIR}/strfry.final.log" 2>&1 || true
   echo "== Secret-leak scan over ${LOG_DIR} (Security Rule 6) =="
   bash "${SECRET_SCAN}" "${LOG_DIR}" || scan_rc=$?
@@ -512,6 +2055,12 @@ fail() {
   adb -s "${DEVICE}" shell dumpsys location 2>/dev/null \
     | grep -aiA 4 'last location\|fused\|gps provider' | head -40 >&2 || \
     echo "(dumpsys location unavailable)" >&2
+  # The last few power samples, for the steps-5/6 findings: which requests and
+  # locks were actually seen is the whole evidence base for those, and reading
+  # the parser's verdict without them is guesswork.
+  echo "---- last power samples ----" >&2
+  tail -30 "${SAMPLE_FILE}" 2>/dev/null >&2 || \
+    echo "(no power samples were captured)" >&2
   exit 1
 }
 
@@ -647,6 +2196,93 @@ adb -s "${DEVICE}" logcat -c || true
 adb -s "${DEVICE}" logcat -v threadtime > "${LOGCAT_FILE}" 2>&1 &
 LOGCAT_PID=$!
 
+# The power sampler, started BEFORE the drive and not after it.
+#
+# The foreground 1 s / 1 m request exists only while the map is up, which is
+# inside the drive; a sampler started later can miss it entirely and then fail
+# the anti-vacuity read on a perfectly healthy run. ${SAMPLE_PERIOD_SECS} s is
+# the cadence, so the shortest thing the oracles reason about (a 30 s wake-lock
+# ceiling) is covered several times over.
+#
+# ONE `adb shell` per sample, deliberately: the logcat stamp, the device clock
+# and both dumps come from the same device round trip, so the sample cannot be
+# mis-ordered against the drive's markers by host scheduling. The stamp is
+# written FIRST, so the dumps describe the instant just after it.
+#
+# The output is filtered HERE rather than on the device: `dumpsys location`
+# prints the active position, and the artifact this uploads has no business
+# carrying coordinates when the assertions only need registration and wake-lock
+# lines. The filter is deliberately LOOSER than the parser — it keeps every line
+# naming the package beside a `Request[`, including the Event Log's replays of
+# registrations that are long cancelled — so the artifact still shows the
+# registration history for triage while the parser (which anchors on the caller
+# identity at the start of a line) counts only the live ones.
+#
+# Each sample is assembled into a scratch file OUTSIDE the uploaded directory
+# and appended whole. Killing the sampler when the drive ends would otherwise
+# be able to sever a line mid-`Request[`, and a half-written request is
+# indistinguishable, to the parser, from the grammar change it is there to
+# catch.
+sample_part="${LOG_DIR}.part"
+(
+  n=0
+  while :; do
+    n=$((n + 1))
+    {
+      adb -s "${DEVICE}" shell \
+        "log -p i -t ${SAMPLE_TAG} 'SAMPLE ${n}'; date '+%m-%d %H:%M:%S.000'; dumpsys location; dumpsys power" \
+        2>/dev/null | tr -d '\r' | awk -v n="${n}" -v pkg="${PKG}" -v q="'" '
+          NR == 1 { print "=== SAMPLE n=" n " device-clock=" $0 " ==="; next }
+          index($0, "WAKE_LOCK " q) { print; next }
+          index($0, pkg) && index($0, " Request[") { print }
+        ' > "${sample_part}" \
+        && cat "${sample_part}" >> "${SAMPLE_FILE}"
+    } || true
+    sleep "${SAMPLE_PERIOD_SECS}"
+  done
+) 2>/dev/null &
+SAMPLE_PID=$!
+
+# The step-8 driver.
+#
+# It has to act DURING the drive — the forced-idle phase is a second hold inside
+# the same test body, held open while the tree is still mounted — so it waits on
+# the drive's own marker in the growing logcat capture instead of being
+# sequenced by this script. The drive prints `${MARK_IDLE_BEGIN}` only AFTER
+# `${MARK_HOLD_DONE}` has closed the P2a window, so nothing below can disturb
+# the span steps 5-7 read.
+#
+# Stopping the drip is the whole experiment: `adb emu geo fix` is a one-shot
+# injection with no stream between injections, so with the loop dead the
+# registration this lane just proved has nothing left to deliver and the only
+# way another location reaches a relay is the no-fix chain.
+#
+# `battery unplug` first, because `DeviceIdleController.updateChargingLocked()`
+# drops the device straight back to ACTIVE on a charging event and the emulator
+# reports AC-plugged; `enable deep` because a device whose deep idle is disabled
+# answers `force-idle` with a message and exit code 0. The authoritative answer
+# is neither of those but the `get deep` read-back, which is stamped into logcat
+# for the oracle — see MARK_IDLE_FORCED.
+(
+  until grep -aqF -- "${MARK_IDLE_BEGIN}" "${LOGCAT_FILE}" 2>/dev/null; do
+    sleep 2
+  done
+  echo "Phase 4/5 — forced-idle phase: stopping the GPS drip and dozing the device..."
+  if [[ -n "${GEO_PID}" ]] && kill -0 "${GEO_PID}" 2>/dev/null; then
+    kill "${GEO_PID}" 2>/dev/null || true
+  fi
+  adb -s "${DEVICE}" shell dumpsys battery unplug >/dev/null 2>&1 || true
+  adb -s "${DEVICE}" shell dumpsys deviceidle enable deep >/dev/null 2>&1 || true
+  adb -s "${DEVICE}" shell dumpsys deviceidle force-idle >/dev/null 2>&1 || true
+  idle_state="$(adb -s "${DEVICE}" shell dumpsys deviceidle get deep 2>/dev/null \
+    | tr -d '\r' | awk 'NF { print $1; exit }')" || idle_state=""
+  [[ -n "${idle_state}" ]] || idle_state="UNREADABLE"
+  echo "Phase 4/5 — deep-idle state: ${idle_state}"
+  adb -s "${DEVICE}" shell \
+    "log -p i -t ${SAMPLE_TAG} '${MARK_IDLE_FORCED}${idle_state}'" >/dev/null 2>&1 || true
+) &
+IDLE_PID=$!
+
 drc=0
 ( cd "${HAVEN_DIR}" && timeout --kill-after=30s "${DRIVE_TIMEOUT}" flutter drive \
     --no-pub \
@@ -655,6 +2291,20 @@ drc=0
     --use-application-binary "${APK}" \
     --driver "${DRIVER_FILE}" \
     --target "${TARGET}" ) > "${DRIVE_LOG}" 2>&1 || drc=$?
+
+# Stop sampling the instant the drive ends. Everything the oracles read happened
+# inside it; the teardown after it is not evidence, and a sample taken there
+# would only widen what the "one registration, no fast request" rows have to
+# explain away.
+if [[ -n "${SAMPLE_PID}" ]] && kill -0 "${SAMPLE_PID}" 2>/dev/null; then
+  kill "${SAMPLE_PID}" 2>/dev/null || true
+fi
+SAMPLE_PID=""
+if [[ -n "${IDLE_PID}" ]] && kill -0 "${IDLE_PID}" 2>/dev/null; then
+  kill "${IDLE_PID}" 2>/dev/null || true
+fi
+IDLE_PID=""
+rm -f "${sample_part}"
 # Scan BEFORE echoing. The EXIT trap's scan runs far too late to protect this:
 # GitHub Actions step logs have no retention control and cannot be redacted
 # after the fact, so an unscanned `cat` of the drive log is a wider, more
@@ -740,7 +2390,7 @@ if ! grep -aqF -- "${MARK_HANDOFF_OK}" "${LOGCAT_FILE}" 2>/dev/null; then
 '${MARK_HANDOFF_OK}'): kForegroundActiveAtMsKey never reached 0, so MapShell._onPaused() \
 did not run to completion and the FGS stayed gated out of publishing."
 fi
-echo "  [1/4] Foreground handoff delivered and confirmed."
+echo "  [1/8] Foreground handoff delivered and confirmed."
 
 # (2) P0-1's oracle — POSITIVE, not an absence check. `Initialized (…
 #     locationSharing=true)` is emitted only after CircleManagerFfi.newInstance
@@ -775,7 +2425,7 @@ appeared: '${MARK_INITIALIZED}… ${MARK_LOCSHARING_OK}' (acquired at onStart) n
 booted, or it booted and never took the session — the P0-1 steady state, in which \
 _publishCycle returns immediately and silently forever."
 fi
-echo "  [2/4] FGS initialized with location sharing wired (Rule-14 acquire succeeded)."
+echo "  [2/8] FGS initialized with location sharing wired (Rule-14 acquire succeeded)."
 
 # (3) Delivery, windowed to the handoff→hold-complete span and PARSED (never
 #     grepped — `Published to 0/1` is P0-1's own signature and contains the
@@ -810,7 +2460,7 @@ if (( published < 1 )); then
   fail "the FGS ran a publish cycle after the handoff but published to ZERO circles \
 (highest count observed: ${published}). The isolate is alive but delivering nothing."
 fi
-echo "  [3/4] FGS published to ${published} circle(s) after the handoff."
+echo "  [3/8] FGS published to ${published} circle(s) after the handoff."
 
 # (4) THE ANTI-VACUITY CHECK. Same OS process ⇒ same Rust `LIVE_SESSIONS`
 #     registry ⇒ the Rule-14 contention was real.
@@ -838,7 +2488,63 @@ if grep -aqF -- "${MARK_ONDESTROY}" "${WINDOW}" 2>/dev/null; then
   fail "the FGS was destroyed during the publish window ('${MARK_ONDESTROY}') — the \
 service did not survive the window it was supposed to publish in.${window_note}"
 fi
-echo "  [4/4] Publish came from PID ${publish_pid}, the same process as the foreground."
+echo "  [4/8] Publish came from PID ${publish_pid}, the same process as the foreground."
+
+# (5)-(7) THE POWER ORACLES. Steps 1-4 prove the FGS publishes; these prove it
+#         does so the way P2a says it does — one long-interval platform request
+#         instead of a 1 Hz stream plus a per-tick one-shot, a scoped and
+#         bounded CPU hold, and a cadence set by the platform's delivery rather
+#         than by a poll. Read from `dumpsys`, i.e. from the PLATFORM's copy of
+#         the request, so a Haven log line claiming a 100 s registration cannot
+#         satisfy them on its own.
+oracle_out=""
+if ! oracle_out="$(assert_registration_oracle "${LOGCAT_FILE}" "${SAMPLE_FILE}" "${WINDOW}")"; then
+  echo "${oracle_out}" >&2
+  fail "the FGS's platform location request does not match the P2a contract (above).\
+${window_note}"
+fi
+echo "${oracle_out}"
+echo "  [5/8] One Haven location request while backgrounded, never under \
+${MIN_FIX_INTERVAL_SECS} s, with the foreground 1 s / 1 m stream released."
+
+if ! oracle_out="$(assert_wake_lock_oracle "${LOGCAT_FILE}" "${SAMPLE_FILE}")"; then
+  echo "${oracle_out}" >&2
+  fail "the wake locks held while backgrounded do not match the P2a contract (above).\
+${window_note}"
+fi
+echo "${oracle_out}"
+echo "  [6/8] Wake locks bounded: the plugin's permanent lock held throughout (P2a keeps \
+it), 'Haven:publish' never past its ${WAKE_LOCK_MAX_AGE_SECS} s ceiling."
+
+if ! oracle_out="$(assert_cadence_oracle "${WINDOW}")"; then
+  echo "${oracle_out}" >&2
+  fail "the background publish cadence does not match the P2a contract (above).\
+${window_note}"
+fi
+echo "${oracle_out}"
+echo "  [7/8] Publishes are delivery-driven and spaced at least \
+${MIN_DELIVERY_GAP_SECS} s apart from the registration that produced them."
+
+# (8) The no-fix chain, in the SECOND hold: the drip is stopped and the device
+#     is in deep idle, so nothing can be delivered and the delivery-driven path
+#     this lane just proved has nothing to run on. Publishing must continue
+#     anyway, from the watchdog and the last known position.
+if ! oracle_out="$(assert_no_fix_chain_oracle "${LOGCAT_FILE}")"; then
+  echo "${oracle_out}" >&2
+  fail "background publishing did not survive the no-fix chain under deep idle (above)."
+fi
+echo "${oracle_out}"
+echo "  [8/8] Publishing survived deep idle with no fix available: a \
+'${MARK_TRIGGER_WATCHDOG}' cycle published from the last known position."
+
+# Evidence only, never asserted: the emulator's GNSS accounting. batterystats on
+# a goldfish HAL measures nothing real (there is no receiver), so a threshold
+# here would be a number with no referent — the kind of gate this file's Phase 5
+# footnote already removed once. The duty cycle it would describe is asserted
+# above, structurally, as the interval the platform was ASKED for.
+echo "---- emulator GNSS accounting (evidence only) ----"
+adb -s "${DEVICE}" shell dumpsys batterystats --checkin 2>/dev/null \
+  | grep -a 'gps' | head -20 || echo "(no gps rows in batterystats)"
 
 # NOTE on what is deliberately NOT asserted: there is no relay-side line-count
 # check. An earlier revision compared strfry's docker-log line count before and

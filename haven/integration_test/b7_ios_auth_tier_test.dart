@@ -9,8 +9,8 @@
 /// `CLLocationManager` session started while the app is FOREGROUNDED, with
 /// `allowsBackgroundLocationUpdates = true` and the `location`
 /// `UIBackgroundMode` declared, keeps delivering under **When-In-Use**
-/// authorization — iOS shows the blue status-bar indicator for exactly that
-/// case. Haven depends on this by design:
+/// authorization — iOS shows the blue location bar for exactly that case, and
+/// it is mandatory there. Haven depends on this by design:
 ///
 ///   * `haven/lib/src/services/geolocator_location_service.dart` (see
 ///     `_streamSettings`) sets `allowBackgroundLocationUpdates` /
@@ -79,10 +79,22 @@
 /// What this proves is the app's own tier-dependent logic and copy: the
 /// production `MethodChannel` → `HavenLocationAuthHandler` → CoreLocation
 /// bridge answers correctly on a real iOS runtime, the provider the settings
-/// UI branches on agrees with it, the rendered copy matches the tier, and the
-/// publish machinery survives a REAL `AppLifecycleState.paused` and puts a
-/// kind-445 on the wire afterwards. Real background delivery on hardware —
-/// jetsam, true suspension, SLC/BGTask fire — stays an owner checklist item.
+/// UI branches on agrees with it, the CoreLocation SESSION OBJECTS the
+/// handler holds are the ones that tier calls for, the rendered copy matches
+/// the tier, and the publish machinery survives a REAL
+/// `AppLifecycleState.paused` and puts a kind-445 on the wire afterwards.
+/// Real background delivery on hardware — jetsam, true suspension, SLC/BGTask
+/// fire — stays an owner checklist item.
+///
+/// The session-object half is the tier→policy mapping OD1 and OD-P3-b rest
+/// on, and it is asserted INVERTED per tier: under When-In-Use a
+/// `CLBackgroundActivitySession` is held (the supported background-delivery
+/// claim, and the mandatory blue bar with it); under a CONFIRMED "Always" —
+/// confirmed by a `CLServiceSessionDiagnostic`, which is the ONE place in CI
+/// that path runs at all — it is released, which is what removes the constant
+/// bar. A handler that took one posture unconditionally satisfies neither
+/// run. The confirmation is asynchronous, so it is read through a bounded
+/// poll and never a single read.
 ///
 /// Skipped (not failed) on non-iOS runtimes: every assertion here is about
 /// CoreLocation, which does not exist elsewhere.
@@ -121,6 +133,7 @@ import 'package:haven/src/providers/onboarding_provider.dart'
 import 'package:haven/src/providers/service_providers.dart'
     show
         circleServiceProvider,
+        iosBackgroundSessionServiceProvider,
         iosLocationPermissionProvider,
         locationServiceProvider;
 import 'package:haven/src/rust/api.dart'
@@ -130,6 +143,8 @@ import 'package:haven/src/rust/api.dart'
         MemberKeyPackageFfi,
         RelayManagerFfi;
 import 'package:haven/src/services/fresh_secret.dart' show withFreshSecret;
+import 'package:haven/src/services/ios_background_session_service.dart'
+    show IosBackgroundSessionService, IosBackgroundSessionStatus;
 import 'package:haven/src/services/ios_location_auth_service.dart'
     show IosAuthStatus, MethodChannelIosLocationAuthService;
 import 'package:haven/src/services/nostr_circle_service.dart'
@@ -199,6 +214,46 @@ const Duration _postPausePublishWindow = Duration(seconds: 240);
 /// [_postPausePublishWindow], so a wedged run leaves evidence in CI instead of
 /// four minutes of silence.
 const Duration _heartbeatInterval = Duration(seconds: 20);
+
+/// How long the per-tier session-posture poll waits for the handler to settle.
+///
+/// Only the "Always" side can actually wait: `CLServiceSession.diagnostics` is
+/// an `AsyncSequence`, so even the immediate first diagnostic of a settled
+/// authorization lands AFTER `arm()` has returned, and only then does the
+/// handler flip `alwaysConfirmed`, re-run `arm()` and release the activity
+/// session. A single read right after the arm is a race; 60 s is far past any
+/// main-actor hop, so a run that never settles is reporting a real absence —
+/// an iOS 17 runtime with no diagnostics API, or a provisional grant.
+const Duration _sessionPostureWindow = Duration(seconds: 60);
+
+/// Cadence of that poll.
+const Duration _sessionPosturePollInterval = Duration(seconds: 5);
+
+/// Polls the native session handler until it holds the posture [tier] calls
+/// for, or [_sessionPostureWindow] expires; returns the last status read.
+///
+/// The posture is INVERTED between the tiers, which is the whole point:
+/// under When-In-Use the `CLBackgroundActivitySession` (and with it the
+/// mandatory blue bar) must be held, and under a CONFIRMED "Always" it must
+/// not be — that inversion is what OD1 and OD-P3-b rest on, and it is the one
+/// place in CI where the tier→policy mapping is observed at runtime.
+Future<IosBackgroundSessionStatus> _pollForTierPosture(
+  IosBackgroundSessionService service,
+  IosAuthStatus tier,
+) async {
+  var waited = Duration.zero;
+  var status = await service.status();
+  while (waited < _sessionPostureWindow) {
+    final settled = tier == IosAuthStatus.whenInUse
+        ? status.backgroundActivitySessionHeld
+        : status.alwaysConfirmed && !status.backgroundActivitySessionHeld;
+    if (settled) return status;
+    await Future<void>.delayed(_sessionPosturePollInterval);
+    waited += _sessionPosturePollInterval;
+    status = await service.status();
+  }
+  return status;
+}
 
 /// Reads the CoreLocation authorization tier through the PRODUCTION bridge.
 ///
@@ -340,11 +395,75 @@ void main() {
             'not hold.',
       );
 
+      // --- The tier -> SESSION POLICY mapping, at runtime, on a real
+      // CoreLocation grant. The copy assertions below say what the page
+      // CLAIMS; this says what the OS objects actually are, and the two must
+      // describe the same world — the settings page picks its indicator
+      // sentence from this very handler state.
+      //
+      // Independent of the faked location service in the second test and of
+      // any location delivery here: `_seedPublishPrefs()` above is what makes
+      // `BackgroundSharingNotifier._load()` take its `enabled && _isIOS`
+      // branch and AWAIT `arm()` before flipping state, and the toggle read
+      // back true above is the proof that branch completed.
+      final sessionService = container.read(
+        iosBackgroundSessionServiceProvider,
+      );
+      final posture = await _pollForTierPosture(sessionService, tier);
+      debugPrint(
+        '[b7] session posture under ${tier.name}: '
+        'supported=${posture.supported} '
+        'held=${posture.backgroundActivitySessionHeld} '
+        'serviceSessionHeld=${posture.serviceSessionHeld} '
+        'alwaysConfirmed=${posture.alwaysConfirmed}',
+      );
+
+      if (tier == IosAuthStatus.always) {
+        // A FULL "Always" grant — `simctl privacy grant location-always`,
+        // which the shell requires this run to have observed. It is the one
+        // place in CI where the CLServiceSessionDiagnostic path is exercised
+        // at all, and the verdict is asynchronous, hence the bounded poll.
+        expect(
+          posture.alwaysConfirmed,
+          isTrue,
+          reason:
+              '"Always" was granted, but no CLServiceSessionDiagnostic '
+              'confirmed it within ${_sessionPostureWindow.inSeconds}s, so '
+              'the handler is still on the fail-safe When-In-Use posture and '
+              'the assertion below would be measuring that instead. Real '
+              'causes, neither of them fixed by waiting longer: an iOS 17 '
+              'runtime (no diagnostics API — raise the runner image) or a '
+              'provisional grant. An unconfirmed Always is exactly the cohort '
+              'OD-P3-b deliberately keeps on the When-In-Use shape.',
+        );
+      }
+      expect(
+        posture.backgroundActivitySessionHeld,
+        tier == IosAuthStatus.whenInUse,
+        reason: tier == IosAuthStatus.whenInUse
+            ? 'Under When-In-Use the CLBackgroundActivitySession must be '
+                  'HELD: it is the supported claim a When-In-Use app has to '
+                  'background location delivery on modern iOS, and it is the '
+                  'object whose absence produced the 2026-08-20 field '
+                  'failure. It is also inseparable from the blue bar, which '
+                  'is mandatory at this tier anyway — so the honest copy for '
+                  'this state is the bar sentence.'
+            : 'Under a CONFIRMED "Always" the CLBackgroundActivitySession '
+                  'must be RELEASED. Holding it keeps the blue bar for a user '
+                  'who does not need it, which is precisely what OD1 removes '
+                  '— and a handler that holds it under both tiers has no '
+                  'tier branch at all, so nothing in CI would distinguish '
+                  'the two policies.',
+      );
+
       // Resolve the strings from the real localisation rather than hardcoding
       // English, so this stays true under a non-English device locale.
       final l10n = AppLocalizations.of(pageElement);
       final limitedNote = find.text(l10n.locationSettingsIosLimitedNote);
-      final guidance = find.text(l10n.locationSettingsIosGuidance);
+      // `textContaining`, not `text`: the card is one paragraph composing the
+      // base sentence and ONE of the two indicator sentences, so an exact-text
+      // finder matches nothing.
+      final guidance = find.textContaining(l10n.locationSettingsIosGuidance);
 
       const honesty =
           'The ARB pins this copy honest in BOTH directions '
@@ -366,10 +485,10 @@ void main() {
           guidance,
           findsNothing,
           reason:
-              'The unqualified iOS guidance card claims Haven can catch up '
-              'after iOS closes the app, which needs "Always". Showing it '
-              'under While-In-Use would be a false capability claim. '
-              '$honesty',
+              'The iOS guidance card describes the session and the indicator '
+              'that are in force under "Always". Showing it under '
+              'While-In-Use would describe a state this user is not in, and '
+              'would sit alongside the note that says so. $honesty',
         );
         expect(
           find.text(l10n.commonOpenSettings),
@@ -392,8 +511,11 @@ void main() {
           findsOneWidget,
           reason:
               '"Always" is granted, so the page must state what is actually '
-              'in force: a continuous session with the blue indicator, plus '
-              'catch-up after iOS closes the app. $honesty',
+              'in force: a location session that drops to a coarser accuracy '
+              'tier while the user is still, with the OS arrow and no blue '
+              'location bar once that Always is confirmed. The card does NOT '
+              'repeat the "grant Always" advice — it renders only for users '
+              'who already hold it. $honesty',
         );
       }
 
@@ -585,7 +707,7 @@ void main() {
         tester,
         () => container
             .read(locationPublishSchedulerProvider.notifier)
-            .trackedCircleKeysForTest
+            .eligibleKeysForTest
             .isNotEmpty,
         description:
             'the per-circle publish scheduler armed a scheduler for the new '

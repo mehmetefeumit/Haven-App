@@ -121,6 +121,16 @@ abstract final class WidgetKeys {
   /// (DM-4c).
   static const Key legacyCircleRecreateCta = Key('legacy_circle_recreate_cta');
 
+  /// "Re-create Circle" CTA on the blocked-circle banner (OD4-c (i)).
+  ///
+  /// Distinct from [legacyCircleRecreateCta] even though both render the same
+  /// label: a blocked circle whose member lookup was swallowed to an empty
+  /// list is ALSO `isLegacyOrphaned`, so both banners can be on screen at
+  /// once and a text finder would be ambiguous.
+  static const Key blockedCircleRecreateCta = Key(
+    'blocked_circle_recreate_cta',
+  );
+
   /// "Remove" CTA on the Dark Matter cutover legacy-circle banner (DM-4c).
   static const Key legacyCircleRemoveCta = Key('legacy_circle_remove_cta');
 

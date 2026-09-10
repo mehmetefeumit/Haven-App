@@ -128,8 +128,10 @@ run: `flutter run --dart-define-from-file=dart_defines/secrets.json` (from `have
 
 > The bundled key is still extractable from any release binary — no client app
 > can prevent this, and Stadia offers no app-locking. The real safeguard is
-> operational (dashboard usage cap with overage OFF, the 80%-credit alert email,
-> key rotation); see `docs/MAP_AND_PRIVACY_BACKLOG.md`.
+> operational and console-side — a Stadia dashboard usage cap with overage OFF,
+> the 80%-credit alert email, and key rotation — so it lives in the Stadia
+> account, not in this repository. (This note used to cite
+> `docs/MAP_AND_PRIVACY_BACKLOG.md`, which does not exist in this tree.)
 
 Output: `build/app/outputs/flutter-apk/app-debug.apk` (debug) /
 `app-{arm64-v8a,armeabi-v7a,x86_64}-release.apk` (release, per-ABI splits — see

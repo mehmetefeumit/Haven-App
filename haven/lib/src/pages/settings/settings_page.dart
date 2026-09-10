@@ -13,6 +13,7 @@ import 'package:haven/src/pages/settings/appearance_settings_page.dart';
 import 'package:haven/src/pages/settings/location_settings_page.dart';
 import 'package:haven/src/pages/settings/map_style_settings_page.dart';
 import 'package:haven/src/pages/settings/relay_settings_page.dart';
+import 'package:haven/src/providers/background_location_provider.dart';
 import 'package:haven/src/providers/debug_log_provider.dart';
 import 'package:haven/src/widgets/widgets.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -56,17 +57,28 @@ class SettingsPage extends StatelessWidget {
               );
             },
           ),
-          HavenSettingsTile(
-            icon: LucideIcons.mapPin,
-            title: l10n.settingsLocationTitle,
-            onTap: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute<void>(
-                  builder: (context) => const LocationSettingsPage(),
-                ),
-              );
-            },
+          // The only hub row with a subtitle: it reports the background-sharing
+          // SETTING, which has no other standing surface — a confirmed-Always
+          // iPhone shows no blue bar, so without this line nothing tells the
+          // user at a glance that Haven keeps sharing once they leave it.
+          // Deliberately not a health reading: the setting is what the user
+          // chose, and the map's own banners own the fault states.
+          Consumer(
+            builder: (context, ref, _) => HavenSettingsTile(
+              icon: LucideIcons.mapPin,
+              title: l10n.settingsLocationTitle,
+              subtitle: ref.watch(backgroundSharingProvider)
+                  ? l10n.settingsLocationSubtitleOn
+                  : l10n.settingsLocationSubtitleOff,
+              onTap: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute<void>(
+                    builder: (context) => const LocationSettingsPage(),
+                  ),
+                );
+              },
+            ),
           ),
           HavenSettingsTile(
             icon: LucideIcons.layers,

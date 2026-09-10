@@ -19,6 +19,8 @@ import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/identity_service.dart';
+import 'package:haven/src/services/publish_stagger.dart'
+    show kMaxCirclesPerAccount;
 import 'package:haven/src/services/relay_service.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -108,12 +110,20 @@ KeyPackageData _invitee(String pubkey) => KeyPackageData(
 );
 
 /// Provider overrides shared by every "create flow" test.
-List<Override> _overrides({required MockCircleService mockCircle}) {
+///
+/// [identityNotifier] replaces [_FakeIdentityNotifier] for the tests that
+/// need the secret read itself to fail.
+List<Override> _overrides({
+  required MockCircleService mockCircle,
+  IdentityNotifier Function()? identityNotifier,
+}) {
   return [
     circleServiceProvider.overrideWithValue(mockCircle),
     identityServiceProvider.overrideWithValue(const _MockIdentityService()),
     identityProvider.overrideWith((_) async => _testIdentity),
-    identityNotifierProvider.overrideWith(_FakeIdentityNotifier.new),
+    identityNotifierProvider.overrideWith(
+      identityNotifier ?? _FakeIdentityNotifier.new,
+    ),
     // Stub inbox relay list — prevents InboxRelaysNotifier from hitting SQLite.
     inboxRelaysProvider.overrideWith(_StubInboxRelays.new),
     // Stub circles so invalidate() after confirm doesn't reach Rust.
@@ -510,5 +520,239 @@ void main() {
         container.read(joinWatcherProvider.notifier).cancel();
       },
     );
+
+    testWidgets(
+      'at the roster bound the refusal names the limit and the remedy, and '
+      'the page stays put',
+      (tester) async {
+        // The service refuses before staging anything (see
+        // `nostr_circle_service_roster_bound_test.dart`). What this pins is the
+        // half the user sees: not the generic "please try again", which would
+        // send them back to a button that can never succeed.
+        final mockCircle = _RosterFullCircleService();
+
+        final observer = _PopCountingNavigatorObserver();
+        final container = ProviderContainer(
+          overrides: _overrides(mockCircle: mockCircle),
+        );
+        addTearDown(container.dispose);
+
+        await tester.pumpWidget(
+          _buildNavApp(
+            container: container,
+            observer: observer,
+            memberKeyPackages: [_invitee('a')],
+          ),
+        );
+
+        final l10n = await _createCircle(tester, name: 'Eleventh');
+
+        final refusal = l10n.nameCircleRosterFullError(kMaxCirclesPerAccount);
+        expect(find.text(refusal), findsOneWidget);
+        // The copy itself, not only the key. Comparing the rendered text with
+        // the same getter that produced it passes for ANY wording, including a
+        // rewrite to "Something went wrong, please try again" — which is the
+        // one thing this screen must never say here. English only: this test
+        // pumps the default `en` locale; the other twelve are held by
+        // `test/l10n/roster_bound_copy_accuracy_test.dart`.
+        expect(
+          refusal,
+          contains('$kMaxCirclesPerAccount'),
+          reason: 'the user cannot act on a limit they are not told',
+        );
+        expect(
+          refusal,
+          matches(
+            RegExp(
+              'up to|at most|a maximum of|no more than|only',
+              caseSensitive: false,
+            ),
+          ),
+          reason: 'the ceiling must be MARKED: a bare positive ("you can be '
+              'in 10 circles") reads as capability, and eleven of the twelve '
+              'locales had to add a limiter to the unmarked wording',
+        );
+        expect(
+          refusal,
+          matches(RegExp(r'\bleave\b', caseSensitive: false)),
+          reason: 'the remedy is leaving a circle; without it the refusal is a '
+              'dead end',
+        );
+        expect(
+          refusal.toLowerCase(),
+          isNot(contains('try again')),
+          reason: 'retrying at the bound can never succeed',
+        );
+        expect(
+          find.text(l10n.nameCircleCreateError),
+          findsNothing,
+          reason: 'a retry prompt for something that can never succeed',
+        );
+        // Security Rule 8: no exception text, however harmless, reaches the
+        // screen — the refusal is copy, not a rendered error.
+        expect(
+          find.textContaining('Exception', findRichText: true),
+          findsNothing,
+        );
+        expect(
+          observer.popCount,
+          0,
+          reason: 'nothing was created, so the create flow must not unwind',
+        );
+      },
+    );
   });
+
+  // ---------------------------------------------------------------------
+  // Every refusal must be AUDIBLE, not merely visible (WCAG 2.1 SC 4.1.3).
+  // The setState that sets `_errorMessage` also clears `_isCreating`, so
+  // `_buildProgress` — the page's only other live region — is gone by the
+  // time the message renders. The error's own node is therefore the only
+  // thing that can carry the announcement.
+  // ---------------------------------------------------------------------
+  group('NameCirclePage — a refusal is announced, not merely shown', () {
+    Future<AppLocalizations> pumpFailedCreate(
+      WidgetTester tester, {
+      required MockCircleService mockCircle,
+      IdentityNotifier Function()? identityNotifier,
+    }) async {
+      final container = ProviderContainer(
+        overrides: _overrides(
+          mockCircle: mockCircle,
+          identityNotifier: identityNotifier,
+        ),
+      );
+      addTearDown(container.dispose);
+
+      await tester.pumpWidget(
+        _buildNavApp(
+          container: container,
+          observer: _PopCountingNavigatorObserver(),
+          memberKeyPackages: [_invitee('a')],
+        ),
+      );
+      return _createCircle(tester, name: 'Announce me');
+    }
+
+    void expectAnnounced(WidgetTester tester, String message) {
+      expect(find.text(message), findsOneWidget);
+      final node = tester.getSemantics(find.text(message));
+      expect(
+        node.label,
+        message,
+        reason: 'the live region must carry the refusal itself — a container '
+            'node with no label announces nothing',
+      );
+      expect(
+        node.flagsCollection.isLiveRegion,
+        isTrue,
+        reason: 'without isLiveRegion on the node that carries the message, '
+            'TalkBack and VoiceOver stay silent when it appears, and the '
+            'progress live region that used to be on screen has just been '
+            'removed by the same setState',
+      );
+    }
+
+    testWidgets('the roster-bound refusal is a live region', (tester) async {
+      // Disposed explicitly, not via addTearDown: the end-of-test
+      // semantics-handle verification runs before tearDowns.
+      final handle = tester.ensureSemantics();
+
+      final l10n = await pumpFailedCreate(
+        tester,
+        mockCircle: _RosterFullCircleService(),
+      );
+      final refusal = l10n.nameCircleRosterFullError(kMaxCirclesPerAccount);
+      expectAnnounced(tester, refusal);
+
+      // The progress live region is NOT what speaks: it left the tree with
+      // `_isCreating`. Pinned so moving the announcement back under
+      // `_buildProgress` cannot pass.
+      expect(
+        find.byType(LinearProgressIndicator),
+        findsNothing,
+        reason: '_buildProgress is gone, so it cannot be the announcer',
+      );
+
+      // A second attempt at the same dead end must speak again. The message
+      // is cleared before each retry, so this is a fresh insertion rather
+      // than a rebuild with an unchanged label — the case a live region
+      // announces reliably on both platforms.
+      await tester.tap(find.byKey(WidgetKeys.createCircleConfirm));
+      for (var i = 0; i < 6; i++) {
+        await tester.pump(Duration.zero);
+      }
+      expectAnnounced(tester, refusal);
+      handle.dispose();
+    });
+
+    testWidgets('the generic create failure is a live region', (tester) async {
+      final handle = tester.ensureSemantics();
+
+      final l10n = await pumpFailedCreate(
+        tester,
+        mockCircle: _FailingCircleService(),
+      );
+      expectAnnounced(tester, l10n.nameCircleCreateError);
+      handle.dispose();
+    });
+
+    testWidgets('the identity failure is a live region', (tester) async {
+      final handle = tester.ensureSemantics();
+
+      final l10n = await pumpFailedCreate(
+        tester,
+        mockCircle: MockCircleService(),
+        identityNotifier: _FailingIdentityNotifier.new,
+      );
+      expectAnnounced(tester, l10n.nameCircleIdentityError);
+      handle.dispose();
+    });
+  });
+}
+
+/// A circle service at the account roster bound: every create is refused.
+class _RosterFullCircleService extends MockCircleService {
+  @override
+  Future<CircleCreationResult> createCircle({
+    required List<int> identitySecretBytes,
+    required List<KeyPackageData> memberKeyPackages,
+    required String name,
+    required CircleType circleType,
+    String? description,
+    List<String>? relays,
+    List<String> creatorFallbackRelays = const [],
+  }) async {
+    methodCalls.add('createCircle');
+    throw const CircleRosterFullException();
+  }
+}
+
+/// A circle service whose create fails for a reason a retry might fix — the
+/// page's generic `CircleServiceException` branch.
+class _FailingCircleService extends MockCircleService {
+  @override
+  Future<CircleCreationResult> createCircle({
+    required List<int> identitySecretBytes,
+    required List<KeyPackageData> memberKeyPackages,
+    required String name,
+    required CircleType circleType,
+    String? description,
+    List<String>? relays,
+    List<String> creatorFallbackRelays = const [],
+  }) async {
+    methodCalls.add('createCircle');
+    throw const CircleServiceException('relay unreachable');
+  }
+}
+
+/// An [IdentityNotifier] whose secret read fails — the page's
+/// `IdentityServiceException` branch, reached before the service is called.
+class _FailingIdentityNotifier extends IdentityNotifier {
+  @override
+  Future<Identity?> build() async => _testIdentity;
+
+  @override
+  Future<List<int>> getSecretBytes() async =>
+      throw const IdentityServiceException('secret unavailable');
 }

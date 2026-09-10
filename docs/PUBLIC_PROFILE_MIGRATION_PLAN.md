@@ -523,10 +523,14 @@ reviewer agents + `arb_parity_check.dart` + warning-free `flutter gen-l10n`.
   revalidation — also the empirical auth-encoding interop proof; duplicate upload →
   200; adversarial mismatched-sha server rejected).
 - **Wire-compat regression**: `new_client_ignores_legacy_display_name_field_in_location_json`
-  (also pins that `deny_unknown_fields` never creeps in);
-  `haven_avatar_inner_kind9_from_old_client_ignored_without_state_damage` — asserting
-  specifically that the message is marked **seen/skipped (not decrypt-failed/retried)**
-  and the processing cursor advances (protocol review 4.3).
+  (`haven-core/src/location/types.rs`; also pins that `deny_unknown_fields` never creeps in);
+  `convert_location_with_unparseable_content_is_seen_not_dropped`
+  (`haven/rust_builder/src/api.rs`) — a decrypted message whose content is not a
+  `LocationMessage` still folds to `kind: Location, location: None`, so it is **seen/skipped,
+  never decrypt-failed and retried forever** (protocol review 4.3). The core-level companion
+  this plan named, `haven_avatar_inner_kind9_from_old_client_ignored_without_state_damage`,
+  was never written: the fold is infallible by construction, which makes "never an `Err` on
+  parse failure" structural rather than asserted.
 
 ### 7.2 Flutter (mocked FFI via `MockProfileService`; ≥50% holds)
 

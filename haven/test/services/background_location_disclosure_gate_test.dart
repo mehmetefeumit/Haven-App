@@ -146,6 +146,60 @@ void main() {
       expect(gateAt, lessThan(encryptAt));
     });
 
+    test('the gate precedes the stream registration as well as the one-shot',
+        () {
+      // Collection is not only the one-shot any more: the background isolate
+      // holds a continuous platform location registration, and the moment it
+      // is issued the platform starts producing this device's coordinates for
+      // Haven. A gate that ran only above `getCurrentLocation()` would leave
+      // that registration — the LONGER-lived of the two collections — outside
+      // the disclosure the user was shown.
+      final gateAt = source.indexOf(
+        'if (!backgroundPublishDisclosureAccepted(',
+      );
+      expect(gateAt, greaterThan(0), reason: 'no call-site form found');
+
+      // The CALL sites, never `indexOf` of the bare name — that returns the
+      // helper's own declaration, which sits above the gate by construction
+      // and would keep this green with every call deleted.
+      final calls = 'await _ensureRegistration('
+          .allMatches(source)
+          .map((m) => m.start)
+          .toList();
+      expect(
+        calls,
+        isNotEmpty,
+        reason: 'the cycle must arm the registration itself; if the helper '
+            'was renamed, re-point this test rather than deleting it',
+      );
+      for (final at in calls) {
+        expect(
+          gateAt,
+          lessThan(at),
+          reason: 'every platform location request must be issued BELOW the '
+              'disclosure gate, on every path',
+        );
+      }
+
+      // ...and the plugin call that issues one exists nowhere else, so there
+      // is no second route around the gate.
+      final helperStart = source.indexOf('Future<void> _ensureRegistration(');
+      final helperEnd = source.indexOf('Future<void> _cancelRegistration(');
+      expect(helperStart, greaterThan(0));
+      expect(
+        helperEnd,
+        greaterThan(helperStart),
+        reason: 'the helpers are read as a pair; a reorder must re-point this '
+            'test rather than silently widen the slice',
+      );
+      final streamCalls = 'getLocationStream('
+          .allMatches(source)
+          .map((m) => m.start)
+          .toList();
+      expect(streamCalls, hasLength(1));
+      expect(streamCalls.single, inInclusiveRange(helperStart, helperEnd));
+    });
+
     test('the foreground publisher still enforces its own gate', () {
       // Guards against "fixing" a future divergence by deleting the foreground
       // check instead of aligning the two.

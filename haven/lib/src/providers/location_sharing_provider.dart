@@ -150,7 +150,7 @@ Future<List<MemberLocation>> _withEffectiveNames(
 /// Publishes the user's current location to all accepted circles.
 ///
 /// The one-shot "publish to every circle now" burst: cold start, app resume,
-/// motion trigger, and the accept/create UI. (The recurring per-circle cadence
+/// motion trigger, and the accept/create UI. (The recurring device cadence
 /// belongs to `locationPublishSchedulerProvider`.) Returns the number of
 /// circles published to.
 ///
@@ -167,19 +167,37 @@ Future<List<MemberLocation>> _withEffectiveNames(
 /// events, including from different relays or from an archive.
 ///
 /// This is the highest-frequency burst path there is — cold start
-/// (`map_shell.dart`), every resume, and every significant-motion trigger —
-/// and on iOS it is ALSO the background publish path (iOS has no foreground
-/// service; background publishes arrive through the motion trigger).
+/// (`map_shell.dart`), every significant-motion trigger, and every resume more
+/// than 30 s after the last one (`MapShell`'s resume debounce sits ABOVE its
+/// invalidate, so a glance inside that window reaches nothing here) — and on
+/// iOS it is ALSO the background publish path (iOS has no foreground service;
+/// background publishes arrive through the motion trigger).
 ///
 /// Freshness cost: the last circle in a burst publishes at most
-/// `PublishStagger.maxSpreadFor(n)` (≤ 30 s for realistic circle counts)
-/// later than the first, using the same GPS fix. That fix is still inside
-/// `kStreamPositionMaxAge` (168 s — the app's own bound on a publishable fix),
-/// the burst still completes well inside `kLocationPublishOverlapGuard` (60 s,
-/// so two bursts can never interleave), and the recurring per-circle schedules
-/// are untouched, so the kind-445 no-gap invariant
-/// (`LOCATION_MESSAGE_RETENTION_SECS` 228 s > `kLocationPublishMaxInterval`
-/// 168 s) is unaffected by the stagger.
+/// `PublishStagger.maxSpreadFor(n)` later than the first, using the same GPS
+/// fix — 30 s up to `kMaxCirclesPerBurst`, and growing by ~3 s per circle past
+/// it, because this path is deliberately NOT capped. A one-shot is a "publish
+/// to everyone NOW" promise (cold start, resume, motion, accept/create), so
+/// deferring its tail would silently drop coverage with no next tick to pick
+/// it up; the recurring burst can defer because another one is already
+/// scheduled.
+///
+/// Two consequences of that, stated rather than assumed — and both are about
+/// rosters `kMaxCirclesPerAccount` (10) refuses, so they bound the mechanism
+/// rather than describing anything a user can reach. The fix stays inside
+/// `kStreamPositionMaxAge` (168 s — the app's own bound on a publishable fix)
+/// up to 56 circles. But the burst only finishes inside
+/// `kLocationPublishOverlapGuard` (60 s) up to 20 circles: from 21 a one-shot
+/// can still be publishing when the guard would allow the next one to begin.
+/// What happens then is a SUPERSEDE rather than an interleave — every trigger
+/// does `invalidate` + `read`, so the in-flight burst's `onDispose` sets
+/// `superseded` and it stops at its next gap boundary, with the replacement
+/// re-shuffling from the start. Two consequences, and they are the reason the
+/// tail's cover past twenty circles is a probability and not a promise: the
+/// abandoned burst never reaches its tail, and the one publish already awaiting
+/// the FFI when the invalidate lands can still overlap the replacement's first
+/// — bounded by the engine's session mutex rather than by this timing (Rule
+/// 14), and costing interleaved `created_at` stamps rather than correctness.
 final locationPublisherProvider = FutureProvider<int>((ref) async {
   debugPrint('[LocationPublish] Provider executing...');
 

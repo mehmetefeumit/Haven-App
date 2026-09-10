@@ -67,8 +67,9 @@ class _RecordingEngine implements SubscriptionService {
 
   /// When true, [subscribeCircle] throws — models a delta op failing against a
   /// possibly-gone session, forcing the full-restart fallback. The message
-  /// embeds a fake group id to prove it is never logged.
-  final bool throwOnSubscribe;
+  /// embeds a fake group id to prove it is never logged. Mutable so a test can
+  /// heal the engine between two applies, which is what the next burst does.
+  bool throwOnSubscribe;
 
   /// When true, [unsubscribeCircle] throws — the `unsubscribeCircle`
   /// counterpart to [throwOnSubscribe].
@@ -81,6 +82,11 @@ class _RecordingEngine implements SubscriptionService {
   /// still works. The message embeds a fake group id to prove it is never
   /// logged.
   bool throwOnIsRunning;
+
+  /// Whether the engine is between background bursts: alive and [isRunning],
+  /// but holding no REQ and no socket. Mutable so a test can pause and un-pause
+  /// it around an apply, which is exactly what a burst does.
+  bool paused = false;
 
   final List<_StartCall> startCalls = [];
 
@@ -144,6 +150,29 @@ class _RecordingEngine implements SubscriptionService {
     }
     return _running;
   }
+
+  @override
+  bool get isPaused => paused;
+
+  // The resubscriber owns delta subscribes and full restarts only; it must
+  // never drive a burst. Throwing keeps that true — a future change that
+  // reaches for the burst API from here fails loudly instead of no-op'ing.
+  //
+  // [isPaused] is the exception, and hardcoding it `false` was a hole rather
+  // than a simplification: it is a READ, so a caller that ignored it no-op'd
+  // silently instead of failing loudly, and every "does this path respect a
+  // paused engine" question answered itself in the negative.
+  @override
+  Future<void> openBackgroundBurst() => throw UnimplementedError();
+
+  @override
+  Future<BacklogOutcomeFfi> waitBacklogSettled() => throw UnimplementedError();
+
+  @override
+  Future<void> settleBeforePause() => throw UnimplementedError();
+
+  @override
+  Future<void> pauseSubscriptions() => throw UnimplementedError();
 }
 
 CircleMember _member(String pubkey) => CircleMember(
@@ -473,6 +502,88 @@ void main() {
           [1],
           reason: 'the full restart targets the full desired set',
         );
+        resub.dispose();
+      });
+    });
+
+    test('a delta failure while PAUSED opens no session', () {
+      // The reachable trigger is the WSS gate: `subscribe_circle` rejects a
+      // newly-added circle's plaintext relay ABOVE its own paused early-return,
+      // so a paused engine really can answer a delta op with a hard error. The
+      // old fallback then ran stop+start, and `start_session` connects the pool
+      // and issues every standing REQ with no notion of a pause — restoring, in
+      // the background, the always-on socket the burst design exists to remove,
+      // with nothing to close it until some later burst's `finally`.
+      FakeAsync().run((async) {
+        final engine = _RecordingEngine(throwOnSubscribe: true)..paused = true;
+        final resub = _resub(engine, [_circle(tag: 1)])
+          ..onCirclesChanged([_circle(tag: 1), _circle(tag: 2)]);
+        async
+          ..elapse(const Duration(milliseconds: 500))
+          ..flushMicrotasks();
+
+        expect(
+          engine.subscribeCalls,
+          hasLength(1),
+          reason: 'anti-vacuity: the delta was attempted and it failed',
+        );
+        expect(
+          engine.startCalls,
+          isEmpty,
+          reason: 'a paused engine must still hold no REQ and no socket',
+        );
+        expect(engine.stopCalls, 0);
+        resub.dispose();
+      });
+    });
+
+    test('the same delta failure DOES restart once the engine is not paused',
+        () {
+      // Anti-vacuity for the test above: the deferral is about the pause, not
+      // about this delta being unrecoverable.
+      FakeAsync().run((async) {
+        final engine = _RecordingEngine(throwOnSubscribe: true);
+        final resub = _resub(engine, [_circle(tag: 1)])
+          ..onCirclesChanged([_circle(tag: 1), _circle(tag: 2)]);
+        async
+          ..elapse(const Duration(milliseconds: 500))
+          ..flushMicrotasks();
+
+        expect(engine.startCalls, hasLength(1));
+        expect(engine.stopCalls, 1);
+        resub.dispose();
+      });
+    });
+
+    test('a deferred delta is retried on the next snapshot, not lost', () {
+      // The running set is deliberately NOT adopted when the restart is
+      // deferred, so the identical snapshot still reads as changed. Without
+      // that, a circle added while paused would be dropped silently and never
+      // re-attempted.
+      FakeAsync().run((async) {
+        final engine = _RecordingEngine(throwOnSubscribe: true)..paused = true;
+        final resub = _resub(engine, [_circle(tag: 1)])
+          ..onCirclesChanged([_circle(tag: 1), _circle(tag: 2)]);
+        async
+          ..elapse(const Duration(milliseconds: 500))
+          ..flushMicrotasks();
+        expect(engine.startCalls, isEmpty);
+
+        // The next burst opens and the app re-feeds the SAME circle set.
+        engine
+          ..paused = false
+          ..throwOnSubscribe = false;
+        resub.onCirclesChanged([_circle(tag: 1), _circle(tag: 2)]);
+        async
+          ..elapse(const Duration(milliseconds: 500))
+          ..flushMicrotasks();
+
+        expect(
+          engine.subscribeCalls.map((g) => g.nostrGroupId.first),
+          [2, 2],
+          reason: 'the added circle is re-attempted, incrementally',
+        );
+        expect(engine.startCalls, isEmpty, reason: 'and it succeeded');
         resub.dispose();
       });
     });
@@ -968,6 +1079,23 @@ void main() {
         reason: 'this runs on a timer; restarting a healthy engine would tear '
             'down a working session on every tick',
       );
+      resub.dispose();
+    });
+
+    test('a PAUSED engine is left paused, not re-anchored', () async {
+      // A pause is alive-but-silent: `isRunning` stays true across it, which
+      // is what makes the healthy-engine early return cover this today. The
+      // assertion is on the OUTCOME rather than on that mechanism, so it still
+      // holds if the early return is ever reworked — re-anchoring here would
+      // re-open every standing REQ in the background and undo the burst.
+      final engine = _RecordingEngine()..paused = true;
+      final resub = _resub(engine, [_circle(tag: 1)]);
+      engine.startCalls.clear();
+
+      await resub.ensureRunning();
+
+      expect(engine.startCalls, isEmpty);
+      expect(engine.stopCalls, 0);
       resub.dispose();
     });
 

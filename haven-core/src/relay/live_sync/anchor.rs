@@ -218,12 +218,40 @@ impl CursorAnchors {
     /// Consumes this generation's EOSE and returns the cursor value (ms) it
     /// justifies, or `None` when there is no open generation or the generation
     /// already advanced.
+    ///
+    /// A generation is opened per CIRCLE while its REQ is issued to SEVERAL
+    /// relays, so this cannot be called on one relay's `EOSE` alone: the caller
+    /// must first have established that every relay which accepted the REQ has
+    /// finished its stored replay
+    /// ([`super::processor::EngineProcessor::note_eose_endpoint`]). One relay's
+    /// `EOSE` is one relay's completeness claim.
     pub fn note_eose(&self, group_id_hex: &str, now_secs: i64) -> Option<i64> {
         self.inner
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get_mut(group_id_hex)
             .and_then(|anchor| anchor.consume_eose(now_secs))
+    }
+
+    /// Whether EVERY open generation has spent its advance — nothing is still
+    /// owed an `EOSE`.
+    ///
+    /// Presence-only (a bool over the whole table, never a group id), and read
+    /// as "advance burned", NOT as "EOSE seen": a generation suppressed by
+    /// [`Self::suppress_open_generations`] (the Rule-12 delivery-gap path)
+    /// counts as consumed, because from the cursor's point of view the two are
+    /// the same fact — this generation will not advance. Vacuously `true` with
+    /// no generation open.
+    ///
+    /// The burst's observability read: after one burst has settled, this says
+    /// whether the burst's own REQs resolved their advances.
+    #[must_use]
+    pub fn all_consumed(&self) -> bool {
+        self.inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+            .all(|anchor| anchor.eose_consumed)
     }
 
     /// Drops a circle's anchor (its subscription was closed).
@@ -262,9 +290,9 @@ impl CursorAnchors {
 /// for the whole duration of the skew. And NIP-59 deliberately backdates every
 /// gift wrap by up to 48h, so with the floor at `now` even a wrap published
 /// *this second* fails the `since` filter: invitation delivery stops entirely,
-/// permanently, and across restarts. The 7-day inbox lookback bounds the
-/// backward direction but does nothing here — it is subtracted from a cursor
-/// that is already ahead of the clock.
+/// permanently, and across restarts. The inbox lookback (7 days cold, 49 hours
+/// on a re-subscribe) bounds the backward direction but does nothing here — it
+/// is subtracted from a cursor that is already ahead of the clock.
 ///
 /// # What this anchors on instead
 ///
@@ -280,11 +308,14 @@ impl CursorAnchors {
 /// plane's `RejectedBeforeAuth`, and letting it hold would sell anyone who
 /// knows the victim's npub a permanent cursor stall for one free event — or (b)
 /// a local storage failure, which no remote party caused. Case (b) is covered
-/// instead by the stream's 7-day lookback ([`INBOX_GIFTWRAP_LOOKBACK_SECS`]):
-/// the next REQ's floor is a full week below this advance, so a wrap that was
-/// delivered in this window is re-requested for the next seven days.
+/// instead by the stream's lookback: a stream with no persisted cursor subtracts
+/// a full week ([`INBOX_GIFTWRAP_LOOKBACK_SECS`]) and every REQ derived from one
+/// subtracts 49 hours ([`INBOX_RESUBSCRIBE_LOOKBACK_SECS`]), so a wrap delivered
+/// in this window is re-requested for that long — the recovery window narrowed
+/// with the bound, which is the cost that constant's doc records.
 ///
 /// [`INBOX_GIFTWRAP_LOOKBACK_SECS`]: super::super::cursor::INBOX_GIFTWRAP_LOOKBACK_SECS
+/// [`INBOX_RESUBSCRIBE_LOOKBACK_SECS`]: super::super::cursor::INBOX_RESUBSCRIBE_LOOKBACK_SECS
 #[derive(Default)]
 pub struct InboxAnchor {
     inner: Mutex<Option<InboxGeneration>>,
@@ -359,9 +390,10 @@ impl InboxAnchor {
     /// inside the same ignorance: ONE notification stream carries both planes,
     /// so a skip on it can have swallowed a gift wrap as easily as a `kind:445`.
     ///
-    /// Cheap here in particular: the inbox REQ already re-requests a 7-day
-    /// window, so a suppressed generation widens that window by the length of
-    /// one generation rather than adding a fetch.
+    /// Cheap here in particular: the inbox REQ already re-requests a whole
+    /// lookback window (7 days cold, 49 hours on a re-subscribe), so a
+    /// suppressed generation widens that window by the length of one generation
+    /// rather than adding a fetch.
     pub fn suppress_open_generation(&self) {
         if let Some(generation) = self
             .inner
@@ -371,6 +403,20 @@ impl InboxAnchor {
         {
             generation.eose_consumed = true;
         }
+    }
+
+    /// Whether the open generation has spent its advance, or no generation is
+    /// open at all.
+    ///
+    /// The inbox counterpart of [`CursorAnchors::all_consumed`], with the same
+    /// "advance burned" reading: a generation suppressed by
+    /// [`Self::suppress_open_generation`] answers `true`.
+    #[must_use]
+    pub fn is_consumed(&self) -> bool {
+        self.inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_none_or(|generation| generation.eose_consumed)
     }
 
     /// Drops the generation (the inbox REQ was closed / the session stopped),

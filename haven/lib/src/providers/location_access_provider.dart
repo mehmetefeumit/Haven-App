@@ -76,6 +76,7 @@ library;
 
 import 'dart:async';
 
+import 'package:clock/clock.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/constants/location.dart';
@@ -196,6 +197,32 @@ class LocationAccessNotifier extends Notifier<LocationAccessStatus> {
   /// probe can still be in flight at that point.
   bool _disposed = false;
 
+  /// Whether the app is paused, i.e. [suspend] ran and [resume] has not.
+  ///
+  /// Cleared ONLY by [resume], never by [refresh]: `refresh()` is also reached
+  /// from the stream-error branch, from `map_page`'s retry button and from a
+  /// failed one-shot read, so a permission revoked in Settings while the app
+  /// is away would otherwise re-open the 30 s probe loop for the whole
+  /// background window.
+  bool _suspended = false;
+
+  /// When the last fix was delivered, or null if none has been.
+  ///
+  /// The watchdog measures SILENCE, so a fix only has to move this timestamp —
+  /// see [_armWatchdog] for why that replaced a Timer per fix.
+  DateTime? _lastFixAt;
+
+  /// How many watchdog timers have been created since this notifier was built.
+  ///
+  /// Test-only, and the ONLY thing that can hold the one-timer rule: the probe
+  /// cadence is identical whether the timer is re-created per fix or left
+  /// armed (that is the point), so no behaviour distinguishes them.
+  int _watchdogArms = 0;
+
+  /// [visibleForTesting] — see [_watchdogArms].
+  @visibleForTesting
+  int get watchdogArmsForTest => _watchdogArms;
+
   /// Whether Haven has held location access at any point in this session —
   /// either a probe read a granted permission, or a fix was delivered.
   ///
@@ -268,7 +295,11 @@ class LocationAccessNotifier extends Notifier<LocationAccessStatus> {
       // A delivered fix settles the contradiction in the probe's favour: the
       // stream is demonstrably alive, so stop paying for fast rechecks.
       _contradictedProbesLeft = 0;
-      _armWatchdog();
+      _lastFixAt = clock.now();
+      // Touch the timestamp, do not re-create the timer: an armed watchdog
+      // already re-arms itself for the remainder when it fires (see
+      // [_armWatchdog]), and Android delivers a fix every second.
+      if (!(_watchdog?.isActive ?? false)) _armWatchdog();
       _apply(LocationAccessStatus.available, restartStream: false);
       return;
     }
@@ -292,12 +323,22 @@ class LocationAccessNotifier extends Notifier<LocationAccessStatus> {
   ///   * on Android the probe would otherwise keep firing platform calls every
   ///     [kLocationAccessProbeInterval] for as long as the app is backgrounded.
   ///
-  /// `_onResumed` calls [refresh] before anything else, which re-arms — so the
-  /// banner is re-decided from a fresh platform read on the way back in, which
-  /// is more accurate than whatever a background tick would have left behind.
+  /// `_onResumed` calls [resume] and then [refresh], so the banner is
+  /// re-decided from a fresh platform read on the way back in — more accurate
+  /// than whatever a background tick would have left behind.
   void suspend() {
+    _suspended = true;
     _watchdog?.cancel();
     _watchdog = null;
+  }
+
+  /// Lets the watchdog be armed again. The mirror of [suspend].
+  ///
+  /// Arms nothing itself: `_onResumed` calls this and then [refresh], and
+  /// `refresh()` re-arms from a fresh platform verdict — which is the reading
+  /// the banner must show on the way back in anyway.
+  void resume() {
+    _suspended = false;
   }
 
   /// Re-reads the platform's location-access state and republishes the verdict.
@@ -520,10 +561,27 @@ class LocationAccessNotifier extends Notifier<LocationAccessStatus> {
     // Recovering. An Android position subscription torn down with the OS
     // provider does not come back on its own, so without this the map would
     // stay frozen for the rest of the session even though access is fine.
-    if (restartStream) ref.invalidate(locationStreamProvider);
+    //
+    // Never while suspended: the invalidate cancels the running subscription
+    // SYNCHRONOUSLY but defers the rebuild to a frame, and frames are off
+    // while the app is paused — so on iOS it would withdraw the background
+    // session that keeps the process executable and rebuild it only at the
+    // next resume. `_onResumed` re-establishes the stream directly.
+    if (restartStream && !_suspended) ref.invalidate(locationStreamProvider);
   }
 
   /// (Re-)arms the silence watchdog. Never throws — see [refresh].
+  ///
+  /// Inert while [_suspended]: the app is paused, nobody can see the banner,
+  /// and probing would keep firing platform calls for the whole backgrounded
+  /// window.
+  ///
+  /// EXACTLY ONE timer is ever armed, whatever the fix rate. A delivered fix
+  /// only moves [_lastFixAt]; when this timer fires with a fix newer than one
+  /// interval it re-arms for the REMAINDER of that interval instead of
+  /// probing. The observable cadence is identical to cancelling and
+  /// re-creating a Timer per fix — which on Android meant one allocation per
+  /// second of every foreground session.
   ///
   /// The `ref.read` here is the last thing standing between a torn-down
   /// container and an exception thrown out of a `finally`, which would defeat
@@ -531,7 +589,7 @@ class LocationAccessNotifier extends Notifier<LocationAccessStatus> {
   void _armWatchdog() {
     _watchdog?.cancel();
     _watchdog = null;
-    if (_disposed) return;
+    if (_disposed || _suspended) return;
     Duration interval;
     try {
       interval = ref.read(locationAccessProbeIntervalProvider);
@@ -562,7 +620,23 @@ class LocationAccessNotifier extends Notifier<LocationAccessStatus> {
         '${interval.inMilliseconds}ms ($_contradictedProbesLeft left)',
       );
     }
-    _watchdog = Timer(interval, () {
+    _armFor(interval, interval);
+  }
+
+  /// Arms the single watchdog timer to fire in [delay], probing only if the
+  /// stream has then been silent for a whole [interval].
+  void _armFor(Duration delay, Duration interval) {
+    _watchdogArms++;
+    _watchdog = Timer(delay, () {
+      if (_disposed || _suspended) return;
+      final lastFix = _lastFixAt;
+      final quiet = lastFix == null
+          ? interval
+          : clock.now().difference(lastFix);
+      if (quiet < interval) {
+        _armFor(interval - quiet, interval);
+        return;
+      }
       unawaited(refresh());
     });
   }

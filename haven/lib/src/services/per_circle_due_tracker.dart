@@ -1,28 +1,35 @@
-/// Per-circle publish-due bookkeeping for the background isolate.
+/// Publish-due bookkeeping for the background isolate's location cycle.
 ///
-/// Decorrelation (privacy): the app must NOT publish a kind-445 location to
-/// every circle on one shared tick — a relay that sees several distinct `#h`
-/// (nostr_group_id) tags all receiving an event within the same instant, every
-/// cycle, can correlate those otherwise-unlinkable pseudonymous circles as one
-/// device. Worse, the engine binds the outer kind-445 `created_at` to the inner
-/// app event's whole-second timestamp, so co-timed publishes carry a
-/// byte-identical `created_at` INSIDE the signed event — readable from an
-/// archive by someone who never saw the socket (see [PublishStagger]). The
-/// foreground breaks this with one independent [JitteredScheduler] per circle;
-/// the background isolate — which runs a single periodic `onRepeatEvent` cycle
-/// — breaks it by tracking an INDEPENDENT next-due time per circle here and
-/// publishing only the circles whose own time has come.
+/// ## One burst, not one schedule per circle
 ///
-/// This class is necessary but NOT sufficient on its own: `onRepeatEvent` is a
-/// coarse poll (`kBackgroundRepeatInterval`, 72 s), so two circles whose
-/// independent due-times fall in the same 72 s bucket are still selected by the
-/// same cycle. The caller must therefore ALSO pace the publishes it selects —
-/// `dueKeysUpTo` returns them in due-time order for exactly that.
+/// Every eligible circle shares one due time, so a cycle publishes them all
+/// and the radio wakes once per interval however many circles the user is in.
+/// The per-circle schedules this replaced never bought the decorrelation they
+/// were written for: the multiplexed `#h` subscription already tells a shared
+/// relay which circles this socket watches, and every circle's publish leaves
+/// over one publish socket. The honest cost of coalescing is that circles on
+/// DISJOINT relay sets now emit the same inter-burst rhythm, so anyone holding
+/// two of your circles' archives can tell they belong to the same phone.
 ///
-/// This is a pure, FFI-free value object so the decorrelation logic is unit
-/// testable without the Rust bridge or a live foreground-service (the
-/// surrounding [background task handler] is inherently bridge-bound and cannot
-/// run under `flutter test`).
+/// ## What the tracker is still for
+///
+/// A time PER KEY rather than one timestamp for the whole roster, because the
+/// two are not the same map: a circle whose publish FAILED, or which a burst's
+/// budget deferred, must stay overdue while its siblings re-arm. What a burst
+/// re-arms them onto, though, is one shared instant — see [nextBurstDue] for
+/// why a due per circle silently kills the burst-order permutation.
+///
+/// This class is necessary but NOT sufficient on its own: the caller must also
+/// pace what it selects, because a burst's circles are due in the SAME instant
+/// and `onRepeatEvent` is a coarse poll (`kBackgroundRepeatInterval`, 72 s).
+/// `dueKeysUpTo` returns them ordered for exactly that, and the
+/// [PublishStagger] gap between consecutive publishes is what keeps their
+/// whole-second `created_at` stamps distinct.
+///
+/// This is a pure, FFI-free value object so the burst logic is unit testable
+/// without the Rust bridge or a live foreground-service (the surrounding
+/// [background task handler] is inherently bridge-bound and cannot run under
+/// `flutter test`).
 library;
 
 import 'package:flutter/foundation.dart';
@@ -40,62 +47,18 @@ class PerCircleDueTracker {
   /// circle that has been publishing on its own cadence is never yanked back
   /// to a fresh phase just because it was seen again this cycle).
   ///
-  /// The caller chooses [initialDue], and it must NOT be the same instant for
-  /// every circle. Seeding the whole roster at one `now` is what re-created
-  /// the shared-`created_at` burst on EVERY foreground→background handoff:
-  /// [pruneToKeys] empties this map while the foreground owns publishing, so
-  /// the seed runs again on every handoff, and a shared seed makes every
-  /// circle due in the same instant. The background seeds the FIRST circle
-  /// due-now and staggers the rest by [PublishStagger] gaps, which keeps the
-  /// handoff's worst-case inter-publish gap inside one background cycle plus
-  /// one stagger spread (see `LOCATION_MESSAGE_RETENTION_SECS`).
+  /// The background seeds the WHOLE roster at ONE instant, deliberately: a
+  /// handoff hands every circle to the same burst, which is the wake the
+  /// device pays for either way. [pruneToKeys] empties this map while the
+  /// foreground owns publishing, so this seed re-runs on every
+  /// foreground→background handoff — and a per-circle seed would therefore
+  /// re-scatter the roster into one wake per circle on every one of them.
+  /// Seeding together is NOT publishing together: the cycle still holds each
+  /// circle a [PublishStagger] gap behind the last
+  /// ([nextBackgroundPublishSlot]), which is what keeps their `created_at`
+  /// stamps in different whole seconds.
   void seedIfAbsent(String key, DateTime initialDue) {
     _nextDueAt.putIfAbsent(key, () => initialDue);
-  }
-
-  /// Whether [key] already has a schedule (so a seed would be a no-op).
-  ///
-  /// Lets a caller sample stagger offsets for the circles that actually need
-  /// one, instead of burning offsets on circles already mid-cadence.
-  bool isTracked(String key) => _nextDueAt.containsKey(key);
-
-  /// Registers every UNTRACKED key in [keys] with an INDEPENDENT, CSPRNG
-  /// staggered initial due-time: a random permutation puts one circle "due
-  /// now" and pushes each later one a further [PublishStagger] gap out.
-  ///
-  /// This replaces a shared `seedIfAbsent(key, now)` over the whole roster,
-  /// which was the background half of the shared-`created_at` leak. Because
-  /// the background empties this map on every cycle where the foreground owns
-  /// publishing ([pruneToKeys] with an empty set), the seed re-runs on EVERY
-  /// foreground→background handoff — so a shared seed re-burst every single
-  /// handoff, not just the first.
-  ///
-  /// Already-tracked circles are skipped entirely rather than merely being
-  /// idempotent seeds: they keep their own phase AND they do not consume a
-  /// stagger slot, so a long-running roster never pushes a genuinely new
-  /// circle to the far end of the spread.
-  ///
-  /// Offsets stay within `stagger.maxSpreadFor(n)` of [from], well inside one
-  /// `kBackgroundRepeatInterval`, so a staggered circle is serviced by the
-  /// SAME cycle rather than slipping a whole polling interval — that is what
-  /// keeps the handoff from widening a circle's worst-case inter-publish gap
-  /// by 72 s instead of by the spread.
-  void seedStaggered(
-    Iterable<String> keys,
-    DateTime from,
-    PublishStagger stagger,
-  ) {
-    final fresh = stagger.shuffled(<String>[
-      for (final key in keys)
-        if (!isTracked(key)) key,
-    ]);
-    if (fresh.isEmpty) return;
-    final gaps = stagger.sampleGaps(fresh.length);
-    var offset = Duration.zero;
-    for (var i = 0; i < fresh.length; i++) {
-      offset += gaps[i];
-      seedIfAbsent(fresh[i], from.add(offset));
-    }
   }
 
   /// The instant [key] is next eligible to publish, or `null` if untracked.
@@ -108,34 +71,79 @@ class PerCircleDueTracker {
   }
 
   /// The subset of [keys] due at or before [horizon], ordered by their own
-  /// due-time (most overdue first), ties broken by key so the order is total.
+  /// due-time (most overdue first), ties broken by the order [keys] arrives
+  /// in so the order is total.
   ///
   /// Most-overdue-first is what keeps the in-cycle stagger nearly free: the
   /// circle that has waited longest takes the zero gap and the freshest one
   /// absorbs the delay, so staggering shifts WHICH circle waits rather than
-  /// adding to the worst-case inter-publish gap. Because every due-time is an
-  /// independent CSPRNG sample, this ordering is itself randomised — it is not
-  /// a stable, fingerprintable circle order.
+  /// adding to the worst-case inter-publish gap.
+  ///
+  /// Ties are the NORM — a burst seeds and re-arms its circles onto ONE due
+  /// ([nextBurstDue]) — which makes the tie-break the burst order, so it may
+  /// not be a property of the circles themselves. Breaking by key would make
+  /// one circle permanently the un-delayed one and its sibling permanently
+  /// ~5 s behind: a stable relationship between their `created_at`s, i.e. the
+  /// second-order fingerprint [PublishStagger.shuffled] exists to prevent. The
+  /// caller therefore owns the tie order and passes a CSPRNG permutation.
   ///
   /// [horizon] is normally the cycle start plus the stagger budget, so circles
-  /// seeded a few seconds apart are all serviced within the SAME cycle instead
-  /// of slipping a whole polling interval.
+  /// whose due-times sit a few seconds apart are all serviced within the SAME
+  /// cycle instead of slipping a whole polling interval.
   List<String> dueKeysUpTo(Iterable<String> keys, DateTime horizon) {
-    return <String>[
+    final due = <String>[
       for (final key in keys)
         if (_nextDueAt[key] case final at? when !at.isAfter(horizon)) key,
-    ]..sort((a, b) {
-      final byTime = _nextDueAt[a]!.compareTo(_nextDueAt[b]!);
-      return byTime != 0 ? byTime : a.compareTo(b);
-    });
+    ];
+    // `List.sort` is not stable, so the caller's order is carried explicitly
+    // rather than relied upon.
+    final arrival = <String, int>{
+      for (var i = 0; i < due.length; i++) due[i]: i,
+    };
+    return due
+      ..sort((a, b) {
+        final byTime = _nextDueAt[a]!.compareTo(_nextDueAt[b]!);
+        return byTime != 0 ? byTime : arrival[a]!.compareTo(arrival[b]!);
+      });
   }
 
-  /// Records a publish at [now] and re-arms [key] a FRESH [nextIntervalSecs]
-  /// into the future. Rearming off `now` (not off the old due-time) means a
-  /// slow cycle never accumulates drift, and each circle's cadence stays
-  /// independent because [nextIntervalSecs] is sampled independently per call.
-  void markPublished(String key, DateTime now, int nextIntervalSecs) {
-    _nextDueAt[key] = now.add(Duration(seconds: nextIntervalSecs));
+  /// The earliest due-time among [keys], or `null` when none of them is
+  /// tracked.
+  ///
+  /// This is what the background cycle aims its single platform location
+  /// request at (`nextFixRequestInterval`): the FIRST circle that needs a fix
+  /// decides when the receiver runs, because aiming at any later due-time
+  /// starves the earlier circle by the difference.
+  ///
+  /// Asked about a SUBSET on purpose. For the circles it is about to publish
+  /// the cycle already knows something this map does not — the slot and the
+  /// interval it pre-sampled for them — so it folds those projections in
+  /// itself and asks here only about the rest. An overdue circle is reported at
+  /// its own past due-time rather than clamped to the present: that is exactly
+  /// the case the request's platform floor exists for.
+  DateTime? earliestDue(Iterable<String> keys) {
+    DateTime? earliest;
+    for (final key in keys) {
+      final at = _nextDueAt[key];
+      if (at != null && (earliest == null || at.isBefore(earliest))) {
+        earliest = at;
+      }
+    }
+    return earliest;
+  }
+
+  /// Re-arms every circle a burst has published so far onto the single
+  /// [dueAt] its caller derived with [nextBurstDue].
+  ///
+  /// Called after EACH publish with everything published so far, not once at
+  /// the end: a burst can be cut short by a service stop or a foreground
+  /// reclaim, and the circles that did go out must be left holding the
+  /// schedule that actually happened rather than staying overdue and
+  /// republishing seconds later.
+  void markBurstPublished(Iterable<String> keys, DateTime dueAt) {
+    for (final key in keys) {
+      _nextDueAt[key] = dueAt;
+    }
   }
 
   /// Drops any tracked circle not in [currentKeys] (left / blocked / orphaned /
@@ -148,8 +156,54 @@ class PerCircleDueTracker {
   /// Number of circles currently tracked.
   int get length => _nextDueAt.length;
 
+  /// Every circle currently on a schedule.
+  ///
+  /// For the one question a caller cannot phrase as a subset: "is ANYTHING due
+  /// soon?" — which the background cycle asks before it re-runs itself for a
+  /// fix that arrived mid-cycle, and which must not be answered off a stale
+  /// copy of the roster.
+  Iterable<String> get trackedKeys => _nextDueAt.keys;
+
   @visibleForTesting
   Map<String, DateTime> get nextDueForTest => Map.of(_nextDueAt);
+}
+
+/// The ONE due-time a burst re-arms every circle it published onto.
+///
+/// One due, not one per circle, and that is the whole point:
+/// `PerCircleDueTracker.dueKeysUpTo` orders by due ascending, so distinct dues
+/// make the next burst's order a function of this burst's order. The CSPRNG
+/// permutation then becomes dead code after the first burst — the same circle
+/// leads every burst for the rest of the session, and the whole-second delta
+/// between two circles' `created_at` climbs to a fixed value and prints it
+/// every burst. That
+/// constant delta is precisely the archive link [PublishStagger] exists to
+/// break, so equal dues are not tidiness, they are what keeps the shuffle
+/// alive.
+///
+/// WHICH instant they equal decides two bounds, and only this rule holds both:
+///
+///  * one interval after the burst's FIRST publish alone lets the circle that
+///    published LAST publish again `interval − spread` later — 42 s against
+///    the 72 s cadence floor the app discloses;
+///  * one interval after its LAST publish alone makes the circle that
+///    published FIRST wait `interval + spread` before the next burst starts,
+///    plus up to another spread inside it: `168 + 30 + 30 = 228 s`, exactly
+///    the retention the no-gap invariant must stay under.
+///
+/// So: one [interval] after the burst STARTED, never sooner than
+/// [minInterval] after it FINISHED. Every circle's realized gap then lands in
+/// `[minInterval, interval + spread]` — the disclosed floor at one end and
+/// `kLocationPublishMaxInterval + kPublishStaggerMaxSpread` at the other.
+DateTime nextBurstDue({
+  required DateTime firstPublishStartedAt,
+  required DateTime lastPublishStartedAt,
+  required Duration interval,
+  required Duration minInterval,
+}) {
+  final fromStart = firstPublishStartedAt.add(interval);
+  final floor = lastPublishStartedAt.add(minInterval);
+  return floor.isAfter(fromStart) ? floor : fromStart;
 }
 
 /// The earliest instant the next circle of a background publish cycle may
@@ -157,7 +211,8 @@ class PerCircleDueTracker {
 ///
 /// Two constraints, and the second is the one that actually holds the line:
 ///
-/// * never before the circle's own [dueAt] (its independent cadence), and
+/// * never before the circle's own [dueAt] (the cadence floor the app
+///   discloses), and
 /// * never within [gap] of the previous publish's **actual** start.
 ///
 /// Measuring the gap from the ACTUAL previous start rather than from a

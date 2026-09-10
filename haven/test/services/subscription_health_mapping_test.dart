@@ -51,6 +51,27 @@ void main() {
         ),
         SubscriptionHealthAction.targetedReanchor,
       );
+      expect(
+        mapSubscriptionHealthAction(SubscriptionHealthActionFfi.paused),
+        SubscriptionHealthAction.paused,
+      );
+    });
+
+    test('paused is proof of nothing, never a repair verdict', () {
+      // A paused engine holds no REQ, so the tick short-circuited before the
+      // probe and inspected nothing. Folding it onto any of the three verdicts
+      // that DO prove the receive plane whole would let a background pause
+      // clear a real lost-subscription latch.
+      final paused = mapSubscriptionHealthAction(
+        SubscriptionHealthActionFfi.paused,
+      );
+      for (final proof in [
+        SubscriptionHealthActionFfi.healthy,
+        SubscriptionHealthActionFfi.resubscribed,
+        SubscriptionHealthActionFfi.targetedReanchor,
+      ]) {
+        expect(paused, isNot(mapSubscriptionHealthAction(proof)));
+      }
     });
 
     test('keeps the two re-anchor remedies distinct', () {

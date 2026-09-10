@@ -113,67 +113,75 @@ class _UserLocationMarkerState extends State<UserLocationMarker>
         : '';
     return Semantics(
       label: l10n.userLocationMarkerSemantics(accuracyInfo),
-      child: SizedBox(
-        width: widget.showAccuracyCircle
-            ? widget.accuracyRadius * 2
-            : widget.size * 2,
-        height: widget.showAccuracyCircle
-            ? widget.accuracyRadius * 2
-            : widget.size * 2,
-        child: Stack(
-          alignment: Alignment.center,
-          children: [
-            // Accuracy circle
-            if (widget.showAccuracyCircle)
-              Container(
-                width: widget.accuracyRadius * 2,
-                height: widget.accuracyRadius * 2,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: _markerColor.withValues(alpha: 0.1),
-                  border: Border.all(
-                    color: _markerColor.withValues(alpha: 0.3),
-                    width: 2,
+      // The pulse repaints at the display refresh rate, forever. `flutter_map`
+      // puts ONE `RepaintBoundary` around the whole map, so without this the
+      // tiles, every member marker and the attribution are redrawn 60 times a
+      // second for a dot breathing four pixels. The boundary confines that to
+      // this marker's own layer; the animation itself is unchanged, because
+      // freezing it would take away the affordance that says the fix is live.
+      child: RepaintBoundary(
+        child: SizedBox(
+          width: widget.showAccuracyCircle
+              ? widget.accuracyRadius * 2
+              : widget.size * 2,
+          height: widget.showAccuracyCircle
+              ? widget.accuracyRadius * 2
+              : widget.size * 2,
+          child: Stack(
+            alignment: Alignment.center,
+            children: [
+              // Accuracy circle
+              if (widget.showAccuracyCircle)
+                Container(
+                  width: widget.accuracyRadius * 2,
+                  height: widget.accuracyRadius * 2,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: _markerColor.withValues(alpha: 0.1),
+                    border: Border.all(
+                      color: _markerColor.withValues(alpha: 0.3),
+                      width: 2,
+                    ),
                   ),
                 ),
-              ),
 
-            // Pulse effect (respects reduced motion preference)
-            if (_shouldAnimate)
-              AnimatedBuilder(
-                animation: _pulseAnimation,
-                builder: (context, child) {
-                  return Container(
-                    width: widget.size * _pulseAnimation.value,
-                    height: widget.size * _pulseAnimation.value,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: _markerColor.withValues(
-                        alpha: 0.3 * (1 - (_pulseAnimation.value - 1) / 0.8),
+              // Pulse effect (respects reduced motion preference)
+              if (_shouldAnimate)
+                AnimatedBuilder(
+                  animation: _pulseAnimation,
+                  builder: (context, child) {
+                    return Container(
+                      width: widget.size * _pulseAnimation.value,
+                      height: widget.size * _pulseAnimation.value,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: _markerColor.withValues(
+                          alpha: 0.3 * (1 - (_pulseAnimation.value - 1) / 0.8),
+                        ),
                       ),
-                    ),
-                  );
-                },
-              ),
+                    );
+                  },
+                ),
 
-            // Main dot
-            Container(
-              width: widget.size,
-              height: widget.size,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: _markerColor,
-                border: Border.all(color: Colors.white, width: 3),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.2),
-                    blurRadius: 4,
-                    offset: const Offset(0, 2),
-                  ),
-                ],
+              // Main dot
+              Container(
+                width: widget.size,
+                height: widget.size,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: _markerColor,
+                  border: Border.all(color: Colors.white, width: 3),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.2),
+                      blurRadius: 4,
+                      offset: const Offset(0, 2),
+                    ),
+                  ],
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );

@@ -158,25 +158,34 @@ class _FakeIosBackgroundSessionService implements IosBackgroundSessionService {
   int disarmCallCount = 0;
   final List<String> calls = [];
 
+  bool _armed = false;
+
   @override
   Future<void> arm() async {
     onArm?.call();
     armCallCount++;
     calls.add('arm');
+    _armed = true;
   }
 
   @override
   Future<void> disarm() async {
     disarmCallCount++;
     calls.add('disarm');
+    _armed = false;
   }
 
   @override
   Future<IosBackgroundSessionStatus> status() async =>
-      const IosBackgroundSessionStatus(
+      IosBackgroundSessionStatus(
         supported: true,
         backgroundActivitySessionHeld: false,
         serviceSessionHeld: false,
+        alwaysConfirmed: false,
+        // Tracked rather than pinned: `armed` is the native handler's own
+        // record of whether its gates passed, so a double that reported a
+        // constant would contradict the arm/disarm sequence these tests drive.
+        armed: _armed,
       );
 }
 

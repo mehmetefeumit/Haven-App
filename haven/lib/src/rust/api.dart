@@ -8,7 +8,7 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These functions are ignored because they are not marked as `pub`: `build_relay_list_event_for`, `build_relay_list_unpublish_for`, `commit_event_to_json`, `convert_commit_to_publish`, `convert_deferred_send`, `convert_location_result`, `current_cache`, `current_picture_hash`, `delete_circles_db_files`, `delete_db_files`, `delete_legacy_mls_db_files`, `delete_mls_session_db_files`, `delete_superseded_kp`, `delete_tile_db_files`, `ensure_own_identity`, `from_cached`, `from_report`, `from_state`, `get_or_create_circle_db_key`, `get_or_create_tiles_db_key`, `hex_to_npub`, `keys_from_secret_bytes`, `live_event_to_ffi`, `live_session_core`, `maintain_relay_list_category`, `maintenance_now_secs`, `mark_kp_slot_retirement_done`, `nip65_relay_list_urls`, `no_network`, `now_ms`, `now_secs`, `platform_init_keyring`, `profile_now_secs`, `profile_picture_delay`, `profile_stamp_lists`, `profile_view`, `purge_key_package_past_not_after`, `record_retired_slot`, `redact_directory_err`, `redact_profile_err`, `reinstall_after_timed_out_stop`, `relay_list_urls_for`, `relay_list_urls`, `relay_list_wire_kind`, `remove_circles_db_key`, `remove_file_strict`, `remove_keyring_key`, `remove_mls_session_db_key`, `remove_tiles_db_key`, `republish_key_package`, `retire_malformed_kp_slot`, `retract_kp_slots`, `run_blocking`, `sync_reason_to_ffi`, `tile_err_to_string`, `truncate_chars`, `unknown`, `usable_profile_pool`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `InMemoryStorage`, `KpPublishPlan`, `KpRetirementInputs`, `KpRetirementTick`, `ProfileStampLists`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`, `default`
 
 /// Initializes the platform-specific keyring credential store.
@@ -1848,6 +1848,32 @@ abstract class HavenCore implements RustOpaqueInterface {
 
 // Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<LiveSyncFfi>>
 abstract class LiveSyncFfi implements RustOpaqueInterface {
+  /// How many publishes this session has between SEND and OK right now.
+  ///
+  /// The other half of the same promise: presence on a relay is permitted
+  /// exactly while a publish is outstanding, so a burst that is quiet on both
+  /// counters is holding nothing. It is also the Rule-13 gauge
+  /// [`Self::pause_subscriptions`] blocks on, so a test can observe the state
+  /// the rule forbids cutting — "a commit is on the wire" — instead of
+  /// inferring it from a duration.
+  ///
+  /// Presence-only: a COUNT. Never an event id, a relay url or a group id.
+  /// Test and diagnostic surface.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if there is no active session or the lock is poisoned.
+  Future<int> inFlightPublishes();
+
+  /// Whether the session is PAUSED between background bursts.
+  ///
+  /// Orthogonal to [`Self::is_running`], which stays `true` across a pause:
+  /// the session is alive, it simply holds no REQ and no socket. A caller
+  /// deciding whether to re-anchor must read THIS — a paused engine has no
+  /// subscription to repair, and re-anchoring one would silently re-open
+  /// standing REQs in the background.
+  bool isPaused();
+
   /// Whether a live session is currently running.
   bool isRunning();
 
@@ -1877,13 +1903,99 @@ abstract class LiveSyncFfi implements RustOpaqueInterface {
     ownPubkeyHex: ownPubkeyHex,
   );
 
+  /// Opens ONE background burst: the same re-anchor as
+  /// [`Self::resume_after_background`], plus the inbox fold — the inbox REQ
+  /// rides only every `INBOX_BURSTS_PER_REQ`-th burst, and this call advances
+  /// the counter that decides it.
+  ///
+  /// The BACKGROUND entry point, and the only one the burst coordinator may
+  /// use. Calling `resume_after_background` for a burst instead would leave
+  /// the fold permanently un-applied — every burst would re-request the
+  /// bounded inbox window, which is the metadata cost the fold exists to cut.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if there is no active session, the lock is poisoned, or
+  /// a re-subscription fails.
+  Future<void> openBackgroundBurst();
+
+  /// Closes whatever is open: drops every standing REQ and disconnects the
+  /// engine's sockets, leaving the session alive and re-openable.
+  ///
+  /// Usually that is a burst's own REQs, but not necessarily — a background
+  /// pause that drove no burst tears the FOREGROUND session's down through
+  /// this same call, which is what makes "no socket while backgrounded" true
+  /// of the gap before the first burst too.
+  ///
+  /// Call it from a `finally`, and only after [`Self::settle_before_pause`] —
+  /// the pause itself waits for the in-flight publish gauge, but settling
+  /// first is what gives a commit the socket time its convergence traffic
+  /// needs (Security Rule 13).
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the session slot is empty, the lock is poisoned, or
+  /// the core refused because it is already shutting down — its ONLY error
+  /// path, and a pre-flight one: it runs before the first `unsubscribe`, so
+  /// an error means nothing was torn down, never that something was torn
+  /// halfway. None of the three leaves a RUNNING session behind either:
+  /// [`Self::is_running`] is `!shutdown && !wedged`, and it answers `false`
+  /// for an absent slot, an unreadable one and a shutting-down core alike.
+  /// Past that pre-flight check the pause is best-effort and reports `Ok`.
+  Future<void> pauseSubscriptions();
+
+  /// How many long-lived subscriptions the engine pool holds right now,
+  /// across every relay.
+  ///
+  /// The DIRECT read of the background-burst promise "no standing REQ between
+  /// publish ticks". [`Self::is_paused`] cannot stand in for it: the core sets
+  /// that flag as the FIRST statement of its pause — before `unsubscribe_all`,
+  /// before the drain marker, before the uncapped Rule-13 publish gauge and
+  /// before `disconnect()` — so it reports that the pause was ENTERED, not
+  /// that the REQs and the sockets are gone. An oracle built on the flag
+  /// asserts an intent; this one asserts the state.
+  ///
+  /// Presence-only: a COUNT. Never a subscription id, a relay url or a group
+  /// id (Security Rules 4 and 6). Test and diagnostic surface — no
+  /// user-facing path reads it.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if there is no active session or the lock is poisoned,
+  /// so a caller can never read "no session" as "no standing REQ".
+  Future<int> poolSubscriptionCount();
+
   /// Re-anchors the session after a background period / reconnect.
+  ///
+  /// The FOREGROUND entry point: app-resume and the subscription-health
+  /// tick's whole-session repair. It always carries the inbox REQ, so an
+  /// app that is simply open can always receive an invitation.
+  ///
+  /// A background burst must use [`Self::open_background_burst`] instead —
+  /// the two are separate in the core precisely because only the burst may
+  /// consume a position in the inbox fold, and Rust cannot tell the callers
+  /// apart through one entry point.
   ///
   /// # Errors
   ///
   /// Returns an error if there is no active session, the lock is poisoned, or
   /// a re-subscription fails.
   Future<void> resumeAfterBackground();
+
+  /// Holds the sockets open until the engine's commit traffic has quiesced,
+  /// so the pause that follows cannot cut a commit between SEND and OK
+  /// (Security Rule 13).
+  ///
+  /// The window spans everything since the last re-anchor: a burst's own
+  /// traffic after a burst, and the foreground session's on a teardown no
+  /// burst preceded. Either way it returns immediately when nothing has
+  /// committed inside it — the common case costs nothing. The core call is
+  /// infallible; the `Result` is the session gate.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if there is no active session or the lock is poisoned.
+  Future<void> settleBeforePause();
 
   /// Starts the live session over `groups` + `inbox_relays`. Idempotent — a
   /// second call while a session is live returns `Ok` without rebuilding.
@@ -1925,6 +2037,19 @@ abstract class LiveSyncFfi implements RustOpaqueInterface {
   /// Returns an error if `nostr_group_id` is malformed, the lock is poisoned, or
   /// a multiplexed-bucket re-issue fails (the Dart caller then full-restarts).
   Future<void> unsubscribeCircle({required List<int> nostrGroupId});
+
+  /// Waits for every endpoint this burst opened to finish its stored replay,
+  /// so a peer commit that landed while paused is applied BEFORE the burst
+  /// encrypts its location.
+  ///
+  /// The core call is infallible — a slow relay yields
+  /// [`BacklogOutcomeFfi::TimedOut`] and the burst publishes anyway — so the
+  /// `Result` here is purely the session gate.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if there is no active session or the lock is poisoned.
+  Future<BacklogOutcomeFfi> waitBacklogSettled();
 }
 
 // Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<LocationEventService>>
@@ -2326,6 +2451,33 @@ abstract class RelayManagerFfi implements RustOpaqueInterface {
     required List<String> relays,
   });
 
+  /// Publishes a kind-445 LOCATION event: one bounded fan-out, no retry.
+  ///
+  /// The location plane's publish, and the only one that may take it. One
+  /// connect and one 5 s per-relay window — 10 s worst case against the
+  /// ~49 s [`RelayManagerFfi::publish_event`] ladder — succeeding as soon as
+  /// one relay returns `OK`. A location that misses is superseded by the next
+  /// tick; a commit is not, so commits, welcomes, proposals, key packages,
+  /// relay lists and profiles keep `publish_event` (Security Rule 13). Never
+  /// call this for anything whose outcome resolves a `PendingStateRef`.
+  ///
+  /// # Arguments
+  ///
+  /// * `event_json` - JSON-serialized signed kind-445 event
+  /// * `relays` - List of relay URLs (must be wss://)
+  ///
+  /// # Errors
+  ///
+  /// The error string keeps `RelayError`'s `Display`, so the
+  /// `haven.clock.device_clock_rejected:` token a fast device clock produces
+  /// still reaches `nostr_relay_service.dart` and still becomes a
+  /// `RelayClockRejectionException` — the one publish failure the user can
+  /// act on. No relay prose and no key material is ever in it (Rule 8).
+  Future<PublishResultFfi> publishLocationEvent({
+    required String eventJson,
+    required List<String> relays,
+  });
+
   /// Once-only legacy relay hygiene (Dark Matter §6 step 5 / F10a): retracts
   /// this account's stale pre-migration KeyPackage advertisements so an
   /// old-stack client cannot mint a Welcome the new stack can't process.
@@ -2407,6 +2559,28 @@ class AddMembersResultFfi {
           commitEventJson == other.commitEventJson &&
           welcomeEvents == other.welcomeEvents &&
           pending == other.pending;
+}
+
+/// Whether a background burst's backlog wait saw every endpoint it opened
+/// finish its stored replay (FFI mirror of
+/// [`haven_core::relay::live_sync::BacklogOutcome`]).
+///
+/// Fieldless — no relay url, sub-id, or group id — so it is leak-free by
+/// construction (Security Rule 4/6).
+enum BacklogOutcomeFfi {
+  /// Every `(relay, subscription)` endpoint this burst issued answered with an
+  /// `EOSE` or a `CLOSED`. Because the ingest worker is serial, that means
+  /// every stored event those relays sent has been ingested and converged —
+  /// so the location the burst is about to encrypt goes out at the epoch a
+  /// peer commit just moved it to.
+  settled,
+
+  /// The wait's budget elapsed with at least one endpoint still silent. The
+  /// burst proceeds anyway, exactly as the foreground does with a slow REQ, so
+  /// the location may be encrypted one epoch behind — peers decrypt that from
+  /// past-epoch keys and the next burst converges it. Reported so a caller can
+  /// count it; it is not a failure.
+  timedOut,
 }
 
 /// Outcome of a [`CircleManagerFfi::build_relay_list_publish`] call.
@@ -3251,8 +3425,34 @@ class FfiRelayEvent {
   /// (`haven_core::relay::live_sync::anchor::InboxAnchor`).
   final String? giftWrapJson;
 
-  /// Closed status reason (Status).
+  /// Closed status reason (Status). `None` on the one Status event that
+  /// carries [`Self::unrecoverable_nostr_group_id`] instead.
   final FfiSyncStatusReason? statusReason;
+
+  /// The pseudonymous `nostr_group_id` of a circle that CANNOT RECOVER on its
+  /// own and has to be re-created (Status).
+  ///
+  /// A TERMINAL, per-circle verdict, and the only thing on this stream a
+  /// consumer may act on destructively. It means this device holds group state
+  /// no code path will move again: waiting cannot help and neither can a
+  /// retry, so a "reconnecting" banner is the wrong response and a re-invite
+  /// is the right one.
+  ///
+  /// Deliberately NOT a [`FfiSyncStatusReason`]. Every reason in that enum is
+  /// self-clearing and names no circle — a relay outage, a pause, one message
+  /// that would not apply, an offline backlog convergence will drain — and
+  /// spelling a terminal per-circle verdict the same way is how a user gets
+  /// told to re-create a working circle. `status_reason` is `None` whenever
+  /// this is `Some`, so the two can never be read as one event.
+  ///
+  /// It REPEATS — on every foreground re-anchor that finds either an
+  /// unpublishable deferral or a group the engine declared unrecoverable; the
+  /// engine itself announces its verdict only once per session, so that sweep
+  /// is what repeats it. No event ever clears it. Do NOT act on the first: a
+  /// parked deferral a peer already healed is reported once, and only that
+  /// circle's next successful send discharges it, so a SECOND verdict from a
+  /// LATER re-anchor is the proof that the circle is genuinely wedged.
+  final Uint8List? unrecoverableNostrGroupId;
 
   const FfiRelayEvent({
     required this.kind,
@@ -3263,6 +3463,7 @@ class FfiRelayEvent {
     this.evolutionEventJson,
     this.giftWrapJson,
     this.statusReason,
+    this.unrecoverableNostrGroupId,
   });
 
   @override
@@ -3274,7 +3475,8 @@ class FfiRelayEvent {
       eventCreatedAtSecs.hashCode ^
       evolutionEventJson.hashCode ^
       giftWrapJson.hashCode ^
-      statusReason.hashCode;
+      statusReason.hashCode ^
+      unrecoverableNostrGroupId.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -3288,7 +3490,8 @@ class FfiRelayEvent {
           eventCreatedAtSecs == other.eventCreatedAtSecs &&
           evolutionEventJson == other.evolutionEventJson &&
           giftWrapJson == other.giftWrapJson &&
-          statusReason == other.statusReason;
+          statusReason == other.statusReason &&
+          unrecoverableNostrGroupId == other.unrecoverableNostrGroupId;
 }
 
 /// Discriminator for [`FfiRelayEvent`] (struct-of-discriminant, like
@@ -3303,7 +3506,9 @@ enum FfiRelayEventKind {
   /// A raw gift-wrapped invitation (`kind:1059`); the consumer unwraps it.
   welcome,
 
-  /// A non-content status/lifecycle signal.
+  /// A non-content status/lifecycle signal. Carries either a
+  /// [`FfiSyncStatusReason`] or — for the one terminal per-circle verdict —
+  /// [`FfiRelayEvent::unrecoverable_nostr_group_id`]. Never both.
   status,
 }
 
@@ -3340,6 +3545,15 @@ enum FfiSyncStatusReason {
 
   /// The session resumed from background.
   backgroundResumed,
+
+  /// The session is paused between background bursts: no standing REQ, no
+  /// socket.
+  ///
+  /// A STATE, never a fault. A consumer must not stamp a "disconnected since"
+  /// from it: a burst interval can be as long as the receive-silence
+  /// threshold, so a health model fed this as an outage would confirm a relay
+  /// fault on a deliberate pause.
+  paused,
 }
 
 /// Outcome of [`force_release_live_session`].
@@ -4666,6 +4880,14 @@ enum SubscriptionHealthActionFfi {
   /// circles are simply idle — a consumer that folded it into `Resubscribed`
   /// would show a normal quiet device as repeatedly losing its relays.
   targetedReanchor,
+
+  /// The session is PAUSED between background bursts: it holds no standing
+  /// REQ and no socket, so there was nothing for this tick to heal.
+  ///
+  /// Proof of nothing, like [`Self::EngineOff`]: a consumer must not read it
+  /// as "the receive plane is whole". The next burst re-issues every REQ at
+  /// its persisted cursor, which is what a healer would have done anyway.
+  paused,
 }
 
 /// Presence-only result of an M8-4 subscription-health maintenance tick.

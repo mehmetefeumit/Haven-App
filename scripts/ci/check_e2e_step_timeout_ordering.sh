@@ -539,7 +539,12 @@ check_extractor_sees_the_repo() {
 }
 
 self_test() {
-  local tmp failures=0
+  # Fixture count pinned by EQUALITY, not printed as prose. A hardcoded "(N
+  # cases)" in the closing line is how a deleted fixture reports "all passed"
+  # while running one check fewer — the exact rot this whole self-test exists to
+  # prevent in the checks it covers.
+  local -r SELF_TEST_CASES=18
+  local tmp failures=0 cases=0
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
   trap "rm -rf '${tmp}'" RETURN
@@ -547,6 +552,7 @@ self_test() {
   _expect() {
     local desc="$1" dir="$2" want_rc="$3" want_grep="${4:-}"
     local out rc=0
+    cases=$((cases + 1))
     VIOLATIONS=0
     # Run in THIS shell (stderr captured to a file) rather than under `$(...)`:
     # a subshell would discard every VIOLATIONS increment, which is exactly the
@@ -784,6 +790,7 @@ self_test() {
   #     case runs in a subshell.
   _expect_vacuity() {
     local desc="$1" dir="$2" want_rc="$3" want_grep="${4:-}"
+    cases=$((cases + 1))
     local out rc=0
     out="$( ( VIOLATIONS=0; check_dir "${dir}" >/dev/null 2>&1
               check_extractor_sees_the_repo "${dir}" ) 2>&1 )" || rc=$?
@@ -884,11 +891,15 @@ self_test() {
   _expect_vacuity "vacuity: a commented-out marker is not a lost lane" "${r}" 0
 
   VIOLATIONS=0
+  if (( cases != SELF_TEST_CASES )); then
+    echo "[${SCRIPT_NAME}] self-test FAILED: ran ${cases} case(s), expected ${SELF_TEST_CASES}" >&2
+    failures=$((failures + 1))
+  fi
   if (( failures > 0 )); then
     echo "[${SCRIPT_NAME}] self-test FAILED (${failures} case(s))" >&2
     return 1
   fi
-  echo "[${SCRIPT_NAME}] self-test passed (18 cases)"
+  echo "[${SCRIPT_NAME}] self-test passed (${cases} cases)"
   return 0
 }
 

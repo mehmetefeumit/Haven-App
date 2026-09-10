@@ -208,6 +208,12 @@ class AppLocalizationsTr extends AppLocalizations {
   String get settingsLocationTitle => 'Konum';
 
   @override
+  String get settingsLocationSubtitleOn => 'Arka planda paylaşım açık';
+
+  @override
+  String get settingsLocationSubtitleOff => 'Yalnızca Haven açıkken';
+
+  @override
   String get settingsMapStyleTitle => 'Harita stili';
 
   @override
@@ -377,7 +383,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get locationSettingsIntro =>
-      'Haven, uygulama açık olduğu sürece konumunuzu çevrelerinizle paylaşır. Bunu açarsanız Haven arka plandayken de çevreleriniz konumunuzu görmeye devam eder. Sistem Haven\'ı kapatırsa paylaşım durur; sistem uygulamayı arka planda uyandırdığında yalnızca çevrelerinizin konumları alınır, sizin konumunuz hiçbir zaman gönderilmez. Android\'de paylaşım, Haven\'ı son kullanılanlar listesinden kaydırıp çıkarsanız bile sürer ve telefon yeniden başlatıldıktan sonra kendiliğinden tekrar çalışmaya başlar; iPhone\'da ise siz Haven\'ı açana kadar paylaşım yeniden başlamaz.';
+      'Haven, uygulama açık olduğu sürece konumunuzu çevrelerinizle paylaşır. Bunu açarsanız Haven arka plandayken de çevreleriniz konumunuzu görmeye devam eder. Sistem Haven\'ı kapatırsa kendi paylaşımınız durur: Haven yine de çevrelerinizin konumlarını almak için uyanabilir, ama sizinkini göndermek için asla uyanmaz. Android\'de paylaşım, Haven\'ı son kullanılanlar listesinden kaydırıp çıkarsanız bile sürer ve telefon yeniden başlatıldıktan sonra kendiliğinden tekrar çalışmaya başlar. iPhone\'da ise paylaşım, siz Haven\'ı açana kadar durmuş olarak kalır.';
 
   @override
   String get locationSettingsToggleTitle => 'Arka planda paylaş';
@@ -388,7 +394,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get locationSettingsIosLimitedNote =>
-      'Paylaşım, mevcut izninizle arka planda çalışmaya devam eder. Ayarlar\'da Haven için Konum\'u \"Her Zaman\" olarak ayarlayın; böylece Haven, iOS uygulamayı kapattıktan sonra çevrelerinizin konumlarını da sonradan yakalayabilir. Kendi paylaşımınız ise Haven\'ı tekrar açtığınızda yeniden başlar.';
+      'Paylaşım, mevcut izninizle arka planda çalışmaya devam eder ve bu sırada iOS, ekranın üst kısmında kendi mavi konum çubuğunu gösterir. Ayarlar\'da Haven için Konum\'u \"Her Zaman\" olarak ayarlayın; böylece Haven, iOS uygulamayı kapattıktan sonra çevrelerinizin konumlarını da sonradan yakalayabilir. \"Her Zaman\" seçiliyken iOS, mavi konum çubuğu yerine durum çubuğunda kendi konum ok simgesini gösterebilir. Kendi paylaşımınız ise Haven\'ı tekrar açtığınızda yeniden başlar.';
 
   @override
   String get locationSettingsAndroidHeader =>
@@ -408,7 +414,48 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get locationSettingsIosGuidance =>
-      'Arka planda paylaşım açıkken Haven kesintisiz bir konum oturumu sürdürür ve iOS durum çubuğunda mavi bir gösterge görüntüler. Ayrıca \"Her Zaman\" iznini verirseniz Haven, iOS uygulamayı kapattıktan sonra da çevrelerinizdeki gelişmeleri yakalayabilir.';
+      'Arka planda paylaşım açıkken Haven bir konum oturumu sürdürür; böylece çevreleriniz sizi görmeye devam eder.';
+
+  @override
+  String get locationSettingsIosIndicatorArrow =>
+      'iOS, Haven konumunuzu kullandığı sürece durum çubuğunda kendi konum ok simgesini gösterir; aynı simgeyi bir süre daha Konum Servisleri\'nde Haven\'ın yanında göstermeye devam eder.';
+
+  @override
+  String get locationSettingsIosIndicatorBar =>
+      'Konum izniniz \"Her Zaman\" olduğunda, Haven konumunuzu kullandığı sürece iOS ekranın üst kısmında kendi mavi konum çubuğunu gösterir.';
+
+  @override
+  String get locationDisclosureTitle => 'Konumunuzun paylaşımı';
+
+  @override
+  String get locationDisclosureWhy =>
+      'Haven, canlı konumunuzu seçtiğiniz çevrelerdeki kişilere gösterir; onların konumunu da haritada size gösterir. Bunun için Haven\'ın, cihazınızın tam konumunu kullanma iznine ihtiyacı vardır.';
+
+  @override
+  String get locationDisclosureHow =>
+      'Konumunuz cihazınızda uçtan uca şifrelenir; bu yüzden onu yalnızca seçtiğiniz çevrelerin üyeleri okuyabilir, Haven okuyamaz. Haven\'ın kendine ait bir sunucusu yoktur: şifreli güncellemeleriniz, başka insanların işlettiği bağımsız aktarıcılar üzerinden geçer; bu aktarıcılar ağ adresinizi görür, ama nerede olduğunuzu asla göremez. Haritayı çizmek için Haven, Stadia Maps\'ten sizin ve çevrenizin bulunduğu alanları ister; böylece Stadia Maps buranın kabaca neresi olduğunu öğrenir, ama adınızı, anahtarınızı ya da çevrelerinizde kimlerin olduğunu asla öğrenmez. Stadia Maps, kişisel bilgileri satmadığını veya takas etmediğini, cihazınıza çerez yerleştirmediğini ve sunucu günlüklerini yaklaşık iki hafta sakladığını belirtiyor; bu, onların kendi politikasıdır ve Haven bunun uygulanmasını sağlayamaz.';
+
+  @override
+  String get locationDisclosureSharing =>
+      'Haven açıkken ve bir çevrede olduğunuz sürece konumunuz birkaç dakikada bir otomatik olarak gönderilir. Paylaşımı duraklatma seçeneği yoktur. Bir çevreyle paylaşımı durdurmak için o çevreden ayrılın.';
+
+  @override
+  String get locationDisclosureBackgroundAndroid =>
+      'Bu uygulama, kapalıyken veya kullanılmadığında bile çevrelerinizle paylaşımı sağlamak için konum verilerini kullanır.';
+
+  @override
+  String get locationDisclosureBackgroundIos =>
+      'Bu uygulama, Haven arka plandayken ve siz onu kullanmıyorken bile çevrelerinizle paylaşımı sağlamak için konum verilerini kullanır. iOS Haven\'ı kapatırsa, siz uygulamayı yeniden açana kadar paylaşım durur: Haven yine de çevrelerinizin konumlarını almak için uyanabilir, ama sizinkini göndermek için asla uyanmaz.';
+
+  @override
+  String get locationDisclosureManage =>
+      'Arka planda paylaşımı istediğiniz zaman Ayarlar → Konum bölümünden kapatabilirsiniz.';
+
+  @override
+  String get locationDisclosureAgree => 'Kabul Et';
+
+  @override
+  String get locationDisclosureNotNow => 'Şimdi Değil';
 
   @override
   String get fgsNotificationSharing =>
@@ -709,6 +756,15 @@ class AppLocalizationsTr extends AppLocalizations {
       'Çevre oluşturulamadı. Lütfen tekrar deneyin.';
 
   @override
+  String nameCircleRosterFullError(int limit) {
+    final intl.NumberFormat limitNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String limitString = limitNumberFormat.format(limit);
+
+    return 'Aynı anda en fazla $limitString çevrede olabilirsiniz. Yenisine yer açmak için bir çevreden ayrılın.';
+  }
+
+  @override
   String addMemberTitle(String circleName) {
     return '$circleName çevresine ekle';
   }
@@ -1003,6 +1059,15 @@ class AppLocalizationsTr extends AppLocalizations {
   @override
   String get invitationAcceptError =>
       'Davet kabul edilemedi. Lütfen tekrar deneyin.';
+
+  @override
+  String invitationRosterFullError(int limit) {
+    final intl.NumberFormat limitNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String limitString = limitNumberFormat.format(limit);
+
+    return 'Aynı anda en fazla $limitString çevrede olabilirsiniz. Bir çevreden ayrılın, sonra bu daveti kabul edebilirsiniz.';
+  }
 
   @override
   String get invitationDeclineError =>

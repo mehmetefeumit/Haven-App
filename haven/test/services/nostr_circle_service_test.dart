@@ -92,6 +92,12 @@ class _StubRelayService implements RelayService {
   }) => throw UnimplementedError();
 
   @override
+  Future<PublishResult> publishLocationEvent({
+    required String eventJson,
+    required List<String> relays,
+  }) => throw UnimplementedError();
+
+  @override
   Future<void> publishEventFireAndForget({
     required String eventJson,
     required List<String> relays,

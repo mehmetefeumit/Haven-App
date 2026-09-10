@@ -37,6 +37,7 @@ import 'package:haven/src/providers/join_watcher_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
 import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
+import 'package:haven/src/providers/sharing_health_provider.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/test_keys.dart';
@@ -141,7 +142,9 @@ Future<void> _openDetailsOnPhone(
       // locale (they differ by at most one character, and neither fits). So
       // the sweep pins the window every Haven-created circle actually shows
       // rather than a hand-picked "widest" unit that buys nothing.
-      circleLocationExpiryProvider(circle).overrideWith((_) async => 228),
+      circleLocationExpiryProvider(
+        circle,
+      ).overrideWith((_) async => kLocationMessageRetention.inSeconds),
     ],
   );
 

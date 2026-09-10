@@ -208,6 +208,12 @@ class AppLocalizationsDe extends AppLocalizations {
   String get settingsLocationTitle => 'Standort';
 
   @override
+  String get settingsLocationSubtitleOn => 'Teilen im Hintergrund ist an';
+
+  @override
+  String get settingsLocationSubtitleOff => 'Nur solange Haven geöffnet ist';
+
+  @override
   String get settingsMapStyleTitle => 'Kartenstil';
 
   @override
@@ -382,7 +388,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get locationSettingsIntro =>
-      'Haven teilt deinen Standort mit deinen Kreisen, solange die App geöffnet ist. Schaltest du das hier ein, sehen deine Kreise ihn auch weiter, während Haven im Hintergrund läuft. Beendet das System Haven, wird dein Standort nicht mehr geteilt – im Hintergrund wird Haven nur aufgeweckt, um die Standorte deiner Kreise abzurufen; dein eigener Standort wird dabei nie gesendet. Unter Android wird dein Standort aber auch dann weiter geteilt, wenn du Haven aus dem App-Umschalter wischst, und nach einem Neustart des Geräts beginnt das Teilen deines Standorts von allein wieder; auf dem iPhone bleibt das Teilen gestoppt, bis du Haven öffnest.';
+      'Haven teilt deinen Standort mit deinen Kreisen, solange die App geöffnet ist. Schalte das hier ein, und deine Kreise sehen ihn weiter, während Haven im Hintergrund läuft. Beendet das System Haven, wird dein eigener Standort nicht mehr geteilt: Haven kann zwar noch aufwachen, um die Standorte deiner Kreise abzurufen, aber nie, um deinen zu senden. Unter Android läuft das Teilen weiter, wenn du Haven aus dem App-Umschalter wischst, und startet nach einem Neustart des Geräts von allein wieder. Auf dem iPhone bleibt das Teilen gestoppt, bis du Haven öffnest.';
 
   @override
   String get locationSettingsToggleTitle => 'Im Hintergrund teilen';
@@ -393,7 +399,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get locationSettingsIosLimitedNote =>
-      'Das Teilen läuft mit deiner aktuellen Berechtigung auch im Hintergrund weiter. Setze in den Einstellungen für Haven den Standortzugriff auf „Immer“, damit Haven auch dann noch die verpassten Standorte deiner Kreise nachholen kann, wenn iOS die App beendet hat. Dein eigener Standort wird erst wieder geteilt, wenn du Haven erneut öffnest.';
+      'Das Teilen läuft mit deiner aktuellen Berechtigung auch im Hintergrund weiter, und iOS zeigt dabei oben am Bildschirm seine blaue Standortleiste. Setze in den Einstellungen für Haven den Standortzugriff auf „Immer“, damit Haven auch dann noch die verpassten Standorte deiner Kreise nachholen kann, wenn iOS die App beendet hat. Unter „Immer“ zeigt iOS statt der blauen Standortleiste möglicherweise seinen Standortpfeil in der Statusleiste. Dein eigener Standort wird erst wieder geteilt, wenn du Haven erneut öffnest.';
 
   @override
   String get locationSettingsAndroidHeader =>
@@ -413,7 +419,48 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get locationSettingsIosGuidance =>
-      'Solange das Teilen im Hintergrund aktiviert ist, hält Haven eine durchgehende Standortsitzung aufrecht, und iOS zeigt in der Statusleiste eine blaue Anzeige. Mit der Berechtigung „Immer“ kann Haven außerdem Verpasstes aus deinen Kreisen nachholen, nachdem iOS die App beendet hat.';
+      'Solange das Teilen im Hintergrund aktiviert ist, hält Haven eine Standortsitzung aufrecht, damit deine Kreise dich weiterhin sehen.';
+
+  @override
+  String get locationSettingsIosIndicatorArrow =>
+      'iOS zeigt seinen Standortpfeil in der Statusleiste, solange Haven deinen Standort verwendet, und lässt denselben Pfeil danach noch eine Weile neben Haven unter „Ortungsdienste“ stehen.';
+
+  @override
+  String get locationSettingsIosIndicatorBar =>
+      'Mit deiner Berechtigung „Immer“ zeigt iOS oben am Bildschirm seine blaue Standortleiste, solange Haven deinen Standort verwendet.';
+
+  @override
+  String get locationDisclosureTitle => 'Deinen Standort teilen';
+
+  @override
+  String get locationDisclosureWhy =>
+      'Haven zeigt deinen Live-Standort den Personen in den Kreisen, die du auswählst, und zeigt dir ihren Standort auf der Karte. Dafür benötigt Haven die Berechtigung, den genauen Standort deines Geräts zu verwenden.';
+
+  @override
+  String get locationDisclosureHow =>
+      'Dein Standort wird auf deinem Gerät Ende-zu-Ende-verschlüsselt, sodass nur die Mitglieder der Kreise, die du auswählst, ihn lesen können – Haven nicht. Haven hat keine eigenen Server: Deine verschlüsselten Aktualisierungen laufen über unabhängige Relays, die andere Leute betreiben. Diese Relays sehen deine Netzwerkadresse, aber nie, wo du bist. Um die Karte zu zeichnen, fragt Haven bei Stadia Maps die Gebiete rund um dich und deinen Kreis ab. Stadia Maps erfährt dadurch ungefähr, wo das ist, aber nie deinen Namen, deinen Schlüssel oder wer in deinen Kreisen ist. Stadia Maps gibt an, personenbezogene Daten weder zu verkaufen noch zu tauschen, keine Cookies auf deinem Gerät zu setzen und Server-Protokolle etwa zwei Wochen lang aufzubewahren – die eigene Richtlinie des Anbieters, auf die Haven keinen Einfluss hat.';
+
+  @override
+  String get locationDisclosureSharing =>
+      'Solange Haven geöffnet ist und du in einem Kreis bist, wird dein Standort automatisch alle paar Minuten gesendet. Pausieren ist nicht möglich. Um das Teilen mit einem Kreis zu beenden, verlasse ihn.';
+
+  @override
+  String get locationDisclosureBackgroundAndroid =>
+      'Diese App nutzt Standortdaten, um das Teilen mit deinen Kreisen zu ermöglichen, auch wenn die App geschlossen ist oder nicht verwendet wird.';
+
+  @override
+  String get locationDisclosureBackgroundIos =>
+      'Diese App nutzt Standortdaten, um das Teilen mit deinen Kreisen zu ermöglichen, auch wenn Haven im Hintergrund läuft und du die App gerade nicht benutzt. Beendet iOS Haven, wird dein Standort nicht mehr geteilt, bis du Haven wieder öffnest – Haven kann zwar noch aufwachen, um die Standorte deiner Kreise abzurufen, aber nie, um deinen zu senden.';
+
+  @override
+  String get locationDisclosureManage =>
+      'Du kannst das Teilen im Hintergrund jederzeit unter Einstellungen → Standort ausschalten.';
+
+  @override
+  String get locationDisclosureAgree => 'Zustimmen';
+
+  @override
+  String get locationDisclosureNotNow => 'Jetzt nicht';
 
   @override
   String get fgsNotificationSharing =>
@@ -719,6 +766,15 @@ class AppLocalizationsDe extends AppLocalizations {
       'Kreis konnte nicht erstellt werden. Bitte versuche es erneut.';
 
   @override
+  String nameCircleRosterFullError(int limit) {
+    final intl.NumberFormat limitNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String limitString = limitNumberFormat.format(limit);
+
+    return 'Du kannst gleichzeitig in höchstens $limitString Kreisen sein. Verlasse einen Kreis, um Platz für einen neuen zu schaffen.';
+  }
+
+  @override
   String addMemberTitle(String circleName) {
     return 'Zu $circleName hinzufügen';
   }
@@ -1016,6 +1072,15 @@ class AppLocalizationsDe extends AppLocalizations {
   @override
   String get invitationAcceptError =>
       'Einladung konnte nicht angenommen werden. Bitte versuche es erneut.';
+
+  @override
+  String invitationRosterFullError(int limit) {
+    final intl.NumberFormat limitNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String limitString = limitNumberFormat.format(limit);
+
+    return 'Du kannst gleichzeitig in höchstens $limitString Kreisen sein. Verlasse einen Kreis, dann kannst du diese Einladung annehmen.';
+  }
 
   @override
   String get invitationDeclineError =>

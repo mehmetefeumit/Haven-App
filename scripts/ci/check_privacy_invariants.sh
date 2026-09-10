@@ -95,11 +95,13 @@
 #       this rule; its own bound is stated under "What the value sweep cannot
 #       prove" below; every
 #       `non_claim_arb_keys` key exists, states a reason, and is not also
-#       claimed; every non-ARB carrier key discoverable by grep (iOS
-#       `NS*UsageDescription`, every `LocationDisclosureStrings` field) maps to
-#       a `non_arb_claims` entry — `kind: "none"` (with a reason) for the
-#       heading and the two button labels that claim nothing, and it buys
-#       nothing anywhere else;
+#       claimed; every iOS `NS*UsageDescription` key discoverable by grep maps
+#       to a `non_arb_claims` entry (`kind: "none"`, with a reason, buys
+#       nothing there); the prominent-disclosure dialog declares no hard-coded
+#       copy and every localization key it RENDERS is classified — that dialog
+#       moved into the ARB so the other twelve locales stop being asked to
+#       consent in English, and its render site is what this rule enumerates
+#       now that its `static const` fields are gone;
 #       and a load-bearing-by-omission string does not contain the clause its
 #       `forbidden_additions` bans
 #   13. every event-kind construction TOKEN in production Rust is declared —
@@ -197,8 +199,8 @@ fail_msg() { printf '\033[1;31m[%s] FAIL:\033[0m %s\n' "${SCRIPT_NAME}" "$*" >&2
 misconfig() { printf '\033[1;31m[%s] ERROR:\033[0m %s\n' "${SCRIPT_NAME}" "$*" >&2; exit 2; }
 
 # Anti-vacuity floors (rule 14), pinned at ~90% of the measured manifest
-# (86 invariants · 54 ARB keys · 15 kinds · 21 guards · 201 tests · 25 doc
-# refs, measured 2026-08-29). They were four times lower than that once, and a
+# (91 invariants · 65 ARB keys · 15 kinds · 22 guards · 278 tests · 28 doc
+# refs, measured 2026-09-08). They were four times lower than that once, and a
 # floor four times below reality is not a floor: 60 of the 81 invariants could
 # be deleted — kinds reattached, orphaned keys dumped into `non_claim_arb_keys`
 # — and every one of these still passed. The ratchet already forces an override
@@ -208,12 +210,36 @@ misconfig() { printf '\033[1;31m[%s] ERROR:\033[0m %s\n' "${SCRIPT_NAME}" "$*" >
 # green. The one lowering on record is the ARB-key floor, 119 → 48 on
 # 2026-08-29, when the owner deleted the 85 `privacy*` strings the register was
 # mostly made of; the invariants those strings hung off are all still here.
-FLOOR_INVARIANTS=77
-FLOOR_ARB_KEYS=48
+#
+# ~90% is a rule, not a slogan, and it has to be RE-APPLIED as the manifest
+# grows or the header stops describing the constants under it. On 2026-09-08
+# the test floor had drifted to 63% of measured — 104 citations of slack, enough
+# that a third of the register could be de-cited with this gate still green —
+# and the ARB-key and doc-ref floors to 74% and 76%.
+#
+# RE-PINNED AGAIN the same day, and the reason is the point: P4-6, P4-7 and
+# P5a-2 each ADDED citations after the first re-pin, so the test and doc-ref
+# floors drifted a second time inside one working tree (250/25 against 286/29 =
+# 87%/86%). A floor re-pinned before the last citation lands is a floor that
+# drifts again. Re-pin LAST, from the counts the gate itself prints, and treat a
+# growing manifest as the normal case rather than the exception.
+#
+# RE-PINNED A THIRD TIME on 2026-09-09, and it happened for the third reason in
+# a row: OD5-a, OD4-d and both halves of OD4-c each added citations, and the new
+# `INV-L-WEDGED-CIRCLE-IS-DETECTED-AND-NAMED` entry arrived after the second
+# re-pin. Four of the six floors were short — invariants 81, guards 19, tests
+# 257 and doc refs 26 against measured 92/24/316/30, the test floor at 81% with
+# 59 citations of slack. All six are now `floor(0.9 x measured)` against the
+# counts rule 14 printed at the END of that session: 92/65/15/24/316/30. Do not
+# read the percentages in the paragraphs above as current; each described the
+# manifest of its own day, which is exactly why the rule is to re-measure rather
+# than to trust a number written down.
+FLOOR_INVARIANTS=82
+FLOOR_ARB_KEYS=58
 FLOOR_EVENT_KINDS=13
-FLOOR_GUARDS=18
-FLOOR_TESTS=180
-FLOOR_DOC_REFS=22
+FLOOR_GUARDS=21
+FLOOR_TESTS=284
+FLOOR_DOC_REFS=27
 
 # Rule 12's value sweep. A key whose English value contains one of these
 # phrases is making a privacy claim in the user's own words, whatever its name,
@@ -238,6 +264,14 @@ CLAIM_LANGUAGE=(
 # decision, never a tidy-up.
 CLAIM_LANGUAGE_PER_KEYS=50
 CLAIM_LANGUAGE_MIN_PHRASES=15
+
+# The consent dialog's own anti-vacuity floor: the localization keys its render
+# site must be seen reading before the classification sweep over them means
+# anything. Four is the disclosure's irreducible shape (a heading, the
+# why/how/when paragraphs), well under the nine it renders today, because this
+# floor exists to catch a scan that stopped working — never to pin the copy,
+# which the render tests do.
+CONSENT_DIALOG_MIN_KEYS=4
 
 # ---------------------------------------------------------------------------
 # jq plumbing. Every check re-validates the manifest rather than trusting a
@@ -762,7 +796,15 @@ privacy claim."
     squashed="$(tr -s ' \t' ' ' <<< "${code}")"
     local trivial
     trivial="$(sed -E 's/(prop_)?assert(_eq|_ne)?!\([[:space:]]*true[[:space:]]*(,[[:space:]]*true[[:space:]]*)?\)//g; s/expect\([[:space:]]*true[[:space:]]*,[[:space:]]*(isTrue|true)[[:space:]]*\)//g' <<< "${squashed}")"
-    if ! grep -qE '(^|[^A-Za-z0-9_])(assert|prop_assert|debug_assert|panic!|expect\(|expectLater\(|fail\()' <<< "${trivial}"; then
+    # mockito's `verify(x).called(n)` / `verifyNever(x)` ARE assertions: they
+    # throw when the recorded call count differs, and for an interaction proof
+    # ("this path never reaches the one-shot") they are the only honest form —
+    # an `expect` bolted on beside them to satisfy this grep would assert
+    # nothing extra. Added 2026-09-04 after rule 5 rejected a real geolocator
+    # test whose whole point was `verifyNever(getCurrentPosition)`. Comments
+    # are stripped above, so a commented-out `verify(` still fails, exactly
+    # like the commented-out `assert` fixture below.
+    if ! grep -qE '(^|[^A-Za-z0-9_])(assert|prop_assert|debug_assert|panic!|expect\(|expectLater\(|fail\(|verify\(|verifyNever\(|verifyInOrder\()' <<< "${trivial}"; then
       fail_msg "[rule 5] ${inv}: ${file}::${name} contains no non-trivial assertion in its \
 CODE — a test that asserts nothing reports coverage it does not have, and a comment saying \
 it used to assert is not an assertion."
@@ -1202,7 +1244,7 @@ judgement; it has to be written down to be reviewable."
 # rule names only assertions and disclosures, but a key classed as attributed
 # (a claim about a third party, falsifiable only via a Haven-side change) is
 # classified; demanding it ALSO be listed as a disclosure would force the exact
-# collapse `location_disclosure_dialog.dart`'s doc comment forbids.
+# collapse `@locationDisclosureHow`'s description forbids.
 # ---------------------------------------------------------------------------
 
 # Every ARB key whose ENGLISH value carries claim language. Key names are a
@@ -1362,25 +1404,59 @@ The permission prompt is a claim the user reads before granting."
     fi
   fi
 
+  # The consent dialog's copy used to be `static const String` fields on
+  # `LocationDisclosureStrings`, enumerated here as `non_arb_claims`. It is ARB
+  # copy now (`locationDisclosure*`), so the twelve non-English locales are no
+  # longer asked to consent in English — and the carrier this rule enumerates
+  # became the RENDER SITE. Every localization key the dialog reads is a
+  # sentence the user consents to, so each must be classified; and the file may
+  # declare no hard-coded copy of its own, or the string a user actually agreed
+  # to would sit outside the register again.
   if [[ ! -f "${ddart}" ]]; then
-    fail_msg "[rule 12] consent-dialog strings file not found: ${ddart}"
+    fail_msg "[rule 12] consent-dialog widget not found: ${ddart}"
     fail=1
   else
-    local cls fields
-    cls="$(sed -nE 's/^[[:space:]]*(abstract[[:space:]]+)?(final[[:space:]]+)?class[[:space:]]+([A-Za-z0-9_]+).*/\3/p' "${ddart}" | head -1)"
-    fields="$(sed -nE 's/^[[:space:]]*static const String[[:space:]]+([A-Za-z0-9_]+).*/\1/p' "${ddart}" | sort -u)"
-    if [[ -z "${cls}" || -z "${fields}" ]]; then
-      fail_msg "[rule 12] could not read the consent-dialog string class from \
-${ddart##*/} — it changed shape, so this coverage rule is scanning nothing."
+    local ddart_code dialog_keys n_dialog_keys hardcoded
+    # Read as CODE: a key named in a doc comment is documentation, not a render.
+    ddart_code="$(code_view dart < "${ddart}")"
+    dialog_keys="$(grep -oE 'l10n\.[A-Za-z0-9_]+' <<< "${ddart_code}" \
+      | sed 's/^l10n\.//' | sort -u)"
+    n_dialog_keys="$(grep -c . <<< "${dialog_keys}" || true)"
+    hardcoded="$(sed -nE 's/^[[:space:]]*static const String[[:space:]]+([A-Za-z0-9_]+).*/\1/p' "${ddart}" | sort -u)"
+
+    if [[ -n "${hardcoded}" ]]; then
+      fail_msg "[rule 12] ${ddart##*/} declares hard-coded consent copy \
+($(tr '\n' ' ' <<< "${hardcoded}")). This dialog is the artefact recording the user's \
+consent and is shown in thirteen languages; a string that is not in the ARB is consent \
+asked in a language the user may not read, and it cannot be classified here either."
       fail=1
-    else
-      while IFS= read -r k; do
-        [[ -n "${k}" ]] || continue
-        fail_msg "[rule 12] '${k}' maps to no non_arb_claims entry. That class is the \
-artefact recording the user's consent; every sentence in it is a claim."
-        fail=1
-      done <<< "$(missing_from "$(sed "s|^|${cls}.|" <<< "${fields}")" "${declared_non_arb}")"
     fi
+    # Anti-vacuity, not a copy pin: the dialog always renders a heading, three
+    # paragraphs and two buttons, so a scan finding fewer than four keys is a
+    # scan that stopped working (renamed accessor, moved widget), never a
+    # dialog that stopped claiming things. What the copy itself says is pinned
+    # by the render tests in test/widgets/location/.
+    if (( n_dialog_keys < CONSENT_DIALOG_MIN_KEYS )); then
+      fail_msg "[rule 12] the consent dialog reads ${n_dialog_keys} localization \
+key(s) in ${ddart##*/} (at least ${CONSENT_DIALOG_MIN_KEYS} expected) — nothing to scan \
+means nothing proven."
+      fail=1
+    fi
+    # Classification is demanded of the keys that are really in the ARB. One
+    # that is not cannot be a live claim — gen-l10n generates no getter for it,
+    # so the widget does not compile — while the floor above still fails a scan
+    # that found nothing at all.
+    local dialog_live
+    dialog_live="$(comm -12 <(printf '%s\n' "${dialog_keys}") \
+                            <(printf '%s\n' "${arb_keys}" | sort -u))"
+    while IFS= read -r k; do
+      [[ -n "${k}" ]] || continue
+      fail_msg "[rule 12] the consent dialog renders '${k}', which is classified \
+nowhere. Every sentence in the artefact that records the user's consent either backs an \
+invariant or is declared to make no claim, with a reason."
+      fail=1
+    done <<< "$(missing_from "${dialog_live}" \
+      "$(printf '%s\n%s\n' "${claimed}" "${non_claim}")")"
   fi
 
   (( fail == 0 )) || return 1
@@ -1855,6 +1931,40 @@ ${MANIFEST_REL}. Ratcheting against the old path — a rename is not a fresh sta
 }
 
 # ---------------------------------------------------------------------------
+# The ONE list of tree checks, driven by `main` and by every self-test fixture.
+#
+# It used to be two: `main` enumerated the checks and the self-test enumerated
+# them again in a private `_check_tree`. Two lists drift, and these already had
+# — `check_floors` was in `main` alone. That instance was harmless (production
+# is the list that matters, and rule 14 has been running all along), but the
+# shape is not: delete a check from `main` and every fixture stays green,
+# because they ran their own copy. They would prove the checks WORK while CI
+# proved nothing about whether they RUN. With one list, a check unwired here is
+# unwired in the fixtures too and its fixtures go red.
+#
+# `check_floors` and `check_ratchet` are deliberately NOT here and are called
+# from `main` directly: floors compare the manifest against absolute repo-scale
+# counts (77 invariants, 180 tests) that a miniature fixture tree can never
+# meet, and the ratchet needs a git baseline. Both carry dedicated fixtures
+# built from synthetic manifests instead — and the self-test's structural
+# fixture holds them to exactly that, so "it has its own fixtures" cannot
+# become a place to hide an unfixtured check.
+# ---------------------------------------------------------------------------
+run_all_checks() { # run_all_checks <repo-root> <manifest>
+  local r="$1" m="$2" rc=0
+  check_invariant_rules "${m}" || rc=1
+  check_symbols "${m}" "${r}" || rc=1
+  check_tests "${m}" "${r}" "${r}/scripts/ci/expected_test_skips.txt" || rc=1
+  check_guards "${m}" "${r}" "${r}/.github/workflows/repo-guards.yml" || rc=1
+  check_arb_coverage "${m}" "${r}/haven/lib/l10n/app_en.arb" \
+    "${r}/haven/ios/Runner/Info.plist" \
+    "${r}/haven/lib/src/widgets/location/location_disclosure_dialog.dart" || rc=1
+  check_event_kinds "${m}" "${r}" "${r}/haven-core/Cargo.toml" || rc=1
+  check_doc_anchors "${m}" "${r}" || rc=1
+  return "${rc}"
+}
+
+# ---------------------------------------------------------------------------
 # Self-test — hermetic fixtures under a mktemp'd miniature repo, no repo state.
 #
 # The base tree is deliberately tiny: each fixture copies it and breaks exactly
@@ -1881,7 +1991,7 @@ ${MANIFEST_REL}. Ratcheting against the old path — a rename is not a fresh sta
 # ---------------------------------------------------------------------------
 FIXTURES=0
 SELFTEST_FAILS=0
-EXPECTED_FIXTURES=101
+EXPECTED_FIXTURES=106
 
 _expect() { # _expect <label> <want-rc> <want-tag-or-'-'> <command...>
   local label="$1" want="$2" tag="$3" got=0 err
@@ -2017,9 +2127,22 @@ JSON
 PLIST
 
   cat > "${d}/haven/lib/src/widgets/location/location_disclosure_dialog.dart" <<'DART'
-abstract final class LocationDisclosureStrings {
-  static const String why = 'Haven asks for precise location.';
-  static const String how = 'Encrypted for your circle only.';
+class LocationDisclosureDialog extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
+    // A doc-comment mention is not a render: l10n.privacyOmission.
+    return AlertDialog(
+      title: Text(l10n.privacyHeading),
+      content: Column(
+        children: [
+          Text(l10n.privacyPromise),
+          Text(l10n.privacyWarning),
+          Text(l10n.privacyThirdParty),
+        ],
+      ),
+    );
+  }
 }
 DART
 
@@ -2124,6 +2247,15 @@ void main() {
       },
     );
 
+    test('proved only by a mockito interaction check', () {
+      verify(mock.method()).called(1);
+    });
+
+    test('a gutted mockito interaction check', () {
+      // We used to verify(mock.method()).called(1) here.
+      final _g = 1;
+    });
+
     testWidgets('skipped by argument', (tester) async {
       expect(1, 1);
     }, skip: 'not on this runner');
@@ -2178,8 +2310,7 @@ DART
       "assertion_arb_keys": ["privacyPromise"],
       "disclosure_arb_keys": ["privacyWarning"],
       "non_arb_claims": [
-        { "carrier": "ios_infoplist", "id": "NSLocationWhenInUseUsageDescription", "kind": "assertion" },
-        { "carrier": "dart_source", "id": "LocationDisclosureStrings.how", "kind": "assertion" }
+        { "carrier": "ios_infoplist", "id": "NSLocationWhenInUseUsageDescription", "kind": "assertion" }
       ],
       "event_kinds": [
         { "kind": 445, "token": "Kind::Custom(445)", "note": "group message" },
@@ -2199,7 +2330,7 @@ DART
       "disclosure_arb_keys": ["privacyWarning"],
       "attributed_arb_keys": ["privacyThirdParty"],
       "non_arb_claims": [
-        { "carrier": "dart_source", "id": "LocationDisclosureStrings.why", "kind": "disclosure" }
+        { "carrier": "dart_source", "id": "haven/lib/src/services/background_location_manager.dart:notificationText", "kind": "disclosure" }
       ],
       "guards": ["scripts/ci/check_wired.sh"]
     }
@@ -2215,28 +2346,14 @@ _manifest_edit() { # _manifest_edit <repo> <jq-filter>
   mv "${tmp}" "${repo}/docs/privacy/privacy_invariants.json"
 }
 
-# All checks except the floors and the ratchet, which have their own fixtures.
-_check_tree() { # _check_tree <repo>
-  local r="$1" m="$1/docs/privacy/privacy_invariants.json" rc=0
-  check_invariant_rules "${m}" || rc=1
-  check_symbols "${m}" "${r}" || rc=1
-  check_tests "${m}" "${r}" "${r}/scripts/ci/expected_test_skips.txt" || rc=1
-  check_guards "${m}" "${r}" "${r}/.github/workflows/repo-guards.yml" || rc=1
-  check_arb_coverage "${m}" "${r}/haven/lib/l10n/app_en.arb" \
-    "${r}/haven/ios/Runner/Info.plist" \
-    "${r}/haven/lib/src/widgets/location/location_disclosure_dialog.dart" || rc=1
-  check_event_kinds "${m}" "${r}" "${r}/haven-core/Cargo.toml" || rc=1
-  check_doc_anchors "${m}" "${r}" || rc=1
-  return "${rc}"
-}
-
 _fixture() { # _fixture <label> <want-rc> <want-tag> <jq-filter-or-empty> [shell-mutation]
   local label="$1" want="$2" tag="$3" filter="$4" mutation="${5:-}"
   local repo="${SELFTEST_TMP}/case-${FIXTURES}"
   cp -r "${SELFTEST_TMP}/base" "${repo}"
   [[ -z "${filter}" ]] || _manifest_edit "${repo}" "${filter}"
   [[ -z "${mutation}" ]] || ( cd "${repo}" && eval "${mutation}" )
-  _expect "${label}" "${want}" "${tag}" _check_tree "${repo}"
+  _expect "${label}" "${want}" "${tag}" \
+    run_all_checks "${repo}" "${repo}/docs/privacy/privacy_invariants.json"
 }
 
 # A manifest of exactly the given shape, built from NUMBERS rather than from
@@ -2358,6 +2475,10 @@ self_test() {
     '.invariants[0].tests[0].name = "good_proof"'
   _fixture "a tautological test fails" 1 '[rule 5]' \
     '.invariants[0].tests[0].name = "tautological_proof"'
+  _fixture "a mockito interaction check counts as an assertion" 0 - \
+    '.invariants[0].tests[0] = {"file": "haven/test/lints/fixture_test.dart", "name": "proved only by a mockito interaction check"}'
+  _fixture "*** a mockito check gutted into a comment still fails ***" 1 '[rule 5]' \
+    '.invariants[0].tests[0] = {"file": "haven/test/lints/fixture_test.dart", "name": "a gutted mockito interaction check"}'
   _fixture "a test in expected_test_skips.txt fails" 1 '[rule 4]' \
     '.invariants[0].tests[0].name = "skipped_by_manifest"'
   # CRITICAL: the canonical gutting. The assertions are commented out and the
@@ -2459,9 +2580,9 @@ self_test() {
   # classified `none` WITH A REASON — and that classification buys nothing
   # anywhere else.
   _fixture "a 'none' non_arb_claim with a reason passes" 0 - \
-    '.invariants[0].non_arb_claims += [{"carrier": "dart_source", "id": "LocationDisclosureStrings.agree", "kind": "none", "reason": "Button label; states no fact."}]'
+    '.invariants[0].non_arb_claims += [{"carrier": "dart_source", "id": "haven/lib/src/services/background_location_manager.dart:notificationTitle", "kind": "none", "reason": "Notification title; the product name, and states no fact."}]'
   _fixture "a 'none' non_arb_claim without a reason fails" 1 '[rule 1]' \
-    '.invariants[0].non_arb_claims += [{"carrier": "dart_source", "id": "LocationDisclosureStrings.agree", "kind": "none"}]'
+    '.invariants[0].non_arb_claims += [{"carrier": "dart_source", "id": "haven/lib/src/services/background_location_manager.dart:notificationTitle", "kind": "none"}]'
 
   log "self-test: rules 10/12 — claim coverage"
   _fixture "an assertion key absent from the ARB fails" 1 '[rule 10]' \
@@ -2481,8 +2602,14 @@ self_test() {
     '.non_claim_arb_keys.privacyHeading = ""'
   _fixture "an undeclared iOS usage description fails" 1 '[rule 12]' \
     '.invariants[0].non_arb_claims[0].id = "NSSomethingElseUsageDescription"'
-  _fixture "an undeclared consent-dialog field fails" 1 '[rule 12]' \
-    '.invariants[1].non_arb_claims[0].id = "LocationDisclosureStrings.gone"'
+  # The consent dialog is ARB copy now, so what this rule enumerates is what it
+  # RENDERS. Three ways that can go wrong, all of them shipped-consent bugs.
+  _fixture "a consent-dialog key classified nowhere fails" 1 '[rule 12]' "" \
+    "sed -i 's|l10n.privacyThirdParty|l10n.unrelatedKey|' haven/lib/src/widgets/location/location_disclosure_dialog.dart"
+  _fixture "hard-coded copy in the consent dialog fails" 1 '[rule 12]' "" \
+    "printf '  static const String why = %s;\n' \"'Haven asks for precise location.'\" >> haven/lib/src/widgets/location/location_disclosure_dialog.dart"
+  _fixture "a consent dialog that renders no ARB copy fails" 1 '[rule 12]' "" \
+    "printf 'class LocationDisclosureDialog {}\n' > haven/lib/src/widgets/location/location_disclosure_dialog.dart"
   # Load-bearing BY OMISSION: honest only because of what it does not say.
   _fixture "a forbidden clause added to an omission string fails" 1 '[rule 12]' "" \
     "jq '.privacyOmission = \"Key packages are published here, and your public profile is published here too.\"' haven/lib/l10n/app_en.arb > a && mv a haven/lib/l10n/app_en.arb"
@@ -2646,6 +2773,48 @@ self_test() {
   _expect "the commit that introduces the manifest ratchets vacuously" 0 - \
     _ratchet_through_baseline "${landing}" "docs/privacy/privacy_invariants.json"
 
+  log "self-test: structural — every check is both RUN and EXERCISED"
+  # STRUCTURAL, not a tree mutation, and the other half of the one-list fix
+  # above. Sharing `run_all_checks` stops a wired check being silently unwired;
+  # nothing yet stops a check being written and wired NOWHERE, which looks like
+  # coverage from every angle except the only one that matters.
+  #
+  # Two questions per `check_*`: does it RUN, and is it EXERCISED? Membership
+  # of the shared list answers both at once — but only while `main` still
+  # drives that list, so the shortcut is conditional on that, or deleting the
+  # one `run_all_checks` call would leave every fixture above green over a list
+  # production no longer touches. The two that cannot run over a miniature
+  # tree — floors compares absolute repo-scale counts, the ratchet needs a git
+  # baseline — answer separately: invoked by `main` AND by these fixtures. That
+  # is the exemption's whole price, so a new check cannot buy it by staying out
+  # of the shared list.
+  #
+  # The match is on the call shape `<name> <arg`, so a check invoked with no
+  # arguments would read as unwired: a false FAIL, which fails safe.
+  FIXTURES=$(( FIXTURES + 1 ))
+  local shared production fixtured fn unrun="" unfixtured="" shared_runs=0
+  shared="$(declare -f run_all_checks)"
+  production="$(declare -f main)"
+  fixtured="$(declare -f self_test)"
+  [[ "${production}" == *"run_all_checks "* ]] && shared_runs=1
+  while read -r fn; do
+    if [[ "${shared}" == *"${fn} "* ]]; then
+      (( shared_runs )) || unrun+="${fn} "
+      continue
+    fi
+    [[ "${production}" == *"${fn} "* ]] || unrun+="${fn} "
+    [[ "${fixtured}" == *"${fn} "* ]] || unfixtured+="${fn} "
+  done < <(declare -F | awk '{print $3}' | grep '^check_')
+  if [[ -z "${unrun}" && -z "${unfixtured}" ]]; then
+    printf '  \033[1;32mPASS\033[0m every check_* is in run_all_checks, or in both main and these fixtures (rc=0)\n'
+  else
+    [[ -z "${unrun}" ]] || printf '  \033[1;31mFAIL\033[0m check function(s) defined but never run in production: %s\n' "${unrun}" >&2
+    [[ -z "${unfixtured}" ]] || printf '  \033[1;31mFAIL\033[0m check function(s) outside run_all_checks with no fixture of their own: %s\n' "${unfixtured}" >&2
+    printf '     A check outside that list runs nowhere — in the production tree OR in these\n' >&2
+    printf '     fixtures — while still counting as coverage in the manifest it enforces.\n' >&2
+    SELFTEST_FAILS=1
+  fi
+
   if (( FIXTURES != EXPECTED_FIXTURES )); then
     fail_msg "self-test ran ${FIXTURES} fixtures, expected ${EXPECTED_FIXTURES}. An exact \
 pin, not a floor: five fixtures — two of them CRITICAL — were once deleted with the count \
@@ -2679,20 +2848,9 @@ main() {
 enforcement half of that manifest and has nothing to check without it."
 
   local arb="${REPO_ROOT}/haven/lib/l10n/app_en.arb"
-  local plist="${REPO_ROOT}/haven/ios/Runner/Info.plist"
-  local ddart="${REPO_ROOT}/haven/lib/src/widgets/location/location_disclosure_dialog.dart"
-  local wf="${REPO_ROOT}/.github/workflows/repo-guards.yml"
-  local skips="${REPO_ROOT}/scripts/ci/expected_test_skips.txt"
-  local cargo="${REPO_ROOT}/haven-core/Cargo.toml"
 
   local rc=0
-  check_invariant_rules "${manifest}" || rc=1
-  check_symbols "${manifest}" "${REPO_ROOT}" || rc=1
-  check_tests "${manifest}" "${REPO_ROOT}" "${skips}" || rc=1
-  check_guards "${manifest}" "${REPO_ROOT}" "${wf}" || rc=1
-  check_arb_coverage "${manifest}" "${arb}" "${plist}" "${ddart}" || rc=1
-  check_event_kinds "${manifest}" "${REPO_ROOT}" "${cargo}" || rc=1
-  check_doc_anchors "${manifest}" "${REPO_ROOT}" || rc=1
+  run_all_checks "${REPO_ROOT}" "${manifest}" || rc=1
   check_floors "${manifest}" || rc=1
 
   if (( ratchet )); then

@@ -162,7 +162,15 @@ jobs:
   # Distinct from the catch-up lane above, which is receive-only, runs in a
   # separate process, and kills the app before waking it — so it cannot reach
   # the Rule-14 contention that P0-1 is about. This lane asserts DELIVERY (a
-  # parsed publish count plus relay-side corroboration), not just liveness.
+  # PARSED publish count, attributed to the same OS process that handed off),
+  # not just liveness. It does so with NO relay-side corroboration step, and
+  # that absence is deliberate: an earlier revision compared strfry's log line
+  # count before and after, which could not fail (the FGS's own connect plus
+  # strfry's expiry cron guarantee new lines) and added nothing, because
+  # `Published to N` is reached only after `publish_with_retry` returns — i.e.
+  # only on a relay OK-ack (Security Rule 13). The lane header in
+  # e2e-fgs-publish.yml carries the full reasoning; this comment credited that
+  # deleted gate until 2026-09-09.
   e2e-fgs-publish:
     name: E2E FGS Publish (Android)
     needs: [rust]
@@ -264,12 +272,38 @@ jobs:
   # A REAL OS-level background transition on iOS: mid-drive, the host launches
   # another app over Haven, so iOS itself fires applicationDidEnterBackground —
   # which no other lane produces (B7 and the Android B1 lane dispatch the
-  # paused lifecycle event in-process). Proves the native CoreLocation
-  # background-session handler arms on enable, that kind-445 publishes keep
-  # reaching the relay while OS-backgrounded, and that disabling background
-  # sharing while still backgrounded stops publishing (event-id diff) and
-  # disarms the session. The simulator still cannot reproduce real-device
-  # SUSPENSION — that stays on the physical-device checklist
+  # paused lifecycle event in-process). THREE legs over two axes. The
+  # CoreLocation grant is one, because the two tiers must produce OPPOSITE
+  # session postures: the activity session and the blue bar held under
+  # When-In-Use, both released under a diagnostic-CONFIRMED Always. The receive
+  # PLANE is the other, because the two planes are mutually exclusive in the
+  # product and one job can only compile one. Every leg proves the pinned tier
+  # is what CoreLocation reports, that the native session handler took that
+  # tier's posture, that the backgrounded session really runs at the 100 m
+  # accuracy profile, that kind-445 publishes keep reaching the relay while
+  # OS-backgrounded, and that disabling background sharing while still
+  # backgrounded stops publishing (event-id diff) and disarms the session.
+  #
+  # Each leg then proves RECEIVE from that backgrounded process, through the
+  # plane it was built with. The two HAVEN_LIVE_SYNC=true legs run P2c: a peer
+  # publishes, and the burst driven afterwards must ingest that ciphertext and
+  # leave the engine holding no registered subscription. P4-7 is what forced
+  # them to compile the receive engine IN (the shipped default) — with it out
+  # there is no session to hold or not hold a REQ, and every burst open failed,
+  # so P2a/P2b were measuring a degenerate burst.
+  #
+  # That flip left the POLL configuration — the shipped one-line rollback of a
+  # flag that defaults on — with no real-backgrounding coverage of its own
+  # distinct receive branch, and this is the only lane in the repo that produces
+  # a real backgrounding at all. OD4-d (docs/POWER_EFFICIENCY_PLAN.md §4) is the
+  # owner decision that bought it back: the third leg runs HAVEN_LIVE_SYNC=false
+  # on When-In-Use and asserts P2d — MapShell's 90 s background receive timer
+  # reaching CatchupService.runCatchup(isBackgroundWake: true) from the
+  # backgrounded process, proved by the peer's location landing in the persisted
+  # last-known store. OD4-d is CLOSED.
+  #
+  # The simulator still cannot reproduce real-device SUSPENSION, so hours-scale
+  # continuity is NOT shown here — that stays on the physical-device checklist
   # (docs/M7_BACKGROUND_SHARING.md §6).
   e2e-ios-background-publish:
     name: E2E iOS Background Publish

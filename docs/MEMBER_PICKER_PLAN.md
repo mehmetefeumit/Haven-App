@@ -697,9 +697,11 @@ expires:
   never triggers a read — so without it a departed co-member's pubkey sat on disk
   for weeks. A bare purge needs no MLS session, no roster read and no session
   lock, so it rides a database open the constructor was already performing, next
-  to the contamination-ledger backfill and the retired-relay prune. No new wake,
-  no new battery cost. Failure is logged, never propagated, exactly as those two
-  are;
+  to the contamination-ledger backfill and the retired-relay prune. No new wake:
+  model E tracks the radio term off the wake COUNT (E-A2,
+  `docs/POWER_EFFICIENCY_PLAN.md` §6.5a), so it predicts no change — an ESTIMATE,
+  never a measurement, and there is no figure for the CPU a purge costs. Failure
+  is logged, never propagated, exactly as those two are;
 * **[P3] the reconcile**, over the same helper.
 
 The read sweep alone was not enough, and neither is the start sweep alone: the
@@ -1302,7 +1304,9 @@ Nothing prohibits the directory, so it remains a product choice — on that grou
 not the stated one. Cite the restructured tree when citing at all: MIP-00…MIP-05
 are deprecated upstream and the normative surfaces are `foundation/`,
 `protocol-core/`, `app-components/`, `features/`, `transports/`
-(`MARMOT_PROTOCOL_KNOWLEDGE.md:70-85`).
+(`MARMOT_PROTOCOL_KNOWLEDGE.md`, "Spec Restructure: MIPs → Protocol Surfaces" —
+cited by section rather than line, because that file's line numbers drifted on
+2026-09-05 and a stale range is worse than none).
 
 **D4 — Auto-populate: yes, unconditionally.** The list renders as soon as the
 picker opens. **No Privacy toggle** — the owner declined it; the feature is not
@@ -1679,11 +1683,18 @@ already pin. `check_directory_logic_not_in_ffi.sh` and
 
 ## 15. Doc bugs found while planning
 
-- **`CLAUDE.md:117`** states `cargo clippy -- -D warnings`; CI runs
+- ~~**`CLAUDE.md:117`** states `cargo clippy -- -D warnings`; CI runs
   **`--all-targets`** (`rust-check.yml:54`, `:112`, `:179`). The bare form lints
-  lib/bins only and once left 123 findings unlinted.
-- **[R] `CLAUDE.md:270` cites `docs/FLUTTER_RUST_BRIDGE.md`, which does not
-  exist.**
+  lib/bins only and once left 123 findings unlinted.~~ — **FIXED 2026-09-09:**
+  the command line now carries `--all-targets` and says why.
+- ~~**[R] `CLAUDE.md:270` cites `docs/FLUTTER_RUST_BRIDGE.md`, which does not
+  exist.**~~ — **FIXED 2026-09-09**, and it had a SECOND carrier this row did not
+  name: `haven-core/SECURITY.md`'s post-compromise-window section cited the same
+  missing file for the rollback path. CLAUDE.md now points at its own
+  Architecture section plus `scripts/regenerate_frb.sh` /
+  `check_generated_bridge_pinned.sh`; SECURITY.md points at
+  `docs/M11_ROLLOUT.md` §8, which is where the one-commit rollback recipe
+  actually lives.
 - **[R] Upstream MDK `traits/src/group.rs:51`** documents `id` as the
   *"signature public key"*. **[R]** The code it contradicts is not three lines
   below (54-57 are bare field declarations) but in another crate —

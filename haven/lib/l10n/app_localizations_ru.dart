@@ -208,6 +208,12 @@ class AppLocalizationsRu extends AppLocalizations {
   String get settingsLocationTitle => 'Местоположение';
 
   @override
+  String get settingsLocationSubtitleOn => 'Фоновый обмен включён';
+
+  @override
+  String get settingsLocationSubtitleOff => 'Только пока Haven открыт';
+
+  @override
   String get settingsMapStyleTitle => 'Стиль карты';
 
   @override
@@ -382,7 +388,7 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String get locationSettingsIntro =>
-      'Haven делится вашим местоположением с вашими кругами всё время, пока приложение открыто. Включите этот параметр — и круги будут видеть его и тогда, когда Haven работает в фоне. Если система закроет Haven, отправка вашего местоположения прекратится: просыпаясь в фоне, Haven лишь получает местоположения ваших кругов и никогда не отправляет ваше. На Android отправка продолжается, даже если смахнуть Haven из списка недавних приложений, а после перезагрузки телефона возобновится сама собой. На iPhone отправка не возобновится, пока вы не откроете Haven.';
+      'Haven делится вашим местоположением с вашими кругами всё время, пока приложение открыто. Включите этот параметр — и круги будут видеть его и тогда, когда Haven работает в фоне. Если система закроет Haven, отправка вашего местоположения прекратится: Haven по-прежнему может просыпаться, чтобы получить местоположения ваших кругов, но никогда — чтобы отправить ваше. На Android отправка продолжается, даже если смахнуть Haven из списка недавних приложений, и сама собой возобновляется после перезагрузки телефона. На iPhone отправка не возобновится, пока вы не откроете Haven.';
 
   @override
   String get locationSettingsToggleTitle => 'Делиться в фоне';
@@ -393,7 +399,7 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String get locationSettingsIosLimitedNote =>
-      'Обмен продолжает работать в фоне и при текущем разрешении. Установите для Haven доступ к геопозиции «Всегда» в Настройках, чтобы он мог получать пропущенные обновления ваших кругов и после того, как iOS закроет приложение. Ваш собственный обмен возобновится, когда вы снова откроете Haven.';
+      'Обмен продолжает работать в фоне и при текущем разрешении, и всё это время iOS показывает вверху экрана свою синюю полосу геопозиции. Установите для Haven доступ к геопозиции «Всегда» в Настройках, чтобы он мог получать пропущенные обновления ваших кругов и после того, как iOS закроет приложение. При доступе «Всегда» iOS может показывать в строке состояния свою стрелку геопозиции вместо этой полосы. Ваш собственный обмен возобновится, когда вы снова откроете Haven.';
 
   @override
   String get locationSettingsAndroidHeader => 'Настройки ОС для надёжности';
@@ -412,7 +418,48 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String get locationSettingsIosGuidance =>
-      'Пока фоновый обмен включён, Haven поддерживает непрерывный сеанс геопозиции, а iOS показывает синий индикатор в строке состояния. Доступ «Всегда» дополнительно позволяет Haven получать пропущенные обновления ваших кругов после того, как iOS закроет приложение.';
+      'Пока фоновый обмен включён, Haven поддерживает сеанс геопозиции, чтобы ваши круги продолжали вас видеть.';
+
+  @override
+  String get locationSettingsIosIndicatorArrow =>
+      'Когда Haven использует ваше местоположение, iOS показывает свою стрелку геопозиции в строке состояния, а затем ещё некоторое время оставляет ту же стрелку рядом с Haven в настройках «Службы геолокации».';
+
+  @override
+  String get locationSettingsIosIndicatorBar =>
+      'При доступе «Всегда» iOS показывает вверху экрана свою синюю полосу геопозиции, пока Haven использует ваше местоположение.';
+
+  @override
+  String get locationDisclosureTitle => 'Обмен вашим местоположением';
+
+  @override
+  String get locationDisclosureWhy =>
+      'Haven показывает ваше местоположение в реальном времени людям из выбранных вами кругов, а их местоположение показывает вам на карте. Для этого Haven нужно разрешение на доступ к точному местоположению вашего устройства.';
+
+  @override
+  String get locationDisclosureHow =>
+      'Ваше местоположение сквозно шифруется на вашем устройстве, поэтому прочитать его могут только участники выбранных вами кругов, но не Haven. У Haven нет собственных серверов: ваши зашифрованные обновления проходят через независимые реле, которыми управляют другие люди, — они видят ваш сетевой адрес, но никогда не видят, где вы находитесь. Чтобы отрисовать карту, Haven запрашивает у Stadia Maps участки местности вокруг вас и вашего круга, поэтому Stadia Maps примерно узнаёт, где это, но не узнаёт ни вашего имени, ни вашего ключа, ни того, кто состоит в ваших кругах. Stadia Maps заявляет, что не продаёт и не обменивает персональные данные, не устанавливает cookie на вашем устройстве и хранит серверные журналы около двух недель. Это их собственная политика, и Haven не может обеспечить её соблюдение.';
+
+  @override
+  String get locationDisclosureSharing =>
+      'Пока Haven открыт и вы состоите в круге, ваше местоположение отправляется автоматически каждые несколько минут. Приостановить обмен нельзя. Чтобы перестать делиться с кругом, покиньте его.';
+
+  @override
+  String get locationDisclosureBackgroundAndroid =>
+      'Это приложение использует данные о местоположении, чтобы обмен с вашими кругами работал, даже когда приложение закрыто или не используется.';
+
+  @override
+  String get locationDisclosureBackgroundIos =>
+      'Это приложение использует данные о местоположении, чтобы обмен с вашими кругами работал, даже когда Haven находится в фоне и вы им не пользуетесь. Если iOS закроет Haven, обмен прекратится, пока вы не откроете его снова: Haven по-прежнему может просыпаться, чтобы получить местоположения ваших кругов, но никогда — чтобы отправить ваше.';
+
+  @override
+  String get locationDisclosureManage =>
+      'Фоновый обмен можно в любой момент отключить в разделе Настройки → Местоположение.';
+
+  @override
+  String get locationDisclosureAgree => 'Согласиться';
+
+  @override
+  String get locationDisclosureNotNow => 'Не сейчас';
 
   @override
   String get fgsNotificationSharing =>
@@ -720,6 +767,15 @@ class AppLocalizationsRu extends AppLocalizations {
       'Не удалось создать круг. Пожалуйста, повторите попытку.';
 
   @override
+  String nameCircleRosterFullError(int limit) {
+    final intl.NumberFormat limitNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String limitString = limitNumberFormat.format(limit);
+
+    return 'Число кругов, в которых вы можете состоять одновременно: $limitString. Покиньте один из кругов, чтобы освободить место для нового.';
+  }
+
+  @override
   String addMemberTitle(String circleName) {
     return 'Добавить в $circleName';
   }
@@ -1020,6 +1076,15 @@ class AppLocalizationsRu extends AppLocalizations {
   @override
   String get invitationAcceptError =>
       'Не удалось принять приглашение. Пожалуйста, повторите попытку.';
+
+  @override
+  String invitationRosterFullError(int limit) {
+    final intl.NumberFormat limitNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String limitString = limitNumberFormat.format(limit);
+
+    return 'Число кругов, в которых вы можете состоять одновременно: $limitString. Покиньте один из кругов, и тогда вы сможете принять это приглашение.';
+  }
 
   @override
   String get invitationDeclineError =>

@@ -727,10 +727,13 @@ class _SheetContent extends ConsumerWidget {
             // Circle header
             SliverToBoxAdapter(child: _CircleHeader(circle: selectedCircle)),
 
-            // Blocked-circle banner (Rule 8) — informational only, no
-            // send/mutate action offered.
+            // Blocked-circle banner (Rule 8). It offers the one repair that
+            // touches nothing in the broken group — re-create — and no action
+            // that would mutate it.
             if (isBlocked)
-              const SliverToBoxAdapter(child: _BlockedCircleBanner()),
+              SliverToBoxAdapter(
+                child: _BlockedCircleBanner(circle: selectedCircle),
+              ),
 
             // Members list. A legacy-orphaned circle (DM-4c) also has an
             // empty member list, but needs a re-create/remove banner
@@ -879,17 +882,37 @@ class _DragHandle extends StatelessWidget {
   }
 }
 
-/// Informational banner shown above the member list for a circle the MLS
-/// engine has flagged `Unrecoverable` (DM-4c, Security Rule 8:
+/// Banner shown above the member list for a circle the MLS engine has flagged
+/// `Unrecoverable` (DM-4c, Security Rule 8:
 /// `CircleService.isCircleBlocked`).
 ///
-/// Deliberately offers NO action — Rule 8 requires the UI to block
-/// send/mutate for a blocked circle, and there is no reliable local recovery
-/// (the group itself is broken). The circle's cached member list and last-
-/// known locations remain visible below (read-only), so the user does not
-/// lose access to what they already knew.
+/// Offers the ONE repair that exists: re-create the circle. Rule 8 still
+/// blocks every mutation of the broken group itself — no add, no eviction, no
+/// send — and re-creating touches none of it: it opens the create flow with
+/// this circle's name pre-filled and leaves the old row alone, so the user
+/// chooses when (and whether) to leave it. Without that affordance the wedge
+/// is detected and the user is told only that something is wrong, which for a
+/// location-sharing app is the failure that matters: believing you are sharing
+/// when you are not.
+///
+/// The circle's cached member list and last-known locations remain visible
+/// below (read-only), so the user does not lose access to what they already
+/// knew — which is why this is a banner above them and not a screen in place
+/// of them.
 class _BlockedCircleBanner extends StatelessWidget {
-  const _BlockedCircleBanner();
+  const _BlockedCircleBanner({required this.circle});
+
+  /// The blocked circle, for the re-created circle's pre-filled name.
+  final Circle circle;
+
+  void _openRecreateFlow(BuildContext context) {
+    Navigator.push<void>(
+      context,
+      MaterialPageRoute<void>(
+        builder: (_) => CreateCirclePage(initialName: circle.displayName),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -897,7 +920,24 @@ class _BlockedCircleBanner extends StatelessWidget {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
     return Semantics(
+      // ONE node carrying the fault and its remedy, spoken the moment the
+      // banner appears (WCAG 2.1 SC 4.1.3). `liveRegion` is load-bearing
+      // rather than polish: this banner is inserted by a PEER's traffic —
+      // `LiveEventRouter._handleUnrecoverable` marks the circle and calls
+      // `onGroupUpdated` to rebuild these surfaces — so no user action leads
+      // here, and it is the only surface that states the fault at all
+      // (`MapStatusBanners` takes no blocked-circle input). Rendered-only, it
+      // announced a wedge to sighted users and nothing to anyone else, which
+      // for a location-sharing app is the failure that matters: believing you
+      // are sharing when you are not.
+      //
+      // Nothing volatile is in the label, so it is spoken once per appearance
+      // rather than on every rebuild.
       container: true,
+      liveRegion: true,
+      explicitChildNodes: true,
+      label:
+          '${l10n.circleBlockedBannerTitle}\n${l10n.circleBlockedBannerBody}',
       child: Container(
         margin: const EdgeInsets.fromLTRB(
           HavenSpacing.base,
@@ -906,32 +946,64 @@ class _BlockedCircleBanner extends StatelessWidget {
           HavenSpacing.sm,
         ),
         padding: const EdgeInsets.all(HavenSpacing.base),
+        // The error container pair, not the amber `warning` token: this is a
+        // FAULT, styled like the app's other fault banner
+        // (`SharingHealthBanner`). Amber at 10 % was also unreadable —
+        // `#D97706` clears 3:1 against a PLAIN light surface (3.19:1) but only
+        // reaches 2.86:1 once its own tint is under it, below WCAG 2.1
+        // SC 1.4.11. `onErrorContainer` on `errorContainer` measures 8.20:1
+        // light / 5.28:1 dark, so every element here clears its threshold in
+        // both themes (blocked_circle_banner_test.dart).
         decoration: BoxDecoration(
-          color: HavenSecurityColors.warning.withValues(alpha: 0.1),
+          color: scheme.errorContainer,
           borderRadius: BorderRadius.circular(12),
         ),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Icon(
+            Icon(
               LucideIcons.triangleAlert,
               size: 20,
-              color: HavenSecurityColors.warning,
+              color: scheme.onErrorContainer,
             ),
             const SizedBox(width: HavenSpacing.sm),
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(
-                    l10n.circleBlockedBannerTitle,
-                    style: theme.textTheme.titleSmall,
+                  // Both visual copies are excluded: the live label above
+                  // already speaks them, and a second node would have a screen
+                  // reader read the whole banner twice. The button below is
+                  // deliberately OUTSIDE the exclusions — it is the remedy and
+                  // needs its own actionable node.
+                  ExcludeSemantics(
+                    child: Text(
+                      l10n.circleBlockedBannerTitle,
+                      style: theme.textTheme.titleSmall?.copyWith(
+                        color: scheme.onErrorContainer,
+                      ),
+                    ),
                   ),
                   const SizedBox(height: 2),
-                  Text(
-                    l10n.circleBlockedBannerBody,
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      color: scheme.onSurfaceVariant,
+                  ExcludeSemantics(
+                    child: Text(
+                      // The muted `onSurfaceVariant` is deliberately NOT used
+                      // here: over `errorContainer` it measures 3.97:1 in dark,
+                      // below SC 1.4.3's 4.5:1 for 12sp body text.
+                      l10n.circleBlockedBannerBody,
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: scheme.onErrorContainer,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: HavenSpacing.sm),
+                  SizedBox(
+                    width: double.infinity,
+                    child: FilledButton.icon(
+                      key: WidgetKeys.blockedCircleRecreateCta,
+                      onPressed: () => _openRecreateFlow(context),
+                      icon: const Icon(LucideIcons.plus),
+                      label: Text(l10n.legacyCircleRecreateCta),
                     ),
                   ),
                 ],

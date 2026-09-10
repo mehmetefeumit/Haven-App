@@ -5,7 +5,10 @@
 mirror true-by-default). The only remaining item is a one-time physical-iPhone `BGAppRefreshTask`
 fire (§6 owner checklist — `BGTaskScheduler` cannot fire on the Simulator). Ships behind the
 compile-time `backgroundCatchupEnabled` flag; **`liveSyncEnabled` (the persistent live-sync engine)
-is M11-owned and stays `false`** — M7 does not flip it.
+is M11-owned and was still `false` when M7 shipped** — M7 does not flip it. It has defaulted to
+**`true`** since M11 Phase B (`live_sync_provider.dart:29-32`, `bool.fromEnvironment('HAVEN_LIVE_SYNC',
+defaultValue: true)`, pinned by check 14b in `scripts/ci/check_m7_native_wake_guards.sh` — cited by CHECK NUMBER
+because the line range this once named (`:1239-1257`) had drifted onto an unrelated log-case fixture by 2026-09-09).
 
 Migration context: `docs/WN_RELAY_EPOCH_SYNC_MIGRATION.md` (M7 ≈ the self-owned background-delivery
 milestone; the former M3/M6/M8 docs are now appendices in that master plan). Siblings:
@@ -68,9 +71,13 @@ while actively sharing). We trade marginal latency for zero metadata leakage.
 
 **Honest residual observability (LOW):** a scheduled background REQ makes the *wake cadence* visible
 to the **relay** as a periodic REQ from the user's pubkey (same as foreground, but now also while
-backgrounded), and on-device "sharing is active" remains visible via the FGS notification / battery
-attribution. **Not** a third-party regression (the relay already sees the pubkey) and inherent to any
-self-wake model; documented so it isn't mis-sold as invisible.
+backgrounded), and on-device "sharing is active" remains visible via the FGS notification (Android)
+or the status-bar indicator plus the Settings → Location Services attribution (iOS), and via battery
+attribution on both. Since P3 the iOS indicator is tier-dependent and the difference is user-visible:
+under When-In-Use, a provisional Always and iOS 17 Always it is the **blue bar**; under a positively
+confirmed Always it is the **status-bar arrow**, and the arrow plus the Location Services listing are
+then the whole of the on-device signal. **Not** a third-party regression (the relay already sees the
+pubkey) and inherent to any self-wake model; documented so it isn't mis-sold as invisible.
 
 ## §B. Writer-exclusion — the corrected core (THE fix for the revert)
 
@@ -134,6 +141,33 @@ collision.
 **M4 assertion (rust, precedes M7-C/D):** a unit test asserting `circles.db` is rollback-journal
 (`PRAGMA journal_mode` ∈ {`delete`,`truncate`}, not `wal`) and MDK's DB `busy_timeout` is 0, so the
 concurrency argument cannot silently drift if a future change flips journal mode.
+
+> **Correction (2026-08-28, Dark Matter): the MDK-DB half of the hazard above no longer applies.**
+> Everything §B says about `circles.db` stands. What has changed is the OTHER database. The
+> pre-Dark-Matter `haven_mdk.db` really was rollback-journal with `busy_timeout=0`, which is why a
+> concurrent writer's `SQLITE_BUSY` was a fork hazard rather than a wait. Its replacement,
+> `session.sqlite` under `storage-sqlite`, opens with **WAL journalling and
+> `busy_timeout = 5000`** (`SqliteStorageOptions::default()`, `storage-sqlite/src/connection.rs`
+> ~361-375, applied in `apply_operational_pragmas` ~506-532), and every multi-write transition goes
+> through **`BEGIN IMMEDIATE` with capped exponential backoff** (`begin_immediate_with_retry`,
+> ~262-280), surfacing an exhausted retry as the *transient* `StorageError::Busy` rather than a
+> fatal backend fault. So contention on the MLS database is now a bounded WAIT with a typed
+> transient error, not a silent `Failed` record.
+>
+> Read §B's `busy_timeout=0` claims (the paragraph above, and the hazard statement near the top of
+> this section) as **historical**: they describe the database this milestone was designed against,
+> and they are kept because the `WRITER_LOCK` design they justify is still what shipped. The
+> file-name and pragma citations are stale; the M4 assertion's MDK half no longer describes the
+> engine's DB. `WRITER_LOCK` remains correct and remains the exclusion for `circles.db`, whose
+> pragmas are unchanged — this correction narrows the *justification*, not the mechanism.
+>
+> Practical consequence, recorded because Unit B of
+> `docs/BACKGROUND_SHARING_FAILURE_ANALYSIS.md` depends on it: a SECOND connection to
+> `session.sqlite` is now a supportable thing to hold (WAL admits one writer plus readers, and the
+> busy timeout makes an overlap a wait). Unit B holds exactly one such connection, for the
+> stuck-convergence-input sweep, and serializes every access behind the session mutex — see
+> `SessionManager::message_store` for why that is not a second `AccountDeviceSession` under
+> Security Rule 14.
 
 > **Scope/risk call-out:** unlike the reverted draft (all-new inert code), this design **modifies the
 > existing, shipping foreground FGS authoring path** to acquire `WRITER_LOCK`. The lock is held only
@@ -200,6 +234,53 @@ Files: `AndroidManifest.xml`, `pubspec.yaml`, new `background_catchup_worker.dar
    `BackgroundLocationManager.init()` (the native receiver reads this from SharedPreferences).
 4. Permissions: `RECEIVE_BOOT_COMPLETED` (for the receiver); `INTERNET`/FGS already present.
 
+**Amendment (P1, power-efficiency phase 1 — landed, not planned).** Two facts about the Android
+backgrounded state changed, and both are properties of the UI isolate rather than of the worker:
+
+5. **The UI isolate's location stream is RELEASED at pause.** `MapShell._onPaused` calls
+   `GeolocatorLocationService.suspendStream()` (`map_shell.dart:1319-1324`) BEFORE the ownership
+   write `markForegroundActive(active: false)`, so this isolate has let go of GPS before the
+   foreground service is told to take over. The call is gated by the keep rule
+   `shouldKeepLocationStreamWhilePaused({backgroundSharingEnabled, isIOS}) => bg && isIOS`
+   (`location_provider.dart:35-38`) — never by a raw platform branch, which
+   `scripts/ci/check_android_location_power.sh` check (8) refuses — so on Android it fires in BOTH
+   toggle states. Before P1 the UI isolate's `getPositionStream` registration (1 Hz, 1 m) was never
+   cancelled and ran for the whole backgrounded period ALONGSIDE the service's own request; a
+   backgrounded Android device now holds exactly the service's registration and nothing else. The
+   cached fix is cleared on the CONSENT condition rather than the keep rule (`:1329`): with sharing
+   on the warm fix still serves the resume publish, with sharing off no coordinate survives the
+   pause on either platform (Rule 10).
+6. **With background sharing OFF the live-sync engine is stopped at pause too.**
+   `MapShell.shouldStopLiveSyncOnPause` is ~~`!isIOS`~~ **`!(isIOS && backgroundSharingEnabled)`
+   (CORRECTED — power-efficiency P4; cite the symbol, the line numbers this row carried have
+   drifted)** — "every pause except the one whose process keeps receiving" — and the `_onPaused`
+   else-branch calls `_stopLiveSyncBounded()`, which deliberately never `releaseForHandoff()`,
+   because with sharing off no isolate reclaims the session and the latch would fail every
+   `getCircleManagerFfi()` closed until the next resume. `_healLiveSyncIfStopped()` restarts it on
+   resume. Before P1 that pause path stopped only publishing, so a backgrounded Android device with
+   sharing off went on holding a standing engine socket until the OS froze the process. The restart
+   is cheap because P4-1's bounded inbox lookback landed in the same phase: a re-anchor asks the
+   inbox for ≤ 49 h, never 7 days.
+
+   **The `!isIOS` form missed the iOS sharing-OFF arm, which P4 closed.** It made the rule false
+   there, so an iPhone whose owner had explicitly turned background sharing off still held every
+   per-circle REQ, the inbox REQ, the engine socket and the crate's 55 s pinger until the OS
+   suspended the process — the `pausedRelayOwner` fall-through does not cover it, because its only
+   effect is shutting the PUBLISH pool and all three of those artefacts belong to the engine pool.
+   That arm now STOPS the engine, as Android's does. The remaining iOS arm — sharing ON — is the one
+   configuration that neither stops nor holds: the engine is PAUSED between publishes and each
+   publish tick opens one bounded burst (`INV-R-BACKGROUND-PRESENCE-ONLY-AT-PUBLISH`, and
+   `haven-core/SECURITY.md`, "iOS background sharing: presence only at publish instants (P4)").
+
+   Also landed alongside, and true on both platforms: no maintenance timer (KeyPackage, relay-list,
+   subscription-health) is armed while backgrounded — the arming sites read the foreground state and
+   re-arm on resume with their normal jittered delays. **P4 hardened the third of those:** the
+   subscription-health timer used to be spared on the iOS background-sharing branch, because a
+   standing subscription was exactly what it existed to repair; it is now foreground-only on every
+   branch, gated at arming AND at fire time, since a tick landing mid-burst repaired a mid-`connect()`
+   pool through the FOREGROUND re-anchor and left standing REQs, a socket and a 49 h gift-wrap replay
+   behind at an instant that is not a publish.
+
 ### iOS
 Files: `Info.plist`, `AppDelegate.swift`, new `HavenSLCHandler.swift` + `HavenBGTaskHandler.swift`,
 `project.pbxproj`.
@@ -219,7 +300,11 @@ Files: `Info.plist`, `AppDelegate.swift`, new `HavenSLCHandler.swift` + `HavenBG
 **Every native change is device/CI-only** and ships **inert** (flag OFF, receiver disabled, no task
 registered) so `flutter analyze` / `flutter test` / `android-build` / `ios-build` stay green.
 
-## §E. Rust / FFI changes (MDK stays PRISTINE at v0.7.1, rev 93ae324)
+## §E. Rust / FFI changes (MDK stays PRISTINE — pin superseded, see below)
+
+> **The PIN this heading carried is history (noted 2026-09-09):** it read "at v0.7.1, rev 93ae324", and the tree has
+> pinned MDK v0.9.4, rev `e391adc133a9…`, since the Dark Matter migration of 2026-07-18 (`haven-core/Cargo.toml`).
+> "Pristine" — no fork, no patch — is still the rule, and Part III's note carries the rest.
 
 1. **`static WRITER_LOCK` (the main change, §B):** process-global `std::sync::Mutex<()>` /
    `parking_lot::Mutex`; authoring FFI methods `lock()`, `run_catchup_all_circles` `try_lock()` →
@@ -277,9 +362,10 @@ Ordering respects dependencies (privacy teardown + writer-lock before any wake p
   Android WorkManager stub replaced with the real background-isolate bootstrap; iOS
   `applicationDidEnterBackground` re-arm closes the upgrade/toggle one-launch arming lag; static guard
   pins the released state (14a–14i); `e2e-background-catchup` emulator runtime-proof lane added. **NOTE:**
-  the flag flip is an M7-E step, NOT the M11 rollout — M11 owns `liveSyncEnabled`, which stays
-  `false`. Full detail = Part II. The one runtime proof CI cannot cover — a physical-iPhone
-  `BGAppRefreshTask` fire — is the single remaining owner checklist item (§6).
+  the flag flip is an M7-E step, NOT the M11 rollout — M11 owns `liveSyncEnabled`, which was still
+  `false` at M7-E time and defaults to `true` since M11 Phase B
+  (`live_sync_provider.dart:29-32`). Full detail = Part II. The one runtime proof CI cannot cover —
+  a physical-iPhone `BGAppRefreshTask` fire — is the single remaining owner checklist item (§6).
 
 **"Safe to enable" gate — ALL five required before `backgroundCatchupEnabled = true`:**
 1. **marmot APPROVE** — four barriers intact; `WRITER_LOCK` proven to exclude two concurrent MDK
@@ -304,8 +390,9 @@ bootstrap, proved it at runtime (local pixel8a AVD + a new CI lane), flipped eve
 switch live on BOTH platforms, and pinned the released state in CI. After this landed there is **no
 M7-owned inert state left** on either platform.*
 
-**Explicitly NOT in scope:** `liveSyncEnabled` stays `false` (M11-owned,
-`live_sync_provider.dart:17`). `enablePeriodicSelfUpdate` stays as-is (M5 kill-switch).
+**Explicitly NOT in scope:** `liveSyncEnabled` stays `false` (at M7 time; M11-owned, and flipped by
+M11 Phase B — see `docs/M11_ROLLOUT.md`. Today `live_sync_provider.dart:29-32` reads
+`defaultValue: true`). `enablePeriodicSelfUpdate` stays as-is (M5 kill-switch).
 `RestartReceiver` stays `enabled="false"` + `tools:node="replace"` (PERMANENT). A physical-iPhone
 BGTask fire is an OWNER item (§6).
 
@@ -406,8 +493,11 @@ Fully closing it needs a Rust-side open-refuses-if-marker gate — deliberate no
 ### D3 — `maxDurationSecs`: Android worker 25, iOS stays 20
 
 - **Android = 25:** bounds only the Rust sweep deadline (`catchup.rs:128`), not the bootstrap; total
-  ≈ 3–6 s cold bootstrap + ≤25 s sweep ≈ ≤~31 s per wake at ≥15-min cadence — negligible battery,
-  far inside JobScheduler's ~10-min ceiling. Deliberately above the foreground default (20): a cold
+  ≈ 3–6 s cold bootstrap + ≤25 s sweep ≈ ≤~31 s per wake at ≥15-min cadence, far inside
+  JobScheduler's ~10-min ceiling. That ceiling is a real bound; the energy is not measured — model E
+  prices a wake off its COUNT (E-A2, `docs/POWER_EFFICIENCY_PLAN.md` §6.5a), never its duration, and
+  no figure for a wake's own cost exists (E-P3 is UNKNOWN). The word "negligible" used to stand here
+  as a verdict on exactly the quantity the model declines to give. Deliberately above the foreground default (20): a cold
   wake is the only receive opportunity a backgrounded device gets; the 512-events/circle flood-guard
   + deadline bound the worst case.
 - **iOS = 20 (unchanged, no code change):** the SLC budget is ~23 s inside a ~30 s window and the
@@ -432,7 +522,7 @@ xmllint checks:
 | # | Pin |
 |---|-----|
 | 14a | `const bool backgroundCatchupEnabled = true;` in `live_sync_provider.dart` |
-| 14b | `const liveSyncEnabled = false;` STILL false (M11-owned; M11 updates this check when it flips) |
+| 14b | `liveSyncEnabled` defaults to `true`: `defaultValue: true` within 3 lines of the `bool.fromEnvironment` declaration (`check_m7_native_wake_guards.sh:1239-1257`). At M7-E this pinned `= false`; M11 Phase B flipped the flag and updated the check with it |
 | 14c | RebootReceiver `android:enabled="true"` |
 | 14d | RestartReceiver STILL `android:enabled="false"` AND carries `tools:node="replace"` |
 | 14e | `autoRunOnBoot: true` present in executable code of `background_location_manager.dart` |
@@ -783,27 +873,166 @@ needs a physical iPhone with Xcode attached, because `BGTaskScheduler` refuses t
 (`.submit()` returns `notPermitted` there, which Haven swallows). Do this once before the public
 release.
 
-**Prerequisites:** a physical iPhone; a debug/Release-like build installed from Xcode; background
-sharing enabled in Haven (Settings → Location); Always location permission granted; at least one
-circle with a peer who will publish a location.
+**DEFERRED IN FULL as of 2026-08-30 — the project has no iPhone** (owner constraint, recorded
+verbatim in `docs/POWER_EFFICIENCY_PLAN.md` §2.5). Every item below stays **authoritative and owed**:
+none of them has been replaced by a CI lane, and where a phase merged on CI evidence instead — P3 did,
+on the re-based bundle in that plan's §5.3 WP3-2 — the item states what that evidence does not reach.
+Run the whole checklist when hardware returns; nothing here may be deleted, weakened or silently
+treated as satisfied in the meantime.
 
-0. **Background PUBLISH continuity (the 2026-07-19 unified-stream fix).** With background sharing
-   ON and only **When-In-Use** granted (deliberately NOT Always — this proves the
-   foreground-started continuation path): open Haven, confirm a fix on the map, press Home (do
-   **not** force-quit), wait 5+ minutes stationary. **Expected:** the blue status-bar location
-   indicator stays visible the whole time, and a peer device keeps receiving this device's
-   location on the normal 72–168 s cadence with no gap after backgrounding (the send scheduler
-   keeps firing because the unified stream's `allowsBackgroundLocationUpdates` session keeps the
-   process executable — movement is NOT required). Then repeat with background sharing OFF:
-   **expected** — no blue indicator after backgrounding, the app suspends within the OS's normal
-   grace period, and peers stop receiving until reopen (the toggle-OFF stream now pins
-   `allowsBackgroundLocationUpdates: false` explicitly, so the pre-fix accidental keep-alive is
-   gone). While there, spot-check battery attribution over a longer backgrounded window — the
-   unified stream keeps the foreground 1 m distance filter in background (the old 50 m
-   background-only filter is gone; delegate-callback frequency while moving is higher by design).
-   Force-quit (swipe-kill) remains out of scope: no iOS app can continue timer-cadence publishing
-   after termination; only the receive-only SLC relaunch path (item 2) survives it, and only with
-   Always.
+**Prerequisites:** a physical iPhone; a debug/Release-like build installed from Xcode; background
+sharing enabled in Haven (Settings → Location); at least one circle with a peer who will publish a
+location. The authorization tier is per row — items 1, 2, 2b and 3 want Always; item 0 has one row per
+tier and says which.
+
+0. **Background PUBLISH continuity — four rows: 0a, 0a-provisional, 0b, 0c.**
+   **DEFERRED — no iPhone available (see `docs/POWER_EFFICIENCY_PLAN.md` §2.5); STILL
+   AUTHORITATIVE, run when hardware returns.** ⚠️ RE-RUN REQUIRED: the first run of this item
+   (2026-08-20) FAILED — publishing stopped on backgrounding — which is what motivated the
+   session-object hardening (see the history entry of the same date). It has NOT been re-run
+   since, and power-efficiency phase P3 (2026-09-04) changed the shape under test again and
+   merged on the re-based CI bundle in `docs/POWER_EFFICIENCY_PLAN.md` §5.3 WP3-2 instead,
+   because the project has no iPhone. **These rows are an owed proof, not a closed one.** Do
+   not delete them, do not fold them back into one, and do not read a green
+   `e2e-ios-background-publish` lane as having run them: a simulator cannot suspend a process
+   on the OS's own hours-scale schedule (the 2026-08-23 second changelog entry closes with exactly
+   that instruction), cannot render the status bar — so it can never tell a pill from an arrow —
+   and has no `CLServiceSessionDiagnostic` answer to give
+   under a provisional grant. Writing the rows out now is deliberate: the steps, the expected
+   observations and the Console recipe are cheapest to record while the design is fresh, and a
+   checklist reconstructed later omits exactly the details that make it decisive.
+
+   **Why four rows.** Since P3 the iOS posture is decided by ONE predicate,
+   `HavenBackgroundSessionHandler.alwaysConfirmed`, and not by `authorizationStatus`: only a
+   POSITIVELY confirmed Always (iOS 18+, a `CLServiceSessionDiagnostic` with
+   `alwaysAuthorizationDenied`, `authorizationRequestInProgress` and `insufficientlyInUse` all
+   false) releases the `CLBackgroundActivitySession` and clears
+   `showsBackgroundLocationIndicator`. When-In-Use, a *provisional* Always (iOS reports
+   `.authorizedAlways` while the second prompt is unanswered, though it still treats the app as
+   When-In-Use) and every iOS 17 Always (no diagnostics API to confirm with) keep the activity
+   session and the blue bar. Each row exercises one of those shapes; 0c exercises the teardown
+   they share. **The confirmed-Always shape is the un-evidenced one** — see 0a.
+
+   **Prerequisites for every row:** the prerequisites above, plus Console access to the device
+   (recipe below), and the relay-side capture of `docs/POWER_MEASUREMENT.md` §3 running for the
+   whole window — a peer's marker is a UI observation, the capture is the evidence. Record each
+   row's outcome in `docs/POWER_MEASUREMENT.md` §9 with the date, the iOS build and the commit.
+
+   **Console recipe (all rows).** Xcode → Window → Devices and Simulators → the device → Open
+   Console, filtered on `locationd`. The decisive lines, in the order they matter:
+   * `"Location subscription"` — the RunningBoard assertion locationd holds on the app. Held =
+     the keep-alive was granted; `invalidated` = it was withdrawn; `#Warning Denying process
+     assertion` = it was refused outright (that last one is the 2026-08-23 signature of a
+     session armed after the app stopped being in use — the 2026-08-23 second changelog entry).
+   * `runningboardd` `Suspending task` — the process was suspended. Any occurrence inside a
+     row's stationary window fails that row.
+   * the client's `desiredAccuracy` lines — the only way to observe the P3 profile switch from
+     outside the app, and what `docs/POWER_MEASUREMENT.md` §6 turns into the profile-duty
+     column. Expect `kCLLocationAccuracyBest` while foregrounded and a drop to 100 within about
+     2 minutes of backgrounding while stationary. (I: locationd is believed to log the client's
+     requested accuracy; if it does not on the build you run, record that and fall back to the
+     peer-side capture — the profile is then unobservable on-device, which is itself a finding.)
+
+   0a. **Confirmed Always — the shape P3 introduced, and the one no CI can prove.**
+   *Setup:* iOS 18 or newer; grant Haven **Always** and ANSWER the second prompt (Settings →
+   Privacy & Security → Location Services → Haven → Always) so the grant is confirmed rather
+   than provisional; background sharing ON; at least one circle with a peer.
+   *Steps:* open Haven, wait for a fix on the map, press Home (do **not** force-quit), leave the
+   phone stationary with the screen off for **≥ 2 h**. Then walk ≥ 150 m and stop.
+   **Expected:**
+   * **No blue bar at any point** — the status-bar location **arrow** only. This is the OD1
+     claim, and it is the observation no simulator can make.
+   * Settings → Privacy & Security → Location Services shows the arrow next to Haven.
+   * Settings → Battery lists Haven with **Background Activity**.
+   * The peer keeps receiving on the normal 72–168 s cadence for the whole 2 h, with **no
+     relay-side `created_at` gap > 228 s** — the original wedge test. Grade it with
+     `docs/POWER_MEASUREMENT.md` §3.5, not by eye.
+   * **Added P4 — the receive side is now observable on the same capture.** Each publish instant
+     should be accompanied by this device's REQ/CLOSE pair on the group plane, and there should be
+     **no REQ from this pubkey between them**: the engine is paused between bursts, so a REQ that
+     appears in a gap means something re-anchored in the background that must not have (a health tick
+     that stayed armed, or an engine start that completed after the pause). The inbox (`#p`) REQ
+     rides only every `INBOX_BURSTS_PER_REQ`-th burst; at the shipped value that is every burst, so a
+     `#p` REQ per burst is expected, not a defect. This device's own receive of the PEER's location
+     lands at this device's publish instants, not sub-second — worst case one peer interval plus one
+     own interval plus the burst, which stays under `kReceiveSilenceThreshold`, so the sharing-health
+     banner must still read healthy on resume.
+   * Console: the `"Location subscription"` assertion stays held, no `Suspending task`, and the
+     client's accuracy drops to 100 within about 2 minutes of backgrounding.
+   * After the ≥ 150 m walk: the accuracy returns to Best and the peer sees the move within one
+     interval.
+   **If it fails** — any gap > 228 s, or any `Suspending task` — the confirmed-Always branch is
+   wrong, and the revert is one line: drop `!alwaysConfirmed` from `wantsActivitySession` in
+   `HavenBackgroundSessionHandler.arm()` so confirmed Always keeps the activity session and the
+   bar like every other tier. The settings copy needs no change; it already follows the
+   handler's own state. Record the failure here and in `docs/POWER_EFFICIENCY_PLAN.md` §5.3.
+
+   0a-provisional. **Provisional Always — the fail-safe cohort, and the upgrade edge.**
+   *Setup:* reset Haven's location permission (Settings → General → Transfer or Reset iPhone →
+   Reset → Reset Location & Privacy, or delete and reinstall), then enable background sharing
+   from inside Haven and take the When-In-Use grant, leaving iOS's deferred Always upgrade
+   unanswered. While it is unanswered `authorizationStatus` reads `.authorizedAlways` although
+   the EFFECTIVE authorization is When-In-Use.
+   *Steps:* as 0a, but 30 min of stationary backgrounding is enough for the continuity half.
+   Then, **while Haven is still backgrounded**, answer the deferred prompt with *Change to
+   Always*. Foreground Haven afterwards.
+   **Expected:**
+   * The blue bar IS shown and the activity session IS held for the whole provisional period —
+     the When-In-Use posture. That is the point of failing safe (OD-P3-b): this cohort keeps the
+     exact object added after the 2026-08-20 failure.
+   * Publishing does not stop across the instant the prompt is answered. `arm()` never withdraws
+     an in-use claim from a background callback, so the session survives the upgrade.
+   * The bar clears at the NEXT foreground — the deferred invalidate runs from
+     `applicationWillEnterForeground` — and not before.
+   This row is what closes the provisional half of V-P3-3 and all of V-P3-4. Nothing in CI can
+   produce a provisional grant, so nothing in CI can stand in for it.
+
+   0b. **When-In-Use — the row that already existed, restated for the native owner.**
+   *Setup:* background sharing ON and only **When-In-Use** granted (deliberately NOT Always —
+   this proves the foreground-started continuation path, backed by the held
+   `CLBackgroundActivitySession` on iOS 17+).
+   *Steps:* open Haven, confirm a fix on the map, press Home (do **not** force-quit), wait 5+
+   minutes stationary.
+   **Expected:** the blue status-bar location indicator stays visible the whole time (with the
+   session held it shows whenever the app is backgrounded, even between fixes; under
+   When-In-Use iOS shows it whether or not Haven asks for it), and a peer device keeps receiving
+   this device's location on the normal 72–168 s cadence with no gap after backgrounding —
+   movement is NOT required. If it STILL fails with the indicator visible, the failure is
+   network-side, not CoreLocation: capture a device log around the publish attempts. If the
+   indicator is NOT visible, run the Console recipe above around the backgrounding instant.
+   Then repeat with background sharing OFF: **expected** — no blue indicator after
+   backgrounding, the app suspends within the OS's normal grace period, and peers stop receiving
+   until reopen. Since P3 the toggle-OFF stream is the same native session started with
+   `allowsBackgroundLocationUpdates = false` (a pure function of the toggle, guard-pinned), so
+   the pre-fix accidental keep-alive is still gone.
+   While there, spot-check battery attribution over a longer backgrounded window. **The distance
+   filter is no longer a variable here:** since P3 the iOS session belongs to
+   `HavenLocationStreamHandler`, whose `init` sets `distanceFilter = kCLDistanceFilterNone` once
+   for BOTH accuracy profiles and BOTH toggle states — there is no 1 m arm on iOS any more (1 m
+   survives only on Android's foreground arm, and the `distanceFilter: -1` geolocator sentinel
+   retired with the plugin path). What varies with the toggle is
+   `allowsBackgroundLocationUpdates`; what varies with foreground and motion is
+   `desiredAccuracy`, between Best and 100 m.
+   Force-quit (swipe-kill) remains out of scope: no iOS app can continue timer-cadence
+   publishing after termination, and since P3 a relaunched process is receive-only BY
+   CONSTRUCTION on both paths — the native owner refuses a background-capable start from the
+   background, and the cold-cache shortcut reads the native lifecycle, so the plugin one-shot is
+   unreachable too. Only the receive-only SLC/region relaunch path (items 2 and 2b) survives a
+   termination, and only with Always.
+
+   0c. **Stuck indicator on teardown (iOS 18 and 26).**
+   *Setup:* run this immediately after 0a, and again immediately after 0b.
+   *Steps:* toggle background sharing OFF from Haven's Location settings with the app in the
+   foreground, then background the app.
+   **Expected:** the arrow (after 0a) or the bar (after 0b) clears within a minute, and Settings
+   → Location Services stops showing Haven as active. `disarm()` is unconditional — the handler
+   header states the contract in one sentence, *"arm() never withdraws a claim while
+   backgrounded; disarm() always does"* — so a residual indicator is an OS defect, not a Haven
+   one, and the code has already released everything.
+   **Known OS defect, and no code mitigation exists:** after invalidating a When-In-Use activity
+   session the pill can stay stuck (Apple DTS forum threads 771422 and 783585, iOS 18/26). If it
+   sticks, file Feedback with the Console excerpt and record the iOS build here. Do not "fix" it
+   by holding the session longer: that trades a real privacy regression for a cosmetic one.
 
 1. **BGAppRefreshTask fires and runs a real catch-up.** Run from Xcode on the device; enable
    background sharing; confirm a peer can publish. Background the app (Home) — this calls
@@ -827,6 +1056,28 @@ circle with a peer who will publish a location.
    **Expected:** iOS relaunches Haven in the background with `launchOptions[.location]`; AppDelegate
    restarts SLC monitoring; the pending event drives a catch-up sweep. Confirm a backgrounded peer
    update was applied.
+2b. **Relaunch REGION after termination, where SLC is quiet.** Companion to item 2, and the
+   only way to exercise it: `HavenSLCHandler` now also monitors one ~500 m `CLCircularRegion`
+   centred on the last delivered fix (re-centred on every SLC delivery), because SLC is driven
+   by cell-tower transitions and a terminated app in a tower-sparse area can travel a long way
+   before the OS calls anything "significant". Same gates as SLC (enable predicate + Always),
+   released by the same `stopSLC`, and it reaches Dart through the same receive-only
+   `runCatchup` channel. To test: with bg-sharing on + Always granted, swipe-kill the app,
+   then use Xcode *Debug → Simulate Location* (or a real drive) to move **out of** the circle
+   around where the app was last running. **Expected:** iOS relaunches Haven with
+   `launchOptions[.location]`, `locationManager(_:didExitRegion:)` fires, and a catch-up sweep
+   runs — same observable as item 2. Then verify the teardown: disable background sharing and
+   confirm the region is released (Xcode's *Debug → Location* with the app relaunched shows no
+   further wakes; `stopMonitoring()` iterates `monitoredRegions` so an OS-restored region is
+   released too).
+   **Honest ceiling — this CANNOT be proven in CI.** Region monitoring, like SLC and
+   `BGTaskScheduler`, needs a real relaunch of a terminated process on hardware; the Simulator
+   neither terminates nor relaunches an app for a geofence crossing, and the
+   `e2e-ios-background-publish` lane only exercises what a still-running, foreground-started
+   process keeps alive — the *publish* path on every leg, plus one *receive* plane per leg since
+   OD4-d, and never a relaunch. Nothing
+   in CI asserts that this region ever fires — only that it is armed and torn down with SLC
+   (static guard + host tests). Treat item 2b as unverified until it is run here.
 3. **Opt-out + rollback sanity.** Disable background sharing. **Expected:** `stopSLC` +
    `cancelAllBGTasks` fire; repeat steps 1/2 and confirm nothing runs (no wake, no relay contact).
    Re-enable → resumes.
@@ -944,7 +1195,15 @@ here as current truth.*
   proposal is never re-delivered.) The AutoCommit case is rare in background (proposals are typically
   admin-committed while the admin is foreground).
 
-## MDK stays PRISTINE at v0.7.1 (rev 93ae324) — the research that forces the Haven-owned marker
+## ~~MDK stays PRISTINE at v0.7.1 (rev 93ae324)~~ — the research that forces the Haven-owned marker
+
+> **The PIN in this heading is history, the CONCLUSION is not (noted 2026-09-09).** Haven left v0.7.1 on
+> 2026-07-18: the tree pins the five Dark Matter crates at MDK v0.9.4, rev `e391adc133a9…`
+> (`haven-core/Cargo.toml`; `docs/MDK_DARKMATTER_MIGRATION_PLAN.md`), and §E's heading in Part II carries the same
+> stale pin for the same reason. What survives unchanged is why the Haven-owned marker exists — the pinned rev still
+> exposes no public read accessor for a staged commit (`relay/live_sync/processor.rs` says so at `e391adc`, and
+> OD4-c's whole shape follows from it) — and the no-fork rule. Read the version numbers in this section as the
+> state of the research when it was done.
 
 C-NOFORK-2's ideal primitive would be MDK's `load_mls_group(id)?.pending_commit()`, but it is
 **inaccessible in the pinned MDK**: `load_mls_group()` is `#[cfg(feature="debug-examples")]` pub /
@@ -1082,3 +1341,176 @@ nostr_group_id_hex=?` in the `delete_circle` cascade (`storage.rs:824-877`) = wi
   branch UNCONDITIONALLY (it was previously unreachable under the live `liveSyncEnabled` default —
   found by independent review, fixed pre-implementation). CI: `check_ios_background_publish.sh` in
   repo-guards + host tests; runtime proof = §6 item 0.
+- 2026-08-20 — **iOS background PUBLISH hardening (CoreLocation session objects).** The owner's
+  physical-iPhone test of §6 item 0 FAILED: publishing stopped on backgrounding despite the
+  2026-07-19 fix being verifiably correct at every app layer (Dart pipeline, plugin flag
+  application, plist, Keychain accessibility — four independent audits). Diagnosis (strongest
+  remaining hypothesis; the legacy contract's documented rules say the config *should* work, but
+  the field record of identically-configured apps being suspended on modern iOS is extensive):
+  Haven relied solely on the LEGACY `allowsBackgroundLocationUpdates` contract, while Apple's
+  supported background-location declaration since iOS 17 is `CLBackgroundActivitySession`
+  (the When-In-Use background mechanism — keeps the app "effectively in-use") and since iOS 18
+  `CLServiceSession(.always)` (Always is only *effective* for the modern delivery APIs while one
+  is held). Fix: new `HavenBackgroundSessionHandler` (ios/Runner) holds both sessions while
+  background sharing is enabled — armed synchronously in BOTH `didFinishLaunching` branches (the
+  relaunch-retake window is seconds) and on every `applicationWillEnterForeground` (which also
+  drops a held `.always` session after a Settings downgrade, closing the only OS-prompt path);
+  `CLServiceSession` is created only when Always is ALREADY granted (never prompts). Dart:
+  `IosBackgroundSessionService` (channel `haven.app/ios_background_session`), armed by
+  `BackgroundSharingNotifier` with load-bearing ordering persist → arm → state-flip
+  (session-before-stream-restart rule) and disarmed on every disable (Rule 10). map_shell's
+  pause watcher now covers BOTH consent edges (C4 teardown AND the R1 stale-toggle re-arm: a
+  pause racing the notifier's async load used to read `false` and never re-arm). CI:
+  `check_ios_background_publish.sh` checks 8–10 pin the handler/AppDelegate/notifier invariants;
+  NEW `e2e-ios-background-publish` lane drives a REAL OS background transition on the simulator
+  (second-app launch → genuine `applicationDidEnterBackground`) and asserts session armed +
+  publishes continue + the toggle-off negative twin — the first OS-level backgrounding proof in
+  CI. (Amended 2026-08-23: the lane suspended twice, but neither run had a background-capable
+  session armed in time, so neither said anything about the simulator either way — see the two
+  entries below. §6 item 0 remains the final proof and MUST be re-run on a physical iPhone.)
+  Post-implementation security review closed three gaps in the same change: (1) the load-time
+  disclosure reconcile now actively disarms + runs `disableBackgroundScheduling` (the native
+  launch arm had already read the stale `true` before Dart ran), with the disclosure key ALSO
+  ANDed into the native arm predicate as a belt; (2) `arm()` now gates ALL session creation on
+  granted authorization (When-In-Use or Always) — creating `CLBackgroundActivitySession` while
+  `.notDetermined` (e.g. after a TCC reset with a persisted-true toggle) could otherwise drive a
+  launch-time prompt the user never initiated; (3) `cancelNativeSchedulers` now also disarms, so
+  identity deletion (which keeps the toggle pref) releases the keep-alive instead of re-arming it
+  on every later launch. All three are pinned by guard checks 8/10.
+- 2026-08-23 — **The bg-publish lane was proving nothing (CI run 32646436116).** P2 asserted ≥2
+  kind-445 events in the 396 s after the real backgrounding and counted 0. Not a publish
+  regression: the drive overrode `locationServiceProvider` with `FakeLocationService`, whose
+  stream yields once and closes, so `Geolocator.getPositionStream` was never called and NO
+  `CLLocationManager` updates session existed in the process — the drive had faked away the one
+  mechanism `HavenBackgroundSessionHandler.swift:9-11` names as keeping the app executing
+  (`CLBackgroundActivitySession` extends authorization, not execution; the log's
+  `serviceSessionHeld=false` after arm is consistent). iOS therefore suspended the app ~28 s
+  after backgrounding, and the oracle — co-resident in that process — was frozen with it: the
+  P2 heartbeat printed `20s of 396s elapsed` at 15:14:59 and `40s of 396s elapsed` at 15:40:36,
+  20 s of Dart clock across 25 min 37 s of wall clock. The 396 s timer expired on resume and
+  returned its partial (0) set from a subscription whose socket had died. That the app then
+  published while still reporting itself backgrounded (`profile anti-entropy tick skipped
+  (background)` in the same instant as `publish done — accepted=1`) is the positive proof the
+  publish pipeline was never stopped by backgrounding. **This means the simulator DOES suspend a
+  backgrounded app**, correcting the 2026-08-20 entry above — what §6 item 0 still uniquely
+  proves is the physical device's keep-alive under a real CoreLocation session, not that
+  suspension is unreachable in CI. Fix: the drive runs the production `GeolocatorLocationService`
+  (guard check 11 now forbids injecting a fake location service into this lane) behind a
+  pre-mount authorization gate; the host drips two simulated fixes 5 m apart every 10 s. With
+  background sharing ON the stream sets NO distance filter (`geolocator_location_service.dart:659`
+  — `-1` = `kCLDistanceFilterNone`; Unit F, 2026-08-28), so the 5 m step no longer has a filter to
+  clear — its only remaining role is to keep fixes flowing. The alternation still matters:
+  displacement never nears `kMotionTriggerDistanceMeters` (100 m), so the drip cannot become a
+  second publish driver. P2 gained `_failIfSuspended`, which compares wall clock against the wait's own duration
+  (slack = 6 missed heartbeats) and reports a freeze as a freeze BEFORE counting, so a suspended
+  run can never again be misreported as "the app stopped publishing". The ≥2 bound and the 396 s
+  window are unchanged. The host's two waits are now derived rather than picked: `DISABLE_WAIT_SECS`
+  = 900 (611 s worst case + half again) and `DISARM_WAIT_SECS` = 210 (200 s settle + 10 s
+  in-flight grace), the latter bounded above by the 228 s kind-445 NIP-40 expiration so a leaked
+  event cannot age out before the re-fetch sees it — replacing the 1500 s that let this
+  suspension burn 25 min and surface as an ambiguous zero.
+- 2026-08-23 (second entry) — **The bg-publish lane's own drive never armed the background stream
+  (CI run 32661622879).** The 2026-08-23 fix above made the diagnosis honest — `_failIfSuspended`
+  correctly reported "iOS SUSPENDED the app during P2: a 396 s wait took 1145 s" — but the lane
+  still failed, now with the production `GeolocatorLocationService` AND a live 10 s
+  simulated-location drip. That run's own `sim.logarchive`, parsed off the CI artifact, names the
+  cause and it is **the drive, not the simulator**: at `20:03:28.804` the toggle flip tore the
+  FOREGROUND location subscription down (`LocationSubcription #pwrlog client unsubscribing`) —
+  Riverpod's `invalidateSelf` runs a provider's `onDispose` synchronously and defers the REBUILD to
+  `markNeedsBuild` — and the replacement subscription with `setAllowsBackgroundLocationUpdates:
+  allows:1` did not start until `20:03:36.860`, **0.43 s after SpringBoard had already set
+  `visiblity is no`**. Eight seconds with no location session at all, because
+  `IntegrationTestWidgetsFlutterBinding` inherits `LiveTestWidgetsFlutterBindingFramePolicy
+  .fadePointers`, under which no widget build runs until the test pumps — and the drive pumped
+  nowhere between `setEnabled(enabled: true)` and the backgrounding. locationd's response is in the
+  same log: `#Warning Denying process assertion` ×10 across `20:03:36.687`-`.862`, then
+  `20:03:38.812` it invalidated the `"Location subscription"` RunningBoard assertion it had been
+  holding on the app, and at `20:04:12.273` runningboardd logged `Suspending task` once the app's
+  own `FinishTask` grace expired. No jetsam, no memory kill; the app stayed suspended 1109.7 s
+  until the host re-foregrounded it, and its ~110 queued `didUpdateLocations` callbacks all drained
+  within 30 ms of the resume. A background-capable session may only be established while the app is
+  in use — this one was established 0.43 s after it stopped being.
+  **This retracts the previous entry's inference** that the two prior suspensions demonstrated
+  anything about the simulator: run 32646436116 had no location session (faked service) and run
+  32661622879 had one that arrived too late, so neither ever tested the keep-alive.
+  Fix: P1 now pumps after the enable and waits for a FRESH fix from the rebuilt
+  `locationStreamProvider` before signalling READY, so the session is live and delivering while the
+  app is unambiguously foregrounded; guard **check 12** pins the pump, the wait and the
+  `locationStreamProvider` assertion to the slice between the enable and the READY marker
+  (mutation-tested against three ways of removing them). P2 split into **P2a** (a per-circle tick
+  driven through the production scheduler from the backgrounded process must reach the relay —
+  answerable inside any background grace, so "the pipeline broke" and "the process was frozen" stop
+  being the same observation) and **P2b** (the unchanged ≥2 events / 396 s claim, now anchored
+  `since` P2a's event so a driven publish cannot count toward it). P3 gained a direct, non-vacuous
+  assertion — `isActiveForTest` must be false immediately after the disable, observed from the
+  still-backgrounded process — because a suspended app is silent on the wire whether or not the
+  disable worked, which made the settle-window diff alone vacuous here.
+  **OPEN, and an owner decision if it lands:** Apple lists "the `UIBackgroundModes` key" among the
+  features "not available in Simulator"
+  (<https://developer.apple.com/documentation/xcode/testing-in-simulator-versus-testing-on-hardware-devices>),
+  and DTS advises against testing background execution there at all — which would make P2b
+  unprovable in CI regardless of this fix. The log evidence cuts the other way (that simulator's
+  locationd did create a `CLBackgroundActivitySession`, did hold a RunningBoard assertion for a
+  location client, and did deliver on a 10 s cadence throughout), and both failures are explained
+  without it, so the claim is kept. If the next run has P2a green and P2b still reporting a
+  suspension, the policy is genuinely absent on the simulator and the continuity claim must move
+  out of CI to §6 item 0 — never into a widened window.
+
+- 2026-09-03 — **P1 (power efficiency phase 1): one lifecycle rule for the location stream, and the
+  R1 edge stated.** The pause/resume seam had been platform-branchy prose spread across
+  `_onPaused`; it is now a single named rule, `shouldKeepLocationStreamWhilePaused({bg, isIOS}) =>
+  bg && isIOS` (`location_provider.dart:35-38`), consulted from ONE place
+  (`map_shell.dart:1319-1324`) and enforced by `check_android_location_power.sh` checks (7) and (8):
+  (7) `suspendStream(` must precede `markForegroundActive(active: false)`, and (8) that call must sit
+  inside the keep-rule conditional rather than a raw `Platform.isIOS` branch. The release is a
+  direct, synchronous service call and never a provider rebuild — Flutter disables frames before the
+  lifecycle observers run, so a release riding a `ref.watch`/`ref.invalidate` lands at RESUME, which
+  is the bug this shape exists to prevent (`map_shell.dart:1314-1318`). `locationStreamProvider` is
+  additionally fail-closed on a background LAUNCH: it reads `appForegroundProvider`, whose initial
+  value is derived from `WidgetsBinding.instance.lifecycleState` rather than a literal, and returns a
+  per-build placeholder that never completes instead of starting a session iOS would refuse.
+  **The R1 edge, stated because it is a deliberate non-restart:** a background-sharing toggle that
+  flips false → true while the app is already paused re-arms the publish scheduler, the motion
+  trigger and the iOS receive timer (`map_shell.dart:1457-1468`), and it does NOT restart the
+  location stream. The keep-alive is (re)established at the next FOREGROUND; until then the app
+  publishes from the last-known fix for the roughly 30 s iOS grants a client-less background app.
+  That is not a gap in the fix — a background-capable start issued from the background is refused by
+  iOS outright (CI run 32661622879, the 2026-08-24 changelog entry at `:1248-1276`), so restarting
+  there would fail loudly and buy
+  nothing. The C4 edge (true → false while paused) is the mirror and is deterministic:
+  `suspendStream()` + `clearCachedPosition()` + `disarm()` are called directly on the watcher, so
+  consent withdrawal stops sharing at once instead of waiting for OS suspension.
+
+- 2026-09-04 — **P3 (power efficiency phase 3): iOS gets a Haven-owned CoreLocation updates
+  session, and the indicator becomes tier-dependent.** `HavenLocationStreamHandler.swift` replaces
+  geolocator's position stream ON iOS ONLY (Android is untouched, and iOS one-shots stay on the
+  plugin because `requestLocation()` does nothing while the same manager is updating). Its `init`
+  pins the Apple 16.4 delivery shape once, for BOTH accuracy profiles and BOTH toggle states:
+  `pausesLocationUpdatesAutomatically = false`, `distanceFilter = kCLDistanceFilterNone`,
+  `activityType = .other`, and a `desiredAccuracy` that is never coarser than 100 m —
+  `kCLLocationAccuracyBest` while foregrounded or moving, `kCLLocationAccuracyHundredMeters` while
+  backgrounded and stationary, switched by a live property write and never by a restart. **The
+  toggle-keyed `distanceFilter: -1` sentinel is retired with the plugin path**, so the "1 m filter
+  on the opt-out arm" statement no longer applies to iOS at all (1 m survives only on Android's
+  foreground arm). `onListen` is the only `startUpdatingLocation()` site and REFUSES a
+  background-capable start while `applicationState == .background`, pushing
+  `background_start_refused` through the event SINK (an `onListen` return value is reported to
+  `FlutterError` and never reaches the stream); together with the cold-cache shortcut now reading
+  the native `backgrounded` status instead of an in-process hint, a relaunched process is
+  receive-only BY CONSTRUCTION on both paths — which is what
+  `INV-L-IOS-WAKES-RECEIVE-ONLY` may now claim, and what closes the hole the failure analysis
+  recorded under its downgraded-hypotheses list. Indicator/session policy moved onto one predicate,
+  `HavenBackgroundSessionHandler.alwaysConfirmed` (false until a `CLServiceSessionDiagnostic`
+  positively confirms Always on iOS 18+, and always false on iOS 17): confirmed Always releases the
+  `CLBackgroundActivitySession` and clears `showsBackgroundLocationIndicator`; When-In-Use, a
+  provisional Always and iOS 17 Always keep both. `arm()` never withdraws an in-use claim while
+  backgrounded, `disarm()` always does. **What was NOT proven:** §6 item 0 is now four rows (0a
+  confirmed Always, 0a-provisional, 0b When-In-Use, 0c stuck indicator) and all four are DEFERRED —
+  there is no iPhone. P3 merged on the re-based CI bundle (`docs/POWER_EFFICIENCY_PLAN.md` §5.3
+  WP3-2). **V-P3-3 — whether the confirmed-Always shape, with no activity session and the indicator
+  flag false, keeps a foreground-started session delivering for HOURS — is UNKNOWN, and the closest
+  physical neighbour of that configuration FAILED in the field on 2026-08-20** (the entry above).
+  The containment is that every path P3 touches runs only while background sharing is ON, and that
+  the fail-safe posture keeps provisional and iOS-17 Always on the When-In-Use shape, so only
+  *confirmed* Always enters the un-evidenced one. The revert, if 0a ever fails, is one line in
+  `arm()`.

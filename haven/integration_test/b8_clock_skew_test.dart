@@ -1020,8 +1020,15 @@ Future<_PublishOutcome> _publishLocation({
 }
 
 /// Encrypts a location and offers it through the PRODUCTION publish path —
-/// `NostrRelayService` -> `RelayManagerFfi` -> `RelayManager::publish_event`
-/// -> `publish_with_retry` -> `clock_skew::classify_publish_outcome`.
+/// `NostrRelayService` -> `RelayManagerFfi` ->
+/// `RelayManager::publish_location_event` -> `publish_with_retry` ->
+/// `clock_skew::classify_publish_outcome`.
+///
+/// The LOCATION ladder, not the commit one: `publishLocation` takes a single
+/// bounded attempt (`LOCATION_PUBLISH_ATTEMPTS == 1`) and this lane exists to
+/// prove that shortening the attempt budget did not shorten the ERROR
+/// contract — a device-clock rejection must still arrive typed. Driving
+/// `publishEvent` here would classify a ladder no location ever takes.
 ///
 /// Returns whatever that path threw (or `null` on success), because the
 /// CLASSIFICATION of the failure is the thing under test. Every other publish
@@ -1043,7 +1050,7 @@ Future<({Object? error, String eventId})> _publishViaProductionPath({
   final id = _eventIdOf(encrypted.eventJson);
   Object? error;
   try {
-    await relayService.publishEvent(
+    await relayService.publishLocationEvent(
       eventJson: encrypted.eventJson,
       relays: <String>[defaultStrfryUrl],
     );

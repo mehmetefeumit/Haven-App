@@ -19,6 +19,7 @@ import 'package:haven/src/providers/location_disclosure_provider.dart';
 import 'package:haven/src/providers/location_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
 import 'package:haven/src/providers/map_controller_provider.dart';
+import 'package:haven/src/providers/resume_extras_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/providers/tile_cache_provider.dart';
 import 'package:haven/src/providers/tile_http_client_provider.dart';
@@ -218,6 +219,11 @@ class _MapPageState extends ConsumerState<MapPage>
   /// Mirrors `HavenImageCacheGuard`: background suspension must not continue
   /// writing member-area tiles to the encrypted cache — both for battery
   /// frugality and to avoid extending the at-rest exposure window.
+  ///
+  /// The warm-resume eviction that used to live here now rides
+  /// [lastResumeExtrasAtProvider] (see `build`): a disk scan on every glance
+  /// bought nothing, and both this page and `MapShell` observe the same resume
+  /// — whichever ran first would have stamped the other out of its turn.
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.paused ||
@@ -225,11 +231,6 @@ class _MapPageState extends ConsumerState<MapPage>
         state == AppLifecycleState.hidden) {
       _prefetchDebounceTimer?.cancel();
       _prefetchService.cancel();
-    } else if (state == AppLifecycleState.resumed) {
-      // Warm-resume eviction: purge stale/over-budget tiles on foreground
-      // return without restarting a prefetch burst (that fires from the
-      // memberLocations listener when the UI resumes).
-      _runEviction();
     }
   }
 
@@ -304,6 +305,15 @@ class _MapPageState extends ConsumerState<MapPage>
       return;
     }
     if (next is AsyncData<Position>) {
+      // Only while somebody can see the map. On iOS with background sharing on
+      // this stream keeps delivering for the whole background window, and each
+      // fix here costs an FFI obfuscation plus a `setState` on a tree that
+      // renders no frames. The publish path reads its own fix from the service
+      // and is untouched; the marker catches up from the next fix after
+      // resume. The user-initiated one-shot in `_getLocation` is deliberately
+      // NOT gated — the app is `inactive` behind the permission sheet, and the
+      // loading scrim clears only when a fix lands.
+      if (!ref.read(appForegroundProvider)) return;
       _updateLocationFromPosition(next.value);
     }
     // AsyncLoading: a (re)subscribe is in flight; keep the current view.
@@ -537,6 +547,16 @@ class _MapPageState extends ConsumerState<MapPage>
     ref.listen<AsyncValue<Position>>(
       locationStreamProvider,
       _onPositionStreamEvent,
+    );
+
+    // Warm-resume eviction: purge stale/over-budget tiles when the shell's
+    // resume-extras window opens, not on every foreground return, and without
+    // restarting a prefetch burst (that fires from the memberLocations
+    // listener when the UI resumes). The stamp changing IS the decision.
+    // ignore: cascade_invocations — ref.listen returns void, cascade not valid.
+    ref.listen<DateTime?>(
+      lastResumeExtrasAtProvider,
+      (previous, next) => _runEviction(),
     );
 
     // Drop the last fix the moment access is lost. `showOwnLocationMarker`

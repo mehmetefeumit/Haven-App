@@ -210,6 +210,12 @@ class AppLocalizationsNe extends AppLocalizations {
   String get settingsLocationTitle => 'स्थान';
 
   @override
+  String get settingsLocationSubtitleOn => 'पृष्ठभूमि साझेदारी सक्रिय छ';
+
+  @override
+  String get settingsLocationSubtitleOff => 'Haven खुला रहेको बेला मात्र';
+
+  @override
   String get settingsMapStyleTitle => 'नक्सा शैली';
 
   @override
@@ -381,7 +387,7 @@ class AppLocalizationsNe extends AppLocalizations {
 
   @override
   String get locationSettingsIntro =>
-      'एप खुला रहेको बेला Haven ले तपाईंको स्थान तपाईंका सर्कलसँग साझा गर्छ। यसलाई सक्रिय गर्नुभयो भने Haven पृष्ठभूमिमा हुँदा पनि तपाईंका सर्कलले यो देखिरहन्छन्। सिस्टमले Haven बन्द गर्‍यो भने साझेदारी रोकिन्छ; पृष्ठभूमिमा एप ब्यूँझँदा Haven ले तपाईंका सर्कलका स्थान मात्र ल्याउँछ, तपाईंको आफ्नो स्थान कहिल्यै पठाउँदैन। Android मा, Haven लाई स्वाइप गरेर हालैका एपको सूचीबाट हटाए पनि साझेदारी चलिरहन्छ, र फोन पुनः सुरु भएपछि साझेदारी आफैँ फेरि सुरु हुन्छ; iPhone मा भने तपाईंले Haven नखोलेसम्म साझेदारी रोकिएकै रहन्छ।';
+      'एप खुला रहेको बेला Haven ले तपाईंको स्थान तपाईंका सर्कलसँग साझा गर्छ। यसलाई सक्रिय गर्नुभयो भने Haven पृष्ठभूमिमा हुँदा पनि तपाईंका सर्कलले यो देखिरहन्छन्। सिस्टमले Haven बन्द गर्‍यो भने तपाईंको आफ्नो साझेदारी रोकिन्छ: Haven ले तपाईंका सर्कलका स्थान ल्याउन त ब्यूँझन सक्छ, तर तपाईंको आफ्नो स्थान पठाउन कहिल्यै ब्यूँझँदैन। Android मा, Haven लाई स्वाइप गरेर हालैका एपको सूचीबाट हटाए पनि साझेदारी चलिरहन्छ, र फोन पुनः सुरु भएपछि साझेदारी आफैँ फेरि सुरु हुन्छ। iPhone मा भने तपाईंले Haven नखोलेसम्म साझेदारी रोकिएकै रहन्छ।';
 
   @override
   String get locationSettingsToggleTitle => 'पृष्ठभूमिमा साझा गर्नुहोस्';
@@ -392,7 +398,7 @@ class AppLocalizationsNe extends AppLocalizations {
 
   @override
   String get locationSettingsIosLimitedNote =>
-      'तपाईंको हालको अनुमतिमै साझेदारी पृष्ठभूमिमा पनि चलिरहन्छ। सेटिङमा Haven का लागि स्थानलाई \'सधैँ\' मा सेट गर्नुहोस्। यसो गर्दा iOS ले एप बन्द गरेपछि पनि Haven ले तपाईंका सर्कलका छुटेका स्थान ल्याउन सक्छ। तपाईंको आफ्नो साझेदारी चाहिँ तपाईंले Haven फेरि खोलेपछि मात्र सुरु हुन्छ।';
+      'तपाईंको हालको अनुमतिमै साझेदारी पृष्ठभूमिमा पनि चलिरहन्छ, र त्यस बेला iOS ले स्क्रिनको सबैभन्दा माथि आफ्नो निलो स्थान पट्टी देखाउँछ। सेटिङमा Haven का लागि स्थानलाई \'सधैँ\' मा सेट गर्नुहोस्। यसो गर्दा iOS ले एप बन्द गरेपछि पनि Haven ले तपाईंका सर्कलका छुटेका स्थान ल्याउन सक्छ। \'सधैँ\' मा भने iOS ले त्यो पट्टीको साटो स्थिति-पट्टीमा आफ्नो स्थान तीर देखाउन सक्छ। तपाईंको आफ्नो साझेदारी चाहिँ तपाईंले Haven फेरि खोलेपछि मात्र सुरु हुन्छ।';
 
   @override
   String get locationSettingsAndroidHeader => 'भरपर्दोपनका लागि OS सेटिङ';
@@ -411,7 +417,48 @@ class AppLocalizationsNe extends AppLocalizations {
 
   @override
   String get locationSettingsIosGuidance =>
-      'पृष्ठभूमि साझेदारी सक्रिय हुँदा, Haven ले तपाईंको स्थान निरन्तर प्रयोग गरिरहन्छ र iOS ले निलो स्थिति-पट्टी सूचक देखाउँछ। \"सधैँ\" अनुमति दिनुभयो भने, iOS ले एप बन्द गरेपछि पनि Haven ले तपाईंका सर्कलका छुटेका अपडेटहरू ल्याउन सक्छ।';
+      'पृष्ठभूमि साझेदारी सक्रिय हुँदा, Haven ले स्थानको सत्र चालु राख्छ, ताकि तपाईंका सर्कलले तपाईंलाई देखिरहन सकून्।';
+
+  @override
+  String get locationSettingsIosIndicatorArrow =>
+      'Haven ले तपाईंको स्थान प्रयोग गरिरहेका बेला iOS ले स्थिति-पट्टीमा आफ्नो स्थान तीर देखाउँछ, र त्यसपछि केही समयसम्म त्यही तीर \"Location Services\" मा Haven कै छेउमा राखिरहन्छ।';
+
+  @override
+  String get locationSettingsIosIndicatorBar =>
+      'तपाईंको \'सधैँ\' अनुमतिका साथ, Haven ले तपाईंको स्थान प्रयोग गरिरहेका बेला iOS ले स्क्रिनको सबैभन्दा माथि आफ्नो निलो स्थान पट्टी देखाउँछ।';
+
+  @override
+  String get locationDisclosureTitle => 'तपाईंको स्थानको साझेदारी';
+
+  @override
+  String get locationDisclosureWhy =>
+      'Haven ले तपाईंको लाइभ स्थान तपाईंले छानेका सर्कलका मानिसहरूलाई देखाउँछ, र तिनको स्थान तपाईंलाई नक्सामा देखाउँछ। यसका लागि Haven लाई तपाईंको यन्त्रको सटीक स्थान प्रयोग गर्ने अनुमति चाहिन्छ।';
+
+  @override
+  String get locationDisclosureHow =>
+      'तपाईंको स्थान तपाईंकै यन्त्रमा एन्ड-टु-एन्ड इन्क्रिप्ट हुन्छ, त्यसैले तपाईंले छानेका सर्कलका सदस्यहरूले मात्र यो पढ्न सक्छन् — Haven ले होइन। Haven को आफ्नै कुनै सर्भर छैन: तपाईंका इन्क्रिप्टेड अपडेट अरू मानिसहरूले चलाउने स्वतन्त्र रिलेहरू हुँदै जान्छन्, जसले तपाईंको नेटवर्क ठेगाना त देख्छन् तर तपाईं कहाँ हुनुहुन्छ भन्ने कहिल्यै देख्दैनन्। नक्सा कोर्न तपाईं र तपाईंको सर्कलको वरपरका क्षेत्र Stadia Maps सँग मागिन्छन्, त्यसैले ती क्षेत्र लगभग कहाँ छन् भन्ने Stadia Maps लाई थाहा हुन्छ, तर तपाईंको नाम, तपाईंको कुञ्जी वा तपाईंका सर्कलमा को-को छन् भन्ने कहिल्यै थाहा हुँदैन। Stadia Maps को भनाइअनुसार, उसले व्यक्तिगत जानकारी बेच्दैन वा साट्दैन, तपाईंको यन्त्रमा कुनै कुकी राख्दैन, र सर्भरका लग करिब दुई हप्ता राख्छ — यो उसको आफ्नै नीति हो, जसलाई Haven ले लागू गराउन सक्दैन।';
+
+  @override
+  String get locationDisclosureSharing =>
+      'Haven खुला रहेसम्म र तपाईं कुनै सर्कलमा हुनुहुँदासम्म तपाईंको स्थान हरेक केही मिनेटमा आफैँ पठाइन्छ। यसलाई रोकेर राख्ने कुनै विकल्प छैन। कुनै सर्कलसँग साझेदारी रोक्न त्यो सर्कल छोड्नुहोस्।';
+
+  @override
+  String get locationDisclosureBackgroundAndroid =>
+      'यो एपले स्थान डाटा प्रयोग गर्छ, ताकि एप बन्द हुँदा वा प्रयोगमा नहुँदा पनि तपाईंका सर्कलसँग साझेदारी हुन सकोस्।';
+
+  @override
+  String get locationDisclosureBackgroundIos =>
+      'यो एपले स्थान डाटा प्रयोग गर्छ, ताकि Haven पृष्ठभूमिमा हुँदा र तपाईंले यसलाई प्रयोग नगरिरहेका बेला पनि तपाईंका सर्कलसँग साझेदारी हुन सकोस्। iOS ले Haven बन्द गर्‍यो भने तपाईंको आफ्नो साझेदारी तपाईंले फेरि नखोलेसम्म रोकिन्छ: Haven ले तपाईंका सर्कलका स्थान ल्याउन त ब्यूँझन सक्छ, तर तपाईंको आफ्नो स्थान पठाउन कहिल्यै ब्यूँझँदैन।';
+
+  @override
+  String get locationDisclosureManage =>
+      'तपाईं पृष्ठभूमि साझेदारी जुनसुकै बेला सेटिङ → स्थानबाट बन्द गर्न सक्नुहुन्छ।';
+
+  @override
+  String get locationDisclosureAgree => 'सहमत छु';
+
+  @override
+  String get locationDisclosureNotNow => 'अहिले होइन';
 
   @override
   String get fgsNotificationSharing =>
@@ -711,6 +758,15 @@ class AppLocalizationsNe extends AppLocalizations {
       'सर्कल बनाउन सकिएन। कृपया फेरि प्रयास गर्नुहोस्।';
 
   @override
+  String nameCircleRosterFullError(int limit) {
+    final intl.NumberFormat limitNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String limitString = limitNumberFormat.format(limit);
+
+    return 'तपाईं एकै समयमा $limitString सर्कलमा मात्र रहन सक्नुहुन्छ। नयाँ सर्कलका लागि ठाउँ खाली गर्न कुनै एक सर्कल छोड्नुहोस्।';
+  }
+
+  @override
   String addMemberTitle(String circleName) {
     return '$circleName मा थप्नुहोस्';
   }
@@ -1004,6 +1060,15 @@ class AppLocalizationsNe extends AppLocalizations {
   @override
   String get invitationAcceptError =>
       'निमन्त्रणा स्वीकार गर्न सकिएन। कृपया फेरि प्रयास गर्नुहोस्।';
+
+  @override
+  String invitationRosterFullError(int limit) {
+    final intl.NumberFormat limitNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String limitString = limitNumberFormat.format(limit);
+
+    return 'तपाईं एकै समयमा $limitString सर्कलमा मात्र रहन सक्नुहुन्छ। यो निमन्त्रणा बाँकी रहन्छ: कुनै एक सर्कल छोड्नुहोस्, त्यसपछि यसलाई स्वीकार गर्नुहोस्।';
+  }
 
   @override
   String get invitationDeclineError =>

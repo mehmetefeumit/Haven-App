@@ -207,6 +207,12 @@ class AppLocalizationsUr extends AppLocalizations {
   String get settingsLocationTitle => 'مقام';
 
   @override
+  String get settingsLocationSubtitleOn => 'پس منظر میں شیئرنگ فعال ہے';
+
+  @override
+  String get settingsLocationSubtitleOff => 'صرف جب تک Haven کھلا ہے';
+
+  @override
   String get settingsMapStyleTitle => 'نقشے کا انداز';
 
   @override
@@ -375,7 +381,7 @@ class AppLocalizationsUr extends AppLocalizations {
 
   @override
   String get locationSettingsIntro =>
-      'جب بھی ایپ کھلی ہو، Haven آپ کا مقام آپ کے حلقوں کے ساتھ شیئر کرتا ہے۔ اسے آن کریں تو Haven کے پس منظر میں ہوتے ہوئے بھی آپ کے حلقے اسے دیکھتے رہیں گے۔ اگر سسٹم Haven کو بند کر دے تو شیئرنگ رک جاتی ہے۔ پس منظر میں ایپ صرف آپ کے حلقوں کے مقامات لانے کے لیے جاگتی ہے، آپ کا اپنا مقام کبھی نہیں بھیجتی۔ Android پر شیئرنگ Haven کو ایپ سوئچر سے ہٹا دینے کے بعد بھی جاری رہتی ہے اور فون دوبارہ چالو ہونے پر خود ہی پھر شروع ہو جاتی ہے؛ iPhone پر یہ اُس وقت تک رکی رہتی ہے جب تک آپ Haven نہ کھولیں۔';
+      'جب بھی ایپ کھلی ہو، Haven آپ کا مقام آپ کے حلقوں کے ساتھ شیئر کرتا ہے۔ اسے آن کریں تو Haven کے پس منظر میں ہوتے ہوئے بھی آپ کے حلقے اسے دیکھتے رہیں گے۔ اگر سسٹم نے Haven کو بند کر دیا تو آپ کی اپنی شیئرنگ رک جاتی ہے: Haven پھر بھی آپ کے حلقوں کے مقامات لانے کے لیے جاگ سکتا ہے، مگر آپ کا اپنا مقام بھیجنے کے لیے کبھی نہیں۔ Android پر شیئرنگ Haven کو ایپ سوئچر سے ہٹا دینے کے بعد بھی جاری رہتی ہے اور فون دوبارہ چالو ہونے پر خود ہی پھر شروع ہو جاتی ہے۔ iPhone پر شیئرنگ اُس وقت تک رکی رہتی ہے جب تک آپ Haven نہ کھولیں۔';
 
   @override
   String get locationSettingsToggleTitle => 'پس منظر میں شیئر کریں';
@@ -386,7 +392,7 @@ class AppLocalizationsUr extends AppLocalizations {
 
   @override
   String get locationSettingsIosLimitedNote =>
-      'آپ کی موجودہ اجازت کے ساتھ شیئرنگ پس منظر میں کام کرتی رہتی ہے۔ ترتیبات میں Haven کے لیے \'Always\' منتخب کریں تاکہ iOS کے ایپ بند کر دینے کے بعد Haven آپ کے حلقوں کے مقامات کی تازہ صورت حال بھی حاصل کر سکے۔ آپ کی اپنی شیئرنگ تو Haven دوبارہ کھولنے پر ہی بحال ہوتی ہے۔';
+      'آپ کی موجودہ اجازت کے ساتھ شیئرنگ پس منظر میں کام کرتی رہتی ہے، اور اس دوران iOS آپ کی اسکرین کے اوپری حصے میں اپنی نیلی مقام پٹی دکھاتا ہے۔ ترتیبات میں Haven کے لیے \'Always\' منتخب کریں تاکہ iOS کے ایپ بند کر دینے کے بعد Haven آپ کے حلقوں کے مقامات کی تازہ صورت حال بھی حاصل کر سکے۔ \'Always\' کے تحت iOS خود اُس پٹی کے بجائے اسٹیٹس بار میں مقام کا تیر دکھا سکتا ہے۔ آپ کی اپنی شیئرنگ تو Haven دوبارہ کھولنے پر ہی بحال ہوتی ہے۔';
 
   @override
   String get locationSettingsAndroidHeader => 'بھروسے کے لیے OS ترتیبات';
@@ -405,7 +411,48 @@ class AppLocalizationsUr extends AppLocalizations {
 
   @override
   String get locationSettingsIosGuidance =>
-      'جب پس منظر میں شیئرنگ آن ہو تو Haven مقام کا ایک مسلسل سیشن جاری رکھتا ہے اور iOS اسٹیٹس بار میں ایک نیلا اشارہ دکھاتا ہے۔ \"Always\" کی اجازت دینے سے یہ اضافی سہولت ملتی ہے کہ iOS کے ایپ بند کر دینے کے بعد Haven آپ کے حلقوں کی تازہ صورت حال حاصل کر سکے۔';
+      'جب پس منظر میں شیئرنگ آن ہو تو Haven مقام کا سیشن جاری رکھتا ہے تاکہ آپ کے حلقے آپ کو دیکھتے رہیں۔';
+
+  @override
+  String get locationSettingsIosIndicatorArrow =>
+      'جب تک Haven آپ کا مقام استعمال کرتا ہے، iOS خود اسٹیٹس بار میں مقام کا تیر دکھاتا ہے، اور اس کے بعد کچھ دیر تک وہی تیر \'لوکیشن کی خدمات\' میں Haven کے ساتھ نظر آتا رہتا ہے۔';
+
+  @override
+  String get locationSettingsIosIndicatorBar =>
+      'آپ کی \'Always\' اجازت کے ساتھ، جب تک Haven آپ کا مقام استعمال کرتا ہے، iOS اپنی نیلی مقام پٹی اسکرین کے اوپری حصے میں دکھاتا ہے۔';
+
+  @override
+  String get locationDisclosureTitle => 'آپ کے مقام کی شیئرنگ';
+
+  @override
+  String get locationDisclosureWhy =>
+      'Haven آپ کا لمحہ بہ لمحہ مقام اُن حلقوں کے لوگوں کو دکھاتا ہے جو آپ منتخب کرتے ہیں، اور اُن کا مقام آپ کو نقشے پر دکھاتا ہے۔ اس کے لیے Haven کو آپ کے آلے کا درست مقام استعمال کرنے کی اجازت درکار ہے۔';
+
+  @override
+  String get locationDisclosureHow =>
+      'آپ کا مقام آپ کے آلے پر ہی اینڈ ٹو اینڈ خفیہ کر دیا جاتا ہے، اس لیے اسے صرف اُن حلقوں کے ارکان پڑھ سکتے ہیں جو آپ منتخب کرتے ہیں، خود Haven نہیں۔ Haven کا اپنا کوئی سرور نہیں: آپ کا خفیہ کردہ مقام ہر بار اُن آزاد ریلے سے گزرتا ہے جنہیں دوسرے لوگ چلاتے ہیں، اور یہ ریلے آپ کا نیٹ ورک پتہ تو دیکھتے ہیں مگر یہ کبھی نہیں دیکھتے کہ آپ کہاں ہیں۔ نقشہ بنانے کے لیے آپ کے اور آپ کے حلقے کے گرد کے علاقے Stadia Maps سے منگوائے جاتے ہیں، اس لیے Stadia Maps کو موٹے طور پر پتہ چل جاتا ہے کہ وہ علاقے کہاں ہیں، مگر آپ کا نام، آپ کی کلید یا آپ کے حلقوں میں کون ہے — یہ اسے کبھی معلوم نہیں ہوتا۔ Stadia Maps کا کہنا ہے کہ وہ ذاتی معلومات نہ بیچتی ہے نہ ان کا تبادلہ کرتی ہے، آپ کے آلے پر کوئی کوکی نہیں رکھتی، اور اپنے سرور کے لاگ تقریباً دو ہفتے محفوظ رکھتی ہے — یہ اُن کی اپنی پالیسی ہے، جسے Haven نافذ نہیں کر سکتا۔';
+
+  @override
+  String get locationDisclosureSharing =>
+      'جب تک Haven کھلا ہے اور آپ کسی حلقے میں ہیں، آپ کا مقام ہر چند منٹ بعد خود بخود بھیج دیا جاتا ہے۔ اسے وقفے پر رکھنے کا کوئی طریقہ نہیں۔ کسی حلقے کے ساتھ شیئرنگ روکنے کے لیے وہ حلقہ چھوڑ دیں۔';
+
+  @override
+  String get locationDisclosureBackgroundAndroid =>
+      'یہ ایپ مقام کا ڈیٹا استعمال کرتی ہے تاکہ آپ کے حلقوں کے ساتھ شیئرنگ ممکن ہو سکے، خواہ ایپ بند ہو یا زیرِ استعمال نہ ہو۔';
+
+  @override
+  String get locationDisclosureBackgroundIos =>
+      'یہ ایپ مقام کا ڈیٹا استعمال کرتی ہے تاکہ Haven کے پس منظر میں ہوتے ہوئے اور آپ کے اسے استعمال نہ کرتے ہوئے بھی آپ کے حلقوں کے ساتھ شیئرنگ ممکن ہو سکے۔ اگر iOS نے Haven کو بند کر دیا تو آپ کی اپنی شیئرنگ اُس وقت تک رکی رہے گی جب تک آپ اسے دوبارہ نہ کھولیں: Haven پھر بھی آپ کے حلقوں کے مقامات لانے کے لیے جاگ سکتا ہے، مگر آپ کا اپنا مقام بھیجنے کے لیے کبھی نہیں۔';
+
+  @override
+  String get locationDisclosureManage =>
+      'آپ پس منظر میں شیئرنگ کسی بھی وقت ترتیبات ← مقام سے بند کر سکتے ہیں۔';
+
+  @override
+  String get locationDisclosureAgree => 'متفق ہوں';
+
+  @override
+  String get locationDisclosureNotNow => 'ابھی نہیں';
 
   @override
   String get fgsNotificationSharing =>
@@ -705,6 +752,15 @@ class AppLocalizationsUr extends AppLocalizations {
       'حلقہ بنانے میں ناکامی۔ براہِ کرم دوبارہ کوشش کریں۔';
 
   @override
+  String nameCircleRosterFullError(int limit) {
+    final intl.NumberFormat limitNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String limitString = limitNumberFormat.format(limit);
+
+    return 'آپ کے پاس بیک وقت زیادہ سے زیادہ $limitString حلقے ہو سکتے ہیں۔ نئے حلقے کی جگہ بنانے کے لیے کوئی حلقہ چھوڑ دیں۔';
+  }
+
+  @override
   String addMemberTitle(String circleName) {
     return '$circleName میں شامل کریں';
   }
@@ -999,6 +1055,15 @@ class AppLocalizationsUr extends AppLocalizations {
   @override
   String get invitationAcceptError =>
       'دعوت قبول کرنے میں ناکامی۔ براہِ کرم دوبارہ کوشش کریں۔';
+
+  @override
+  String invitationRosterFullError(int limit) {
+    final intl.NumberFormat limitNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String limitString = limitNumberFormat.format(limit);
+
+    return 'آپ کے پاس بیک وقت زیادہ سے زیادہ $limitString حلقے ہو سکتے ہیں۔ پہلے کوئی حلقہ چھوڑ دیں، پھر یہ دعوت قبول کریں۔';
+  }
 
   @override
   String get invitationDeclineError =>

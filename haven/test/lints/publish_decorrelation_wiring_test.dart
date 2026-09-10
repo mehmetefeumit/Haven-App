@@ -1,35 +1,66 @@
-// Static guards for the parts of the cross-circle `created_at` decorrelation
-// that cannot be executed under `flutter test`.
+// The cross-circle `created_at` decorrelation, on both publish planes.
 //
-// ## What is and is not pinned here
+// ## What one burst per tick does and does not promise
 //
-// The decorrelation PROPERTY — that two circles' `encryptLocation` calls land
-// more than a whole second apart — is proved by execution, not by grep:
+// A tick publishes EVERY eligible circle, so the device wakes its radio ~30
+// times an hour whatever its circle count. Per-circle schedules are gone: they
+// never stopped a shared relay from linking a device's circles (the multiplexed
+// `#h` subscription already names the circles one socket watches, and every
+// publish leaves over one publish socket), and circles on DISJOINT relay sets
+// now emit the same inter-burst rhythm — so anyone holding two of your circles'
+// archives can tell they belong to the same phone.
 //
-//   * foreground burst + chained scheduler ticks:
-//     `test/providers/location_publish_decorrelation_test.dart` asserts on the
-//     recorded wall-clock instants of the encrypt calls, with the production
-//     `PublishStagger`;
-//   * the background pacing rule and its seed:
+// What survives is the [PublishStagger] BETWEEN consecutive encrypts, and it
+// answers a different observer: the engine binds the outer kind-445
+// `created_at` to the inner app event's WHOLE-SECOND timestamp, so two circles
+// encrypted inside one second carry a byte-identical `created_at` inside the
+// SIGNED event — readable from an archive by someone who never saw the socket.
+// The first three tests here are that promise, executed: one tick reaches every
+// circle, consecutive encrypts land 2-9 s apart, and the burst's spread stays
+// inside the budget the freshness constants allow.
+//
+// ## What is pinned by grep, and why
+//
+// The rest of the decorrelation runs where `flutter test` cannot reach it:
+//
+//   * the foreground burst's own timing, with the production constants:
+//     `test/providers/location_publish_decorrelation_test.dart`;
+//   * the background pacing rule and its shared seed:
 //     `test/services/per_circle_due_tracker_test.dart` drives
-//     `seedStaggered` and `nextBackgroundPublishSlot` directly, including the
-//     slow-publish case;
-//   * the stagger's own bounds: `test/services/publish_stagger_test.dart`.
+//     `nextBackgroundPublishSlot` directly, including the slow-publish case;
+//   * the stagger's own bounds: `test/services/publish_stagger_test.dart`;
+//   * the background CYCLE that calls those pieces, over
+//     `test/mocks/background_task_fakes.dart`
+//     (`test/services/background_location_task_publish_cycle_test.dart` drives
+//     two due circles through a real stagger).
 //
-// The background publish CYCLE that calls those pieces runs on the host too,
-// over `test/mocks/background_task_fakes.dart`
-// (`test/services/background_location_task_publish_cycle_test.dart` drives
-// two due circles through a real stagger). A behavioural run proves the gap
-// held for the circles it scheduled; it cannot see a later rewrite that
-// bypasses the stagger for some other path.
-//
-// So this file pins WIRING as well: that the cycle still routes through the
+// A behavioural run proves the gap held for the circles it scheduled; it cannot
+// see a later rewrite that bypasses the stagger for some other path. So this
+// file also pins WIRING: that the background cycle still routes through the
 // decorrelating helpers instead of the shapes it used to have. It matches
 // identifiers, never prose, so a comment rewrite cannot satisfy or break it.
 
 import 'dart:io';
+import 'dart:math';
 
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/src/constants/location.dart';
+import 'package:haven/src/providers/circles_provider.dart';
+import 'package:haven/src/providers/location_publish_scheduler_provider.dart';
+import 'package:haven/src/providers/service_providers.dart';
+import 'package:haven/src/services/circle_service.dart';
+import 'package:haven/src/services/identity_service.dart';
+import 'package:haven/src/services/location_service.dart';
+import 'package:haven/src/services/location_sharing_service.dart';
+import 'package:haven/src/services/publish_stagger.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+import '../mocks/mock_circle_service.dart';
+import '../mocks/mock_relay_service.dart';
+
+const _selfPubkey =
+    'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 
 String _read(String relativePath) {
   final file = File(relativePath);
@@ -49,7 +80,205 @@ String _codeOnly(String source) => source
     .where((line) => !line.trimLeft().startsWith('//'))
     .join('\n');
 
+Circle _circle(int id) => TestCircleFactory.createCircle(
+  mlsGroupId: [id],
+  nostrGroupId: [id],
+  members: [TestCircleFactory.createMember(pubkey: _selfPubkey)],
+);
+
+String _hex(List<int> bytes) =>
+    bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+
+/// Gaps between consecutive `encryptLocation` entries, in milliseconds.
+List<int> _separationsMs(MockCircleService mock) => <int>[
+  for (var i = 1; i < mock.encryptCallTimes.length; i++)
+    mock.encryptCallTimes[i]
+        .difference(mock.encryptCallTimes[i - 1])
+        .inMilliseconds,
+];
+
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  ({ProviderContainer container, MockCircleService mock}) build(
+    List<Circle> circles,
+    PublishStagger stagger,
+  ) {
+    SharedPreferences.setMockInitialValues({
+      kLocationDisclosureAcceptedKey: true,
+    });
+    final mock = MockCircleService(circles: circles);
+    final container = ProviderContainer(
+      overrides: [
+        identityServiceProvider.overrideWithValue(_StubIdentityService()),
+        locationServiceProvider.overrideWithValue(_StubLocationService()),
+        circleServiceProvider.overrideWithValue(mock),
+        locationSharingServiceProvider.overrideWithValue(
+          LocationSharingService(
+            circleService: mock,
+            relayService: MockRelayService(),
+          ),
+        ),
+        locationPublishJitterSamplerProvider.overrideWithValue((_) => 120),
+        locationPublishStaggerProvider.overrideWithValue(stagger),
+      ],
+    );
+    addTearDown(container.dispose);
+    return (container: container, mock: mock);
+  }
+
+  /// Reads the notifier and lets its `circlesProvider` listen resolve, so the
+  /// roster is populated and the tick is armed.
+  Future<LocationPublishSchedulerNotifier> ready(
+    ProviderContainer container,
+  ) async {
+    final notifier = container.read(
+      locationPublishSchedulerProvider.notifier,
+    );
+    await container.read(circlesProvider.future);
+    await pumpEventQueue();
+    return notifier;
+  }
+
+  group('one jittered burst per interval', () {
+    test('every circle is published in one burst per tick', () async {
+      // Two halves of one promise, and the first is the battery half: on THIS
+      // plane five circles arm ONE wake, not five. Per-circle schedulers made
+      // the wake count the circle count, on every plane, for a decorrelation
+      // that a shared relay could see through anyway.
+      //
+      // "One wake" is this plane's timer count and not a claim about the
+      // device: the Android foreground service has no timer of its own — it
+      // publishes on platform location deliveries, and its cadence is proved
+      // separately in `background_fix_request_test.dart`.
+      final env = build(
+        [for (var i = 1; i <= 5; i++) _circle(i)],
+        PublishStagger.none(),
+      );
+      final notifier = await ready(env.container);
+
+      expect(
+        notifier.armedWakesForTest,
+        1,
+        reason: 'the wake count must not scale with the circle count',
+      );
+
+      await notifier.triggerTickForTest();
+
+      expect(
+        env.mock.encryptedMlsGroupIds.map(_hex).toSet(),
+        {for (var i = 1; i <= 5; i++) _hex([i])},
+        reason: 'one wake is only allowed to replace five if it reaches every '
+            'circle those five would have published',
+      );
+      expect(
+        env.mock.encryptedMlsGroupIds,
+        hasLength(5),
+        reason: 'exactly once each — a burst that published a circle twice '
+            'would spend the cadence it saved',
+      );
+    });
+
+    test(
+      'consecutive encrypts are ≥ 2 s and ≤ 9 s apart (gap sampled per pair)',
+      () async {
+        // The production bounds, on the real chain, under a seeded CSPRNG so
+        // the wall clock of this test is a fact rather than a draw. Four
+        // circles is three gaps: enough for "sampled per pair" to be visible.
+        final env = build(
+          [for (var i = 1; i <= 4; i++) _circle(i)],
+          PublishStagger(rng: Random(246)),
+        );
+        final notifier = await ready(env.container);
+
+        await notifier.triggerTickForTest();
+
+        expect(env.mock.encryptCallTimes, hasLength(4));
+        final separations = _separationsMs(env.mock);
+        for (final ms in separations) {
+          expect(
+            ms,
+            greaterThanOrEqualTo(kPublishStaggerMinGap.inMilliseconds),
+            reason: 'the kind-445 created_at is a whole-second u64, so a pair '
+                'closer than the floor can share one stamp — which is the '
+                'leak, not a hint of it',
+          );
+          expect(
+            ms,
+            // Measured around an encrypt, so the scheduled ceiling plus
+            // measurement slack; the ceiling itself is pinned by
+            // publish_stagger_test.
+            lessThanOrEqualTo(kPublishStaggerMaxGap.inMilliseconds + 1500),
+            reason: 'a burst that outruns the per-gap ceiling publishes the '
+                'last circle from a fix the app itself would call stale',
+          );
+        }
+        expect(
+          separations.map((ms) => ms ~/ 500).toSet(),
+          hasLength(3),
+          reason: 'one draw reused for the whole burst would put a CONSTANT '
+              'delta between every pair — a fingerprint of its own, and the '
+              'thing a per-pair sample exists to avoid',
+        );
+      },
+    );
+
+    test(
+      'a sampled burst never overruns its predicted spread, for every burst '
+      'size the app admits',
+      () {
+        final stagger = PublishStagger(rng: Random(17));
+        for (var n = 2; n <= kMaxCirclesPerBurst; n++) {
+          for (var trial = 0; trial < 200; trial++) {
+            final spread = stagger
+                .sampleGaps(n)
+                .fold(Duration.zero, (a, b) => a + b);
+            expect(
+              spread,
+              lessThanOrEqualTo(stagger.maxSpreadFor(n)),
+              reason: 'a burst of $n circles overran its own predicted spread, '
+                  'which is what every freshness and no-gap bound is computed '
+                  'from',
+            );
+            expect(
+              spread,
+              lessThanOrEqualTo(kPublishStaggerMaxSpread),
+              reason: 'and the whole point of the cap is that the predicted '
+                  'spread never leaves the budget: at $n circles it did',
+            );
+          }
+        }
+        // The cap must actually BIND, or it is decoration. With a per-gap
+        // ceiling near the `minGap + 1 s` floor the spread grows linearly and
+        // never reaches the budget, so this is the assertion that a 2-2.5 s
+        // stagger fails: it would leave the spread at 2.5 x (n-1), bounded by
+        // nothing here.
+        expect(
+          stagger.maxSpreadFor(kMaxCirclesPerBurst),
+          kPublishStaggerMaxSpread,
+          reason: 'the 30 s cap never engages, so nothing in this range is '
+              'actually bounded by it',
+        );
+        // The no-gap invariant itself — swept over the same range, and with
+        // the propagation margin the retention reserves left intact — is
+        // pinned in `publish_stagger_test.dart`. What matters here is that
+        // the range this file exercises is the range the app admits: one more
+        // circle than the cap is DEFERRED, never published into a wider
+        // spread.
+        expect(
+          kLocationPublishMaxInterval +
+              stagger.maxSpreadFor(kMaxCirclesPerBurst),
+          lessThanOrEqualTo(const Duration(seconds: 198)),
+          reason: 'a circle that moves from the front of one burst to the '
+              'back of the next waits the cadence ceiling PLUS the spread, '
+              'and a relay must still hold a non-expired event across it — '
+              'with the 30 s of the 228 s retention that is reserved for '
+              'propagation and clock skew still unspent',
+        );
+      },
+    );
+  });
+
   group('background publish cycle wiring', () {
     late String code;
 
@@ -57,24 +286,17 @@ void main() {
       code = _codeOnly(_read('lib/src/services/background_location_task.dart'));
     });
 
-    test('seeds per-circle schedules through the STAGGERED seed', () {
+    test('seeds every circle of a handoff at ONE instant', () {
       // `pruneToKeys({})` empties the tracker on every cycle the foreground
       // owns publishing, so this seed re-runs on every foreground→background
-      // handoff. Seeding the whole roster at one instant is what made every
-      // handoff publish all circles inside one second.
+      // handoff — which makes it the shape that decides whether a handoff
+      // hands the roster to one burst or to a wake apiece. This exact string
+      // used to be FORBIDDEN here; coalescing reverses that, and the pacing
+      // below is what still keeps the circles out of one second.
       expect(
         code,
-        contains('seedStaggered('),
-        reason: 'the background cycle no longer uses the staggered seed',
-      );
-    });
-
-    test('does not seed every circle at the cycle timestamp', () {
-      expect(
-        code,
-        isNot(contains('seedIfAbsent(key, timestamp)')),
-        reason: 'this is the exact pre-fix shape: one shared due-time for the '
-            'whole roster, re-applied on every handoff',
+        contains('seedIfAbsent(key, timestamp)'),
+        reason: 'a per-circle seed re-scatters the roster on every handoff',
       );
     });
 
@@ -83,8 +305,46 @@ void main() {
         code,
         contains('nextBackgroundPublishSlot('),
         reason: 'without this the cycle publishes its due circles back to '
-            'back; the 72 s poll routinely selects several at once, so the '
-            'per-circle tracker alone cannot space them',
+            'back; one burst makes every circle due at once, so the slot rule '
+            'is the only thing spacing them',
+      );
+    });
+
+    test('the burst budget is anchored at the first PUBLISH, not at the '
+        'cycle start', () {
+      // The fix is delivered `kBackgroundFixLeadTime` BEFORE the due it was
+      // taken for, so the cycle's first publish waits. A deadline measured
+      // from the cycle start therefore hands the burst only `30 s − lead` of
+      // its own spread budget, and rosters that fit are split across two
+      // cycles — one wake per interval becoming two, on the plane whose wake
+      // count is the entire claim. Measured at 2.2 circles per cycle at
+      // n = 4 before this anchor, 4.0 after.
+      //
+      // Pinned by wiring rather than behaviourally: reproducing the split
+      // needs a burst that genuinely spends most of `kPublishStaggerMaxSpread`
+      // in real waits, i.e. a ~30 s unit test. The arithmetic itself is swept
+      // in `background_fix_request_test.dart`, which reimplements the cycle's
+      // ordering and so cannot see this call site.
+      expect(
+        code,
+        contains('deadline: (firstPlannedSlot ?? planStart).add('),
+        reason: 'the planning pass must price the burst from its first slot',
+      );
+      expect(
+        code,
+        contains('deadline: (firstPublishStartedAt ?? publishPhaseStart).add('),
+        reason: 'and the publish loop from its first actual publish',
+      );
+      expect(
+        code,
+        isNot(contains('deadline: planStart.add(')),
+        reason: 'a cycle-start deadline spends the lead time out of the '
+            'decorrelation budget',
+      );
+      expect(
+        code,
+        isNot(contains('deadline: publishPhaseStart.add(')),
+        reason: 'same defect, in the loop that actually publishes',
       );
     });
 
@@ -155,10 +415,27 @@ void main() {
       // subtract the stagger and recover the co-timing it was added to hide.
       // `Random()` is seeded from a low-entropy source and is explicitly not
       // acceptable here.
-      final code = _codeOnly(_read('lib/src/services/publish_stagger.dart'));
+      bool drawsFromCsprng(String source) =>
+          _codeOnly(source).contains('rng ?? Random.secure()');
+
+      // Fixtures first, in both directions: a check that cannot fail is not
+      // evidence that the tree is healthy.
+      expect(drawsFromCsprng('_rng = rng ?? Random.secure(),'), isTrue);
       expect(
-        code,
-        contains('rng ?? Random.secure()'),
+        drawsFromCsprng('_rng = rng ?? Random(),'),
+        isFalse,
+        reason: 'the check would accept a low-entropy source',
+      );
+      expect(
+        drawsFromCsprng('/// _rng = rng ?? Random.secure()'),
+        isFalse,
+        reason: 'a doc comment naming the CSPRNG would satisfy the check '
+            'while the code drew from anything at all',
+      );
+
+      expect(
+        drawsFromCsprng(_read('lib/src/services/publish_stagger.dart')),
+        isTrue,
         reason: 'the default randomness source is no longer a CSPRNG',
       );
     });
@@ -190,4 +467,22 @@ void main() {
       );
     });
   });
+}
+
+/// The identity the burst publishes under. [Fake] on purpose: a burst reads
+/// exactly one thing from this service, and spelling out the rest would be a
+/// second place to keep the interface in sync.
+class _StubIdentityService extends Fake implements IdentityService {
+  @override
+  Future<Identity?> getIdentity() async => Identity(
+    pubkeyHex: _selfPubkey,
+    npub: 'npub1self',
+    createdAt: DateTime(2025),
+  );
+}
+
+class _StubLocationService extends Fake implements LocationService {
+  @override
+  Future<Position> getCurrentLocation() async =>
+      Position(latitude: 37, longitude: -122, timestamp: DateTime.now());
 }

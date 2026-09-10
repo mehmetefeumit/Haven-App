@@ -43,7 +43,10 @@ pub mod router;
 pub mod session;
 pub mod supervisor;
 
-pub use config::COMMIT_SETTLE_WINDOW_SECS;
+pub use config::{
+    burst_issues_inbox, BURST_BACKLOG_WAIT_SECS, BURST_SETTLE_CAP_SECS, COMMIT_SETTLE_WINDOW_SECS,
+    INBOX_BURSTS_PER_REQ,
+};
 pub use error::{LiveSyncError, LiveSyncResult};
 pub use event::{LiveSyncEvent, SyncStatusReason};
 pub use event_bus::{classify_recv, EventBus, RecvDisposition};
@@ -56,6 +59,7 @@ pub use planes::{
     build_relay_set_subscriptions, derive_dynamic_group_sub_id, derive_sub_id, CircleSpec,
     GroupSubscription, InboxSubscription, PlaneKind,
 };
-pub use processor::{group_cursor_stream, EngineProcessor, GroupProcessOutcome};
+pub use processor::{group_cursor_stream, BacklogOutcome, EngineProcessor, GroupProcessOutcome};
+pub use repair::{ClosedKind, RepairKey};
 pub use router::{Router, SubCtx};
 pub use session::{LiveSyncCore, StopOutcome};

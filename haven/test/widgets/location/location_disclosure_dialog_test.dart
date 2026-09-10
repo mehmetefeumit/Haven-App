@@ -7,8 +7,20 @@ library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/widgets/location/location_disclosure_dialog.dart';
+
+/// Every string the dialog renders, in tree order, excluding the host button.
+List<String> renderedDialogText(WidgetTester tester) => tester
+    .widgetList<Text>(
+      find.descendant(
+        of: find.byType(AlertDialog),
+        matching: find.byType(Text),
+      ),
+    )
+    .map((t) => t.data ?? '')
+    .toList();
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -29,6 +41,12 @@ void main() {
     required bool isIOS,
   }) {
     return MaterialApp(
+      // The copy lives in the ARB, so the delegates are not optional
+      // scaffolding here: without them `AppLocalizations.of` throws and the
+      // dialog renders nothing at all (`nullable-getter: false` in l10n.yaml).
+      locale: const Locale('en'),
+      localizationsDelegates: AppLocalizations.localizationsDelegates,
+      supportedLocales: AppLocalizations.supportedLocales,
       home: Scaffold(
         body: Builder(
           builder: (context) => ElevatedButton(
@@ -281,5 +299,115 @@ void main() {
         );
       },
     );
+  });
+
+  // The consent copy moved from `static const String` fields on
+  // `LocationDisclosureStrings` into the `locationDisclosure*` ARB group, so
+  // that the twelve non-English locales stop being asked to consent in a
+  // language they may not read. An extraction that dropped a paragraph,
+  // reordered two, wired a slot to the wrong key or quietly reworded a sentence
+  // would still render *a* dialog — so these pin what the user actually reads:
+  // the exact English text, in the exact order, in each of the three shapes the
+  // dialog has.
+  //
+  // Verbatim literals, deliberately, NOT the generated getters: comparing the
+  // render against `l10n.locationDisclosureWhy` only proves the widget read
+  // that key, and would keep agreeing with itself if the words behind it
+  // changed. This is a consent artefact; the words are the promise.
+  group('LocationDisclosureDialog (consent copy)', () {
+    const title = 'Sharing your location';
+    const why =
+        'Haven shows your live location to the people in the circles you '
+        'choose, and shows you theirs on the map. To do this, Haven needs '
+        'permission to use your device’s precise location.';
+    const how =
+        'Your location is end-to-end encrypted on your device, so only the '
+        'members of the circles you choose can read it, not Haven. Haven runs '
+        'no servers of its own: your encrypted updates pass through '
+        'independent relays run by other people, which see your network '
+        'address but never where you are. Drawing the map asks Stadia Maps for '
+        'the areas around you and your circle, so it learns roughly where that '
+        'is, but never your name, your key, or who is in your circles. Stadia '
+        'Maps says it does not sell or trade personal information, sets no '
+        'cookies on your device, and keeps server logs for about two weeks — '
+        'its own policy, which Haven cannot enforce.';
+    const sharing =
+        'While Haven is open and you are in a circle, your location is sent '
+        'automatically every couple of minutes. There is no pause. To stop '
+        'sharing with a circle, leave it.';
+    const backgroundAndroid =
+        'This app uses location data to enable sharing with your circles '
+        'even when the app is closed or not in use.';
+    const backgroundIos =
+        'This app uses location data to enable sharing with your circles even '
+        'when Haven is in the background and you are not using it. If iOS '
+        'closes Haven, sharing stops until you open it again — Haven may '
+        'still wake up to fetch your circles’ locations, but never to send '
+        'yours.';
+    const manage =
+        'You can turn background sharing off at any time in '
+        'Settings → Location.';
+    const agree = 'Agree';
+    const notNow = 'Not now';
+
+    Future<List<String>> pumpAndRead(
+      WidgetTester tester, {
+      required bool includeBackground,
+      required bool isIOS,
+    }) async {
+      final result = ValueNotifier<bool?>(null);
+      await tester.pumpWidget(
+        buildHost(
+          includeBackground: includeBackground,
+          result: result,
+          isIOS: isIOS,
+        ),
+      );
+      await tester.tap(find.text('Show dialog'));
+      await tester.pumpAndSettle();
+      return renderedDialogText(tester);
+    }
+
+    testWidgets('foreground scope renders the whole disclosure, in order',
+        (tester) async {
+      expect(
+        await pumpAndRead(tester, includeBackground: false, isIOS: false),
+        equals(<String>[title, why, how, sharing, notNow, agree]),
+      );
+    });
+
+    testWidgets('background scope on Android adds the Play sentence and the '
+        'off-switch line', (tester) async {
+      expect(
+        await pumpAndRead(tester, includeBackground: true, isIOS: false),
+        equals(<String>[
+          title,
+          why,
+          how,
+          sharing,
+          backgroundAndroid,
+          manage,
+          notNow,
+          agree,
+        ]),
+      );
+    });
+
+    testWidgets('background scope on iOS states the limit instead',
+        (tester) async {
+      expect(
+        await pumpAndRead(tester, includeBackground: true, isIOS: true),
+        equals(<String>[
+          title,
+          why,
+          how,
+          sharing,
+          backgroundIos,
+          manage,
+          notNow,
+          agree,
+        ]),
+      );
+    });
   });
 }

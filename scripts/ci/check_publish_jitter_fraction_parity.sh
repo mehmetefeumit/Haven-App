@@ -36,9 +36,13 @@
 #   2. THE MAXIMUM. Symmetric on the ceiling. A widened Rust spread with an
 #      unchanged Dart maximum makes the Dart-documented worst-case
 #      inter-publish gap SMALLER than what the engine can actually produce —
-#      the no-gap invariant Dart's own file header derives
-#      (`LOCATION_MESSAGE_RETENTION_SECS = 228s > δ_max (168s) + 60s buffer`)
-#      would be checked against a δ_max that is no longer real.
+#      the no-gap invariant Dart's own file header derives would be checked
+#      against a δ_max that is no longer real. That invariant is an EQUALITY
+#      with nothing spare: `LOCATION_MESSAGE_RETENTION_SECS (228 s) = δ_max
+#      (168 s) + 60 s`, and the 60 s is not a buffer above the bound — it is the
+#      whole budget a cycle has for its own fix, encrypt, ack and re-register
+#      latency (`kBackgroundFixLeadTime` is spent out of it). So a widened δ_max
+#      does not eat slack, it eats that budget second for second.
 #
 # Rounding matches Dart's own `(nominal * factor).round()` (round-half-up for
 # the non-half values either side of this constant produces), not truncation.

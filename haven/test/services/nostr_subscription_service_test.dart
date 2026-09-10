@@ -1,6 +1,6 @@
 import 'dart:async';
-import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/nostr_subscription_service.dart';
@@ -8,7 +8,7 @@ import 'package:haven/src/services/subscription_service.dart';
 
 import '../mocks/mock_circle_service.dart';
 
-/// A fake [LiveSyncFfi] engine. Only the 7 methods the service drives are
+/// A fake [LiveSyncFfi] engine. Only the methods the service drives are
 /// overridden; everything else (the `RustOpaqueInterface` internals) routes to
 /// [noSuchMethod] and is never called by the service.
 class _FakeEngine implements LiveSyncFfi {
@@ -17,6 +17,11 @@ class _FakeEngine implements LiveSyncFfi {
     this.failSubscribe = false,
     this.failUnsubscribe = false,
     this.failLiveEvents = false,
+    this.failBurstOpen = false,
+    this.failBacklogWait = false,
+    this.failSettle = false,
+    this.failPause = false,
+    this.failPoolCount = false,
   });
 
   /// When true, [liveEvents] throws — the one failure that lands AFTER the
@@ -41,6 +46,38 @@ class _FakeEngine implements LiveSyncFfi {
   /// [failStart].
   final bool failUnsubscribe;
 
+  /// When true, [openBackgroundBurst] throws — with a hex-like detail, to
+  /// prove the service never leaks it (Security Rule 8).
+  final bool failBurstOpen;
+
+  /// When true, [waitBacklogSettled] throws.
+  final bool failBacklogWait;
+
+  /// When true, [settleBeforePause] throws. Its whole job is to run to
+  /// completion immediately before the pause on the same `finally` path, so a
+  /// throw that escaped would skip the pause and leave the burst's sockets
+  /// open until some later burst closed them.
+  final bool failSettle;
+
+  /// When true, [pauseSubscriptions] throws. The pause is the caller's
+  /// `finally` link, so this models the one failure that must NOT become an
+  /// exception the caller sees instead of the one that aborted its burst.
+  final bool failPause;
+
+  /// When true, [poolSubscriptionCount] throws (with a hex-like detail, to
+  /// prove the service never leaks it — Security Rule 8).
+  final bool failPoolCount;
+
+  /// What [waitBacklogSettled] answers when it does not throw.
+  BacklogOutcomeFfi backlogOutcome = BacklogOutcomeFfi.settled;
+
+  /// What [poolSubscriptionCount] answers, held INDEPENDENTLY of [_paused] on
+  /// purpose: the real core raises its paused flag as the first statement of
+  /// the pause and drops the REQs afterwards, so the two really can disagree,
+  /// and a fake that derived one from the other could not express the state an
+  /// `isPaused` oracle misreports.
+  int poolSubscriptions = 0;
+
   /// How many LEADING [stopSession] calls throw, modelling the real FFI's
   /// `StopOutcome::TimedOut` → `Err` (with the wedged core reinstalled into the
   /// process-global `SESSION`, which is what makes a retry meaningful).
@@ -54,6 +91,11 @@ class _FakeEngine implements LiveSyncFfi {
   int resumeCalls = 0;
   int subscribeCalls = 0;
   int unsubscribeCalls = 0;
+  int burstOpenCalls = 0;
+  int backlogWaitCalls = 0;
+  int settleCalls = 0;
+  int pauseCalls = 0;
+  int poolCountCalls = 0;
 
   /// Set by [dispose]. The engine handle owns an `Arc<CircleManager>` clone, so
   /// until it is released the MLS DB's Rule-14 single-session slot stays held
@@ -63,6 +105,7 @@ class _FakeEngine implements LiveSyncFfi {
   bool disposed = false;
 
   bool _running = false;
+  bool _paused = false;
 
   @override
   Future<void> startSession({
@@ -107,9 +150,68 @@ class _FakeEngine implements LiveSyncFfi {
     }
   }
 
+  // Both entry points route through the core's `resume_burst`, whose FIRST act
+  // — before it adds a relay, connects, or issues a REQ — is to clear the
+  // paused flag. So the flag is cleared here too, and for BOTH, and BEFORE the
+  // failure: an open that fails part way really does leave an un-paused
+  // session behind. A fake that cleared it only on the burst path, and only on
+  // success, would teach the burst's future caller the wrong model of what it
+  // is holding when its `finally` runs.
   @override
   Future<void> resumeAfterBackground() async {
     resumeCalls++;
+    _paused = false;
+  }
+
+  @override
+  Future<void> openBackgroundBurst() async {
+    burstOpenCalls++;
+    _paused = false;
+    if (failBurstOpen) {
+      throw Exception('boom for mls group deadbeefcafef00ddeadbeefcafef00d');
+    }
+  }
+
+  @override
+  Future<BacklogOutcomeFfi> waitBacklogSettled() async {
+    backlogWaitCalls++;
+    if (failBacklogWait) {
+      throw Exception('boom for mls group deadbeefcafef00ddeadbeefcafef00d');
+    }
+    return backlogOutcome;
+  }
+
+  @override
+  Future<void> settleBeforePause() async {
+    settleCalls++;
+    if (failSettle) {
+      throw Exception('boom for mls group deadbeefcafef00ddeadbeefcafef00d');
+    }
+  }
+
+  // The core raises its paused flag as the FIRST statement of the pause, so it
+  // is raised here before the failure too: a pause that broke half way through
+  // still reports as paused, which is precisely why `isPaused` cannot be read
+  // as "the radio is off".
+  @override
+  Future<void> pauseSubscriptions() async {
+    pauseCalls++;
+    _paused = true;
+    if (failPause) {
+      throw Exception('boom for mls group deadbeefcafef00ddeadbeefcafef00d');
+    }
+  }
+
+  @override
+  bool isPaused() => _paused;
+
+  @override
+  Future<int> poolSubscriptionCount() async {
+    poolCountCalls++;
+    if (failPoolCount) {
+      throw Exception('boom for mls group deadbeefcafef00ddeadbeefcafef00d');
+    }
+    return poolSubscriptions;
   }
 
   @override
@@ -851,4 +953,345 @@ void main() {
       expect(seen, [LiveSyncStopOutcome.stillHolding]);
     });
   });
+
+  group('the background-burst API', () {
+    Future<(NostrSubscriptionService, _FakeEngine)> started([
+      _FakeEngine? engine,
+    ]) async {
+      final e = engine ?? _FakeEngine();
+      final service = NostrSubscriptionService(
+        router: _SpyRouter(),
+        engineFactory: () async => e,
+      );
+      await service.start(groups: const [], inboxRelays: const []);
+      addTearDown(service.stop);
+      return (service, e);
+    }
+
+    test('a burst opens through the BURST entry point, not the foreground one',
+        () async {
+      // The two Rust entry points exist because only the burst may consume a
+      // position in the inbox fold. Routing a burst through
+      // `resumeAfterBackground` compiles, runs, and silently leaves the fold
+      // never applied — so the distinction is only real if it is pinned here.
+      final (service, engine) = await started();
+
+      await service.openBackgroundBurst();
+
+      expect(engine.burstOpenCalls, 1);
+      expect(
+        engine.resumeCalls,
+        0,
+        reason: 'the burst must never take the foreground re-anchor',
+      );
+    });
+
+    test('the foreground re-anchor never advances the burst counter',
+        () async {
+      // The other half of the same promise: an app resume and the health
+      // tick's whole-session repair must not consume a fold position, or an
+      // active user could go a whole fold period without an inbox REQ.
+      final (service, engine) = await started();
+
+      await service.resumeAfterBackground();
+
+      expect(engine.resumeCalls, 1);
+      expect(engine.burstOpenCalls, 0);
+    });
+
+    test('a failed burst open throws, and carries none of the FFI detail',
+        () async {
+      // Unlike the foreground re-anchor (retried by the health tick and the
+      // next resume), a burst open has no redundancy: a caller that swallowed
+      // it would then wait out the whole backlog budget on a burst that never
+      // subscribed.
+      final (service, engine) = await started(
+        _FakeEngine(failBurstOpen: true),
+      );
+
+      await expectLater(
+        service.openBackgroundBurst,
+        throwsA(
+          isA<SubscriptionServiceException>().having(
+            (e) => e.message,
+            'message',
+            isNot(contains('deadbeef')),
+          ),
+        ),
+      );
+      expect(engine.burstOpenCalls, 1);
+    });
+
+    test('opening a burst with no session throws rather than reporting one',
+        () async {
+      final service = NostrSubscriptionService(
+        router: _SpyRouter(),
+        engineFactory: () async => _FakeEngine(),
+      );
+
+      await expectLater(
+        service.openBackgroundBurst,
+        throwsA(isA<SubscriptionServiceException>()),
+      );
+    });
+
+    test('the backlog outcome is reported as the engine gave it', () async {
+      final (service, engine) = await started();
+
+      expect(await service.waitBacklogSettled(), BacklogOutcomeFfi.settled);
+
+      engine.backlogOutcome = BacklogOutcomeFfi.timedOut;
+      expect(await service.waitBacklogSettled(), BacklogOutcomeFfi.timedOut);
+      expect(engine.backlogWaitCalls, 2);
+    });
+
+    test('a failed or session-less backlog wait answers timedOut', () async {
+      // `settled` is a claim that every endpoint replayed. Answering it when
+      // nothing was even asked would have the caller encrypt at an epoch a
+      // peer commit may already have moved — `timedOut` promises nothing,
+      // which is the only honest answer here.
+      final (failing, _) = await started(_FakeEngine(failBacklogWait: true));
+      expect(await failing.waitBacklogSettled(), BacklogOutcomeFfi.timedOut);
+
+      final sessionless = NostrSubscriptionService(
+        router: _SpyRouter(),
+        engineFactory: () async => _FakeEngine(),
+      );
+      expect(
+        await sessionless.waitBacklogSettled(),
+        BacklogOutcomeFfi.timedOut,
+      );
+    });
+
+    test('settle and pause reach the engine', () async {
+      final (service, engine) = await started();
+
+      await service.settleBeforePause();
+      await service.pauseSubscriptions();
+
+      expect(engine.settleCalls, 1);
+      expect(engine.pauseCalls, 1);
+    });
+
+    test('a failing settle never throws — the pause behind it must still run',
+        () async {
+      // These are consecutive links on ONE `finally` path. A throw escaping
+      // the settle would skip the pause, so the burst's standing REQs and its
+      // sockets would stay open for the whole gap to the next burst — the
+      // always-on background socket, restored by an error path.
+      final logs = <String>[];
+      final original = debugPrint;
+      debugPrint = (message, {wrapWidth}) {
+        if (message != null) logs.add(message);
+      };
+      addTearDown(() => debugPrint = original);
+
+      final (service, engine) = await started(_FakeEngine(failSettle: true));
+
+      await expectLater(service.settleBeforePause(), completes);
+
+      expect(
+        engine.settleCalls,
+        1,
+        reason: 'anti-vacuity: it was called, and it threw',
+      );
+      final joined = logs.join('\n');
+      expect(joined, contains('settle failed'));
+      expect(
+        joined,
+        isNot(contains('deadbeef')),
+        reason: 'the FFI detail is remote text (Security Rule 8)',
+      );
+    });
+
+    test("a failing pause never throws — it is the caller's finally link",
+        () async {
+      // A throw here would REPLACE whatever failure aborted the burst with a
+      // less informative one, and the caller would lose the error it was
+      // handling.
+      final (service, engine) = await started(_FakeEngine(failPause: true));
+
+      await expectLater(service.pauseSubscriptions(), completes);
+      expect(engine.pauseCalls, 1);
+    });
+
+    test('settle and pause with no session are no-ops', () async {
+      final service = NostrSubscriptionService(
+        router: _SpyRouter(),
+        engineFactory: () async => _FakeEngine(),
+      );
+
+      await expectLater(service.settleBeforePause(), completes);
+      await expectLater(service.pauseSubscriptions(), completes);
+    });
+
+    test('isPaused tracks the engine and is orthogonal to isRunning',
+        () async {
+      final (service, _) = await started();
+      expect(service.isPaused, isFalse);
+
+      await service.pauseSubscriptions();
+      expect(service.isPaused, isTrue);
+      expect(
+        service.isRunning,
+        isTrue,
+        reason: 'a paused session is alive — it simply holds no REQ; a caller '
+            'that read isRunning as "not paused" would re-anchor it and '
+            'silently re-open standing REQs in the background',
+      );
+
+      await service.openBackgroundBurst();
+      expect(service.isPaused, isFalse);
+    });
+
+    test('the FOREGROUND re-anchor un-pauses the session too', () async {
+      // Both entry points reach the core's one `resume_burst`, and clearing
+      // the paused flag is its first act. A caller that treated
+      // `resumeAfterBackground` as pause-preserving — an app resume arriving
+      // mid-pause, say — would go on believing the engine holds no socket
+      // while it holds all of them.
+      final (service, _) = await started();
+
+      await service.pauseSubscriptions();
+      expect(service.isPaused, isTrue);
+
+      await service.resumeAfterBackground();
+      expect(service.isPaused, isFalse);
+    });
+
+    test('a failed burst open leaves the session UN-paused', () async {
+      // The flag is cleared before the open touches a socket, so a failure
+      // part way through does not restore it. This is why the caller's
+      // `finally` must pause even when the open threw: there is no "left as it
+      // was" state to fall back on.
+      final (service, _) = await started();
+
+      await service.pauseSubscriptions();
+      expect(service.isPaused, isTrue);
+
+      final failing = NostrSubscriptionService(
+        router: _SpyRouter(),
+        engineFactory: () async => _FakeEngine(failBurstOpen: true),
+      );
+      await failing.start(groups: const [], inboxRelays: const []);
+      addTearDown(failing.stop);
+      await failing.pauseSubscriptions();
+      expect(failing.isPaused, isTrue);
+
+      await expectLater(
+        failing.openBackgroundBurst,
+        throwsA(isA<SubscriptionServiceException>()),
+      );
+      expect(failing.isPaused, isFalse);
+    });
+
+    test('the pool count reports the REQs, where isPaused reports the intent',
+        () async {
+      // The two observables the background-burst promise can be read from, and
+      // the whole reason the count exists: the core raises `paused` as the
+      // FIRST statement of its pause and drops the REQs after it, so there is
+      // a real state — pause entered, subscriptions still registered — in which
+      // an `isPaused` oracle answers "nothing is standing" while something is.
+      final (service, engine) = await started();
+      engine.poolSubscriptions = 3;
+
+      expect(service.isPaused, isFalse);
+      expect(await service.poolSubscriptionCount(), 3);
+
+      await service.pauseSubscriptions();
+
+      expect(service.isPaused, isTrue, reason: 'the intent flag is up');
+      expect(
+        await service.poolSubscriptionCount(),
+        3,
+        reason: 'and the REQs are still registered — an oracle built on the '
+            'flag would already be reporting the promise kept',
+      );
+
+      engine.poolSubscriptions = 0;
+      expect(await service.poolSubscriptionCount(), isZero);
+    });
+
+    test('a count with no session THROWS rather than answering zero', () async {
+      // Zero is the PASSING value of "no standing REQ between bursts", so a
+      // session-less read that answered it would let an engine that never
+      // started prove the promise.
+      final service = NostrSubscriptionService(
+        router: _SpyRouter(),
+        engineFactory: () async => _FakeEngine(),
+      );
+
+      await expectLater(
+        service.poolSubscriptionCount,
+        throwsA(isA<SubscriptionServiceException>()),
+      );
+    });
+
+    test('a failed count read throws and carries none of the FFI detail',
+        () async {
+      final (service, engine) = await started(_FakeEngine(failPoolCount: true));
+
+      await expectLater(
+        service.poolSubscriptionCount,
+        throwsA(
+          isA<SubscriptionServiceException>().having(
+            (e) => e.message,
+            'message',
+            isNot(contains('deadbeef')),
+          ),
+        ),
+      );
+      expect(engine.poolCountCalls, 1);
+    });
+
+    test('isPaused reads false with no engine, and logs a failed FFI read',
+        () async {
+      final logs = <String>[];
+      final original = debugPrint;
+      debugPrint = (message, {wrapWidth}) {
+        if (message != null) logs.add(message);
+      };
+      addTearDown(() => debugPrint = original);
+
+      final service = NostrSubscriptionService(
+        router: _SpyRouter(),
+        engineFactory: () async => _FakeEngine(),
+      );
+      expect(service.isPaused, isFalse, reason: 'no engine yet');
+      expect(logs, isEmpty, reason: 'no engine is not a failure');
+
+      final live = NostrSubscriptionService(
+        router: _SpyRouter(),
+        engineFactory: () async => _ThrowingPausedEngine(),
+      );
+      await live.start(groups: const [], inboxRelays: const []);
+      addTearDown(live.stop);
+
+      expect(
+        live.isPaused,
+        isFalse,
+        reason: 'fail safe: a caller that reads "not paused" re-anchors, '
+            'which is the recoverable direction',
+      );
+      // `false` is also what a genuinely un-paused engine answers, so a read
+      // that failed has to be visible somewhere or it is silent.
+      final joined = logs.join('\n');
+      expect(joined, contains('isPaused read failed'));
+      expect(
+        joined,
+        isNot(contains('deadbeef')),
+        reason: 'the thrown message embeds a fake group id; only the type may '
+            'ever be logged (Security Rule 8)',
+      );
+    });
+  });
+}
+
+/// A [_FakeEngine] whose [isPaused] read itself throws — the FFI boundary
+/// failing rather than the session answering. The message embeds a fake group
+/// id, which the test above captures the logs to prove is never printed.
+class _ThrowingPausedEngine extends _FakeEngine {
+  @override
+  bool isPaused() =>
+      throw Exception('boom for mls group deadbeefcafef00ddeadbeefcafef00d');
 }

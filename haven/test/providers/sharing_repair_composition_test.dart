@@ -133,6 +133,13 @@ void main() {
     // appears twice. The promise is about relative order, and stating it that
     // way keeps the test about the promise instead of about Riverpod's
     // scheduling.
+    //
+    // Each leg is asserted to have RUN before its index is compared.
+    // `lastIndexOf` answers −1 for a leg that never ran, and every real index
+    // beats −1 — so an ordering check on its own passes most loudly when the
+    // legs it is ordering have silently stopped happening.
+    expect(_log, contains('resume'));
+    expect(_log, contains('publish'));
     expect(_log.where((e) => e == 'epoch'), hasLength(1));
     expect(_log.indexOf('epoch'), greaterThan(_log.lastIndexOf('resume')));
     expect(_log.indexOf('epoch'), greaterThan(_log.lastIndexOf('publish')));
@@ -207,6 +214,11 @@ void main() {
 
     await container.read(sharingRepairProvider)();
 
+    // Same trap as the ordering assertion at the top of this file, mirrored:
+    // an epoch leg that never ran indexes at −1, which is less than every real
+    // index, so the ordering would hold most comfortably when the leg being
+    // ordered had disappeared.
+    expect(_log, contains('epoch'));
     expect(_log.indexOf('epoch'), lessThan(_log.indexOf('refresh')));
   });
 }

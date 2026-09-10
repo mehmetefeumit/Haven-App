@@ -206,6 +206,12 @@ class AppLocalizationsEn extends AppLocalizations {
   String get settingsLocationTitle => 'Location';
 
   @override
+  String get settingsLocationSubtitleOn => 'Background sharing on';
+
+  @override
+  String get settingsLocationSubtitleOff => 'Only while Haven is open';
+
+  @override
   String get settingsMapStyleTitle => 'Map style';
 
   @override
@@ -373,7 +379,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get locationSettingsIntro =>
-      'Haven shares your location with your circles whenever the app is open. Turn this on and your circles keep seeing it while Haven is in the background. If the system closes Haven, sharing stops — background wake-ups only fetch your circles\' locations, they never send yours. On Android, sharing survives swiping Haven away and starts again by itself after a reboot; on iPhone it stays stopped until you open Haven.';
+      'Haven shares your location with your circles whenever the app is open. Turn this on and your circles keep seeing it while Haven is in the background. If the system closes Haven, your own sharing stops: Haven may still wake up to fetch your circles\' locations, but never to send yours. On Android, sharing survives swiping Haven away and starts again by itself after a reboot. On iPhone, sharing stays stopped until you open Haven.';
 
   @override
   String get locationSettingsToggleTitle => 'Share in background';
@@ -384,7 +390,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get locationSettingsIosLimitedNote =>
-      'Sharing keeps working in the background with your current permission. Choose \'Always\' for Haven in Settings so Haven can also catch up on your circles\' locations after iOS closes the app. Your own sharing resumes when you reopen Haven.';
+      'Sharing keeps working in the background with your current permission, and iOS shows its blue location bar at the top of the screen while it does. Choose \'Always\' for Haven in Settings so Haven can also catch up on your circles\' locations after iOS closes the app. Under \'Always\', iOS may show its location arrow in the status bar instead of the bar. Your own sharing resumes when you reopen Haven.';
 
   @override
   String get locationSettingsAndroidHeader => 'OS settings for reliability';
@@ -403,7 +409,48 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get locationSettingsIosGuidance =>
-      'While background sharing is on, Haven keeps a continuous location session and iOS shows a blue status-bar indicator. Granting \"Always\" additionally lets Haven catch up on your circles after iOS closes the app.';
+      'While background sharing is on, Haven keeps a location session running so your circles keep seeing you.';
+
+  @override
+  String get locationSettingsIosIndicatorArrow =>
+      'iOS shows its location arrow in the status bar while Haven uses your location, and keeps that same arrow next to Haven in Location Services for a while afterwards.';
+
+  @override
+  String get locationSettingsIosIndicatorBar =>
+      'With your \'Always\' permission, iOS shows its blue location bar at the top of the screen while Haven uses your location.';
+
+  @override
+  String get locationDisclosureTitle => 'Sharing your location';
+
+  @override
+  String get locationDisclosureWhy =>
+      'Haven shows your live location to the people in the circles you choose, and shows you theirs on the map. To do this, Haven needs permission to use your device’s precise location.';
+
+  @override
+  String get locationDisclosureHow =>
+      'Your location is end-to-end encrypted on your device, so only the members of the circles you choose can read it, not Haven. Haven runs no servers of its own: your encrypted updates pass through independent relays run by other people, which see your network address but never where you are. Drawing the map asks Stadia Maps for the areas around you and your circle, so it learns roughly where that is, but never your name, your key, or who is in your circles. Stadia Maps says it does not sell or trade personal information, sets no cookies on your device, and keeps server logs for about two weeks — its own policy, which Haven cannot enforce.';
+
+  @override
+  String get locationDisclosureSharing =>
+      'While Haven is open and you are in a circle, your location is sent automatically every couple of minutes. There is no pause. To stop sharing with a circle, leave it.';
+
+  @override
+  String get locationDisclosureBackgroundAndroid =>
+      'This app uses location data to enable sharing with your circles even when the app is closed or not in use.';
+
+  @override
+  String get locationDisclosureBackgroundIos =>
+      'This app uses location data to enable sharing with your circles even when Haven is in the background and you are not using it. If iOS closes Haven, sharing stops until you open it again — Haven may still wake up to fetch your circles’ locations, but never to send yours.';
+
+  @override
+  String get locationDisclosureManage =>
+      'You can turn background sharing off at any time in Settings → Location.';
+
+  @override
+  String get locationDisclosureAgree => 'Agree';
+
+  @override
+  String get locationDisclosureNotNow => 'Not now';
 
   @override
   String get fgsNotificationSharing =>
@@ -704,6 +751,15 @@ class AppLocalizationsEn extends AppLocalizations {
       'Failed to create circle. Please try again.';
 
   @override
+  String nameCircleRosterFullError(int limit) {
+    final intl.NumberFormat limitNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String limitString = limitNumberFormat.format(limit);
+
+    return 'You can be in up to $limitString circles at a time. Leave a circle to make room for a new one.';
+  }
+
+  @override
   String addMemberTitle(String circleName) {
     return 'Add to $circleName';
   }
@@ -996,6 +1052,15 @@ class AppLocalizationsEn extends AppLocalizations {
   @override
   String get invitationAcceptError =>
       'Failed to accept invitation. Please try again.';
+
+  @override
+  String invitationRosterFullError(int limit) {
+    final intl.NumberFormat limitNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String limitString = limitNumberFormat.format(limit);
+
+    return 'You can be in up to $limitString circles at a time. Leave a circle, then accept this invitation.';
+  }
 
   @override
   String get invitationDeclineError =>

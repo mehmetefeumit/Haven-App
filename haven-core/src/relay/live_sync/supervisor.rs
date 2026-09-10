@@ -43,7 +43,7 @@ use std::sync::Arc;
 use nostr::{Event, Kind, PublicKey, RelayMessage, RelayUrl, SubscriptionId};
 use nostr_sdk::RelayPoolNotification;
 use tokio::sync::broadcast::error::RecvError;
-use tokio::sync::{broadcast, mpsc, watch, RwLock};
+use tokio::sync::{broadcast, mpsc, oneshot, watch, RwLock};
 
 use super::config::WORKER_QUEUE_CAP;
 use super::event::SyncStatusReason;
@@ -91,7 +91,15 @@ pub struct RawEvent {
 /// variant rather than by a whole `nostr::Event`: the queue is bounded at
 /// [`super::config`]'s worker cap and a `try_send` that finds it full DROPS the
 /// signal, so keeping the per-slot cost low is what keeps that cap meaningful.
-#[derive(Debug, Clone)]
+///
+/// # Why this enum is not `Clone`
+///
+/// [`Self::Pause`] carries a one-shot ack the worker consumes exactly once.
+/// Cloning a signal would either duplicate a marker (two clears, one ack) or
+/// require an ack that can be dropped silently — and a pause whose ack is lost
+/// blocks the lifecycle lock until its bound elapses. Nothing in the receive
+/// path clones a signal, so the capability is simply not offered.
+#[derive(Debug)]
 pub enum RawSignal {
     /// A first-seen event on a live subscription.
     Event(Box<RawEvent>),
@@ -116,6 +124,37 @@ pub enum RawSignal {
         subscription_id: SubscriptionId,
         /// Whether the pool deleted the subscription or merely marked it closed.
         kind: ClosedKind,
+    },
+    /// The session is pausing: drain everything already queued, THEN clear the
+    /// router and burn the open generations' advances, and ack.
+    ///
+    /// # Why it rides the intake queue instead of being done by the caller
+    ///
+    /// The worker resolves the router at PROCESSING time, so a caller that
+    /// cleared the router directly would drop every stored event still sitting
+    /// in the intake queue — the undrained backlog of a burst whose relay was
+    /// still replaying — burn the generation, and re-download the same window on
+    /// the next burst. That is the silent loss of legitimate offline backlog
+    /// Security Rule 12 forbids.
+    ///
+    /// Behind the marker, FIFO does the work: everything queued AHEAD of it —
+    /// including an inline auto-commit and its OK wait — is processed first, so
+    /// an acked marker means "every downloaded event has been applied, and no
+    /// further ingest can start".
+    Pause {
+        /// The [`Router::registrations`] count the pause read while it held the
+        /// lifecycle lock — the ONLY router state this marker may clear.
+        ///
+        /// The pause's wait for the ack is bounded, so a worker still draining
+        /// when it expires leaves this marker queued while the pause clears the
+        /// router itself and returns. A later burst then opens and registers its
+        /// own REQs, and an unconditional clear here would wipe THOSE — a total
+        /// receive outage for that burst, with every endpoint reading as
+        /// subscribed. See [`Router::clear_if_unchanged`].
+        registrations: u64,
+        /// Fired once the marker has been resolved (cleared, or recognised as
+        /// stale) and any suppression applied.
+        ack: oneshot::Sender<()>,
     },
 }
 
@@ -242,8 +281,8 @@ pub fn intake_queue() -> (mpsc::Sender<RawSignal>, mpsc::Receiver<RawSignal>) {
 /// load-bearing rather than belt-and-braces: the inbox REQ filters on kind and
 /// `#p` alone, so a fully conformant relay will deliver a `kind:1059` carrying
 /// whatever `#h` its author chose. A dropped gift wrap needs no hold-back of its
-/// own — the inbox stream's 7-day lookback re-requests it (see
-/// [`super::anchor::InboxAnchor`]).
+/// own — the inbox stream's multi-day lookback re-requests it (49 h on a
+/// re-anchor, 7 d on a cold start; see [`super::anchor::InboxAnchor`]).
 ///
 /// [`CursorAnchors::note_unapplied`]: super::anchor::CursorAnchors::note_unapplied
 fn note_intake_drop(processor: &EngineProcessor, event: &Event) {
@@ -534,9 +573,36 @@ pub(crate) fn note_subscription_closed(
 /// in the worker, after it has already drained every stored event the relay sent
 /// ahead of it on the same channel, so the advance can never claim an event this
 /// worker has not ingested.
-fn anchor_end_of_stored_events(processor: &EngineProcessor, ctx: &SubCtx) {
+///
+/// # Why the GROUP plane waits for every relay and the INBOX plane does not
+///
+/// A group bucket REQ is issued to several relays and its circles hold ONE
+/// generation each, so the first relay's `EOSE` would advance the cursor over a
+/// window a slower co-bucketed relay had not served — and the next REQ's floor
+/// is only [`crate::relay::cursor::GROUP_RESUBSCRIBE_BUFFER_SECS`] (60 s) below
+/// that cursor, so an event older than a minute is then never asked for again.
+/// The advance therefore waits for every relay that accepted the REQ
+/// ([`EngineProcessor::note_eose_endpoint`]).
+///
+/// The inbox is deliberately left on the first `EOSE`. Its recovery window is
+/// the lookback, not the buffer: every re-subscribe asks for
+/// `cursor − INBOX_RESUBSCRIBE_LOOKBACK_SECS` (49 h), so a wrap a slow inbox
+/// relay had not yet replayed is re-requested by the next REQ for two days —
+/// there is no permanent skip to close. Waiting instead would pin the inbox
+/// cursor on one silent relay and make every REQ replay that 49-hour window,
+/// which is the cost P1 bounded it to avoid.
+fn anchor_end_of_stored_events(processor: &EngineProcessor, ctx: &SubCtx, key: &RepairKey) {
     match ctx.plane {
         PlaneKind::Group => {
+            if !processor.note_eose_endpoint(key) {
+                // Presence-only: some relay that accepted this REQ has not
+                // finished replaying, so no circle on it may advance yet.
+                log::debug!(
+                    "[live_sync::worker] EOSE recorded; the REQ's other relays have not \
+                     answered, so no cursor advances"
+                );
+                return;
+            }
             for group_hex in &ctx.group_ids_hex {
                 if processor.note_end_of_stored_events(group_hex) {
                     log::debug!(
@@ -558,6 +624,42 @@ fn anchor_end_of_stored_events(processor: &EngineProcessor, ctx: &SubCtx) {
             }
         }
     }
+}
+
+/// Resolves one pause drain marker: clears the router it was authorised for,
+/// burns those generations' advances, and acks.
+///
+/// Only the registration state the pause OBSERVED may be cleared. A pause whose
+/// ack timed out has already cleared the router itself and released the
+/// lifecycle lock, so this marker can reach the worker after a LATER burst
+/// registered its own REQs — and clearing those would leave that burst routing
+/// nothing at all while every endpoint still read as subscribed.
+///
+/// `note_delivery_gap`, NEVER `forget_*`: a `forget` DROPS the generation's
+/// un-applied hold-back, so a future-epoch event this burst buffered would stop
+/// bounding the next burst's advance and the cursor would move straight over it.
+/// Suppressing burns the advance and KEEPS the hold-back for the generation the
+/// next burst opens. A STALE marker suppresses nothing: the pause that sent it
+/// already burned the generations it interrupted, and burning again here would
+/// cost the current burst an advance for a window it did serve.
+async fn resolve_pause_marker(
+    router: &RwLock<Router>,
+    processor: &EngineProcessor,
+    registrations: u64,
+    ack: oneshot::Sender<()>,
+) {
+    if router.write().await.clear_if_unchanged(registrations) {
+        processor.note_delivery_gap();
+    } else {
+        // Presence-only.
+        log::warn!(
+            "[live_sync::worker] a drain marker from an abandoned pause arrived after a \
+             later burst opened; leaving that burst's router alone"
+        );
+    }
+    // A dropped receiver means the pause gave up waiting and already ran its own
+    // fallback; the resolution above is then simply idempotent.
+    let _ = ack.send(());
 }
 
 /// The ingest worker: drains `rx`, routes each event, and awaits the engine
@@ -582,6 +684,16 @@ pub async fn run_worker(
     own_pubkey: PublicKey,
 ) {
     while let Some(signal) = rx.recv().await {
+        // The pause marker carries no `(relay, sub)` and must be handled BEFORE
+        // the router lookup — the lookup is exactly what it is about to make
+        // impossible. Everything queued ahead of it has already been processed
+        // by the time we get here (this loop is serial), which is the whole
+        // content of the ack.
+        if let RawSignal::Pause { registrations, ack } = signal {
+            resolve_pause_marker(&router, &processor, registrations, ack).await;
+            continue;
+        }
+
         let key = match &signal {
             RawSignal::Event(raw) => RepairKey {
                 relay_url: raw.relay_url.clone(),
@@ -599,6 +711,8 @@ pub async fn run_worker(
                 relay_url: relay_url.clone(),
                 sub_id: subscription_id.clone(),
             },
+            // Handled above; the marker never reaches the router.
+            RawSignal::Pause { .. } => continue,
         };
 
         // Resolve the subscription context (cloned so the router lock is not held
@@ -622,13 +736,24 @@ pub async fn run_worker(
         let raw = match signal {
             RawSignal::Event(raw) => *raw,
             RawSignal::SubscriptionClosed { kind, .. } => {
+                // This endpoint will send nothing more on this REQ, so a burst
+                // waiting on it has its answer — waiting for an `EOSE` that can
+                // no longer come would spend the whole backlog budget.
+                processor.note_endpoint_settled(&key);
                 note_subscription_closed(&processor, &repair, &key, kind);
                 continue;
             }
             RawSignal::EndOfStoredEvents { .. } => {
-                anchor_end_of_stored_events(&processor, &ctx);
+                anchor_end_of_stored_events(&processor, &ctx, &key);
+                // Recorded AFTER the anchor, and after every stored event this
+                // relay sent ahead of the EOSE was ingested by this serial loop:
+                // that ordering is what lets a burst treat a settled endpoint as
+                // "its backlog is applied" rather than merely "downloaded".
+                processor.note_endpoint_settled(&key);
                 continue;
             }
+            // Unreachable: handled at the top of the loop.
+            RawSignal::Pause { .. } => continue,
         };
 
         // Hold the relay to the filter this REQ was issued with. Nothing else
@@ -1069,6 +1194,172 @@ mod supervisor_isolation_tests {
     /// worker to also process the NEXT event (>= 2 `Unprocessable` emits). A dead
     /// worker would emit at most one, then wedge (the harness times out at 0/1).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_pause_marker_drains_every_queued_event_before_the_router_is_cleared() {
+        // How much backlog sits ahead of the marker.
+        const QUEUED: usize = 12;
+
+        // SECURITY RULE 12, at the exact point it can be broken.
+        //
+        // The worker resolves the router at PROCESSING time. A pause that
+        // cleared the router directly — rather than sending a marker THROUGH the
+        // intake queue and letting the worker clear it once it has drained
+        // everything ahead of it — would drop every stored event still queued
+        // from the burst's own replay: downloaded, never applied, and (with the
+        // generation's advance burned in the same breath) re-requested only by a
+        // later REQ's lookback. That is the silent loss of legitimate offline
+        // backlog the rule forbids.
+        //
+        // Deterministic by construction: every signal is queued BEFORE the worker
+        // is spawned, so "the marker is behind the backlog" is a fact about the
+        // channel, not a race. Swapping the worker's arm to clear-then-drain
+        // makes this red at `seen == 0`.
+        let dir = TempDir::new().unwrap();
+        let keys = Keys::generate();
+        let circle = Arc::new(CircleManager::new_unencrypted(dir.path(), &keys).unwrap());
+        let bus = EventBus::new();
+        let mut rx_bus = bus.subscribe();
+        let processor = Arc::new(EngineProcessor::new(Arc::clone(&circle), bus.clone()));
+
+        let group_hex = hex::encode([0x77u8; 32]);
+        let sub = SubscriptionId::new("s_group_0");
+        let relay = "wss://relay.example".to_string();
+        let router = Arc::new(RwLock::new(Router::new()));
+        router.write().await.register_group(
+            std::slice::from_ref(&relay),
+            &sub,
+            &HashSet::from([group_hex.clone()]),
+        );
+        // An open generation, so the pause has an advance to burn.
+        processor.note_subscription_opened(&group_hex, 1_000);
+
+        // The queued backlog. The `#[cfg(test)]` panic seam inside
+        // `process_group_event` is the per-event delivery oracle: reaching it
+        // proves the worker ROUTED that event, which is exactly what a premature
+        // router clear would prevent. (Scary panic messages on stderr are
+        // expected.)
+        let (tx, worker_rx) = mpsc::channel::<RawSignal>(QUEUED + 1);
+        for _ in 0..QUEUED {
+            tx.send(RawSignal::Event(Box::new(RawEvent {
+                relay_url: RelayUrl::parse(&relay).unwrap(),
+                subscription_id: sub.clone(),
+                event: event_445(&group_hex, "__panic_for_test__"),
+            })))
+            .await
+            .expect("the queue is sized for the whole backlog plus the marker");
+        }
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+        tx.send(RawSignal::Pause {
+            registrations: router.read().await.registrations(),
+            ack: ack_tx,
+        })
+        .await
+        .expect("the marker goes in BEHIND the backlog");
+
+        tokio::spawn(run_worker(
+            worker_rx,
+            Arc::clone(&router),
+            Arc::clone(&processor),
+            Arc::new(RepairQueue::default()),
+            Keys::generate().public_key(),
+        ));
+
+        tokio::time::timeout(Duration::from_secs(20), ack_rx)
+            .await
+            .expect("the marker must be acked")
+            .expect("the worker must not drop the ack");
+
+        let mut seen = 0usize;
+        while let Ok(Ok(ev)) = tokio::time::timeout(Duration::from_millis(200), rx_bus.recv()).await
+        {
+            if matches!(
+                ev,
+                LiveSyncEvent::Status {
+                    reason: SyncStatusReason::Unprocessable
+                }
+            ) {
+                seen += 1;
+            }
+        }
+        assert_eq!(
+            seen, QUEUED,
+            "every event queued AHEAD of the pause marker must be routed before the \
+             router is cleared. Clearing first drops whatever is still queued from \
+             this burst's own replay — downloaded backlog, discarded silently \
+             (Security Rule 12)"
+        );
+
+        assert!(
+            router.read().await.is_empty(),
+            "...and only THEN is the router cleared: an acked marker means no further \
+             ingest can start"
+        );
+        assert!(
+            processor.all_advances_consumed(),
+            "the marker must also burn every open generation's advance \
+             (`note_delivery_gap`), or the next EOSE would advance a cursor over a \
+             window this pause interrupted"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pause_marker_keeps_an_unapplied_hold_back_instead_of_forgetting_it() {
+        // The `forget_*` trap, in one assertion.
+        //
+        // What this pins precisely: a hold-back recorded in the generation the
+        // pause interrupts still bounds the advance of the generation the NEXT
+        // burst opens. Two things could break it — the pause dropping the anchor
+        // (a `forget_*`, which the CI guard also refuses in that function), or
+        // `CursorAnchors::open_generation` no longer carrying an un-redeemed
+        // hold-back across the generation boundary. Either way the next burst's
+        // EOSE would advance the cursor straight over an event this device
+        // recorded as un-applied, and nothing would ever ask for it again.
+        //
+        // The OTHER half of `note_delivery_gap` — burning the interrupted
+        // generation's own pending advance, so a late EOSE for it cannot redeem
+        // one — is pinned by `all_advances_consumed()` in the marker test above
+        // and by `security_rule_gates::rule12_a_delivery_gap_suppresses_every_open_generation`.
+        let dir = TempDir::new().unwrap();
+        let keys = Keys::generate();
+        let circle = Arc::new(CircleManager::new_unencrypted(dir.path(), &keys).unwrap());
+        let processor = Arc::new(EngineProcessor::new(Arc::clone(&circle), EventBus::new()));
+        let group_hex = hex::encode([0x66u8; 32]);
+        let stream = crate::relay::live_sync::group_cursor_stream(&group_hex);
+
+        // A generation with an un-applied event held at T_held.
+        let opened = chrono::Utc::now().timestamp() - 600;
+        let held = opened - 60;
+        processor.note_subscription_opened(&group_hex, opened);
+        processor.note_dropped_before_ingest(&group_hex, held);
+
+        // The pause.
+        processor.note_delivery_gap();
+
+        // The next burst opens a fresh generation and its relay EOSEs.
+        let next_open = chrono::Utc::now().timestamp();
+        processor.note_subscription_opened(&group_hex, next_open);
+        assert!(processor.note_end_of_stored_events(&group_hex));
+
+        let cursor = circle
+            .read_sync_cursor(&stream)
+            .expect("cursor read")
+            .expect("the EOSE advanced something");
+        assert_eq!(
+            cursor,
+            held.saturating_mul(1000),
+            "the hold-back must survive the pause and bound the NEXT generation's \
+             advance. `forget`ting the anchor instead would let the advance reach the \
+             new REQ's open time ({}), sailing over an event the plane recorded as \
+             un-applied",
+            next_open.saturating_mul(1000)
+        );
+        assert!(
+            cursor < next_open.saturating_mul(1000),
+            "anti-vacuity: the two values must actually differ, or this test would \
+             pass for a cursor that never moved"
+        );
+    }
+
+    #[tokio::test]
     async fn run_worker_survives_a_processor_panic_and_keeps_processing() {
         let dir = TempDir::new().unwrap();
         let keys = Keys::generate();

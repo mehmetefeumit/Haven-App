@@ -1564,7 +1564,7 @@ PID column of `logcat -v threadtime` is enough).
 
 | # | Scenario | Mechanism | Est. |
 |---|---|---|---|
-| B1 | FGS-with-live-foreground (catches P0-1) — **IMPLEMENTED 2026-08-02**, `e2e-fgs-publish` lane. **P0-1 was REPRODUCED on the first run**; green since (CI 31216078806, 2026-08-07) | in-drive lifecycle pause, then: `Initialized (… locationSharing=true)` present (positive Rule-14 oracle, not an absence check), `onStart FAILED` absent, `Published to N/…` N≥1 **parsed and windowed to after the pause**, and publishing PID == handoff PID | ~5m |
+| B1 | FGS-with-live-foreground (catches P0-1) — **IMPLEMENTED 2026-08-02**, `e2e-fgs-publish` lane. **P0-1 was REPRODUCED on the first run**; green since (CI 31216078806, 2026-08-07) | in-drive lifecycle pause, then: `Initialized (… locationSharing=true)` present (positive Rule-14 oracle, not an absence check), `onStart FAILED` absent, `Published to N/…` N≥1 **parsed and windowed to after the pause**, and publishing PID == handoff PID. Since Phase P2a it also carries the power oracles, read from a 5 s `dumpsys location`/`dumpsys power` sampler stamped into the same logcat: exactly ONE Haven location request while backgrounded, never below `kLocationPublishMinInterval − kBackgroundFixLeadTime`, with the foreground 1 s / 1 m request seen BEFORE the handoff and gone after it; `Haven:publish` never held past `kPublishWakeLockTimeout` and the plugin's permanent lock held throughout; ≥ 2 publishes, consecutive delivery-driven ones ≥ 90 % of that interval floor apart. AP suspension stays out of scope — the emulator never suspends | ~5m |
 | B2 | **Background delivery assertion — IMPLEMENTED 2026-08-03.** The premise held exactly; the prescribed *mechanism* was not needed — see below | the lane's cold worker now arms the `ws://` opt-in through a CI-only WorkManager dispatcher that delegates to the production wake body, and `M7_REQUIRE_DECRYPT=1` is set in the workflow | M |
 | B3 | Android real GPS — **IMPLEMENTED 2026-08-03**, `e2e-real-gps` lane. **The premise was HALF FALSE: three of the four mechanisms already existed in B1; the missing piece was the ORACLE — see below** | no `locationServiceProvider` override; `pm grant` verified through `dumpsys package`; `adb emu geo fix` on a re-issue loop; and the part nothing else did — a SEPARATE peer decrypts the kind-445 and its coordinates are compared numerically against the injection within 1e-5 | ~10m |
 | B4 | iOS real GPS — **IMPLEMENTED 2026-08-03**, `e2e-ios-real-gps` lane. **The premise HELD; two corrections to the ordering and the cadence it implies — see below** | `simctl privacy grant location` + `simctl location set`, in the only order that works (build → install → grant → seed → drive, with `HAVEN_E2E_IOS_SKIP_UNINSTALL=1`), both subcommands probed for support rather than assumed; the drive asserts a peer's decrypted coordinates against the seed within 1e-5 and prints a terminal `[b4] PEER_DECRYPT_MATCH` the shell requires | ~15m |
@@ -1646,7 +1646,19 @@ magnitude:
    `connected_at > subscribed_at`;
 2. Haven's M8 subscription-health tick (`maintainSubscriptionHealth` →
    `resume_after_background` at the persisted cursor when any relay is
-   `Disconnected`), scheduled at +90 s then every 15 min;
+   `Disconnected`), scheduled at +90 s then every 15 min. **Amended
+   2026-09-08 (power-efficiency P4): this mechanism is FOREGROUND-ONLY on every
+   branch now**, gated both where the timer is armed and where it fires. It used
+   to stay armed on iOS with background sharing on — the one branch whose process
+   stays executable — and once P4 replaced the standing background subscription
+   with one bounded burst per publish tick, a tick landing MID-BURST read a pool
+   in the middle of `connect()` as dropped and repaired it through the FOREGROUND
+   re-anchor, leaving standing REQs, an open socket and a 49 h `#p` gift-wrap
+   replay behind at an instant that is not a publish. So for a backgrounded
+   device this list is now two mechanisms plus the burst: on iOS with sharing on
+   the burst on each publish tick is the repair (72-168 s, faster than this tick
+   was), and on every other pause the engine is stopped and mechanism 3 is what
+   brings it back;
 3. `MapShell._healLiveSyncIfStopped` → `LiveSyncResubscriber.ensureRunning()`
    — the ONLY thing that restarts an engine `NostrSubscriptionService
    ._onStreamClosed` tore down — on a jittered 90–150 s timer that DOUBLES per
@@ -1852,11 +1864,17 @@ against correct code:
 * A CLLocationManager session started while foregrounded with
   `allowsBackgroundLocationUpdates = true` and the `location` UIBackgroundMode
   declared **keeps delivering under When-In-Use**; the blue status-bar indicator
-  is the price. `MapShell._onPaused()`'s iOS branch (`map_shell.dart:1049`, branch at `:1111`)
-  keeps the per-circle scheduler and the motion trigger running purely on
-  `shouldKeepPublishingWhilePaused(backgroundSharingEnabled, isIOS)` — the tier
-  is never consulted, deliberately, and `geolocator_location_service.dart:186-199`
-  documents why.
+  is the price. `MapShell._onPaused()`'s iOS branch — selected by
+  `MapShell.shouldKeepPublishingWhilePaused(backgroundSharingEnabled, isIOS)`,
+  the only branch that may install the burst coordinator — keeps the **coalesced
+  publish scheduler** (`LocationPublishSchedulerNotifier`, ONE
+  `JitteredScheduler` whose tick publishes every eligible circle) and the motion
+  trigger running purely on that predicate: the tier is never consulted,
+  deliberately, and `GeolocatorLocationService`'s own `checkPermission`
+  reasoning documents why. **Two corrections, 2026-09-09:** there has been no
+  *per-circle* scheduler since P5(a) coalesced them (`PUB-COALESCE`), and both
+  line citations here had drifted — this entry now cites symbols, which is what
+  the rest of this file's newer entries do.
 * What "Always" genuinely buys is the receive-only SLC relaunch after iOS
   terminates the app: `HavenSLCHandler.startMonitoring()`
   (`HavenSLCHandler.swift:161`) refuses to arm without `.authorizedAlways` and
@@ -2115,7 +2133,18 @@ against them:
   **On app-ops the honest answer is that nothing can be surfaced.** The stream
   carries `distanceFilter: 1`, so a stationary device legitimately emits
   nothing for hours; surfacing on silence alone would fire exactly the false
-  alarm another test forbids. The test now asserts current behaviour with the
+  alarm another test forbids. *(2026-08-30: the filter became toggle-keyed on
+  iOS — the background-sharing-ON arm carried `kCLDistanceFilterNone` (`-1`),
+  Unit F 2026-08-28 — while the toggle-OFF arm kept 1 m. 2026-09-04, power-plan
+  P3: that arrangement is gone. App-ops is an Android concern, and on Android
+  the filter is now per-profile — 1 m on the foreground arm, 0 on the
+  background-service arm — while iOS has no distance filter in either toggle
+  state, because its session belongs to `HavenLocationStreamHandler`, which
+  sets `kCLDistanceFilterNone` once in `init` for both accuracy profiles. The
+  conclusion is unchanged under every one of those shapes: with a metre-scale
+  filter a stationary device emits nothing, and with no filter silence still
+  cannot distinguish an app-op denial from a phone that has simply stopped
+  producing fixes.)* The test now asserts current behaviour with the
   limitation named, plus an anti-vacuity clause so it cannot pass because
   nothing ran.
 
@@ -2524,13 +2553,13 @@ allow-list, linted by both consumers.
 
 | Item | Artefact | Self-test |
 |---|---|---|
-| C1 | `tooling/e2e/local-relay/src/{proxy,frame,journal,summarize,loopback}.rs`, `bin/wire_proxy.rs` — listens on 7788, forwards to 7777; a non-loopback listen is refused at the bind with no override | 120 Rust tests |
+| C1 | `tooling/e2e/local-relay/src/{proxy,frame,journal,summarize,loopback}.rs`, `bin/wire_proxy.rs` — listens on 7788, forwards to 7777; a non-loopback listen is refused at the bind with no override | `cargo test` in that crate — the suite count is NOT carried here: it read "120" and the tree holds 119 `#[test]`/`#[tokio::test]` functions, 87 of them in the six files this row names and the rest in `config.rs` and `tests/wire_proxy_*.rs`, which is exactly how a prose count of a suite goes stale. The two oracles below carry counts because theirs are PINNED by `MIN_CASES` |
 | C2–C4 | `tooling/e2e/ci/check-wire-journal.sh` | **128 fixtures**, `MIN_CASES` pinned exactly |
 | C5.1–C5.9 | `tooling/e2e/ci/check-wire-correlation.sh` | **157 fixtures**, `MIN_CASES=157` (pinned exactly) |
-| C6 | `haven/integration_test/e2e/_lib/wire_canaries.dart`, CLI `tooling/e2e/ci/check-wire-canaries.dart` | 85 Dart tests, 177 live terms |
+| C6 | `haven/integration_test/e2e/_lib/wire_canaries.dart`, CLI `tooling/e2e/ci/check-wire-canaries.dart` | 85 Dart tests (`haven/test/e2e/wire_canaries_test.dart`, counted 2026-09-09); the live-term total is a PER-RUN property printed in that run's own canary manifest, so no fixed figure for it belongs here |
 | C7 | `tooling/e2e/ci/setup-network-guard.sh` + `egress-allowlist.txt`, **observe mode** | wired on e2e-android, e2e-profile, e2e-location-provider-toggle |
 | — | `scripts/ci/check_wire_proxy_test_only.sh` — the proxy may never be reachable from app code (NEGATIVE half) | green |
-| — | `scripts/ci/check_wire_oracle_lane_reachable.sh` — the oracles must be REACHED by a lane (POSITIVE half) | 39 fixtures |
+| — | `scripts/ci/check_wire_oracle_lane_reachable.sh` — the oracles must be REACHED by a lane (POSITIVE half) | **39 fixtures**, `SELF_TEST_CASES=39` pinned by equality (added 2026-09-09; until then this figure lived only in this cell, so a deleted fixture would still have printed `self-test: OK`) |
 
 **The harness itself carried a flaky test, found 2026-08-17** while verifying
 the work above — and found only because a full-crate run happened to be made
@@ -3957,3 +3986,475 @@ the trigger wiring, the `actions: write` token and the re-run POST itself are
 verified only by a dry run against this incident's real run with the mutating
 call intercepted — the listing, the log fetch and the classification are proven
 against live data; the POST is not.
+
+## Power-efficiency P1 review pass, 2026-09-03 — four items carried here
+
+Four independent reviews of `docs/POWER_EFFICIENCY_PLAN.md` §5.1 (Phase P1) as
+landed. Most of what they found belongs to that plan and was corrected in it —
+one live cross-packet defect, three claims that outran their evidence, one
+undeclared test drop, four stale citations; §5.1's LANDED RECORD carries all of
+them. Four findings are *not* P1's to fix, and are carried here instead. Three
+are guard-quality gaps of the kind Workstream A exists for; the fourth is an
+internal contradiction in `haven-core` that is not a shipped leak.
+
+| # | Item | Status |
+|---|---|---|
+| CI-R7 | `check_android_location_power.sh` self-test fixtures assert the RETURN CODE only, never the failure message — and two of them trip the same message, so a check-numbering regression is invisible | **OPEN** |
+| CI-R8 | `check_location_access_gate.sh` counts its self-test fixtures and prints the count, but never pins it by equality — a deleted fixture is invisible | **OPEN** |
+| CI-R9 | The OWED per-file coverage floor for `background_deferred_send.dart` exists only as prose in `coverage_floors.txt`; `check_coverage_floors.sh` has no PENDING/OWED concept, so nothing fails if the row is never added | **OPEN** |
+| SEC-F6 | `relay/manager.rs` logs relay URLs at `log::debug!` three hundred lines above a policy comment stating that neither a URL nor a reason is logged. Not a shipped leak (release caps the level at `Warn`); an internal contradiction that will mislead the next reader | **OPEN** |
+
+**CI-R7 — a fixture that asserts only `rc` cannot see a check swapping places
+with its neighbour.** `scripts/ci/check_android_location_power.sh`'s
+`self_test()` drives its fixtures through `_record()`, which compares
+`want-rc` against `got-rc` and nothing else, and through `_shell()`, which
+discards the guard's output entirely (`>/dev/null 2>&1`). The sibling guard the
+same packet restructured does it properly: `check_engine_client_options.sh`'s
+`_fixture()` takes a `want-msg` substring as its third argument (`:563-564`) and
+fails a fixture whose rc is right but whose message never appeared (`:579-580`).
+The gap is not theoretical here, because two fixtures — "the release is gone
+entirely" and "only a comment describes the release" — both bottom out on check
+(7)'s *first* `lfail`, "(7) `_onPaused` never calls `suspendStream(`". Any
+future edit that makes a check-(8) fixture trip a check-(7) message (a merged
+conditional, a reordered early return, a renamed anchor) keeps every rc at 1
+and the self-test stays green while the guard has stopped testing what its
+labels say. *Line numbers are given by identifier rather than by number for
+this file: the P1 review pass is changing it concurrently — the fixture count
+moved 6 → 7 while this entry was being written — so read `SELF_TEST_FIXTURES`,
+`self_test()`, `_record()` and `_shell()` in the tree.* **What it would take:**
+give `_record`/`_shell` a `want-msg` parameter, capture the guard's stderr
+instead of discarding it, and pin every fixture to the distinguishing fragment
+of its own message — for the two that share one, pin the check NUMBER prefix at
+minimum, which is what makes a renumbering visible. Roughly a 25-line change to
+one file, no behaviour change, and the guard's own `--self-test` proves it.
+
+**CI-R8 — a fixture count that is printed but never pinned is a comment.**
+`scripts/ci/check_location_access_gate.sh:537` declares `checked=0`, `:557`
+increments it per fixture, and `:737` prints
+`OK: self-test passed (%d fixtures)`. Nothing ever compares that number to an
+expected constant, so deleting a fixture — the exact edit a change that cannot
+otherwise be made to pass would reach for — lowers the printed count and
+returns 0. The repo already has the right shape in two places:
+`check_android_location_power.sh` (`local -r SELF_TEST_FIXTURES=<n>`, checked
+by equality just before its success print) and `summarize-created-at-gaps.sh`'s
+own `SELF_TEST_FIXTURES`. **What it would take:** one `readonly SELF_TEST_FIXTURES=<n>`
+pinned at the count that exists today, one equality check before the success
+print, and the same "the count is pinned by EQUALITY, not a floor" comment the
+sibling carries. Under ten lines. The only care needed is that the constant is
+raised in the same commit that adds a fixture, which is what makes the pin
+worth having.
+
+**CI-R9 — an owed floor recorded as prose is a floor nothing enforces.**
+`scripts/ci/coverage_floors.txt:283-292` carries a nine-line comment explaining
+that `lib/src/services/background_deferred_send.dart` warrants its own row, why
+it could not be pinned from the P1 run (a Flutter floor's denominator is the
+SDK's instrumented-line count, and the local SDK was 3.41.0 against the pinned
+3.44.8), what it measured locally (81.82 %, 18/22, which would pin at 79), and
+how to add it (`--repin flutter <lcov>` from a CI artifact). All of that is
+correct and none of it is enforcement: `check_coverage_floors.sh` (1173 lines)
+has no notion of a pending row. `--lint` (`:596-714`) checks that every row
+present obeys the pin rule; nothing checks that a row that *should* be present
+is. If nobody re-pins, the comment ages into folklore and the file it names —
+which carries the Rule-13 commit ladder the location plane may never take — has
+no floor at all, silently, forever. **What it would take:** a `# PENDING-ROW: <stack>|<path>`
+directive that `--lint` parses like any other line and fails on, with a
+deliberately narrow escape (an `until=<ISO date>` field, or a required
+`reason=` — the point is that it expires rather than that it is comfortable).
+`--lint` already reads the manifest line by line through one parser shared with
+`--list`/`--repin` (`:181`), so the directive costs one branch there, one
+`problems+=()` case beside `TOO-TIGHT`/`TOO-LOOSE` (`:670`, `:683`), and two
+self-test fixtures (a pending row present → red; the row added → green). It
+should fail loudly rather than warn: a warning in a gate this long is a line
+nobody reads.
+
+**SEC-F6 — `manager.rs` logs relay URLs in one place and states that it does
+not in another.** `haven-core/src/relay/manager.rs:444` logs
+`"[RelayManager] add_relay({url}): newly_added={newly_added}"` and `:462` logs
+`"[RelayManager] connected to {url}"`, both at `log::debug!`, both interpolating
+the relay URL verbatim (the neighbouring error arms redact only the error text,
+through `redact_hex_sequences`). The publish-harvest log further down the same
+file is governed by a comment at `:785-787` that states the opposite policy in
+as many words: *"Counts only: which relays a device publishes to is
+itself linkable metadata and a refusal is remote prose (Rule 8), so neither a
+URL nor a reason is logged here (matching the per-relay fetch probe)."*
+**This is not a shipped leak.** `init_app` caps the global level by build
+profile — `log::set_max_level(LevelFilter::Debug)` under `debug_assertions`,
+`LevelFilter::Warn` otherwise (`haven/rust_builder/src/api.rs:81-84`) — so no
+`debug!` record reaches a release device's log at all, and
+`check_no_key_logging.sh` is correct not to flag it (it covers key material,
+not endpoint metadata). *Both `manager.rs` and
+`check_engine_client_options.sh` were being edited by the P1 review pass as this
+entry was written, so every line number here is anchored to its exact log or
+comment text — re-derive by grep if they have moved.* It is a documentation-accuracy and
+next-reader problem: the file states a policy in one place and contradicts it
+in another, and the next person to add a connection-path log has two mutually
+exclusive precedents to copy. **Two candidate fixes, either of which closes it:**
+(1) **redact the URL to a stable per-URL index** — assign each configured relay
+a small integer at pool-construction time and log `relay #2` instead of the
+host, which keeps every triage question these two lines exist to answer ("which
+of the configured relays failed to connect") while making the debug log carry
+no endpoint; or (2) **amend the comment to scope itself honestly** — "neither a
+URL nor a reason is logged here *at INFO and above*; the connect path logs URLs
+at DEBUG, which release builds do not emit" — which costs nothing and is
+truthful, but leaves the two precedents side by side. (1) is the better outcome
+and is a contained change; (2) is the minimum that removes the contradiction.
+Whichever is chosen, the invariant should end up stated once, not twice.
+
+### Test-matcher trap: `lessThan`/`lessThanOrEqualTo` do not order `DateTime` (recorded 2026-08-31)
+
+`package:matcher` implements the ordering matchers with the `<` / `<=` operators,
+which `DateTime` does not define (it has `isBefore`/`isAfter`/`compareTo` only).
+Measured on the pinned toolchain:
+
+| assertion | result |
+|---|---|
+| `expect(earlier, lessThan(later))` | **fails** |
+| `expect(earlier, lessThanOrEqualTo(later))` | **fails** |
+| `expect(t, lessThanOrEqualTo(t))` (equal) | **passes** |
+
+So `lessThanOrEqualTo` on `DateTime` is *equality-only*. It never passes on
+unequal values, so it cannot turn a real regression green — but under
+`fake_async` or an injected frozen clock, where two timestamps are routinely
+identical, it passes trivially while proving nothing about ordering. That is the
+silent-weakness case, and this repo injects clocks nearly everywhere.
+
+Use `isBefore` / `isAfter`, or compare `.difference(...)` (a `Duration`, which
+does define the operators). Swept 2026-08-31: every ordering assertion in
+`haven/test` is on `int` or `Duration` — none is on `DateTime` — so nothing is
+weak today. Found while writing the P2a-1 interval sweeps, where an assertion
+was silently weak until it was switched to `isAfter`.
+
+## Power-efficiency P2a review pass, 2026-09-04 — two items carried here
+
+Two independent reviews of `docs/POWER_EFFICIENCY_PLAN.md` §5.2 (Phase P2a) as
+landed. Most of what they found belongs to that plan and was corrected in it —
+one live BLOCKER (the watchdog's early returns latched the in-flight slot, so
+background sharing published once per backgrounding and then stopped), a missing
+current-consent gate on the standing registration, a wake lock released out from
+under the teardown drain, an unpinned `onEngineCreate`, three oracles that could
+not fail, and three internal contradictions; §5.2's REVIEW ROUND record carries
+all of them. Two findings are *not* P2a's to fix, and are carried here instead; both are
+bounds that the plan states more confidently than the code earns. A third
+(CI-R19) was added on 2026-09-04 when the B1 lane fix pass landed step (8) and
+moved the lane's timeouts out from under a citation elsewhere.
+
+| # | Item | Status |
+|---|---|---|
+| CI-R17 | `kMinFixRequestInterval` (31 s) sits below AOSP's `NO_FIX_TIMEOUT` (60 s), so at the floor the framework arms no give-up alarm and an indoor search is bounded only by Haven's ≤ 72 s watchdog re-aim. D3 (vii)'s "≈ 60 s per interval" residual is optimistic there, and the floor is reachable in ordinary operation | **OPEN** |
+| CI-R18 | `PublishWakeLock` is a Kotlin `object` holding one process-wide, non-reference-counted lock, while the plugin destroys and recreates the task engine with the dying isolate's teardown drain still running — so that drain's `release()` can drop the new cycle's hold | **OPEN** |
+| CI-R19 | `check_e2e_step_timeout_ordering.sh:73` cites B1's per-drive default as 18 m; it is 20 m after the forced-idle phase landed. Comment-only — the guard is GREEN either way, because it deliberately reads workflow-declared values and not script defaults | **OPEN** (cosmetic; verified green) |
+
+**CI-R17 — the floor is under the timeout, and the plan's own §2.2 says what
+that costs.** `kMinFixRequestInterval` is 31 s (declared in
+`haven/lib/src/constants/location.dart`, cited by symbol under CI-R22's rule
+because the line this row used to name has since drifted into the
+`kStationaryConfirmMaxAge` region), derived from
+`LocationProviderManager.MIN_REQUEST_DELAY_MS` + 1 s — the S+ threshold above
+which a request is duty-cycled at all. §2.2 of the plan records the *other*
+AOSP threshold on the same request: a request `>= NO_FIX_TIMEOUT` (60 s,
+`GnssLocationProvider.java:223`) arms a give-up alarm, and only without HAL
+`CAPABILITY_SCHEDULING`. Below 60 s no give-up alarm is armed at all, so on a
+non-scheduling HAL the chip runs at 1 Hz until a fix arrives — the framework
+never ends the search. What ends it instead is Haven's own `onRepeatEvent` at
+`kBackgroundRepeatInterval` (72 s), whose re-aim replaces the registration. So
+for the duration of a floored interval the request runs CONTINUOUSLY for up to
+`kBackgroundRepeatInterval` (72 s), rather than the "≈ 60 s per 72–168 s
+interval" D3 (vii) states, and D3 (vii) has been qualified accordingly. That is
+a **100 % duty by definition** of the platform's sub-threshold behaviour — the
+same figure `kMinFixRequestInterval`'s own doc states definitionally ("runs the
+request CONTINUOUSLY at HIGH_ACCURACY — the 100 % GNSS duty cycle") — and **not**
+an E-A1 duty input, i.e. not an estimate of anything. Phrased that way from
+2026-09-09 so it cannot be read as a model-E output; `scripts/ci/check_estimate_integrity.sh`
+treats a percentage beside a unit of time as an energy claim needing attribution,
+and a definitional statement is what earns the exemption rather than a tag.
+
+**It is reachable in ordinary operation, which is why it is a backlog item and
+not a footnote.** The floor binds when
+`earliestDue - now <= kMinFixRequestInterval + kBackgroundFixLeadTime` = 41 s,
+and a sibling due within `kBackgroundFixHorizon` (30 s) is published by the same
+cycle rather than waited for — so the band that actually produces a 31 s request
+is a sibling due 31–41 s out. Against a per-circle interval drawn uniformly from
+[72, 168] s that is an 11 s band in a 96 s span, i.e. **≈ 11 % of cycles at two
+circles**, rising with circle count. (Stated as the arithmetic of independent
+uniform draws, which is the model `per_circle_due_tracker.dart` implements; it
+is not a measurement, and no measurement is available — see the hardware
+constraint in §2.5 of the plan.) **What it would take:** the honest options are
+(1) *measure* — an Android handset under `POWER_MEASUREMENT.md` §5, which is the
+same un-park condition P2b waits on, so this rides along rather than needing its
+own campaign; (2) *raise the floor on the no-fix path only* — give
+`nextFixRequestInterval` one more input (did the previous cycle consume a
+delivery?) and floor a no-delivery re-aim at `NO_FIX_TIMEOUT + 1 s` so the
+framework's give-up alarm is armed exactly when the search is the thing being
+bounded, which the pure function can carry and the existing exhaustive sweep in
+`background_fix_request_test.dart` can pin; or (3) *accept and document*, which
+is what has been done to D3 (vii) as an interim. Option (2) is not free of the
+argument that put the floor at 31 s: D3 (iii) rejected a 62 s floor precisely
+because it starves a sibling due 31–71 s later by up to 41 s, so any raise has
+to be conditional on "no delivery arrived", never unconditional, and the gap
+proof has to be re-derived over the conditional.
+
+**CI-R18 — a process singleton against an engine lifecycle that overlaps.**
+`haven/android/app/src/main/kotlin/com/oblivioustech/haven/PublishWakeLock.kt:34`
+declares `object PublishWakeLock`, with one `lock` field for the whole process,
+created `setReferenceCounted(false)` (`:98`) and released unconditionally at
+`:106`. That is correct for one isolate. It is not correct across two, and the
+plugin creates two: `flutter_foreground_task-9.2.0`'s
+`ForegroundService.createForegroundTask()`
+(`android/src/main/kotlin/com/pravera/flutter_foreground_task/service/ForegroundService.kt:461`)
+calls `destroyForegroundTask()` (`:477`) and then **immediately** constructs a
+new `ForegroundTask` with a new `FlutterEngine`, while
+`ForegroundTask.destroy()` (`ForegroundTask.kt:155`) hands Dart's `onDestroy`
+off through `backgroundChannel.invokeMethod(ACTION_TASK_DESTROY, …) { flutterEngine.destroy() }`
+— asynchronously — and returns. The old isolate's bounded teardown drain
+(`background_location_task.dart` `onDestroy` → `_drainAndTearDown`) is therefore
+still running, under the lock, when the new engine's first cycle can already
+have acquired it. The old isolate's `finally` then calls `release()` on the same
+process-wide lock and the new cycle continues with no CPU hold.
+
+**Reachable from three places**, all in the plugin's `when (action)` block
+(`ForegroundService.kt:153`): `API_START`, `API_RESTART`, and the OS's
+`RESTART`/`REBOOT`. Haven reaches the restart through
+`requestSessionHandover`'s `restartService` (`mls_session_handover.dart:221` →
+`service_providers.dart:162` → `BackgroundLocationManager.startService`), whose
+`isRunningService` guard is not a defence here: the flag can already read false
+while the dying isolate is inside its drain. **A Dart depth counter does not
+cover it** — the two counters would live in two isolates, each correct about
+itself. Today the consequence is bounded, because P2a keeps the plugin's
+permanent `PARTIAL_WAKE_LOCK` and that is what actually holds the AP; it becomes
+a silent stall rather than a lost hold in P2b, which removes exactly that lock.
+**What it would take:** key the native state per engine. `onEngineCreate` already
+receives the `FlutterEngine`, so the smallest correct shape is a per-engine
+handler instance owning its own `WakeLock`, installed on that engine's channel,
+instead of `setMethodCallHandler(this)` on the singleton — a release can then
+only ever touch the lock its own isolate took, and an engine that dies without
+releasing is still covered by `MAX_TIMEOUT_MS`. Two follow-through details: the
+`attach(context)` `PowerManager` can stay on the singleton (it is stateless), and
+B1's `dumpsys power` oracle must be re-checked against the transient state where
+two `Haven:publish` rows exist, since it asserts an `ACQ=` age per row rather
+than a count. A guard fixture that reds a `lock` field on the `object` itself is
+what keeps the shape from coming back.
+
+### CI-R19 — a stale harness-default citation in `check_e2e_step_timeout_ordering.sh` (recorded 2026-09-04)
+
+`scripts/ci/check_e2e_step_timeout_ordering.sh:73` names B1's per-drive default
+as `run-b1-fgs-publish.sh's 18m`. It is **20 m**
+(`tooling/e2e/ci/run-b1-fgs-publish.sh:1938`, `DRIVE_TIMEOUT="${B1_DRIVE_TIMEOUT:-20m}"`),
+raised by the B1 lane fix pass together with the forced-idle phase (drive target
+10→14 m, drive 18→20 m, deadline 25→28 m, step 35→38 m).
+
+**The guard is GREEN either way, and that is the point of the entry rather than
+an excuse for it.** The citation sits in the guard's "Scope and boundaries"
+comment, which exists to say that harness-script defaults are deliberately NOT
+parsed — C4 checks a value only where a workflow declares it, so coupling the
+guard to script internals would rot on the first refactor. Verified: the guard
+passes on the current tree (37 emulator/simulator steps, 19 drives, `inner <
+step < job` in all of them), and the workflow-declared values it does read
+(`e2e-fgs-publish.yml`: 20 m drive, 28 m deadline, 38 m step) are the new ones
+and are consistent. So this is a documentation-accuracy defect in a comment, not
+a gate failure — but it is the kind that teaches the next reader a wrong number
+about a lane whose bounds were just re-derived, which is exactly what §73's
+paragraph is there to prevent.
+
+**What it would take:** one word. Change `18m` to `20m` on that line. The
+durable version costs a little more and is worth considering while the line is
+open: the comment cites three script defaults by value
+(`run-integration-tests.sh`'s 10 m, this one, `run-single-avd-scenario.sh`'s
+20 m), and nothing keeps any of the three honest. Either drop the values and
+name only the scripts — the paragraph's argument does not need them — or, if
+they earn their place as orientation, add a one-line reader that greps each
+named script for its `*_DRIVE_TIMEOUT:-` default and reds a mismatch, which
+turns three decorative numbers into three pins.
+
+## Power-efficiency P3 doc/manifest pass, 2026-09-04 — four items carried here
+
+Found while writing WP3-6 (the docs + privacy-manifest packet of
+`docs/POWER_EFFICIENCY_PLAN.md` §5.3) against the code the earlier P3 packets
+landed. Neither is a live user-visible defect and neither blocks P3; both are
+the shape this backlog exists for — something that reads as proved and is not.
+
+| # | Item | Status |
+|---|---|---|
+| CI-R20 | `IosLocationStreamStatus.alwaysConfirmed` is parsed from a key the native stream handler never emits, so it is `false` forever — dead, and misleading to the next reader, with a green test that appears to cover it | **FIXED 2026-09-04** |
+| CI-R21 | `docs/POWER_EFFICIENCY_PLAN.md` §5.3's traffic-shape claim ("a re-sent stationary fix serialises to the same length as a fresh one at the same coordinate") has no test: the Rust `resent_fix_payload_has_identical_shape` the plan specifies was never written, so `INV-L-IOS-PUBLISH-INPUT-BEST-PROFILE-ONLY` cannot and does not cite it | **OPEN** |
+| CI-R23 | `locationSettingsIosCatchUp` ships in 13 locales, is pinned by two copy-tie tests, and renders NOWHERE — the settings page deliberately drops it, and no other widget picks it up | **FIXED 2026-09-04** |
+| CI-R22 | Line citations into `docs/M7_BACKGROUND_SHARING.md` and `docs/BACKGROUND_SHARING_FAILURE_ANALYSIS.md` no longer land on what they name — both files grow with every phase. Five `M7:<line>` and about a dozen `FA:<line>` refs survive in `POWER_EFFICIENCY_PLAN.md`'s P0/P1/P2a/P4 change lists, plus one in a Dart test comment | **OPEN** (cosmetic) |
+
+**CI-R20 — a field that can only ever answer one way.**
+`HavenLocationStreamHandler.status()`
+(`haven/ios/Runner/HavenLocationStreamHandler.swift:271-281`) returns exactly six
+keys: `running`, `allowsBackgroundLocationUpdates`,
+`showsBackgroundLocationIndicator`, `profile`, `authorization`, `backgrounded`.
+It does **not** return `alwaysConfirmed` — that predicate is owned by
+`HavenBackgroundSessionHandler`, which exports it on its own channel
+(`HavenBackgroundSessionHandler.swift:270`), and which is what the lanes and the
+settings copy actually read. But the Dart side of the *stream* channel declared
+the field and parsed it anyway — constructor, declaration, the
+`IosLocationStreamStatus.unknown` reading, and
+`alwaysConfirmed: _boolOr(raw['alwaysConfirmed'], fallback: false)` in
+`status()` (`haven/lib/src/services/ios_location_source.dart`, then at :149,
+:186, :160 and :499). Because the key is never sent, the fallback was the only
+branch that ever ran: the field was `false` on every real device, in every
+tier, forever.
+
+What made it worth an entry rather than a shrug was the test.
+`haven/test/services/ios_location_source_test.dart` (then at :846, 'status
+parses the native map') fed a fake map that DID contain `'alwaysConfirmed':
+true` and asserted the parse returned `true` — so the reader saw a covered
+field, the coverage report agreed, and nothing anywhere failed. That is
+precisely the "passes, executes nowhere" shape §"Cross-cutting note" describes.
+It was also a trap with a direction: a reader who reached for the field on the
+stream status — it was right there, and named the same as the predicate the
+policy turns on — silently got `false`, i.e. the bar posture, for a
+confirmed-Always user.
+
+**FIXED 2026-09-04 — option (a): one predicate, one carrier.** The field, its
+`unknown` reading, its constructor parameter and its parse line are gone from
+`IosLocationStreamStatus`, as are the two test constructions that only existed
+to satisfy the required parameter
+(`haven/test/mocks/fake_ios_location_source.dart`,
+`haven/test/services/geolocator_location_service_test.dart`). No Dart or Swift
+reader was lost with it: the only production read of a stream-status field is
+`(await _iosSource.status()).backgrounded`
+(`haven/lib/src/services/geolocator_location_service.dart:921`), the sentence
+selector reads `IosBackgroundSessionStatus.alwaysConfirmed`, and the field was
+never logged, serialised or asserted outside the vacuous test. The Swift side
+was NOT touched — emitting the key would have created the second carrier this
+entry argues against. The class doc now records why the predicate is absent, so
+the next reader reaching for it finds the reason instead of the field.
+
+The vacuous test kept its real half and lost its fabricated one: `'status
+parses the native map'` now feeds exactly the six keys the handler emits, and a
+second posture (`'status reads every key from its own key'` — When-In-Use,
+background sharing off, so `allowsBackgroundLocationUpdates` is false while
+`showsBackgroundLocationIndicator` is true) gives every key a value pair no
+other key shares. Three of the six flags share a `false` fallback, which one
+posture alone cannot separate: with two, a parse that drops a key or reads a
+neighbour's reddens at least one. The fail-closed tests gained the two branches
+nothing pinned — `running`'s fallback (the missing-key map now carries a single
+correctly-typed `authorization`, which both proves the map was read and leaves
+`running` absent) and `authorization`'s `'unknown'` fallback under a
+wrong-typed value.
+
+Verified by mutation, not by inspection: eleven single-edit mutations of the
+parse — dropping a key, reading a neighbour's key, and flipping each fallback,
+for all six fields — were applied one at a time and each reddened at least one
+test (43 pass in the file, 1244 in `test/services/`, analyzer clean).
+
+*Related, and deliberately NOT a defect:* the settings page's indicator sentence
+is selected from `IosBackgroundSessionStatus.alwaysConfirmed`
+(`haven/lib/src/providers/service_providers.dart:166-173`), never from the stream
+handler's resolved `showsBackgroundLocationIndicator`. That is the safe
+direction and must stay: the stream status degrades to
+`IosLocationStreamStatus.unknown` on an unreadable channel, whose
+`showsBackgroundLocationIndicator` is `false`, so a selector keyed on it would
+show the *arrow* sentence to a user who is looking at a *bar*. The session
+status degrades to `alwaysConfirmed: false`, which selects the bar sentence — an
+over-warning, which is the harmless direction.
+`haven/test/lints/ios_indicator_copy_accuracy_test.dart` pins the selector
+against `backgroundActivitySessionHeld`; keying it on the stream handler's flag
+is now structurally impossible, because CI-R20's fix left no such flag to key
+on.
+
+**CI-R21 — an unproven claim in a plan that is otherwise pinned.**
+`docs/POWER_EFFICIENCY_PLAN.md` §5.3's "Traffic-shape proof (no ratchet)" block
+specifies a Rust test, `resent_fix_payload_has_identical_shape`, asserting
+`serde_json::to_vec(resent).len() == serde_json::to_vec(fresh_same_coordinate).len()`
+for a `LocationMessage`, with the honest residual that length varies with the
+coordinate VALUE in every version, so the claim is "a re-send adds no signal",
+never "no signal in size". Grepped 2026-09-04: no such test exists anywhere in
+`haven-core`, and no Dart test asserts the equivalent. The rest of the block is
+sound without it — the profile switch is a property write that publishes nothing
+and opens no socket, and the publish instants come from three unchanged drivers
+— so this is a missing *pin*, not a wrong claim. The manifest entry P3 added
+(`INV-L-IOS-PUBLISH-INPUT-BEST-PROFILE-ONLY`) therefore does not state the
+equal-length property at all and cites no such test, rather than citing one that
+does not exist.
+
+**What it would take:** write the test in `haven-core/src/location/types.rs`'s
+test module (where `LocationMessage`'s serialisation already lives), then add
+both the sentence and the citation to the invariant in the same commit. Roughly
+fifteen lines; the reason it is carried here rather than done in WP3-6 is that
+that packet owns `docs/**` only.
+
+**CI-R22 — line citations into a file that keeps growing.** WP3-6 converted every
+`M7:<line>` reference in the parts of the plan it owns into a stable descriptor
+(a section, or a changelog entry named by its date), because M7 gained ~150 lines
+in P3 alone and every numeric reference into it had already rotted. Five remain,
+all inside earlier phases' change lists, and all verified wrong on 2026-09-04:
+`M7:1209-1254` (§5.1), `M7:57-61` and the `§D Android (:212-228)` pair (§5.2),
+`M7:764` and `M7:433-441` (§3 D3/D4). `M7:3-8` is the one that still lands
+(`liveSyncEnabled` is named on line 7), though its siblings `:332-336` and `:462`
+in the same row do not. The same applies to `FA:<line>` refs, which WP3-6 also
+converted where it owned the sentence and left elsewhere — and to one outside the
+plan entirely: `haven/test/services/geolocator_location_service_test.dart:1774`
+opens with "The FA:218-222 hole", whose bullet is still there and is now marked
+CLOSED, but no longer at those lines. That one is in `haven/**` and outside this
+packet's ownership.
+
+**What it would take:** the same conversion, five times — name the section or the
+dated changelog entry instead of the line. Not done here because those rows are
+historical records of what an earlier phase edited, and re-deriving "where §D sat
+when P2a was written" is not a meaningful answer; the honest fix is to stop
+citing lines into this file at all. The general rule worth adopting: a citation
+into a living document names a heading, never a line.
+
+**CI-R23 — a sentence translated into thirteen languages that no user can
+read.** P3 split the iOS reliability card and moved the catch-up sentence out of
+`locationSettingsIosGuidance` into its own key so it could render last. It then
+turned out that the card renders only under `IosAuthStatus.always`, where the
+sentence's inducement ("grant Always so Haven can catch up after iOS closes the
+app") is addressed to nobody — every reader of the card already holds Always —
+so `location_settings_page.dart:335-343` deliberately does not compose it in, and
+argues the point well. The cohort the inducement IS for reads it from
+`locationSettingsIosLimitedNote` instead, which does render. What is left is a
+key that exists in `app_en.arb` plus twelve translations, is asserted by
+`haven/test/lints/ios_indicator_copy_accuracy_test.dart` and
+`haven/test/l10n/location_settings_copy_accuracy_test.dart`, and is cited by
+`INV-L-IOS-WAKES-RECEIVE-ONLY` as an assertion key — a promise with proofs, a
+translation round, and no surface.
+
+The citation is deliberate and should stay: the sentence is the cleanest
+statement of the receive-only claim, and binding it now means a future widget
+that renders it inherits the invariant instead of re-deriving it. But a string
+nobody sees is not a disclosure, and the manifest must not be read as though it
+were. **What it would take:** either render it where it is true and useful (the
+honest candidate is under a confirmed Always, restated as a fact rather than an
+inducement — "Haven can catch up on your circles after iOS closes the app" —
+which would also give the card its third sentence back), or delete it across
+thirteen locales with its tests and its manifest citation. Do not leave it in
+this state indefinitely; that is how the 85 `privacy*` keys got where they were.
+
+**FIXED 2026-09-04 — deleted, not re-rendered.** The owner took the second
+option. The key and its `@description` are gone from `app_en.arb` and from the
+twelve translations, the generated `app_localizations*.dart` are regenerated in
+step, and `INV-L-IOS-WAKES-RECEIVE-ONLY` now cites `locationSettingsIosLimitedNote`
+alone as its assertion key. No coverage moved with it: the note renders under
+While-In-Use — the one cohort the advice was ever addressed to — and states the
+same limit more completely ("Choose 'Always' … so Haven can also catch up …
+after iOS closes the app. Your own sharing resumes when you reopen Haven"),
+while the invariant's disclosure key `locationSettingsIntro` renders in every
+state and says the receive-only half outright ("background wake-ups only fetch
+your circles' locations, they never send yours"). The two `non_arb_claims`
+carriers are untouched.
+
+The ratchet needed no `ratchet_override`, and adding one would have reddened the
+gate as stale: `enumerate_weakenings` filters dropped assertion keys through
+`still_in_arb`, so a key deleted from the ARB is never enumerated — the same
+path the 2026-08-29 `privacy*` removal took, and what the function's own header
+describes. Confirmed empirically against `HEAD` before staging: green with no
+override.
+
+Of the three test files that pinned the key, two kept every guarantee they
+still had. `test/l10n/location_settings_copy_accuracy_test.dart` kept its
+termination-claim case with the note half only (renamed to *'the While-In-Use
+note keeps the termination claim'*, and the manifest citation renamed with it),
+so all thirteen locales are still asserted to name "Always" and to say the app
+is closed. `test/lints/ios_indicator_copy_accuracy_test.dart` lost only the
+byte-identity pin on the deleted sentence; every vocabulary, battery-promise,
+pause/timer and breadcrumb scan still covers the four surviving keys.
+`test/pages/settings/location_settings_page_test.dart` lost case 25, which
+asserted the card never composes the catch-up sentence — its subject no longer
+exists, and the promise it guarded is held more strongly by cases 19 and 20,
+which assert the composed paragraph by EQUALITY in both indicator states and
+therefore fail on ANY third sentence, inducement or not. That reasoning was
+moved into the group header so the next reader does not re-derive it.

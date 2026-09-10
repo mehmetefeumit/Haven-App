@@ -7,7 +7,7 @@
 /// `State.initState`, so pumping it in `flutter test` crashes the runner (the
 /// same limitation `map_page_prefetch_test.dart` documents). The overlay and
 /// marker decisions are therefore expressed as pure statics on [MapPage] — the
-/// pattern `MapShell.shouldKeepRelayConnectedWhilePaused` already established
+/// pattern `MapShell.shouldKeepPublishingWhilePaused` already established
 /// here — which are exhaustively tested below, plus an AST guard proving the
 /// page actually calls them. Runtime proof of the composed page is in
 /// `integration_test/b6_location_provider_toggle_test.dart`.

@@ -129,6 +129,20 @@
 #   9. BACKLOG_REPLAYED ms=<N>          THE HEADLINE: the event imported
 #                                       while the device was in airplane mode
 #                                       was decrypted after the reconnect
+#  10. PUBLISH_AFTER_IDLE_OK accepted=<N>  the PUBLISH plane came back too: a
+#                                       location sent through the production
+#                                       one-shot ladder was acked by a relay
+#
+# Step 10 is about the other pool. The two now differ deliberately: the
+# ENGINE's client keeps `RelayOptions::default()` (ping on, reconnect on,
+# which is what recovery paths (1) and (2) above lean on), while the PUBLISH
+# pool is built with `.ping(false).reconnect(false).sleep_when_idle(true)`
+# and closes ~60-70 s after its last send. Nothing else in this lane touches
+# it, so an outage leaves its socket `Terminated` with no retry loop behind
+# it, and `LOCATION_PUBLISH_ATTEMPTS == 1` means the wake gets exactly one
+# bounded attempt. A green receive verdict with a dead publish plane is
+# sharing that has silently stopped, which is why this is asserted rather
+# than recorded.
 #
 # Steps 8 and 9 are the point. A socket that reopened proves nothing a user
 # cares about, so the drive asserts on DECRYPTED COORDINATES reaching
@@ -221,6 +235,8 @@ readonly MARK_BACKLOG_STAGE_FAIL='[b9] BACKLOG_STAGE_FAILED'
 readonly MARK_BACKLOG_ON_RELAY='[b9] BACKLOG_ON_RELAY'
 readonly MARK_BACKLOG_REPLAYED='[b9] BACKLOG_REPLAYED'
 readonly MARK_BACKLOG_MISSED='[b9] BACKLOG_MISSED'
+readonly MARK_PUBLISH_IDLE='[b9] PUBLISH_AFTER_IDLE_OK'
+readonly MARK_PUBLISH_IDLE_DEAD='[b9] PUBLISH_AFTER_IDLE_DEAD'
 readonly MARK_COMPLETE='[b9] SEQUENCE_COMPLETE'
 
 # HOST-side markers, written by THIS script to its own log rather than by the
@@ -655,7 +671,38 @@ backlog replay either way."
     esac
   fi
 
-  # (10) EVIDENCE ONLY — which recovery mechanism this run exercised. An
+  # (10) THE PUBLISH PLANE. The receive verdict above says the ENGINE's
+  #     client recovered; it says nothing about the PUBLISH pool, which is
+  #     built with different options on purpose (ping off, reconnect off,
+  #     sleeps when idle) and is used by nothing else in this lane. An
+  #     outage therefore leaves its socket Terminated with no retry loop, and
+  #     the location ladder gets ONE bounded attempt to re-drive the connect.
+  #     Asserted, not recorded: a device that receives but cannot publish has
+  #     stopped sharing, silently, which is the failure this whole packet is
+  #     about.
+  if b9_has_marker "${log}" "${MARK_PUBLISH_IDLE}"; then
+    b9_note "publish plane: a location was acked by \
+$(b9_marker_number "${log}" "${MARK_PUBLISH_IDLE}" 'accepted') relay(s) after \
+the outage, so the ping-less publish pool woke from its idle socket."
+  else
+    local pub_reason
+    pub_reason="$(b9_marker_flag "${log}" "${MARK_PUBLISH_IDLE_DEAD}" 'reason')"
+    if [[ -n "${pub_reason}" ]]; then
+      b9_finding "THE PUBLISH POOL DID NOT COME BACK \
+(${MARK_PUBLISH_IDLE_DEAD} reason=${pub_reason}). Live receive recovered, so \
+the network is not the explanation: a location offered through the production \
+one-shot ladder never reached a relay. Do NOT add a retry to make this pass — \
+the single attempt is the contract, and re-driving the connect inside it is \
+what must work."
+    else
+      b9_finding "neither '${MARK_PUBLISH_IDLE}' nor a readable \
+'${MARK_PUBLISH_IDLE_DEAD} reason=<...>' was recorded — the drive never \
+reached the publish-plane check, so this run says nothing about whether the \
+publish pool survives an outage."
+    fi
+  fi
+
+  # (11) EVIDENCE ONLY — which recovery mechanism this run exercised. An
   #     engine that survived the outage recovered through the relay pool's
   #     own reconnect; one that died needed MapShell's self-heal, which is
   #     an order of magnitude slower and is the path that had no runtime
@@ -750,6 +797,7 @@ run_self_test() {
       "${rec}" \
       "${back}" \
       "I/flutter ( 40): ${MARK_ENGINE_RECOVERED} running=true" \
+      "I/flutter ( 40): ${MARK_PUBLISH_IDLE} accepted=1" \
       "I/flutter ( 40): ${MARK_COMPLETE}" \
       > "${out}"
   }
@@ -894,6 +942,38 @@ prescan=0 postscan=1}"
     printf '  \033[1;31mFAIL\033[0m unsent peer event is not reported as unreadable\n' >&2
     fails=1
   fi
+
+  # (16b) THE PUBLISH-PLANE FINDING. Everything the older oracle checked is
+  #      green — the receive path came back and the backlog replayed — and the
+  #      publish pool never woke. Before this step such a run was a silent
+  #      pass, which is exactly the shape "sharing stopped and nothing said
+  #      so" takes in the field.
+  _fixture_full "${tmp}/nopublish.log"
+  # The marker names are NOT interpolated into the pattern: they start with
+  # `[b9]`, which sed reads as a character class. Every fixture here mutates
+  # the suffix for that reason.
+  sed -i 's/IDLE_OK accepted=1/IDLE_DEAD reason=unacked/' \
+    "${tmp}/nopublish.log"
+  rc=0; b9_run_oracle "${tmp}/nopublish.log" "${tmp}/host.log" >/dev/null || rc=1
+  _case "publish pool that never woke is REPORTED" 1 "${rc}"
+  if (( rc == 1 )) && [[ "${B9_FINDINGS[*]}" != *"PUBLISH POOL DID NOT COME BACK"* ]]; then
+    printf '  \033[1;31mFAIL\033[0m dead publish pool is not named as the finding\n' >&2
+    fails=1
+  fi
+
+  # (16c) THE NEGATIVE-TWIN TRAP for the new pair: the DEAD marker must never
+  #      satisfy a search for the OK one, or the fixture above would pass.
+  printf '%s\n' "I/flutter ( 40): ${MARK_PUBLISH_IDLE_DEAD} reason=unacked" \
+    > "${tmp}/twin4.log"
+  rc=0; b9_has_marker "${tmp}/twin4.log" "${MARK_PUBLISH_IDLE}" || rc=1
+  _case "negative twin does not satisfy its positive (publish pool)" 1 "${rc}"
+
+  # (16d) A capture that reached the verdict and printed NEITHER marker is a
+  #      finding too — an absent check is not a passed one.
+  _fixture_full "${tmp}/nopubmark.log"
+  sed -i '/PUBLISH_AFTER_IDLE_OK accepted=1/d' "${tmp}/nopubmark.log"
+  rc=0; b9_run_oracle "${tmp}/nopubmark.log" "${tmp}/host.log" >/dev/null || rc=1
+  _case "absent publish-plane verdict fails the lane" 1 "${rc}"
 
   # (17) A truncated capture (the drive died) must say so FIRST, so its
   #      downstream absences are not misread as product defects.

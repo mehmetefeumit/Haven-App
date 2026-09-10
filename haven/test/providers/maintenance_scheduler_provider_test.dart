@@ -5,11 +5,14 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/constants/profile_refresh_tiers.dart';
+import 'package:haven/src/providers/background_location_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/key_package_provider.dart';
+import 'package:haven/src/providers/location_provider.dart';
 import 'package:haven/src/providers/maintenance_scheduler_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/rust/api.dart';
+import 'package:haven/src/services/background_location_manager.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/maintenance_service.dart';
 import 'package:haven/src/services/relay_service.dart';
@@ -43,6 +46,16 @@ class _FakeMaintenanceService extends MaintenanceService {
   int relayListCalls = 0;
   int healthCalls = 0;
 
+  /// True while a GATED task call is blocked mid-flight. In the burst-fold
+  /// tests that window is precisely the window a burst is open — the fold runs
+  /// inside the burst, between its engine re-anchor and its pause — so it is
+  /// what lets a test assert on the INTERLEAVING rather than on a total that
+  /// could be zero for some unrelated reason.
+  bool foldInFlight = false;
+
+  /// Health calls that landed while [foldInFlight] was true.
+  int healthCallsDuringFold = 0;
+
   /// When set, the KP task blocks on this until completed (overlap tests).
   Completer<void>? kpGate;
 
@@ -70,22 +83,54 @@ class _FakeMaintenanceService extends MaintenanceService {
     kpCalls++;
     if (throwOnKp) throw StateError('kp boom');
     final gate = kpGateFor?.call(callIndex) ?? kpGate;
-    if (gate != null) await gate.future;
+    if (gate != null) await _gated(gate);
     return kpOutcome;
   }
 
   @override
   Future<RelayListMaintenanceResult> maintainRelayList() async {
     relayListCalls++;
-    if (relayListGate != null) await relayListGate!.future;
+    if (relayListGate != null) await _gated(relayListGate!);
     return const RelayListMaintenanceResult.empty();
   }
 
   @override
   Future<SubscriptionHealthResult> maintainSubscriptionHealth() async {
     healthCalls++;
+    if (foldInFlight) healthCallsDuringFold++;
     return const SubscriptionHealthResult.empty();
   }
+
+  /// Awaits [gate] with [foldInFlight] raised for exactly that window.
+  Future<void> _gated(Completer<void> gate) async {
+    foldInFlight = true;
+    try {
+      await gate.future;
+    } finally {
+      foldInFlight = false;
+    }
+  }
+}
+
+/// A [BackgroundSharingNotifier] pinned to a value, with no platform reads.
+///
+/// The real one loads from `SharedPreferences` on construction and holds the
+/// iOS session bridges; none of that has anything to say about scheduling.
+class _FixedBackgroundSharingNotifier extends BackgroundSharingNotifier {
+  _FixedBackgroundSharingNotifier({required bool enabled})
+    : super(
+        ensurePermissions: () async => const EnsurePermissionsGranted(),
+        isAndroid: false,
+        isIOS: false,
+      ) {
+    state = enabled;
+  }
+
+  /// The persisted consent, settable the way the notifier's async load sets
+  /// it when it resolves after a pause already read the constructor's `false`
+  /// (the R1 race).
+  bool get persistedConsent => state;
+  set persistedConsent(bool value) => state = value;
 }
 
 /// A maintenance service whose health task throws (fail-soft health test).
@@ -109,14 +154,28 @@ final _testIdentity = Identity(
 /// login-publish provider (so the first KeyPackage tick's causal handoff does
 /// not try to build the real publisher). [loginPublish] defaults to an
 /// immediately-resolved success.
+///
+/// [isIOS] and [backgroundSharing] are the pair the scheduler consults to
+/// decide whether a backgrounded process is still RECEIVING (both true = the
+/// iOS keep-alive branch of `MapShell._onPaused`). Both are overridden on
+/// every container so no test reaches the real `SharedPreferences`-backed
+/// notifier or the host runner's platform.
 ProviderContainer _containerWith(
   _FakeMaintenanceService fake, {
   Future<KeyPackageMaintenanceOutcome>? loginPublish,
   MockProfileService? profileService,
+  bool isIOS = false,
+  bool backgroundSharing = false,
+  DateTime Function()? clock,
 }) {
   return ProviderContainer(
     overrides: [
       maintenanceServiceProvider.overrideWithValue(fake),
+      if (clock != null) maintenanceClockProvider.overrideWithValue(clock),
+      isIOSProvider.overrideWithValue(isIOS),
+      backgroundSharingProvider.overrideWith(
+        (_) => _FixedBackgroundSharingNotifier(enabled: backgroundSharing),
+      ),
       keyPackagePublisherProvider.overrideWith(
         (ref) =>
             loginPublish ??
@@ -202,6 +261,330 @@ void main() {
         expect(fake.relayListCalls, 1);
         expect(fake.healthCalls, 1);
         expect(fake.kpCalls, 1);
+
+        container.dispose();
+      });
+    });
+  });
+
+  group('MaintenanceScheduler — foreground gate', () {
+    // The three relay-contacting tasks (KeyPackage 10 min, relay list 30 min,
+    // subscription health 15 min) used to keep firing while the app was away,
+    // opening relay sockets unrelated to any send — on Android they rode the
+    // publish pool, so the periodic connect happened whether or not anything
+    // needed publishing. `MapShell` is NOT disposed when the app backgrounds
+    // (the main isolate stays alive for background sharing), so widget
+    // lifetime is not a foreground proxy.
+    //
+    // The gate is platform-neutral by construction: it reads the app
+    // lifecycle. The tests below that DO name a platform name the iOS
+    // background-sharing pair on purpose — that branch used to be the one
+    // exception to the gate, and P4 (where the paused process receives by
+    // bounded burst) is what removed the job the exception existed for.
+
+    test('a pause costs no relay work at all, not even one armed tick', () {
+      fakeAsync((async) {
+        final binding = TestWidgetsFlutterBinding.ensureInitialized();
+        // Restored even if an expectation below fails: the binding's lifecycle
+        // state is process-wide, so a leaked `paused` would silently disarm
+        // every later test in this file.
+        addTearDown(
+          () => binding.handleAppLifecycleStateChanged(
+            AppLifecycleState.resumed,
+          ),
+        );
+        final fake = _FakeMaintenanceService();
+        final container = _containerWith(fake);
+        final notifier = container.read(maintenanceSchedulerProvider.notifier);
+        expect(
+          notifier.foregroundGatedTimersArmedForTest,
+          isTrue,
+          reason: 'anti-vacuity: a foreground launch must arm them',
+        );
+
+        // Exactly what `MapShell._onPaused` does.
+        binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+        notifier.suspendForBackground();
+
+        // BEFORE any elapse. The arming gate alone only refuses to RE-arm
+        // after a tick settles, so without the explicit cancel a pause landing
+        // between two ticks still bought one KeyPackage + one relay-list +
+        // one health round-trip from the timers already armed — relay sockets
+        // opened for a backgrounded device, unrelated to any send.
+        expect(
+          notifier.foregroundGatedTimersArmedForTest,
+          isFalse,
+          reason: 'the pause must cancel the armed timers, not merely decline '
+              'to re-arm them after they fire',
+        );
+
+        async
+          ..elapse(const Duration(hours: 2))
+          ..flushMicrotasks();
+        expect(
+          fake.kpCalls + fake.relayListCalls + fake.healthCalls,
+          0,
+          reason: 'two hours of being away must cost no relay work at all',
+        );
+
+        container.dispose();
+      });
+    });
+
+    test('a settled tick leaves its timer unarmed while backgrounded', () {
+      // The other half of the gate: the pause cancel above covers the timers
+      // that were already armed, this covers a tick that was mid-flight when
+      // the pause landed and comes back to reschedule itself.
+      fakeAsync((async) {
+        final binding = TestWidgetsFlutterBinding.ensureInitialized();
+        addTearDown(
+          () => binding.handleAppLifecycleStateChanged(
+            AppLifecycleState.resumed,
+          ),
+        );
+        final fake = _FakeMaintenanceService();
+        final container = _containerWith(fake);
+        final notifier = container.read(maintenanceSchedulerProvider.notifier);
+
+        binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+        async
+          ..elapse(const Duration(minutes: 3))
+          ..flushMicrotasks();
+        expect(
+          notifier.foregroundGatedTimersArmedForTest,
+          isFalse,
+          reason: 'a tick that settles while backgrounded must leave its timer '
+              'unarmed — nothing else stops the 10/15/30 min relay probes',
+        );
+
+        final callsWhileAway =
+            fake.kpCalls + fake.relayListCalls + fake.healthCalls;
+        async
+          ..elapse(const Duration(hours: 2))
+          ..flushMicrotasks();
+        expect(
+          fake.kpCalls + fake.relayListCalls + fake.healthCalls,
+          callsWhileAway,
+          reason: 'and nothing may come back on its own afterwards',
+        );
+
+        container.dispose();
+      });
+    });
+
+    test('the health tick is never armed while the engine is paused', () {
+      // THE RECEIVE HALF, on the branch that used to be the exception to the
+      // whole gate. On iOS with background sharing on, the paused process is a
+      // BURST receiver: between publish ticks the engine holds no REQ and no
+      // socket, and each burst re-anchors every REQ at its persisted cursor on
+      // the way in — every 72-168 s, far more often than a 15 min tick.
+      //
+      // A health timer surviving here can only take that back. The engine's
+      // health tick short-circuits only while `paused` is ALREADY true when it
+      // enters, and a burst clears that flag for its whole duration: a tick
+      // landing inside one passes the gate, reads the mid-`connect()` pool as
+      // dropped, and repairs it through the FOREGROUND re-anchor — standing
+      // REQs, an inbox REQ replaying 49 h of gift wraps keyed on this device's
+      // own pubkey, and a socket held open until the next burst's pause, at an
+      // instant that is not a publish. Between bursts it is a background wake
+      // that inspects nothing.
+      fakeAsync((async) {
+        final binding = TestWidgetsFlutterBinding.ensureInitialized();
+        addTearDown(
+          () => binding.handleAppLifecycleStateChanged(
+            AppLifecycleState.resumed,
+          ),
+        );
+        final fake = _FakeMaintenanceService();
+        final container = _containerWith(
+          fake,
+          isIOS: true,
+          backgroundSharing: true,
+        );
+        final notifier = container.read(maintenanceSchedulerProvider.notifier);
+        expect(
+          notifier.healthArmedForTest,
+          isTrue,
+          reason: 'anti-vacuity: a foreground launch must arm health',
+        );
+
+        binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+        notifier.suspendForBackground();
+        expect(
+          notifier.healthArmedForTest,
+          isFalse,
+          reason: 'the pause must cancel the health timer on THIS branch too — '
+              'it is the one timer that used to survive it',
+        );
+
+        // 15 min nominal, jittered ±25 %, so a surviving loop would show at
+        // least 2h / (15min * 1.25) = 6 ticks, and a single armed timer 1.
+        async
+          ..elapse(const Duration(hours: 2))
+          ..flushMicrotasks();
+        expect(
+          fake.healthCalls,
+          0,
+          reason: 'two hours of being away must cost no health tick at all: '
+              'the burst is the repair, and it runs every 72-168 s',
+        );
+        expect(fake.kpCalls, 0);
+        expect(fake.relayListCalls, 0);
+
+        container.dispose();
+      });
+    });
+
+    test('the receive repair comes back on the way in, not while away', () {
+      // What the old carve-out was really afraid of: a loop that fires once
+      // and then stays dead, because the tick's own `finally` re-arms through
+      // the same gate that refused. Foreground-only must not mean gone —
+      // `rearmForForeground` brings it back, and nothing else has to.
+      fakeAsync((async) {
+        final binding = TestWidgetsFlutterBinding.ensureInitialized();
+        addTearDown(
+          () => binding.handleAppLifecycleStateChanged(
+            AppLifecycleState.resumed,
+          ),
+        );
+        final fake = _FakeMaintenanceService();
+        final container = _containerWith(
+          fake,
+          isIOS: true,
+          backgroundSharing: true,
+        );
+        final notifier = container.read(maintenanceSchedulerProvider.notifier);
+
+        binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+        notifier.suspendForBackground();
+        async
+          ..elapse(const Duration(hours: 2))
+          ..flushMicrotasks();
+        expect(fake.healthCalls, 0, reason: 'nothing while away');
+
+        // Exactly what `MapShell._onResumed` does.
+        binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+        notifier.rearmForForeground();
+        expect(notifier.healthArmedForTest, isTrue);
+
+        // Its NORMAL jittered interval, so at most 18 min 45 s.
+        async
+          ..elapse(const Duration(minutes: 20))
+          ..flushMicrotasks();
+        expect(
+          fake.healthCalls,
+          greaterThanOrEqualTo(1),
+          reason: 'the repair must be running again once there is something '
+              'to repair — a foreground session holds standing REQs',
+        );
+
+        container.dispose();
+      });
+    });
+
+    test('a health timer that outlives the pause handler contacts nothing',
+        () {
+      // The gate cannot rest on `suspendForBackground` alone: that is a call
+      // `MapShell` makes, and a timer armed in the foreground fires whenever
+      // it fires — including after the OS pause and before the pause handler
+      // has run, on the one branch that keeps this isolate executable. So the
+      // tick re-reads the lifecycle before it touches the engine, and a tick
+      // that finds itself backgrounded contacts nothing and arms nothing.
+      fakeAsync((async) {
+        final binding = TestWidgetsFlutterBinding.ensureInitialized();
+        addTearDown(
+          () => binding.handleAppLifecycleStateChanged(
+            AppLifecycleState.resumed,
+          ),
+        );
+        final fake = _FakeMaintenanceService();
+        final container = _containerWith(
+          fake,
+          isIOS: true,
+          backgroundSharing: true,
+        );
+        final notifier = container.read(maintenanceSchedulerProvider.notifier);
+        expect(
+          notifier.healthArmedForTest,
+          isTrue,
+          reason: 'anti-vacuity: the timer under test must really be armed',
+        );
+
+        // The pause WITHOUT the pause handler: the armed timer is still live.
+        binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+
+        async
+          ..elapse(const Duration(hours: 2))
+          ..flushMicrotasks();
+        expect(
+          fake.healthCalls,
+          0,
+          reason: 'a tick that fires while the app is away must not reach the '
+              'engine, whatever armed it',
+        );
+        expect(
+          notifier.healthArmedForTest,
+          isFalse,
+          reason: 'and it must not put itself back — the resume owns that',
+        );
+
+        container.dispose();
+      });
+    });
+
+    test('a mid-pause consent flip to on arms nothing at all', () {
+      // R1: a pause that raced the background-sharing notifier's async load
+      // read a stale `false`; when the persisted consent resolves `true`, the
+      // paused process becomes a background sharer and `MapShell`'s mid-pause
+      // consent watcher calls the scheduler on that edge.
+      //
+      // The right answer there is now NOTHING. The receive path that edge
+      // switches on is the burst — which re-anchors on its own way in — so an
+      // armed health timer would only reintroduce a background wake that can
+      // re-open standing REQs between bursts, on exactly the branch the hole
+      // was found on. The publishing tasks stay away for their own reason:
+      // neither has a background consumer.
+      fakeAsync((async) {
+        final binding = TestWidgetsFlutterBinding.ensureInitialized();
+        addTearDown(
+          () => binding.handleAppLifecycleStateChanged(
+            AppLifecycleState.resumed,
+          ),
+        );
+        final fake = _FakeMaintenanceService();
+        final container = _containerWith(fake, isIOS: true);
+        final notifier = container.read(maintenanceSchedulerProvider.notifier);
+
+        binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+        notifier.suspendForBackground();
+        async
+          ..elapse(const Duration(hours: 1))
+          ..flushMicrotasks();
+        expect(
+          fake.healthCalls,
+          0,
+          reason: 'anti-vacuity: the stale-false pause must really have left '
+              'nothing armed',
+        );
+
+        // The persisted consent resolves true, and the watcher calls in.
+        (container.read(backgroundSharingProvider.notifier)
+                as _FixedBackgroundSharingNotifier)
+            .persistedConsent = true;
+        notifier.rearmHealthForBackgroundReceive();
+        expect(
+          notifier.healthArmedForTest,
+          isFalse,
+          reason: 'the consent edge must not arm a background health timer: '
+              'the burst it switches on is the repair',
+        );
+
+        async
+          ..elapse(const Duration(hours: 1))
+          ..flushMicrotasks();
+        expect(fake.healthCalls, 0);
+        expect(fake.kpCalls, 0);
+        expect(fake.relayListCalls, 0);
 
         container.dispose();
       });
@@ -922,6 +1305,240 @@ void main() {
       // Cleanup: release B.
       gateB.complete();
       await tickB;
+    });
+  });
+
+  group('MaintenanceScheduler — background burst fold (P4)', () {
+    // While backgrounded on iOS the KeyPackage and relay-list timers are not
+    // armed at all (the foreground gate), so the ONLY way either task runs is
+    // a background burst folding it in on the socket the publish just warmed.
+    // Two opposite ways to get this wrong: fold on every burst (a reachability
+    // publish every 72-168 s, which is the battery cost this phase exists to
+    // remove) or never fold (nobody can invite the account for the whole
+    // background window). The deadline is what separates them.
+
+    /// Puts the binding in the paused state a burst actually runs in, and
+    /// restores it — the state is process-wide, so a leak would silently
+    /// disarm every later test in this file.
+    void background() {
+      final binding = TestWidgetsFlutterBinding.ensureInitialized();
+      addTearDown(
+        () => binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed),
+      );
+      binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+    }
+
+    final t0 = DateTime(2026, 9, 7, 12);
+
+    test('a task that is not yet due is not folded in', () async {
+      final fake = _FakeMaintenanceService();
+      final container = _containerWith(fake, clock: () => t0);
+      final notifier = container.read(maintenanceSchedulerProvider.notifier);
+
+      // Initial deadlines: relay list at +1 min, KeyPackage at +2 min.
+      await notifier.runKeyPackageIfDue(t0.add(const Duration(seconds: 59)));
+      await notifier.runRelayListIfDue(t0.add(const Duration(seconds: 59)));
+
+      expect(fake.kpCalls, 0);
+      expect(fake.relayListCalls, 0);
+    });
+
+    test('a task whose deadline has passed is folded in', () async {
+      final fake = _FakeMaintenanceService();
+      final container = _containerWith(fake, clock: () => t0);
+      final notifier = container.read(maintenanceSchedulerProvider.notifier);
+
+      await notifier.runRelayListIfDue(t0.add(const Duration(minutes: 1)));
+      await notifier.runKeyPackageIfDue(t0.add(const Duration(minutes: 2)));
+
+      expect(fake.relayListCalls, 1);
+      expect(fake.kpCalls, 1);
+    });
+
+    test('a fold runs neither task a second time before the next deadline',
+        () async {
+      // The deadline has to MOVE when the task runs, or every later burst in
+      // the background window would republish.
+      var now = t0;
+      final fake = _FakeMaintenanceService();
+      final container = _containerWith(fake, clock: () => now);
+      final notifier = container.read(maintenanceSchedulerProvider.notifier);
+
+      now = t0.add(const Duration(minutes: 2));
+      await notifier.runKeyPackageIfDue(now);
+      expect(fake.kpCalls, 1);
+
+      // Two more bursts, one publish interval apart. The re-armed nominal
+      // deadline is 10 min ± 25 %, so 168 s later is inside it whatever the
+      // jitter sampled.
+      now = now.add(const Duration(seconds: 168));
+      await notifier.runKeyPackageIfDue(now);
+      now = now.add(const Duration(seconds: 168));
+      await notifier.runKeyPackageIfDue(now);
+
+      expect(
+        fake.kpCalls,
+        1,
+        reason: 'the fold must respect the deadline the tick just re-armed',
+      );
+    });
+
+    test('the fold never runs the subscription-health tick', () async {
+      // A paused engine holds no REQ, so the health tick would probe nothing
+      // and answer `paused` — a relay round trip for no information. It is
+      // absent from `BurstMaintenance` by construction; this proves the two
+      // fold entry points do not reach it by another route.
+      final fake = _FakeMaintenanceService();
+      final container = _containerWith(fake, clock: () => t0);
+      final notifier = container.read(maintenanceSchedulerProvider.notifier);
+
+      await notifier.runKeyPackageIfDue(t0.add(const Duration(minutes: 30)));
+      await notifier.runRelayListIfDue(t0.add(const Duration(minutes: 30)));
+
+      expect(fake.kpCalls, 1);
+      expect(fake.relayListCalls, 1);
+      expect(fake.healthCalls, 0);
+    });
+
+    test('no health tick can land inside a burst', () {
+      // The collision P4 has to make impossible. The engine's health tick
+      // short-circuits only if `paused` is ALREADY true when it enters, and a
+      // burst clears that flag from its open until its pause — so a tick
+      // landing in between passes the gate, reads the mid-`connect()` pool as
+      // dropped (`Terminated` counts as disconnected) and repairs it with the
+      // FOREGROUND re-anchor: standing REQs, the inbox REQ's 49 h gift-wrap
+      // replay keyed on this device's own pubkey, and a socket held until the
+      // next burst's pause — plus a `reset_commit_activity` that can make the
+      // burst's own settle return early on a burst that DID see commits.
+      //
+      // That race lives inside the Rust call, so a Dart-side re-read could not
+      // close it. What closes it is that no health timer exists while the app
+      // is away, and therefore none can fire into a burst.
+      fakeAsync((async) {
+        final binding = TestWidgetsFlutterBinding.ensureInitialized();
+        addTearDown(
+          () => binding.handleAppLifecycleStateChanged(
+            AppLifecycleState.resumed,
+          ),
+        );
+        final fake = _FakeMaintenanceService()..kpGate = Completer<void>();
+        final container = _containerWith(
+          fake,
+          isIOS: true,
+          backgroundSharing: true,
+          clock: () => t0,
+        );
+        final notifier = container.read(maintenanceSchedulerProvider.notifier);
+
+        // The pause a burst runs in, exactly as `MapShell._onPaused` leaves it.
+        binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+        notifier.suspendForBackground();
+
+        // A burst opens and reaches its maintenance fold, which is held open:
+        // for the whole of this window the engine is UNPAUSED and its health
+        // gate is down.
+        unawaited(
+          notifier.runKeyPackageIfDue(t0.add(const Duration(minutes: 2))),
+        );
+        async.flushMicrotasks();
+        expect(
+          fake.foldInFlight,
+          isTrue,
+          reason: 'anti-vacuity: the burst must really be open',
+        );
+        expect(
+          notifier.healthArmedForTest,
+          isFalse,
+          reason: 'no health timer may exist while a burst is open',
+        );
+
+        // Longer than any burst and than several 15 min ticks.
+        async
+          ..elapse(const Duration(hours: 2))
+          ..flushMicrotasks();
+        expect(
+          fake.healthCallsDuringFold,
+          0,
+          reason: 'a health tick inside a burst re-anchors through the '
+              'foreground path and leaves standing REQs behind it',
+        );
+        expect(fake.healthCalls, 0, reason: 'and none outside one either');
+
+        fake.kpGate!.complete();
+        async.flushMicrotasks();
+        expect(
+          fake.foldInFlight,
+          isFalse,
+          reason: 'the burst really closed — the window above was bounded',
+        );
+
+        container.dispose();
+      });
+    });
+
+    test('a due task folded in while backgrounded arms no timer of its own',
+        () async {
+      // R14: a background Dart timer is a wake source, and the whole phase is
+      // about removing wake sources. The tick's re-arm records the next
+      // deadline and stops at the foreground gate.
+      background();
+      final fake = _FakeMaintenanceService();
+      final container = _containerWith(fake, clock: () => t0);
+      final notifier = container.read(maintenanceSchedulerProvider.notifier);
+      expect(
+        notifier.foregroundGatedTimersArmedForTest,
+        isFalse,
+        reason: 'anti-vacuity: a backgrounded launch arms none of them',
+      );
+
+      await notifier.runKeyPackageIfDue(t0.add(const Duration(minutes: 2)));
+      await notifier.runRelayListIfDue(t0.add(const Duration(minutes: 2)));
+
+      expect(fake.kpCalls, 1);
+      expect(fake.relayListCalls, 1);
+      expect(
+        notifier.foregroundGatedTimersArmedForTest,
+        isFalse,
+        reason: 'the fold ran the work and armed nothing — the next burst is '
+            'what brings the task back',
+      );
+    });
+
+    test('a fold does not overlap a tick that is already in flight', () async {
+      final fake = _FakeMaintenanceService()..kpGate = Completer<void>();
+      final container = _containerWith(fake, clock: () => t0);
+      final notifier = container.read(maintenanceSchedulerProvider.notifier);
+
+      final first = notifier.runKeyPackageIfDue(
+        t0.add(const Duration(minutes: 2)),
+      );
+      await pumpEventQueue();
+      expect(fake.kpCalls, 1);
+      expect(notifier.keyPackageInFlightForTest, isTrue);
+
+      await notifier.runKeyPackageIfDue(t0.add(const Duration(minutes: 2)));
+      expect(
+        fake.kpCalls,
+        1,
+        reason: 'the fold reuses the tick, so it reuses the no-overlap guard',
+      );
+
+      fake.kpGate!.complete();
+      await first;
+    });
+
+    test('a fold after logout runs nothing', () async {
+      final fake = _FakeMaintenanceService();
+      final container = _containerWith(fake, clock: () => t0);
+      final notifier = container.read(maintenanceSchedulerProvider.notifier)
+        ..suspendForBackground();
+      container.dispose();
+
+      await notifier.runKeyPackageIfDue(t0.add(const Duration(hours: 1)));
+      await notifier.runRelayListIfDue(t0.add(const Duration(hours: 1)));
+
+      expect(fake.kpCalls, 0);
+      expect(fake.relayListCalls, 0);
     });
   });
 }

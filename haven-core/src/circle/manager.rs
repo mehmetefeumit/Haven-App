@@ -159,6 +159,21 @@ pub struct CircleManager {
     /// re-stamp those people `Current` with the never-purge sentinel on every
     /// pass, and no removal there could ever be observed.
     unrecoverable_groups: Mutex<HashSet<GroupId>>,
+    /// Removal-bearing receive-side auto-commits this device OWES a publish
+    /// for, keyed by circle — see [`Self::owe_removal_publish`].
+    ///
+    /// At most one entry per circle, because a group holds at most one staged
+    /// commit. Written by EVERY plane that takes such a commit, BEFORE it opens
+    /// the publish-before-apply window rather than after that window fails — so
+    /// the wedge a plane can leave behind is recorded whichever plane leaves it,
+    /// and the detector is not blind to the planes that are not live-sync.
+    ///
+    /// In-memory because a [`PendingStateRef`] is: it is an engine handle valid
+    /// for the life of this session and unresolvable after it. The DURABLE half
+    /// lives in `deferred_removal_commits`, and the two disagreeing is the
+    /// signal: a durable row this map does not know is an obligation a previous
+    /// session took and never discharged.
+    removal_deferrals: Mutex<HashMap<[u8; 32], CommitToPublish>>,
     pub(crate) storage: CircleStorage,
 }
 
@@ -222,6 +237,7 @@ impl CircleManager {
             directory_lock: tokio::sync::Mutex::new(()),
             directory_flight: Mutex::new(DirectoryFlight::default()),
             unrecoverable_groups: Mutex::new(HashSet::new()),
+            removal_deferrals: Mutex::new(HashMap::new()),
             storage,
         })
     }
@@ -342,6 +358,7 @@ impl CircleManager {
             directory_lock: tokio::sync::Mutex::new(()),
             directory_flight: Mutex::new(DirectoryFlight::default()),
             unrecoverable_groups: Mutex::new(HashSet::new()),
+            removal_deferrals: Mutex::new(HashMap::new()),
             storage,
         })
     }
@@ -1378,7 +1395,22 @@ impl CircleManager {
     /// Returns an error if the circle-row deletion fails. The directory refresh
     /// is best-effort and never fails the leave.
     pub async fn complete_leave(&self, mls_group_id: &GroupId, now_unix_secs: i64) -> Result<()> {
+        // The in-memory half of an owed removal publish has to go with the row
+        // `delete_circle` cascades away. The `nostr_group_id` is only resolvable
+        // while the circle row still exists, so it is read FIRST; an entry left
+        // behind would pin an `Event` and a dead engine ref to a circle that no
+        // longer exists, and would answer `orphaned_removal_deferrals` for a
+        // durable row that is already gone.
+        let ngid = self
+            .storage
+            .get_circle(mls_group_id)
+            .ok()
+            .flatten()
+            .map(|circle| circle.nostr_group_id);
         let _existed = self.storage.delete_circle(mls_group_id)?;
+        if let Some(ngid) = ngid {
+            self.forget_removal_deferral_in_memory(&ngid);
+        }
         self.reconcile_member_directory_at(DirectoryReconcile::Rewrite, now_unix_secs)
             .await;
         Ok(())
@@ -1429,6 +1461,13 @@ impl CircleManager {
             Ok(effects) => effects,
             Err(e) => return Err(e),
         };
+        // An APPLIED commit is the obligation discharged. Every plane records a
+        // removal-bearing auto-commit before it publishes, so without this each
+        // peer-leave would leave a durable row behind and the next foreground
+        // open would report a perfectly healthy circle unrecoverable. Only on
+        // success: a rejected confirm leaves the commit exactly as staged as it
+        // was, and the obligation with it.
+        self.discharge_owed_removal_publish(pending);
         let _ = self.take_create_pending(pending);
         // A repair rotation spends its circle's 24-hour rate limit HERE, not
         // when it was staged: a commit no relay accepted reset nobody's ratchet,
@@ -1457,10 +1496,30 @@ impl CircleManager {
     /// Reports that a staged publish failed; the engine discards the staged
     /// commit and returns the group to `Stable` at the prior epoch.
     ///
+    /// # The one commit it will NOT discard
+    ///
+    /// A removal-bearing receive-side auto-commit — a peer's `SelfRemove`
+    /// eviction — is never rolled back, from any plane. At MDK `e391adc` that
+    /// rollback is a PERMANENT SILENT DROP of the removal, so the leaver would
+    /// stay in the circle and keep deriving its keys
+    /// ([`Self::owe_removal_publish`] carries the mechanism). Every plane that
+    /// takes one records the obligation first, and this is the ONE place that
+    /// decides what an unacked publish means — so the guarantee covers the
+    /// in-Rust receive planes, the Dart planes that call this over the FFI, and
+    /// a plane written after this comment, instead of resting on three call
+    /// sites agreeing. Such a commit stays STAGED and owed:
+    /// [`Self::redeem_removal_deferrals`] retries it, a successful send
+    /// discharges it ([`Self::discharge_removal_deferral_after_send`]), and a
+    /// session that dies still owing one reports the circle
+    /// ([`Self::orphaned_removal_deferrals`]).
+    ///
     /// # Errors
     ///
     /// Returns an error if the pending ref is unknown.
     pub async fn publish_failed(&self, pending: PendingStateRef) -> Result<()> {
+        if self.keeps_its_removal_publish_owed(pending) {
+            return Ok(());
+        }
         let result = self
             .session
             .publish_failed(pending)
@@ -2125,6 +2184,37 @@ impl CircleManager {
                             redact_hex_sequences(&e.to_string())
                         );
                     }
+                    // An epoch move discharges an ORPHANED obligation, and
+                    // only an orphaned one. Whatever moved the epoch merged some
+                    // commit, and a merge empties the proposal store — so the
+                    // leaver's `SelfRemove` is gone and a row this session
+                    // cannot redeem is evidence of nothing; leaving it would
+                    // report a circle that has moved on as unrecoverable. A row
+                    // this session CAN still redeem is the opposite case: the
+                    // commit is staged and the publish is still owed, and
+                    // dropping the in-memory entry would destroy the obligation
+                    // with the commit still staged — a silent drop by another
+                    // route.
+                    //
+                    // What does NOT arrive here is the case this used to claim:
+                    // a remaining peer's own commit of the SAME `SelfRemove`
+                    // emits no `EpochChanged` at all (the group record's epoch
+                    // was already projected forward when our commit was staged,
+                    // so applying theirs reports `Processed` with an empty event
+                    // batch), which is exactly why
+                    // [`Self::discharge_removal_deferral_after_send`] exists.
+                    // What does arrive is an UNRELATED peer commit landing after
+                    // an orphaned park — and this device's own confirm, which
+                    // DOES fold through here (`confirm_published` →
+                    // `publish_outcome_verdict`, and the engine returns
+                    // `EpochChanged` for every group-evolution confirm). That is
+                    // harmless rather than redundant-by-luck: the confirm has
+                    // already called [`Self::discharge_owed_removal_publish`] for
+                    // its own ref, so either this circle owed nothing (a no-op
+                    // DELETE) or it still owes a DIFFERENT, superseded ref, which
+                    // is redeemable and must survive — the same answer this arm
+                    // gives every other caller.
+                    self.clear_orphaned_removal_deferral(&circle.nostr_group_id);
                 }
                 // A group with no circle row (a create still mid-flight, or a
                 // circle already deleted) has nothing to record against.
@@ -2152,6 +2242,338 @@ impl CircleManager {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    /// Those same groups as pseudonymous `nostr_group_id`s (Security Rule 4) —
+    /// the ONLY way to observe the engine's terminal verdict more than once.
+    ///
+    /// The engine announces `Unrecoverable` for a group EXACTLY ONCE per
+    /// session: `mark_unrecoverable` latches the state, and every later
+    /// convergence run short-circuits on `is_unrecoverable` before the arm that
+    /// pushes `GroupUnrecoverable` (`cgka-engine/src/distributed_convergence.rs`
+    /// lines 238 and 401 at rev `e391adc`). `EpochState` has no accessor, so a
+    /// consumer that needs a second observation before it acts — as the wedge
+    /// report does, because telling a user to rebuild a working circle costs
+    /// them every invitation in it — cannot get one from the engine. It comes
+    /// from here.
+    ///
+    /// A group whose circle row is gone is dropped: the verdict names a circle
+    /// the consumer can act on, or it names nothing.
+    #[must_use]
+    pub fn unrecoverable_circles(&self) -> Vec<[u8; 32]> {
+        self.unrecoverable_group_ids()
+            .iter()
+            .filter_map(|group_id| self.storage.get_circle(group_id).ok().flatten())
+            .map(|circle| circle.nostr_group_id)
+            .collect()
+    }
+
+    // ===== Owed removal publishes (OD4-c options (i) and (iv)) =====
+
+    /// Parks a departing peer's eviction commit unpublished, because it surfaced
+    /// inside a BACKGROUND burst (owner decision OD4-c, option (iv)).
+    ///
+    /// [`Self::owe_removal_publish`] plus the decision NOT to publish at all: a
+    /// burst must not open a publish-before-apply window inside a wake window
+    /// the OS may end, and a removal-bearing staged commit killed in that window
+    /// is the ONE thing MDK's hydrate deliberately does not recover
+    /// (`cgka-engine/src/engine.rs:820-828` at rev `e391adc` short-circuits on
+    /// `staged_removes_member`).
+    ///
+    /// Returns `None` when the commit is parked, and hands it BACK when the
+    /// obligation could not be recorded, so the caller falls back to its normal
+    /// disposition: a park nobody can redeem OR report is worse than a publish.
+    pub fn defer_removal_commit(&self, commit: CommitToPublish) -> Option<CommitToPublish> {
+        if self.owe_removal_publish(&commit) {
+            None
+        } else {
+            Some(commit)
+        }
+    }
+
+    /// Records that this device OWES the publish of a removal-bearing
+    /// receive-side auto-commit — durably first, then in memory. Returns whether
+    /// the obligation was recorded.
+    ///
+    /// EVERY plane that takes such a commit calls this BEFORE it opens the
+    /// publish-before-apply window, never only once that window has failed.
+    /// A receive-side auto-commit is always removal-bearing (it commits a peer's
+    /// `SelfRemove`), and MDK's hydrate deliberately refuses to recover a
+    /// removal-bearing staged commit, so a process killed mid-publish leaves a
+    /// staged commit no hydrate will clear and emits no
+    /// `PendingCommitRecovered` for anyone to notice. The durable row is the only
+    /// thing that survives that, which is why it is written first and written
+    /// early: it is what turns an invisible wedge into
+    /// [`Self::orphaned_removal_deferrals`], for every plane and not just the
+    /// live-sync one. A crash between the durable write and the in-memory
+    /// registration leaves the state that REPORTS itself, never the state that
+    /// hides.
+    ///
+    /// # Why neither resolution is an alternative to recording this
+    ///
+    /// * **Confirming** without a relay ack applies a commit no peer received
+    ///   (Rule 13) — a roster fork.
+    /// * **Rolling back** is a SILENT PERMANENT DROP of the removal, verified at
+    ///   source and by experiment at the pinned rev: the engine drops the
+    ///   in-memory `scheduled_self_remove_auto_commits` entry before staging,
+    ///   `do_publish_failed` does not re-arm it, and a redelivery of the proposal
+    ///   short-circuits to `Buffered` off its durable `Created` row without ever
+    ///   rescheduling. The leaver would stay in the circle — and keep deriving
+    ///   its keys — until some unrelated commit moved the epoch. That is why
+    ///   [`Self::publish_failed`] refuses to roll one of these back.
+    ///
+    /// `false` means the obligation could NOT be recorded: the `#h` names no
+    /// circle this device holds, or the row could not be written. A caller that
+    /// was going to park must then publish instead, and a caller that was going
+    /// to publish must know that its own no-ack path can no longer keep the
+    /// removal owed.
+    pub fn owe_removal_publish(&self, commit: &CommitToPublish) -> bool {
+        let Some(ngid) = nostr_group_id_from_commit_event(&commit.commit_event) else {
+            return false;
+        };
+        // The circle must exist: the durable row is keyed by `nostr_group_id`
+        // and `delete_circle` is what cascades it away, so a row for a circle
+        // this device does not hold could never be cleared.
+        if !self
+            .storage
+            .get_all_circles()
+            .is_ok_and(|circles| circles.iter().any(|c| c.nostr_group_id == ngid))
+        {
+            return false;
+        }
+        if let Err(e) = self
+            .storage
+            .put_deferred_removal_commit(&ngid, chrono::Utc::now().timestamp_millis())
+        {
+            // The durable half is what makes the obligation loud if this process
+            // dies. Without it, holding the commit would be exactly the silent
+            // wedge OD4-c names, so report the failure to the caller.
+            log::warn!(
+                "removal publish obligation not recorded: {}",
+                redact_hex_sequences(&e.to_string())
+            );
+            return false;
+        }
+        self.removal_deferrals
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                ngid,
+                CommitToPublish {
+                    commit_event: commit.commit_event.clone(),
+                    pending: commit.pending,
+                },
+            );
+        true
+    }
+
+    /// Whether `pending` is a removal-bearing commit this device owes a publish
+    /// for — the one answer [`Self::publish_failed`] needs to know it must not
+    /// roll back.
+    ///
+    /// The obligation was recorded by the plane that took the commit, so nothing
+    /// is written here. Linear over a map that holds at most one entry per circle
+    /// mid-leave, and normally none at all.
+    ///
+    /// Matching on the REF and not on the circle is what keeps a send-side commit
+    /// for the same circle (a Remove, a relay update) rolling back normally: the
+    /// engine's `pending_counter` is monotonic within a session, so no other
+    /// staged commit can wear an owed ref's id.
+    fn keeps_its_removal_publish_owed(&self, pending: PendingStateRef) -> bool {
+        self.removal_deferrals
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .any(|commit| commit.pending == pending)
+    }
+
+    /// Clears the obligation `pending` belongs to, in memory and durably.
+    ///
+    /// [`Self::confirm_published`]'s discharge: the engine applied the eviction,
+    /// so the removal has landed and nothing is owed. The ngid is resolved from
+    /// the map rather than from the event, because that is the key the row is
+    /// under and the map is the only place the two are already joined.
+    fn discharge_owed_removal_publish(&self, pending: PendingStateRef) {
+        let owed = {
+            let deferrals = self
+                .removal_deferrals
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            deferrals
+                .iter()
+                .find(|(_, commit)| commit.pending == pending)
+                .map(|(ngid, _)| *ngid)
+        };
+        if let Some(ngid) = owed {
+            self.clear_removal_deferral(&ngid);
+        }
+    }
+
+    /// Publishes every owed eviction commit under the Rule-13 ladder and clears
+    /// the ones that land. Returns how many were confirmed.
+    ///
+    /// Call this from a FOREGROUND pass only: the whole point of the obligation
+    /// is that the publish happens where the process is not about to be
+    /// suspended. A commit that gets no relay ack STAYS owed — it is never rolled
+    /// back, because a rollback is the silent drop
+    /// [`Self::owe_removal_publish`] documents — so the next foreground pass
+    /// retries it.
+    ///
+    /// It redeems what THIS session owes, whichever plane took the commit: the
+    /// map holds the only live `PendingStateRef`s there are, and an obligation
+    /// recorded by a session that has since died is unredeemable by construction
+    /// (see [`Self::orphaned_removal_deferrals`]) — which is why a plane running
+    /// in a short-lived isolate must publish rather than park.
+    pub async fn redeem_removal_deferrals(
+        &self,
+        publisher: &dyn crate::relay::auto_commit::AutoCommitPublisher,
+    ) -> usize {
+        let owed: Vec<([u8; 32], Event, PendingStateRef)> = {
+            let deferrals = self
+                .removal_deferrals
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            deferrals
+                .iter()
+                .map(|(ngid, commit)| (*ngid, commit.commit_event.clone(), commit.pending))
+                .collect()
+        };
+        let mut confirmed = 0;
+        for (ngid, commit_event, pending) in owed {
+            let relays = self
+                .relays_for_commit_event(&commit_event)
+                .unwrap_or_default();
+            let acked =
+                !relays.is_empty() && publisher.publish_auto_commit(&commit_event, &relays).await;
+            if !acked {
+                continue;
+            }
+            if self.confirm_published(pending).await.is_err() {
+                // STAYS owed. A confirm can fail with the staged commit still
+                // attached: the engine's durable transaction propagates a lock
+                // blip BEFORE its in-memory state-machine transition, which is
+                // why upstream marks the call retry-safe
+                // (`EngineError::is_transient`). Clearing on ANY error would
+                // delete the only record of a still-owed eviction, leaving a
+                // wedge that reports nothing and a fail rung free to discard the
+                // removal — the silent drop this obligation exists to prevent.
+                // A ref that genuinely is gone costs one redundant publish per
+                // foreground open until that circle's next successful send
+                // discharges the row.
+                continue;
+            }
+            self.clear_removal_deferral(&ngid);
+            confirmed += 1;
+        }
+        confirmed
+    }
+
+    /// Every circle that owes an eviction commit, redeemable or not.
+    ///
+    /// The DURABLE view: it counts an obligation this session can still publish
+    /// and one that outlived the session which took it alike. Use
+    /// [`Self::orphaned_removal_deferrals`] for the second alone — that is the
+    /// one that is a wedge.
+    #[must_use]
+    pub fn owed_removal_commits(&self) -> Vec<[u8; 32]> {
+        self.storage.deferred_removal_commits().unwrap_or_default()
+    }
+
+    /// Circles with a DURABLE obligation row that this session cannot redeem —
+    /// the wedge OD4-c option (i) reports.
+    ///
+    /// A row with no live in-memory entry was recorded by a session that is
+    /// gone. Its `PendingStateRef` died with that session, and at MDK `e391adc`
+    /// nothing can re-derive the eviction: the engine's `SelfRemove` auto-commit
+    /// schedule is in-memory only, `do_publish_failed` does not re-arm it, and a
+    /// redelivered proposal short-circuits to `Buffered`. The circle therefore
+    /// carries a staged commit no code path will ever publish or clear, and it
+    /// cannot recover on its own.
+    ///
+    /// Returns the pseudonymous `nostr_group_id`s only (Security Rule 4).
+    #[must_use]
+    pub fn orphaned_removal_deferrals(&self) -> Vec<[u8; 32]> {
+        let Ok(rows) = self.storage.deferred_removal_commits() else {
+            return Vec::new();
+        };
+        let live = self
+            .removal_deferrals
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        rows.into_iter()
+            .filter(|ngid| !live.contains_key(ngid))
+            .collect()
+    }
+
+    /// Discharges `nostr_group_id`'s deferral because an outbound send for that
+    /// circle just SUCCEEDED.
+    ///
+    /// A successful send proves the group is `Stable` — the engine refuses one
+    /// from any other state — which proves no staged commit remains, which proves
+    /// nothing is owed. It is the ONLY positive proof available at MDK `e391adc`:
+    /// every read accessor (`epoch`, `members`, `group_record`,
+    /// `current_safe_export_epoch`) projects the post-merge state from the moment
+    /// a commit is staged, so none of them can tell a merged eviction from a
+    /// staged one.
+    ///
+    /// This is what keeps [`Self::orphaned_removal_deferrals`] from reporting a
+    /// circle another member's commit already healed: that heal arrives as
+    /// `IngestOutcome::Processed` with NO engine events (the record's epoch was
+    /// already projected forward, so nothing "changed"), so there is no event to
+    /// clear the row on — but the very next publish for that circle succeeds, and
+    /// this clears it.
+    ///
+    /// One indexed point lookup per successful send, on a table that holds at
+    /// most one row per circle mid-leave.
+    fn discharge_removal_deferral_after_send(&self, nostr_group_id: &[u8; 32]) {
+        if self
+            .storage
+            .has_deferred_removal_commit(nostr_group_id)
+            .unwrap_or(false)
+        {
+            self.clear_removal_deferral(nostr_group_id);
+        }
+    }
+
+    /// Clears `nostr_group_id`'s obligation only when this session can no
+    /// longer redeem it — the `EpochChanged` fold's discharge, argued at
+    /// [`Self::note_epoch_changes`].
+    fn clear_orphaned_removal_deferral(&self, nostr_group_id: &[u8; 32]) {
+        let redeemable = self
+            .removal_deferrals
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains_key(nostr_group_id);
+        if !redeemable {
+            self.clear_removal_deferral(nostr_group_id);
+        }
+    }
+
+    /// Drops the in-memory half of `nostr_group_id`'s obligation, leaving the
+    /// durable row to whoever owns it.
+    ///
+    /// For the one case where the row is already gone: `delete_circle` cascades
+    /// `deferred_removal_commits`, so re-issuing the DELETE would be noise and
+    /// the map is the only half left to clean up.
+    fn forget_removal_deferral_in_memory(&self, nostr_group_id: &[u8; 32]) {
+        self.removal_deferrals
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(nostr_group_id);
+    }
+
+    /// Forgets `nostr_group_id`'s obligation, in memory and durably.
+    fn clear_removal_deferral(&self, nostr_group_id: &[u8; 32]) {
+        self.removal_deferrals
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(nostr_group_id);
+        if let Err(e) = self.storage.clear_deferred_removal_commit(nostr_group_id) {
+            log::warn!(
+                "deferred removal commit not cleared: {}",
+                redact_hex_sequences(&e.to_string())
+            );
+        }
     }
 
     // ==================== Invitation Handling ====================
@@ -2424,6 +2846,11 @@ impl CircleManager {
                 .await);
         }
         let event = take_app_message(effects)?;
+        // The engine accepted an outbound message, so this group is `Stable` and
+        // holds no staged commit — the only positive proof that a deferred
+        // eviction is no longer owed. See
+        // [`Self::discharge_removal_deferral_after_send`].
+        self.discharge_removal_deferral_after_send(&circle.nostr_group_id);
 
         Ok((event, circle.nostr_group_id, circle.relays))
     }
@@ -2574,8 +3001,34 @@ impl CircleManager {
         let mut out = DeferredWork::default();
         for item in work {
             match item {
-                PublishWork::AutoPublish { msg, pending }
-                | PublishWork::GroupEvolution { msg, pending, .. } => {
+                // Split from `GroupEvolution` below for one reason: THIS is the
+                // peer `SelfRemove` eviction the engine staged inside the send,
+                // so it is removal-bearing and its publish is recorded as owed
+                // before it crosses the FFI — exactly as on the receive path
+                // ([`Self::collect_auto_commits`]). A `GroupEvolution` is a
+                // send-side commit this device authored and may legitimately
+                // roll back.
+                PublishWork::AutoPublish { msg, pending } => {
+                    match SessionManager::transport_message_to_event(msg) {
+                        Ok(commit_event) => {
+                            let commit = CommitToPublish {
+                                commit_event,
+                                pending: *pending,
+                            };
+                            if !self.owe_removal_publish(&commit) {
+                                log::warn!(
+                                    "deferred send handed back an eviction commit with no \
+                                     recorded obligation: an unacked publish will roll it back"
+                                );
+                            }
+                            out.commits.push(commit);
+                        }
+                        Err(_) => {
+                            let _ = self.publish_failed(*pending).await;
+                        }
+                    }
+                }
+                PublishWork::GroupEvolution { msg, pending, .. } => {
                     match SessionManager::transport_message_to_event(msg) {
                         Ok(commit_event) => out.commits.push(CommitToPublish {
                             commit_event,
@@ -2696,8 +3149,11 @@ impl CircleManager {
     /// [`DecryptedIngest::auto_commits`] entry's `commit_event` to the circle's
     /// relays and then [`Self::confirm_published`] on a ≥1-relay ack (or
     /// [`Self::publish_failed`] on failure) — exactly like [`CommitToPublish`]
-    /// from the send paths. An auto-commit that cannot be serialized is rolled
-    /// back here (never surfaced half-formed).
+    /// from the send paths, except that the failure rung keeps the publish OWED
+    /// instead of discarding the eviction. The obligation is recorded before the
+    /// commit is handed over ([`Self::collect_auto_commits`]). An auto-commit
+    /// that cannot be serialized is rolled back here (never surfaced
+    /// half-formed).
     ///
     /// An event Haven's receiver-side screen rejected before any MLS
     /// authentication (an expired NIP-40 replay) yields an EMPTY
@@ -2797,17 +3253,40 @@ impl CircleManager {
     }
 
     /// Converts each [`PublishWork::AutoPublish`] in `work` into a surfaced
-    /// [`CommitToPublish`]; an auto-commit whose wrapped message cannot be
-    /// serialized is rolled back ([`Self::publish_failed`]) rather than surfaced
-    /// half-formed (Rule 13: never leave a pending ref dangling).
+    /// [`CommitToPublish`], recording the publish this device now owes for it;
+    /// an auto-commit whose wrapped message cannot be serialized is rolled back
+    /// ([`Self::publish_failed`]) rather than surfaced half-formed (Rule 13:
+    /// never leave a pending ref dangling).
+    ///
+    /// The obligation is recorded HERE, not by the caller, because the caller is
+    /// across the FFI: the foreground poll plane and the Android foreground
+    /// service's publish cycle both take the commit into Dart and publish it
+    /// there. Recording it before it crosses is what makes their
+    /// publish-before-apply window survivable — a process killed mid-publish
+    /// leaves the row, and their no-ack `publishFailed` keeps the removal owed
+    /// instead of dropping it (see [`Self::owe_removal_publish`]).
     async fn collect_auto_commits(&self, work: &[PublishWork], out: &mut Vec<CommitToPublish>) {
         for item in work {
             if let PublishWork::AutoPublish { msg, pending } = item {
                 match SessionManager::transport_message_to_event(msg) {
-                    Ok(commit_event) => out.push(CommitToPublish {
-                        commit_event,
-                        pending: *pending,
-                    }),
+                    Ok(commit_event) => {
+                        let commit = CommitToPublish {
+                            commit_event,
+                            pending: *pending,
+                        };
+                        if !self.owe_removal_publish(&commit) {
+                            // Not recordable (the circle row is gone, or the DB
+                            // refused the write). Said out loud rather than
+                            // assumed away: this is the one shape in which the
+                            // caller's own no-ack path can still roll the
+                            // eviction back.
+                            log::warn!(
+                                "receive-side eviction commit surfaced with no recorded \
+                                 obligation: an unacked publish will roll it back"
+                            );
+                        }
+                        out.push(commit);
+                    }
                     Err(_) => {
                         let _ = self.publish_failed(*pending).await;
                     }
@@ -2821,11 +3300,20 @@ impl CircleManager {
     ///
     /// Back-compatible shim over [`Self::decrypt_location_collecting_commits`]
     /// for call sites (chiefly tests) that never trigger a peer `SelfRemove`. It
-    /// does NOT surface receive-side auto-commits; to stay Rule-13-safe it rolls
-    /// back ([`Self::publish_failed`]) any that surfaced rather than
+    /// does NOT surface receive-side auto-commits; to stay Rule-13-safe it
+    /// reports each as failed ([`Self::publish_failed`]) rather than
     /// optimistically applying an unpublished commit. Production receive paths use
     /// [`Self::decrypt_location_collecting_commits`] (poll → Dart publishes) or
     /// the live-sync / catch-up planes (which publish in-Rust).
+    ///
+    /// That report does NOT discard the eviction: the surfacing recorded the
+    /// obligation, so the commit stays staged and OWED
+    /// ([`Self::owe_removal_publish`]). The circle cannot send while it stands
+    /// (`create_message` refuses from `PendingPublish`), which is the honest cost
+    /// of a caller that has no relay plane — the alternative, a rollback, would
+    /// drop the removal permanently and silently and leave the circle equally
+    /// unable to send (`GroupStateError(PendingProposal)`); see
+    /// [`crate::relay::auto_commit::park_or_rollback_receive_publish_work`].
     ///
     /// # Errors
     ///
@@ -2833,7 +3321,8 @@ impl CircleManager {
     pub async fn decrypt_location(&self, event: &Event) -> Result<Vec<LocationMessageResult>> {
         let ingest = self.decrypt_location_collecting_commits(event).await?;
         for commit in ingest.auto_commits {
-            // No relay plane here — never apply an unpublished eviction commit.
+            // No relay plane here — never apply an unpublished eviction commit,
+            // and never discard it either: this leaves it staged and owed.
             let _ = self.publish_failed(commit.pending).await;
         }
         Ok(ingest.results)
@@ -3897,7 +4386,9 @@ pub struct CommitToPublish {
 /// Carries the location-facing results AND any receive-side auto-commit the
 /// engine staged (a peer `SelfRemove` eviction). Publish-before-apply (Rule 13):
 /// each [`Self::auto_commits`] entry MUST be published to the circle's relays and
-/// then confirmed on a ≥1-relay ack (or rolled back on failure).
+/// then confirmed on a ≥1-relay ack, else reported as failed — which for these
+/// commits keeps the publish OWED rather than rolling it back
+/// ([`CircleManager::owe_removal_publish`]).
 pub struct DecryptedIngest {
     /// The folded location-facing results (locations, joins, updates, …).
     pub results: Vec<LocationMessageResult>,
@@ -4022,8 +4513,12 @@ struct DeferredSendReport {
 ///   blackout.
 ///
 /// So the only correct disposition is the one the receive path already uses:
-/// hand the caller the publish → ack → `confirm_published` / `publish_failed`
-/// ladder it already runs for [`DecryptedIngest::auto_commits`].
+/// hand the caller the publish → ack → `confirm_published` /
+/// [`CircleManager::publish_failed`] ladder it already runs for
+/// [`DecryptedIngest::auto_commits`] — where the fail rung does NOT roll a
+/// removal-bearing commit back but keeps it owed
+/// ([`CircleManager::owe_removal_publish`]), which is what makes "rolling back
+/// is never a disposition" true of the Dart planes too.
 #[derive(Default)]
 pub struct DeferredWork {
     /// Staged commits: publish each, then [`CircleManager::confirm_published`]
@@ -7560,18 +8055,18 @@ mod tests {
                 .propose_leave(&gid)
                 .await
                 .expect("bob proposes to leave");
-            // Ingest WITHOUT resolving the eviction, so the proposal row is left
-            // exactly as a process killed mid-departure would leave it.
-            let ingest = alice
-                .decrypt_location_collecting_commits(&proposal)
+            // Ingest the proposal and stop there — no convergence drain, so the
+            // eviction auto-commit is scheduled but never becomes due. That is
+            // exactly the state a process killed mid-departure leaves: a stored
+            // proposal row and no staged commit. (Draining and then discarding the
+            // commit would model nothing reachable — no Haven plane may discard a
+            // removal-bearing commit, and one left staged would gate on
+            // `PendingPublish` instead, which is a different refusal.)
+            alice
+                .session()
+                .process_event(&proposal)
                 .await
                 .expect("alice ingests the proposal");
-            for commit in ingest.auto_commits {
-                alice
-                    .publish_failed(commit.pending)
-                    .await
-                    .expect("nothing was published, so nothing may be applied");
-            }
             gid
         };
 
@@ -9188,6 +9683,245 @@ mod tests {
              surface that makes it Rule-14-safe: {forbidden:?}. Reaching group writes, \
              snapshots, welcomes or mls_storage() from a non-session connection is a \
              confidentiality argument this test exists to protect."
+        );
+    }
+
+    // ── Owed removal publishes: what discharges one, and what must not ──────
+
+    /// A synthetic `kind:445` carrying `ngid` in its `#h` tag — the only field
+    /// [`CircleManager::owe_removal_publish`] reads, so an obligation can be
+    /// recorded without driving a real peer leave.
+    fn commit_event_for(ngid: &[u8; 32]) -> Event {
+        nostr::EventBuilder::new(nostr::Kind::Custom(445), "ciphertext")
+            .tag(nostr::Tag::custom(
+                nostr::TagKind::custom("h"),
+                [hex::encode(ngid)],
+            ))
+            .sign_with_keys(&Keys::generate())
+            .expect("sign the synthetic commit")
+    }
+
+    fn epoch_changed(group_id: &GroupId) -> GroupEvent {
+        GroupEvent::EpochChanged {
+            group_id: group_id.clone(),
+            from: crate::nostr::mls::types::EpochId(1),
+            to: crate::nostr::mls::types::EpochId(2),
+        }
+    }
+
+    /// D9, direction 1: an `EpochChanged` for a circle whose obligation this
+    /// session CANNOT redeem clears it — otherwise the next foreground open would
+    /// report a circle that has moved on as unrecoverable.
+    ///
+    /// This is the reachable case: an unrelated peer commit landing after an
+    /// orphaned park merges, which empties the proposal store and discards the
+    /// leaver's `SelfRemove`. The row then describes nothing.
+    #[tokio::test]
+    async fn an_epoch_change_clears_an_obligation_this_session_cannot_redeem() {
+        let (manager, keys, _dir) = create_test_manager();
+        let (gid, _member) = create_confirmed_circle(&manager, &keys, "Orphan").await;
+        let ngid = manager
+            .storage
+            .get_circle(&gid)
+            .unwrap()
+            .unwrap()
+            .nostr_group_id;
+        // The durable half ALONE: exactly what a session that died mid-leave
+        // leaves behind.
+        manager
+            .storage
+            .put_deferred_removal_commit(&ngid, 1)
+            .unwrap();
+        assert_eq!(manager.orphaned_removal_deferrals(), vec![ngid]);
+
+        manager.note_inbound_group_events(&[epoch_changed(&gid)]);
+
+        assert!(
+            manager.owed_removal_commits().is_empty(),
+            "an orphaned row must be cleared by an epoch move: the commit that \
+             moved it discarded the leaver's proposal, so the row is evidence of \
+             nothing and would be a false `GroupUnrecoverable`"
+        );
+    }
+
+    /// D9, direction 2: an `EpochChanged` must NOT clear an obligation this
+    /// session can still redeem.
+    ///
+    /// The commit is STAGED and its publish is still owed. Dropping the in-memory
+    /// entry here would destroy the only handle that can publish it while leaving
+    /// the commit staged — a silent drop of the removal by another route, and
+    /// invisible because every projected read already shows the post-eviction
+    /// roster.
+    #[tokio::test]
+    async fn an_epoch_change_does_not_clear_an_obligation_this_session_owes() {
+        let (manager, keys, _dir) = create_test_manager();
+        let (gid, _member) = create_confirmed_circle(&manager, &keys, "Owed").await;
+        let ngid = manager
+            .storage
+            .get_circle(&gid)
+            .unwrap()
+            .unwrap()
+            .nostr_group_id;
+        let pending = PendingStateRef::new(4242);
+        assert!(manager.owe_removal_publish(&CommitToPublish {
+            commit_event: commit_event_for(&ngid),
+            pending,
+        }));
+        assert!(
+            manager.orphaned_removal_deferrals().is_empty(),
+            "premise: this obligation IS redeemable by this session"
+        );
+
+        manager.note_inbound_group_events(&[epoch_changed(&gid)]);
+
+        assert_eq!(
+            manager.owed_removal_commits(),
+            vec![ngid],
+            "a live obligation survives an epoch move"
+        );
+        assert!(
+            manager.orphaned_removal_deferrals().is_empty(),
+            "and stays REDEEMABLE — the in-memory handle is what \
+             `redeem_removal_deferrals` publishes from, so losing it would wedge \
+             the circle while reporting nothing"
+        );
+    }
+
+    /// A relay plane that OK-acks every publish and records what it was handed,
+    /// so a test can prove the ladder actually reached the confirm rung.
+    struct AckingPublisher {
+        published: Mutex<Vec<Event>>,
+    }
+
+    /// The boxed future shape `AutoCommitPublisher` returns.
+    type AckFuture<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>>;
+
+    impl crate::relay::auto_commit::AutoCommitPublisher for AckingPublisher {
+        fn publish_auto_commit<'a>(
+            &'a self,
+            event: &'a Event,
+            _relays: &'a [String],
+        ) -> AckFuture<'a> {
+            self.published
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(event.clone());
+            Box::pin(async { true })
+        }
+    }
+
+    /// A publish the relay ACKED whose confirm the engine then refuses must leave
+    /// the obligation standing.
+    ///
+    /// `confirm_published` can fail with the staged commit still attached: the
+    /// engine's durable transaction propagates a lock blip BEFORE its in-memory
+    /// state-machine transition, which is exactly why upstream marks the call
+    /// retry-safe. Clearing the row on that error deletes the only record of a
+    /// still-owed eviction — nothing would retry it, `orphaned_removal_deferrals`
+    /// would never name it, and the fail rung would be free to discard the
+    /// removal, which is the permanent silent drop this obligation exists to
+    /// prevent.
+    #[tokio::test]
+    async fn a_refused_confirm_keeps_the_removal_publish_owed() {
+        let (manager, keys, _dir) = create_test_manager();
+        let (gid, _member) = create_confirmed_circle(&manager, &keys, "Refused").await;
+        let ngid = manager
+            .storage
+            .get_circle(&gid)
+            .unwrap()
+            .unwrap()
+            .nostr_group_id;
+        // A ref the engine never issued, standing in for every refusal that
+        // leaves the staged commit attached.
+        assert!(manager.owe_removal_publish(&CommitToPublish {
+            commit_event: commit_event_for(&ngid),
+            pending: PendingStateRef::new(u64::MAX),
+        }));
+
+        let publisher = AckingPublisher {
+            published: Mutex::new(Vec::new()),
+        };
+        let confirmed = manager.redeem_removal_deferrals(&publisher).await;
+
+        assert_eq!(
+            publisher
+                .published
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len(),
+            1,
+            "premise: the ladder reached the wire and got its ack, so the confirm \
+             rung is what refused — without this the assertion below would also \
+             pass for a publish that never happened"
+        );
+        assert_eq!(confirmed, 0, "a refused confirm confirms nothing");
+        assert_eq!(
+            manager.owed_removal_commits(),
+            vec![ngid],
+            "the obligation SURVIVES a refused confirm: the commit may still be \
+             staged, and the row is the only thing that would ever report it"
+        );
+    }
+
+    /// D10: deleting a circle takes the in-memory half of its obligation with the
+    /// durable row `delete_circle` cascades.
+    #[tokio::test]
+    async fn leaving_a_circle_forgets_the_removal_publish_it_owed() {
+        let (manager, keys, _dir) = create_test_manager();
+        let (gid, _member) = create_confirmed_circle(&manager, &keys, "Left").await;
+        let ngid = manager
+            .storage
+            .get_circle(&gid)
+            .unwrap()
+            .unwrap()
+            .nostr_group_id;
+        assert!(manager.owe_removal_publish(&CommitToPublish {
+            commit_event: commit_event_for(&ngid),
+            pending: PendingStateRef::new(9),
+        }));
+
+        manager.complete_leave(&gid, DIR_NOW).await.unwrap();
+
+        assert!(
+            manager.owed_removal_commits().is_empty(),
+            "the cascade removed the durable row"
+        );
+        assert!(
+            !manager.keeps_its_removal_publish_owed(PendingStateRef::new(9)),
+            "and the in-memory entry went with it: leaving it behind would pin an \
+             Event and a dead engine ref to a circle that no longer exists"
+        );
+    }
+
+    /// A confirmed publish discharges the obligation; a REJECTED one does not.
+    ///
+    /// Both halves matter. Without the discharge every peer-leave would leave a
+    /// durable row behind and the next foreground open would report a healthy
+    /// circle unrecoverable. And a confirm the engine refused leaves the commit
+    /// exactly as staged as it was, so keeping the row is what makes that wedge
+    /// visible rather than assumed away.
+    #[tokio::test]
+    async fn only_a_confirmed_publish_discharges_an_owed_removal() {
+        let (manager, keys, _dir) = create_test_manager();
+        let (gid, _member) = create_confirmed_circle(&manager, &keys, "Discharge").await;
+        let ngid = manager
+            .storage
+            .get_circle(&gid)
+            .unwrap()
+            .unwrap()
+            .nostr_group_id;
+        let unknown = PendingStateRef::new(u64::MAX);
+        assert!(manager.owe_removal_publish(&CommitToPublish {
+            commit_event: commit_event_for(&ngid),
+            pending: unknown,
+        }));
+
+        // The engine never issued this ref, so the confirm is rejected.
+        assert!(manager.confirm_published(unknown).await.is_err());
+        assert_eq!(
+            manager.owed_removal_commits(),
+            vec![ngid],
+            "a rejected confirm applied nothing, so nothing is discharged"
         );
     }
 }

@@ -669,8 +669,9 @@ impl CircleStorage {
             -- never re-opens a `since = NULL` 'send all history' window and
             -- never skips an unprocessed commit (the field epoch-desync bug).
             -- `last_synced_ms` is the raw event/rumor timestamp in
-            -- MILLISECONDS; the per-stream lookback buffer (7-day gift-wrap for
-            -- inbox, 10/60s for group) is applied live at REQ time by
+            -- MILLISECONDS; the per-stream lookback buffer (gift-wrap 7d cold
+            -- start / 49h re-anchor for inbox, 10/60s for group) is applied
+            -- live at REQ time by
             -- `since_for_stream`, never stored here. Single-identity Haven;
             -- adding an `account_pubkey` column is additive if multi-identity
             -- ever lands. Advance is a per-statement-atomic conditional UPSERT
@@ -722,6 +723,31 @@ impl CircleStorage {
             CREATE TABLE IF NOT EXISTS catchup_cutoff_holds (
                 stream TEXT PRIMARY KEY,
                 sweeps INTEGER NOT NULL
+            );
+
+            -- Removal-bearing receive-side auto-commits a BACKGROUND burst
+            -- declined to publish (OD4-c option (iv)). One row per circle whose
+            -- departing peer's eviction commit is staged in the MLS engine and
+            -- deliberately unresolved, waiting for a FOREGROUND pass to publish
+            -- it under the Rule-13 ladder.
+            --
+            -- Durable because the obligation must outlive the process, and the
+            -- `PendingStateRef` that resolves it cannot: it is an in-memory
+            -- engine handle. A row with no matching in-memory deferral therefore
+            -- means a previous session staged this eviction and died before
+            -- publishing it -- the one state this engine cannot repair at the
+            -- pinned MDK rev (the in-memory `SelfRemove` auto-commit schedule is
+            -- gone and a redelivered proposal short-circuits to `Buffered`
+            -- without rescheduling), and the ONLY signal there is that it
+            -- happened. `crate::circle::CircleManager::orphaned_removal_deferrals`
+            -- reads exactly that, and the live-sync engine turns it into a
+            -- `GroupUnrecoverable` status.
+            --
+            -- Keyed by `nostr_group_id` (the pseudonymous routing id), never the
+            -- MLS group id (Security Rule 4), and dropped with the circle.
+            CREATE TABLE IF NOT EXISTS deferred_removal_commits (
+                nostr_group_id BLOB PRIMARY KEY,
+                deferred_at_ms INTEGER NOT NULL
             );
 
             -- Dark Matter (DM-2b): identity-level tracking of the CURRENT
@@ -1611,6 +1637,14 @@ impl CircleStorage {
             )?;
             tx.execute(
                 "DELETE FROM last_known_locations WHERE nostr_group_id = ?1",
+                params![ngid],
+            )?;
+            // ...and any deferred eviction commit: the circle is gone, so an
+            // obligation to publish a commit into it is not merely stale but
+            // unactionable, and leaving the row would report the departed
+            // circle unrecoverable forever.
+            tx.execute(
+                "DELETE FROM deferred_removal_commits WHERE nostr_group_id = ?1",
                 params![ngid],
             )?;
             // ...and the delivery-health row, for the same reason: a leave must
@@ -2900,6 +2934,111 @@ impl CircleStorage {
         Ok(())
     }
 
+    // ============ Deferred Removal Commits (OD4-c option (iv)) ============
+
+    /// Records that `nostr_group_id`'s departing-peer eviction commit is staged
+    /// in the engine and was deliberately NOT published, because it surfaced
+    /// inside a background burst.
+    ///
+    /// Written BEFORE the in-memory deferral is registered, so a crash between
+    /// the two leaves the LOUD state (a durable row with no live deferral, which
+    /// reports the circle unrecoverable) rather than the silent one.
+    /// `deferred_at_ms` is a wall-clock reading kept for diagnostics only —
+    /// nothing branches on it, because a clock that moved must never decide
+    /// whether a removal is owed.
+    ///
+    /// Idempotent: a second deferral for the same circle refreshes the instant
+    /// and nothing else (there is at most one staged commit per group).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    pub fn put_deferred_removal_commit(
+        &self,
+        nostr_group_id: &[u8; 32],
+        deferred_at_ms: i64,
+    ) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        conn.execute(
+            "INSERT INTO deferred_removal_commits (nostr_group_id, deferred_at_ms) \
+             VALUES (?1, ?2) \
+             ON CONFLICT(nostr_group_id) DO UPDATE SET deferred_at_ms = ?2",
+            params![nostr_group_id.as_slice(), deferred_at_ms],
+        )?;
+        Ok(())
+    }
+
+    /// Every circle with an outstanding deferred eviction commit.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    pub fn deferred_removal_commits(&self) -> Result<Vec<[u8; 32]>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        let mut stmt = conn.prepare("SELECT nostr_group_id FROM deferred_removal_commits")?;
+        let rows = stmt.query_map([], |row| row.get::<_, Vec<u8>>(0))?;
+        let mut out = Vec::new();
+        for row in rows {
+            // A row whose key is not 32 bytes cannot name a circle, so it is
+            // skipped rather than surfaced: reporting it would name no circle
+            // the consumer could act on.
+            if let Ok(id) = <[u8; 32]>::try_from(row?.as_slice()) {
+                out.push(id);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Whether `nostr_group_id` owes a deferred eviction commit.
+    ///
+    /// A point lookup on a table that holds at most one row per circle mid-leave,
+    /// so it is cheap enough for the send path to ask on every successful
+    /// publish — which is what discharges a row a peer's commit already healed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    pub fn has_deferred_removal_commit(&self, nostr_group_id: &[u8; 32]) -> Result<bool> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        Ok(conn
+            .query_row(
+                "SELECT 1 FROM deferred_removal_commits WHERE nostr_group_id = ?1",
+                params![nostr_group_id.as_slice()],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .is_some())
+    }
+
+    /// Clears `nostr_group_id`'s deferral — the eviction commit was published
+    /// and confirmed, or the epoch moved past it under a peer's commit.
+    ///
+    /// Idempotent.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    pub fn clear_deferred_removal_commit(&self, nostr_group_id: &[u8; 32]) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        conn.execute(
+            "DELETE FROM deferred_removal_commits WHERE nostr_group_id = ?1",
+            params![nostr_group_id.as_slice()],
+        )?;
+        Ok(())
+    }
+
     // ==================== Gift Wrap Idempotency ====================
 
     /// Checks whether a gift-wrap (kind 1059) wrapper event has already been
@@ -3057,11 +3196,17 @@ impl CircleStorage {
     /// A dedup row must outlive the wrapper it dedups: the inbox poller
     /// re-fetches every kind-1059 gift wrap whose `created_at` is within
     /// [`crate::relay::cursor::INBOX_GIFTWRAP_LOOKBACK_SECS`] of the cursor
-    /// (7 days, widened by NIP-59's ±48h backdating). If we pruned a dedup
+    /// (7 days, widened by NIP-59's 48h backdating). If we pruned a dedup
     /// row while its wrapper is still re-fetchable, the already-consumed
     /// `KeyPackage` would be re-admitted to MDK and fail with "invalid welcome".
     /// So retention is the inbox lookback plus a 48h margin, referenced from
     /// the lookback const so the two cannot drift apart.
+    ///
+    /// The inbox lookback is phase-dependent — a re-subscription asks for only
+    /// [`crate::relay::cursor::INBOX_RESUBSCRIBE_LOOKBACK_SECS`] — so deriving
+    /// retention from the `Initial` constant alone is correct only while that
+    /// stays the WIDER of the two. `retention_const_exceeds_inbox_lookback`
+    /// pins both halves at compile time.
     pub const PROCESSED_GIFT_WRAP_RETENTION_SECS: i64 =
         crate::relay::cursor::INBOX_GIFTWRAP_LOOKBACK_SECS + 48 * 3600;
 
@@ -4591,13 +4736,21 @@ mod tests {
     fn retention_const_exceeds_inbox_lookback() {
         // FIX-1 invariant: a dedup row must outlive its wrapper's re-fetch
         // window, else a still-refetchable wrapper re-admits a consumed
-        // `KeyPackage`. Retention must be STRICTLY greater than the inbox
-        // gift-wrap lookback. Both are consts, so assert at compile time.
+        // `KeyPackage`. Retention must be STRICTLY greater than the WIDEST
+        // inbox lookback any phase can ask for. Retention is derived from the
+        // `Initial` constant, so the second assertion is what makes the first
+        // one cover the `Resubscribe` phase too. All consts: compile time.
         const {
             assert!(
                 CircleStorage::PROCESSED_GIFT_WRAP_RETENTION_SECS
                     > crate::relay::cursor::INBOX_GIFTWRAP_LOOKBACK_SECS,
                 "dedup retention must exceed the inbox gift-wrap lookback"
+            );
+            assert!(
+                crate::relay::cursor::INBOX_GIFTWRAP_LOOKBACK_SECS
+                    >= crate::relay::cursor::INBOX_RESUBSCRIBE_LOOKBACK_SECS,
+                "retention is derived from the Initial lookback, so Initial must \
+                 stay the widest inbox phase"
             );
         }
     }

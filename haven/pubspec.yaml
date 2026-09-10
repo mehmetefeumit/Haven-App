@@ -52,6 +52,12 @@ dependencies:
   # DISCARDING a maintenance outcome an analyzer warning rather than a way to
   # read a failed KeyPackage publish as health. See relay_service.dart.
   meta: ^1.16.0
+  # Dart-team injectable clock. Already present transitively (fake_async pulls
+  # it in); declared directly so lib/ may use `clock.now()` — the location
+  # access watchdog measures silence against it, and `fake_async` installs a
+  # fake `clock` for the whole zone, so the measurement is testable without a
+  # production seam or a wall-clock sleep.
+  clock: ^1.1.2
   # State management
   flutter_riverpod: ^2.6.1
   qr_flutter: ^4.1.0

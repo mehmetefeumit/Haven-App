@@ -86,7 +86,7 @@ scripts/              → Build and utility scripts
 
 **Flutter Service Layer**: Abstract service interfaces enable mocking for tests:
 - `IdentityService` → `NostrIdentityService` (real) - wraps Rust identity manager
-- `LocationService` → `GeolocatorLocationService` (real) - wraps platform location
+- `LocationService` → `GeolocatorLocationService` (real) - wraps platform location; one stream owner per platform (Android: geolocator; iOS: the native `HavenLocationStreamHandler` behind `IosLocationSource`. One-shots stay on geolocator on both)
 - `CircleService` → `NostrCircleService` (real) - MLS group + circle metadata
 - `RelayService` → `NostrRelayService` (real) - Nostr relay connections
 - `LocationSharingService` - encrypt-publish-fetch-decrypt pipeline
@@ -114,7 +114,7 @@ scripts/              → Build and utility scripts
 # Rust core
 cd haven-core && cargo test                    # Run all tests
 cd haven-core && cargo test test_name          # Run specific test
-cd haven-core && cargo clippy -- -D warnings   # Lint (pedantic + nursery enabled)
+cd haven-core && cargo clippy --all-targets -- -D warnings   # Lint (pedantic + nursery). --all-targets as CI does; bare clippy skips tests
 cd haven-core && cargo fmt --check             # Check formatting
 cd haven-core && cargo llvm-cov --open         # Coverage report (opens in browser)
 
@@ -246,7 +246,8 @@ Non-negotiable for this cryptographic application:
 | 10050 | NIP-17 inbox relays | Gift-wrap (1059) delivery |
 | 10063 | Blossom server list (BUD-03) | Not published in v1 |
 | 24242 | Blossom authorization (BUD-01/02) | HTTP `Authorization` header only — NEVER published to a relay |
-| 9 | Chat/location content | Inner application message |
+| 9 | Marmot chat message | Haven never emits it: 9 is Marmot's default chat kind (MDK `MARMOT_APP_EVENT_KIND_CHAT`), which MDK-based clients draw as chat bubbles. Accepted inbound ONLY when paired with `["t","location"]` — a transitional window for peers still on v0.1.11/v0.1.12 |
+| 25442 | Location content | Inner application message (`KIND_LOCATION_UPDATE`): unsigned, **no tags** — the kind alone is the discriminator — and only ever visible after MLS decryption |
 
 ## CI Pipeline
 
@@ -254,7 +255,7 @@ Reusable workflows in `.github/workflows/`; **ci.yml** is the PR/push orchestrat
 - **Stage 1 — code quality**: `rust-check.yml` (fmt + clippy + tests + release-mode build, both crates), `flutter-check.yml` (`flutter analyze --no-fatal-infos` — errors/warnings gate, pre-existing infos advisory), `cross-check.yml` (`cargo check --target` for macOS/iOS/Windows/Android; validates platform-gated `#[cfg]` code), `coverage.yml` (80% Rust / 50% Flutter thresholds), `audit.yml` (cargo-audit; also weekly)
 - **Stage 2 — repo guards**: `repo-guards.yml` — ALL fast grep/bash invariants in ONE job (committed secrets, tile-provider policy, public-profile privacy boundaries, INTERNET permission, background-wake invariants, locale privacy, exporter-label override ban, MDK supply-chain shape, E2E publish-before-apply, E2E-harness self-tests). Every guard step runs even if an earlier one failed, so one red run reports all violations. Add new pure-grep guards HERE as steps, not as new workflows.
 - **Stage 3 — localization**: `l10n-check.yml` (gen-l10n regeneration + cross-locale ARB parity)
-- **Stage 4 — E2E lanes** (all parallel, each `needs: [rust]` only): core flow on Android + iOS, each in poll AND live-sync variants (`e2e-android.yml` / `e2e-ios.yml` via the `live_sync` input), `e2e-integration.yml` (component integration tests), `e2e-relay-customization.yml` (two-relay proof), `e2e-background-catchup.yml` (WorkManager runtime proof incl. guest reboot), `e2e-profile.yml` (kind-0 + Blossom, Android + iOS)
+- **Stage 4 — E2E lanes** (all parallel, each `needs: [rust]` only): core flow on Android + iOS, each in poll AND live-sync variants (`e2e-android.yml` / `e2e-ios.yml` via the `live_sync` input), `e2e-integration.yml` (component integration tests), `e2e-relay-customization.yml` (two-relay proof), `e2e-background-catchup.yml` (WorkManager runtime proof incl. guest reboot), `e2e-ios-background-publish.yml` (real OS background transition on the iOS sim: Haven's native CoreLocation session armed with a tier-dependent indicator/session oracle + publishes continue under the 100 m stationary profile + a burst RECEIVES a peer's kind-445 and the engine pool holds NO subscription between bursts (P2c, since P4) + toggle-off silence; THREE legs over two axes since OD4-d, `leg` being the per-job identity — `when-in-use-live-sync`, `always-live-sync`, `when-in-use-poll`, and deliberately no `(always, poll)` — so the shipped receive path is measured by two legs that compile the engine in (`HAVEN_LIVE_SYNC: "true"`; a burst has no receive engine without it) and the flag-off rollback path by one, which asserts **P2d** in P2c's place: MapShell's 90 s background receive timer reaching `runCatchup(isBackgroundWake: true)` and landing a peer's fix in the PERSISTED last-known store. That leg CLOSES owner decision OD4-d (`docs/POWER_EFFICIENCY_PLAN.md` §4) at one extra ~62-minute macOS job; `check_ios_background_publish.sh` check 6 still does NOT stand in for it (mutation-tested) — check 16 and P2d are what do; cannot prove device suspension — physical checklist in `docs/M7_BACKGROUND_SHARING.md` §6 remains final and is currently DEFERRED for lack of an iPhone), `e2e-profile.yml` (kind-0 + Blossom, Android + iOS), plus further scenario lanes fanned out in `ci.yml` (GPS/auth-tier/FGS/clock-skew/KP-rotation/reconnect and friends)
 - **Stage 5 — build verification**: `build-check.yml` — Android debug APK per ABI (separate runners avoid disk exhaustion) + iOS no-codesign build; `needs: [rust, coverage, guards]`
 - Standalone: `e2e-nightly.yml` + `e2e-flakiness-stress.yml` (nightly), `e2e-flakiness.yml` (weekly report), `e2e-live-sync.yml` (manual), `release-build.yml` (tags `v*`; gate = rust-check + cross-check + coverage + repo-guards), `ios-certificates.yml` (manual)
 - Concurrency groups cancel in-progress runs on new pushes to the same branch
@@ -265,8 +266,11 @@ Reusable workflows in `.github/workflows/`; **ci.yml** is the PR/push orchestrat
 - **MDK (Rust SDK)**: https://github.com/marmot-protocol/mdk
 - **whitenoise-rs**: https://github.com/parres-hq/whitenoise (reference app)
 - **Local Docs**: See `MARMOT_PROTOCOL_KNOWLEDGE.md` for consolidated protocol reference
+- **Background-sharing failure analysis + fix plan**: `docs/BACKGROUND_SHARING_FAILURE_ANALYSIS.md` (canonical for the "sharing stops after hours" incident; work units A–F with status, plus Unit H mapping the power phases P1–P5 back onto the five wedges)
+- **Power efficiency (P0–P6)**: `docs/POWER_EFFICIENCY_PLAN.md` (canonical plan + decision ledger for the battery epic; §2.5 is the no-hardware constraint and §6.5a is estimation model E — every battery figure in this tree is ESTIMATED, never measured)
+- **Power measurement protocol**: `docs/POWER_MEASUREMENT.md` (the device protocol, DEFERRED. Its `## Baseline` table is deliberately EMPTY, and there is **no `## Acceptance` section at all** — that absence is the record, not an omission, so an `## Acceptance` heading appearing without a dated row under it means somebody added a heading ahead of the measurement. Never fill either from an estimate; the estimates live in `docs/POWER_EFFICIENCY_PLAN.md` §6.5a, tagged)
 - **Setup Guide**: See `haven/DEVELOPMENT.md` for environment setup
-- **FFI Architecture**: See `docs/FLUTTER_RUST_BRIDGE.md` for dual-crate design and FRB troubleshooting
+- **FFI Architecture**: the dual-crate design and the `*Ffi` wrapper pattern are the **Architecture** section above (there is no separate FFI document); regeneration is `./scripts/regenerate_frb.sh`, and the generated Rust/Dart halves are pinned against each other by `scripts/ci/check_generated_bridge_pinned.sh` (whose header is the troubleshooting reference)
 - **Security Tracking**: See `haven-core/SECURITY.md` for known CVEs and keyring setup
 - **DI Testing Patterns**: See `haven/test/services/DEPENDENCY_INJECTION_EXAMPLES.md`
 
@@ -279,6 +283,7 @@ Specialized agents auto-invoke for their domains. Do not skip security-reviewer 
 | Crypto, keys, MLS, auth | security-reviewer | Any code touching encryption or secrets |
 | New features, bug fixes | test-writer | Write tests before implementation (TDD) |
 | MIP specs, protocol compliance | marmot-expert | Marmot, MLS, Nostr integration questions |
+| NIP compliance, event shape, relays | nostr-expert | Nostr protocol questions, event validation, relay debugging |
 | haven-core, Rust, FFI | rust-expert | Rust implementation tasks |
 | haven app, Flutter, Dart | flutter-expert | Flutter implementation tasks |
 | UI/UX, design, accessibility | ui-ux-reviewer | Flutter UI implementation, design reviews, accessibility checks, before releases |

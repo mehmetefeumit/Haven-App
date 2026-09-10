@@ -13,6 +13,7 @@ import 'package:haven/src/services/circle_health_service.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/clock_skew_detector.dart';
 import 'package:haven/src/services/identity_service.dart';
+import 'package:haven/src/services/location_auto_commit.dart';
 import 'package:haven/src/services/relay_service.dart';
 
 /// A circle member's location.
@@ -285,6 +286,89 @@ class LocationSharingService {
   /// `_seenEventIds` with the very data we intended to drop.
   int _pauseGeneration = 0;
 
+  /// How many commit-critical ladders this service currently has in flight.
+  ///
+  /// A count, not a single future: the ladders come from three independent
+  /// call chains — a deferred SEND, a location fetch and an evolution poll —
+  /// which interleave freely at their awaits, so "the one in flight" is not a
+  /// thing that exists. Two really can overlap: a motion-triggered publish and
+  /// a poll tick are separate chains and neither awaits the other.
+  int _commitCriticalCount = 0;
+
+  /// Completes when the LAST in-flight commit-critical ladder has reached its
+  /// own conclusion; `null` whenever there are none.
+  ///
+  /// Held as a completer rather than composed per read, because
+  /// [inFlightCommitCritical]'s reader must be able to read it repeatedly and
+  /// get the same object: a `Future.wait` built at read time is a NEW future
+  /// every time, and a caller that drains until the read comes back `null`
+  /// would then never finish.
+  Completer<void>? _commitCriticalQuiescent;
+
+  /// The commit-critical work this service has in flight, or `null` when it
+  /// has none.
+  ///
+  /// "Commit-critical" is the window between an auto-commit's `publishEvent`
+  /// and the `confirmPublished` / `publishFailed` that resolves it. Tearing a
+  /// relay pool down inside that window makes the ack unobservable, so the
+  /// sender rolls back a commit a relay may already have stored and served —
+  /// the roster fork Security Rule 13 exists to prevent, not a lost location
+  /// sample. Anything that shuts the shared publish pool must therefore wait
+  /// for this future first, UNBOUNDED: a `.timeout(` cancels nothing, it only
+  /// lets the caller return while the ladder is still mid-flight. The iOS
+  /// background burst's teardown is the caller that does
+  /// (`background_burst_coordinator.dart`); the Android foreground service
+  /// keeps its own equivalent field.
+  ///
+  /// The contract this satisfies, exactly:
+  ///
+  ///  * non-`null` while any ladder is in flight, `null` once every one of
+  ///    them has finished — including the ones that failed;
+  ///  * the SAME future object on every read while it is non-null, so a
+  ///    drain-until-null loop terminates;
+  ///  * never a future manufactured by the read itself.
+  ///
+  /// Deliberately NOT cleared by [onAppPaused]: a ladder that is running when
+  /// the app backgrounds is exactly the one a teardown must wait for, and a
+  /// registry that forgot it would report quiescence that does not exist.
+  Future<void>? get inFlightCommitCritical => _commitCriticalQuiescent?.future;
+
+  /// Registers [commitCritical] as in-flight for as long as it runs, and
+  /// awaits it, rethrowing whatever it throws.
+  ///
+  /// The bookkeeping is in a `finally` and must stay there: a ladder that
+  /// threw and never deregistered would leave [inFlightCommitCritical]
+  /// non-null for the life of the process, and its reader waits on that future
+  /// without a bound — a burst teardown that never ends, which is a worse
+  /// outcome than the fork it was protecting against.
+  Future<void> _awaitCommitCritical(Future<void> commitCritical) async {
+    _commitCriticalCount++;
+    _commitCriticalQuiescent ??= Completer<void>();
+    try {
+      await commitCritical;
+    } finally {
+      _commitCriticalCount--;
+      if (_commitCriticalCount == 0) {
+        // Cleared BEFORE the completion, so anything that runs on that
+        // completion reads the quiescent state rather than the one being left.
+        final quiescent = _commitCriticalQuiescent;
+        _commitCriticalQuiescent = null;
+        quiescent?.complete();
+      }
+    }
+  }
+
+  /// Pushes [commitCritical] through the same registration the three
+  /// auto-commit sites use.
+  ///
+  /// Exists because `resolveAutoCommits` never throws — every step of it is
+  /// guarded — so the failure half of the registration contract has no
+  /// reachable production path to be proved on, and an untested `finally` is
+  /// how a permanently non-null registry ships.
+  @visibleForTesting
+  Future<void> trackCommitCriticalForTest(Future<void> commitCritical) =>
+      _awaitCommitCritical(commitCritical);
+
   /// Encrypts and publishes the user's location to a circle.
   ///
   /// Encrypts the location via MLS, then publishes the kind 445 event
@@ -358,9 +442,15 @@ class LocationSharingService {
     // publisher provider both `catch`-and-`debugPrint`), so routing the verdict
     // through the service itself is what stops a relay's "your timestamp is out
     // of range" from dying in a log line no user will ever read.
+    //
+    // The one-shot ladder, never the 3-attempt one: this fix is superseded by
+    // the next tick within `kLocationPublishMaxInterval`, so a retry would
+    // hold the radio awake to deliver a sample that is already stale. The
+    // deferral branch above has already returned, so nothing carrying a
+    // staged `PendingStateRef` reaches this call (Security Rule 13).
     final PublishResult publishResult;
     try {
-      publishResult = await _relayService.publishEvent(
+      publishResult = await _relayService.publishLocationEvent(
         eventJson: encrypted.eventJson,
         relays: encrypted.relays,
       );
@@ -434,28 +524,20 @@ class LocationSharingService {
     }
 
     var publishedProposals = 0;
-    if (deferred.commits.isNotEmpty) {
-      if (circle == null) {
-        // No relays to publish to. Rolling back is the only Rule-13-safe
-        // disposition left: leaving the ref unresolved pins the group in
-        // `PendingPublish`, where every later send fails outright.
-        for (final commit in deferred.commits) {
-          try {
-            await _circleService.failPendingCommit(commit.pendingToken);
-          } on Object catch (e) {
-            debugPrint(
-              '[LocationService] deferred send: rollback failed: '
-              '${e.runtimeType}',
-            );
-          }
-        }
-      } else {
-        await _publishAutoCommits(
-          autoCommits: deferred.commits,
-          circle: circle,
-        );
-      }
-    }
+    // A null circle is the no-relays case; `resolveAutoCommits` rolls those
+    // back, which is the only Rule-13-safe disposition left.
+    //
+    // Registered as commit-critical for its whole duration: this ladder rides
+    // the SHARED publish pool, and on the iOS background branch the burst
+    // teardown shuts that pool without one — see [inFlightCommitCritical].
+    await _awaitCommitCritical(
+      resolveAutoCommits(
+        relayService: _relayService,
+        circleService: _circleService,
+        autoCommits: deferred.commits,
+        circle: circle,
+      ),
+    );
 
     if (deferred.proposals.isNotEmpty && circle != null) {
       publishedProposals = await _publishDeferredProposals(
@@ -965,17 +1047,23 @@ class LocationSharingService {
         // peer `SelfRemove` eviction a remaining member's engine decided to
         // auto-commit): this poll path owns no Rust-side relay handle, so
         // `decryptLocationCollectingCommits` surfaces it instead of rolling it
-        // back, and `_publishAutoCommits` below runs the publish-then-confirm
-        // dance (Rule 13 / security F13). A single outer event can still yield
-        // SEVERAL folded results (the engine may release buffered inbound
-        // after this one), so iterate the list.
+        // back, and `resolveAutoCommits` (a sibling FILE, so nothing
+        // carrying a pending token can reach the one-shot location publish)
+        // runs the publish-then-confirm dance (Rule 13 / security F13). A
+        // single outer event can still yield SEVERAL folded results (the
+        // engine may release buffered inbound after this one), so iterate the
+        // list.
         final outcome = await _circleService.decryptLocationCollectingCommits(
           eventJson: eventJson,
         );
         if (outcome.autoCommits.isNotEmpty) {
-          await _publishAutoCommits(
-            autoCommits: outcome.autoCommits,
-            circle: circle,
+          await _awaitCommitCritical(
+            resolveAutoCommits(
+              relayService: _relayService,
+              circleService: _circleService,
+              autoCommits: outcome.autoCommits,
+              circle: circle,
+            ),
           );
         }
 
@@ -1090,116 +1178,6 @@ class LocationSharingService {
       locations: cache.values.toList(),
       groupUpdated: groupUpdated,
     );
-  }
-
-  // ============== Receive-side auto-commit publish (Rule 13) ==============
-  //
-  // `decryptLocationCollectingCommits` surfaces a peer `SelfRemove` eviction
-  // a remaining member's engine auto-staged during ingest, instead of the
-  // engine rolling it back — because the FOREGROUND POLL path (this file)
-  // owns a relay handle (`_relayService`) but the Rust `CircleManagerFfi`
-  // does not. Live-sync and background-catch-up already publish these
-  // in-Rust via `haven_core::relay::auto_commit::resolve_receive_publish_work`
-  // and never surface an auto-commit here; THIS is the Dart mirror of that
-  // exact function for the one receive plane it cannot reach. One publish
-  // attempt per entry (no retry/backoff, matching the Rust reference
-  // one-for-one): confirm on a ≥1-relay OK-ack, else roll back — NEVER
-  // confirm before an ack, NEVER drop an entry silently (either would
-  // re-fork or re-open the group the leaver departed). An unconfirmed
-  // commit is NOT lost: the underlying `SelfRemove` proposal stays buffered
-  // in the engine, so the NEXT poll tick (or the background catch-up sweep)
-  // re-surfaces a fresh jittered auto-commit attempt — that recurring cadence
-  // is this path's retry, exactly as it is for the live-sync / catch-up
-  // planes.
-
-  /// Publishes every [autoCommits] entry surfaced for [circle], resolving
-  /// the circle's CURRENT relays fresh (mirrors `removeMember` /
-  /// `updateCircleRelays`, which re-read `circle.relays` from the manager
-  /// rather than trust a possibly-stale caller-held snapshot — a relay
-  /// rotation could have landed between this poll cycle's hydration and this
-  /// decrypt). Best-effort per entry: a failure is logged, never thrown, so
-  /// one bad auto-commit cannot abort the rest of the decrypt/persist loop.
-  Future<void> _publishAutoCommits({
-    required List<PendingAutoCommit> autoCommits,
-    required Circle circle,
-  }) async {
-    List<String> relays;
-    try {
-      final fresh = await _circleService.getCircle(circle.mlsGroupId);
-      relays = (fresh == null || fresh.relays.isEmpty)
-          ? circle.relays
-          : fresh.relays;
-    } on Object catch (e) {
-      debugPrint(
-        '[LocationService] auto-commit relay lookup failed: '
-        '${e.runtimeType}',
-      );
-      relays = circle.relays;
-    }
-
-    for (final commit in autoCommits) {
-      if (relays.isEmpty) {
-        debugPrint(
-          '[LocationService] auto-commit: no relays available — '
-          'rolling back',
-        );
-        try {
-          await _circleService.failPendingCommit(commit.pendingToken);
-        } on Object catch (e) {
-          debugPrint(
-            '[LocationService] auto-commit rollback failed: '
-            '${e.runtimeType}',
-          );
-        }
-        continue;
-      }
-      await _publishAndConfirmAutoCommit(commit: commit, relays: relays);
-    }
-  }
-
-  /// Publishes one [PendingAutoCommit]'s event to [relays] — ONE attempt,
-  /// mirroring `haven_core::relay::auto_commit::resolve_receive_publish_work`
-  /// (the live-sync / catch-up planes' own receive-side auto-commit
-  /// publisher) rather than the send-side retry/backoff loop used by
-  /// one-shot admin actions (`removeMember` / `updateCircleRelays`) — this
-  /// path already recurs on its own poll cadence, which is its retry.
-  /// Confirms on a ≥1-relay OK-ack, else rolls back. Never throws — a
-  /// publish or confirm/rollback failure is logged and swallowed so it
-  /// cannot abort the surrounding decrypt/persist loop.
-  Future<void> _publishAndConfirmAutoCommit({
-    required PendingAutoCommit commit,
-    required List<String> relays,
-  }) async {
-    var published = false;
-    try {
-      final result = await _relayService.publishEvent(
-        eventJson: commit.commitEventJson,
-        relays: relays,
-      );
-      published = result.acceptedBy.isNotEmpty;
-      if (!published) {
-        debugPrint(
-          '[LocationService] auto-commit publish rejected by all relays',
-        );
-      }
-    } on Object catch (e) {
-      debugPrint(
-        '[LocationService] auto-commit publish failed: ${e.runtimeType}',
-      );
-    }
-
-    try {
-      if (published) {
-        await _circleService.confirmPendingCommit(commit.pendingToken);
-      } else {
-        await _circleService.failPendingCommit(commit.pendingToken);
-      }
-    } on Object catch (e) {
-      debugPrint(
-        '[LocationService] auto-commit '
-        '${published ? "confirm" : "rollback"} failed: ${e.runtimeType}',
-      );
-    }
   }
 
   // ============== Live-sync stream ingest (M6-3) ==============
@@ -1593,12 +1571,16 @@ class LocationSharingService {
         // Rule 13 / security F13: a receive-side auto-commit (a peer
         // `SelfRemove` eviction) surfaces here instead of being rolled back —
         // this poller, like `fetchMemberLocations`, owns no Rust-side relay
-        // handle, so `_publishAutoCommits` runs the publish-then-confirm
+        // handle, so `resolveAutoCommits` runs the publish-then-confirm
         // dance.
         if (outcome.autoCommits.isNotEmpty) {
-          await _publishAutoCommits(
-            autoCommits: outcome.autoCommits,
-            circle: circle,
+          await _awaitCommitCritical(
+            resolveAutoCommits(
+              relayService: _relayService,
+              circleService: _circleService,
+              autoCommits: outcome.autoCommits,
+              circle: circle,
+            ),
           );
         }
 

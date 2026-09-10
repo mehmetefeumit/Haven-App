@@ -283,6 +283,14 @@ class _MockRelayService implements RelayService {
   }
 
   @override
+  Future<PublishResult> publishLocationEvent({
+    required String eventJson,
+    required List<String> relays,
+  }) async {
+    throw UnimplementedError();
+  }
+
+  @override
   Future<void> publishEventFireAndForget({
     required String eventJson,
     required List<String> relays,

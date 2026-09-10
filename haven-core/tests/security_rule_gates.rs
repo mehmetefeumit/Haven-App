@@ -25,6 +25,11 @@
 //!   way, above that queue: the pool's notification broadcast can overrun, and
 //!   what it then reports is a bare count, with no event left to hold a cursor
 //!   at. Both losses are gated here, on the cursor.
+//! * **Rule 13 — publish-before-apply, read as a ROUTING rule.** A location may
+//!   take the one-shot bounded fan-out because the next tick supersedes it; a
+//!   commit may not, because a commit that is neither confirmed nor rolled back
+//!   forks the group. Nothing in the type system stops the two paths from
+//!   meeting, so the separation is asserted on the source.
 
 mod helpers;
 
@@ -628,6 +633,497 @@ async fn rule12_an_intake_drop_holds_the_cursor_instead_of_discarding_backlog() 
     cleanup_dir(&dir);
 }
 
+/// The BURST form of the same rule: a backlog bigger than the intake cap holds
+/// the cursor ACROSS a pause.
+///
+/// A background burst downloads into the same bounded queue, and the pause that
+/// follows it is the one moment the engine deliberately stops ingesting. The two
+/// have to compose: an event the cap dropped must still bound the advance the
+/// NEXT burst's `EOSE` issues, or a device that pauses every 72-168 s loses a
+/// slice of every over-cap replay it ever takes — permanently, because the
+/// catch-up sweep re-derives its floor from the same per-circle cursor.
+///
+/// What the pause contributes is `note_delivery_gap`, which SUPPRESSES the open
+/// generation's advance and KEEPS its hold-back. A `forget_*` there drops the
+/// hold-back with the anchor, and the next burst's advance sails over the
+/// dropped events: this test is red for that mutation, at the cursor.
+#[tokio::test]
+async fn a_burst_backlog_larger_than_the_intake_cap_holds_the_cursor() {
+    let dir = unique_temp_dir("rule12_burst_backlog");
+    let circle = Arc::new(
+        CircleManager::new_unencrypted(&dir, &Keys::generate()).expect("open a circle manager"),
+    );
+    let processor = Arc::new(EngineProcessor::new(
+        Arc::clone(&circle),
+        EventBus::with_capacity(16),
+    ));
+    let opened_at = chrono::Utc::now().timestamp() - 10;
+    let group = hex::encode([0x44u8; 32]);
+
+    // ── The burst downloads an over-cap replay. The queue keeps one and drops
+    //    the rest; the oldest drop is what must bound every later advance.
+    processor.note_subscription_opened(&group, opened_at);
+    let oldest = opened_at - 7_200;
+    let delivered = deliver_through_receiver(
+        Arc::clone(&processor),
+        64,
+        1,
+        &[
+            backlog_445(&group, opened_at - 50),
+            backlog_445(&group, opened_at - 1_800),
+            backlog_445(&group, oldest),
+        ],
+    )
+    .await;
+    assert_eq!(
+        delivered, 1,
+        "precondition: a cap-1 queue must drop two of the three, or this test is about \
+         nothing"
+    );
+
+    // ── The pause: suppress, never forget.
+    processor.note_delivery_gap();
+
+    // ── The next burst re-issues the REQ at a FRESH open time and its relay
+    //    EOSEs. That advance must stop at the dropped event, not at the new
+    //    REQ's open time.
+    let next_open = chrono::Utc::now().timestamp();
+    processor.note_subscription_opened(&group, next_open);
+    assert!(
+        processor.note_end_of_stored_events(&group),
+        "the next burst's EOSE must be redeemable — otherwise nothing is being bounded"
+    );
+
+    assert_eq!(
+        circle
+            .read_sync_cursor(&group_cursor_stream(&group))
+            .expect("read the circle's cursor"),
+        Some(oldest * 1000),
+        "an event the intake cap dropped must hold its circle's cursor at itself ACROSS \
+         a pause (Rule 12). Advancing to the next burst's open time ({}) discards \
+         legitimate offline backlog that no plane ever re-requests",
+        next_open * 1000
+    );
+
+    cleanup_dir(&dir);
+}
+
+/// Rule 13, structurally: the radio is never cut with a publish outstanding.
+///
+/// The gauge is the whole mechanism — the engine awaits `in_flight_publishes ==
+/// 0` with NO cap immediately before every radio cut. A time-based cap there
+/// would cut a commit between SEND and OK: `wait_for_ok` returns `Err`,
+/// `publish_failed` rolls the group back to the prior epoch, and the relay may
+/// already have stored and served that commit — a roster fork every couple of
+/// minutes on a background device.
+///
+/// There are TWO cuts, not one: the pause, and the failure exit of a burst open
+/// that had already connected. Both go through `terminate_all_relays`, so this
+/// pins the ordering at every call of it rather than at the one the pause makes
+/// — a second cut added without its drain is exactly the kind of thing that is
+/// silent when broken.
+///
+/// The behavioural proof, over a real relay withholding a real OK, is
+/// `live_sync_burst_e2e::pause_never_disconnects_while_an_auto_commit_awaits_its_ok`.
+/// This is the SOURCE-level half: the two facts that make it work are asserted
+/// where a reviewer would otherwise have to notice them, because both are silent
+/// when broken.
+#[test]
+fn rule13_a_burst_never_pauses_with_a_pending_publish_outstanding() {
+    let session =
+        std::fs::read_to_string(repo_root().join("haven-core/src/relay/live_sync/session.rs"))
+            .expect("read session.rs");
+
+    let pause = fn_body(&session, "pub async fn pause_subscriptions")
+        .expect("session.rs must define pause_subscriptions");
+
+    let resume =
+        fn_body(&session, "async fn resume_burst").expect("session.rs must define resume_burst");
+    for (name, body) in [("pause_subscriptions", &pause), ("resume_burst", &resume)] {
+        let gauge = body
+            .find("wait_publishes_drained")
+            .unwrap_or_else(|| panic!("{name} must await the in-flight publish gauge"));
+        let cut = body
+            .find("terminate_all_relays")
+            .unwrap_or_else(|| panic!("{name} must cut the radio — that is what it is for"));
+        assert!(
+            gauge < cut,
+            "in {name} the in-flight publish gauge MUST be awaited BEFORE the radio is \
+             cut: a disconnect while a commit is between SEND and OK makes wait_for_ok \
+             return Err(PrematureExit)/Err(NotConnected), the commit rolls back to the \
+             prior epoch, and the relay may already have served it — a roster fork \
+             (Rule 13)"
+        );
+        assert!(
+            !body.contains("client.disconnect()"),
+            "{name} must cut the radio through `terminate_all_relays`, never a bare \
+             `client.disconnect()`. One `disconnect` does not reliably stop a relay's \
+             connection task: it fires the termination permit BEFORE storing \
+             `Terminated`, so a preempted caller leaves the task armed on the crate's \
+             retry schedule and it re-opens a socket mid-gap"
+        );
+    }
+
+    let terminate = fn_body(&session, "async fn terminate_all_relays")
+        .expect("session.rs must define terminate_all_relays");
+    // Matched on call syntax, never the bare words: the function's own comments
+    // explain why it yields rather than sleeps, and a guard that read prose
+    // would fire on the explanation of the thing it is guarding against.
+    for timer in ["sleep(", "timeout(", "Duration"] {
+        assert!(
+            !terminate.contains(timer),
+            "the radio cut must hold no timer; it now uses `{timer}`. It runs \
+             immediately after the UNCAPPED Rule-13 gauge wait, so a clock here would \
+             be the engine choosing to delay a pause the caller has already paid an \
+             unbounded wait for. Its bound is a ROUND COUNT, and each round yields"
+        );
+    }
+
+    let processor =
+        std::fs::read_to_string(repo_root().join("haven-core/src/relay/live_sync/processor.rs"))
+            .expect("read processor.rs");
+    let wait = fn_body(&processor, "pub async fn wait_publishes_drained")
+        .expect("processor.rs must define wait_publishes_drained");
+    for capped in ["timeout", "sleep", "Duration"] {
+        assert!(
+            !wait.contains(capped),
+            "the in-flight publish wait must stay UNCAPPED (Rule 13); it now mentions \
+             `{capped}`. Its bound is the crate's own 10 s per-relay OK wait, never a \
+             clock this engine chose"
+        );
+    }
+}
+
+/// Rule 14: pausing and re-opening a burst opens no second session.
+///
+/// One `AccountDeviceSession` per MLS database, across every isolate and
+/// process. A burst model is where that could quietly break: rebuilding the core
+/// per burst — instead of pausing and resuming ONE core — would re-run the
+/// construction site every ~2 minutes and, worse, rotate the per-session sub-id
+/// salt on every publish tick (a fresh relay-visible fingerprint, which PSI-2
+/// declares intentional to avoid).
+///
+/// The construction site is already pinned to one place by
+/// `check_mls_session_single_owner.sh`; what this adds is that the BURST path
+/// contains no second one, and that the pause/burst methods live on the SAME
+/// core rather than building one.
+#[test]
+fn rule14_pause_and_burst_open_no_second_session() {
+    let session =
+        std::fs::read_to_string(repo_root().join("haven-core/src/relay/live_sync/session.rs"))
+            .expect("read session.rs");
+
+    for (name, body) in [
+        ("pause_subscriptions", "pub async fn pause_subscriptions"),
+        ("resume_burst", "async fn resume_burst"),
+    ] {
+        let text =
+            fn_body(&session, body).unwrap_or_else(|| panic!("session.rs must define {name}"));
+        for forbidden in ["new_local", "AccountDeviceSession", "SessionManager::"] {
+            assert!(
+                !text.contains(forbidden),
+                "{name} mentions `{forbidden}`: the burst must pause and re-open the ONE \
+                 core it already has. Rebuilding a core per burst re-runs the Rule-14 \
+                 session construction on every publish tick and rotates the sub-id salt \
+                 with it"
+            );
+        }
+    }
+}
+
+/// OD4-c, structurally: the background/foreground split that keeps
+/// removal-bearing auto-commits out of a burst cannot be edited away silently.
+///
+/// Three facts hold this up, and each is invisible when broken — a burst would
+/// simply publish again, and no existing test would say so:
+///
+/// 1. the receive-side auto-commit resolution goes through the POLICY-taking
+///    entry point, never the unconditional publisher;
+/// 2. the policy comes from the session's typed `BurstKind`, set before any REQ
+///    the open issues, so no event can be resolved under the previous open's
+///    lifecycle;
+/// 3. the redemption NEVER rolls a deferred eviction back. A rollback is a
+///    permanent silent drop of the removal at the pinned MDK rev (the engine
+///    drops its in-memory `SelfRemove` auto-commit schedule before staging,
+///    `do_publish_failed` does not re-arm it, and a redelivered proposal
+///    short-circuits to `Buffered`), so the only safe failure is to stay owed.
+///
+/// The behavioural proofs are in `od4c_removal_deferral_e2e`.
+#[test]
+fn od4c_a_background_burst_cannot_publish_a_removal_bearing_auto_commit() {
+    let processor =
+        production_source(&repo_root().join("haven-core/src/relay/live_sync/processor.rs"));
+    let resolve = fn_body(&processor, "async fn resolve_publish_work")
+        .expect("processor.rs must define resolve_publish_work");
+    assert!(
+        resolve.contains("resolve_receive_publish_work_with_policy"),
+        "the receive path must resolve auto-commits through the POLICY-taking \
+         entry point; without it a background burst publishes a removal-bearing \
+         commit into a wake window the OS may end, and MDK's hydrate does not \
+         recover one that is cut (OD4-c)"
+    );
+    assert!(
+        !resolve.contains("resolve_receive_publish_work(&self.circle"),
+        "the unconditional publisher must NOT be reachable from the receive \
+         path: it is the pre-OD4-c behaviour and it is silent when restored"
+    );
+    assert!(
+        resolve.contains("self.auto_commit_policy()"),
+        "the policy must be READ from state, never assumed: one processor serves \
+         both lifecycles over the same engine"
+    );
+
+    let session = production_source(&repo_root().join("haven-core/src/relay/live_sync/session.rs"));
+    let resume =
+        fn_body(&session, "async fn resume_burst").expect("session.rs must define resume_burst");
+    let set = resume
+        .find("set_background_burst")
+        .expect("resume_burst must set the receive-side auto-commit lifecycle");
+    assert!(
+        resume[set..].starts_with("set_background_burst(matches!(kind, BurstKind::Background))"),
+        "the lifecycle must be derived from the open's own typed BurstKind — the \
+         same value the inbox fold reads — so the two cannot drift apart"
+    );
+    let subscribe = resume
+        .find("register_and_subscribe")
+        .expect("resume_burst must issue the REQs");
+    assert!(
+        set < subscribe,
+        "the lifecycle must be set BEFORE the REQs this open issues, or an event \
+         delivered by this open is resolved under the PREVIOUS open's policy"
+    );
+
+    let start = fn_body(&session, "pub async fn start").expect("session.rs must define start");
+    assert!(
+        !start.contains("redeem_removal_deferrals"),
+        "`start` must not redeem a parked eviction commit: it cannot tell a \
+         foreground launch from a background wake that cold-launched the process, \
+         so redeeming here re-opens the publish-before-apply window in the \
+         background. A FOREGROUND open is the only place that may publish one"
+    );
+
+    let manager = production_source(&repo_root().join("haven-core/src/circle/manager.rs"));
+    let redeem = fn_body(&manager, "pub async fn redeem_removal_deferrals")
+        .expect("manager.rs must define redeem_removal_deferrals");
+    assert!(
+        !redeem.contains("publish_failed"),
+        "a deferred eviction must NEVER be rolled back. At MDK e391adc a rollback \
+         drops the removal permanently and silently — the leaver stays in the \
+         circle, still able to derive its keys — so an unacked publish stays owed \
+         and is retried"
+    );
+}
+
+/// The same guarantee, TREE-WIDE: no plane rolls a removal-bearing auto-commit
+/// back, and every plane records the obligation before it opens the window.
+///
+/// The burst is one of four planes that can hold such a commit, and the three
+/// others are what this gate exists for — the background catch-up sweep, the
+/// foreground poll path, and the Android foreground service's publish cycle. Two
+/// of them resolve the commit from DART, so the rule cannot live at a Rust call
+/// site: it lives at the single rung all four go through
+/// (`CircleManager::publish_failed`), and this pins that rung, the write-ahead
+/// record that makes each plane's crash window visible, and the discharge that
+/// keeps the record from crying wolf.
+///
+/// The behavioural proofs are in `od4c_removal_deferral_e2e` and
+/// `selfremove_autopublish_e2e`.
+#[test]
+fn od4c_no_plane_can_roll_back_or_hide_a_removal_bearing_auto_commit() {
+    let manager = production_source(&repo_root().join("haven-core/src/circle/manager.rs"));
+
+    let fail = fn_body(&manager, "pub async fn publish_failed")
+        .expect("manager.rs must define publish_failed");
+    let guard = fail
+        .find("keeps_its_removal_publish_owed")
+        .expect("publish_failed must refuse to roll back an owed removal publish");
+    let engine = fail
+        .find("publish_failed(pending)")
+        .expect("publish_failed must reach the engine rollback for every OTHER commit");
+    assert!(
+        guard < engine,
+        "the owed-removal guard must be read BEFORE the engine rollback. At MDK \
+         e391adc `do_publish_failed` drops a peer's `SelfRemove` eviction \
+         permanently and silently — the schedule is cleared before staging, is \
+         not re-armed, and a redelivered proposal short-circuits to Buffered — so \
+         the leaver keeps deriving the circle's keys. This rung is where the four \
+         planes (burst, catch-up sweep, foreground poll, foreground service) \
+         converge, and two of them call it from Dart, so a per-call-site rule \
+         cannot cover them"
+    );
+
+    let confirm = fn_body(&manager, "pub async fn confirm_published")
+        .expect("manager.rs must define confirm_published");
+    assert!(
+        confirm.contains("discharge_owed_removal_publish"),
+        "an APPLIED eviction must discharge its obligation. Every plane records \
+         one before it publishes, so without this each peer-leave leaves a durable \
+         row behind and the next foreground open reports a healthy circle \
+         unrecoverable — a detector that cries wolf gets switched off"
+    );
+
+    let epoch_fold = fn_body(&manager, "fn note_epoch_changes")
+        .expect("manager.rs must define note_epoch_changes");
+    assert!(
+        epoch_fold.contains("clear_orphaned_removal_deferral"),
+        "the `EpochChanged` fold may clear only an ORPHANED obligation"
+    );
+    assert!(
+        !epoch_fold.contains("self.clear_removal_deferral("),
+        "and never a live one: an epoch move arriving while a park stands would \
+         drop the only handle that can publish the staged commit, wedging the \
+         circle while reporting nothing — a silent drop of the removal by another \
+         route"
+    );
+
+    let auto = production_source(&repo_root().join("haven-core/src/relay/auto_commit.rs"));
+    let resolve = fn_body(&auto, "pub async fn resolve_receive_publish_work")
+        .expect("auto_commit.rs must define resolve_receive_publish_work");
+    let record = resolve
+        .find("owe_removal_publish")
+        .expect("the publishing planes must record the obligation");
+    let publish = resolve
+        .find("publish_then_resolve")
+        .expect("the publishing planes must still publish");
+    assert!(
+        record < publish,
+        "the record is WRITE-AHEAD or it is worthless: a wake window the OS ends \
+         between SEND and OK leaves a staged removal-bearing commit MDK's hydrate \
+         refuses to clear, and only a row written before the send survives to \
+         report it"
+    );
+    let no_publisher = fn_body(&auto, "pub async fn park_or_rollback_receive_publish_work")
+        .expect("auto_commit.rs must define park_or_rollback_receive_publish_work");
+    assert!(
+        no_publisher.contains("defer_removal_commit"),
+        "a plane with no relay handle must PARK the eviction, not discard it"
+    );
+
+    assert_the_ffi_planes_record_before_the_handover(&manager);
+    assert_nothing_reaches_past_the_fail_rung();
+    assert_the_reanchor_sweep_reports_both_causes();
+
+    // No background plane redeems. The foreground gate lives in session.rs and is
+    // pinned above; this is the other half — a redemption reachable from the
+    // catch-up sweep would re-open the publish-before-apply window inside exactly
+    // the wake the deferral exists to avoid.
+    let catchup = production_source(&repo_root().join("haven-core/src/relay/catchup.rs"));
+    assert!(
+        !catchup.contains("redeem_removal_deferrals"),
+        "the catch-up sweep must not redeem an owed removal publish: it runs on \
+         WorkManager / BGTask wakes and from a background isolate, and OD4-c \
+         reserves the publish for a foreground open"
+    );
+}
+
+/// The write-ahead ordering at the two surfacing sites that hand the commit to
+/// DART. Past the hand-over this crate no longer decides when — or whether —
+/// the publish happens, so a record written afterwards would never be written at
+/// all for the crash this exists to catch.
+fn assert_the_ffi_planes_record_before_the_handover(manager: &str) {
+    for surfacing in [
+        "async fn collect_auto_commits",
+        "async fn collect_deferred_work",
+    ] {
+        let body = fn_body(manager, surfacing)
+            .unwrap_or_else(|| panic!("manager.rs must define {surfacing}"));
+        let record = body.find("owe_removal_publish").unwrap_or_else(|| {
+            panic!("{surfacing} must record the obligation before it surfaces the commit")
+        });
+        let handover = body
+            .find(".push(commit)")
+            .unwrap_or_else(|| panic!("{surfacing} must surface the commit"));
+        assert!(
+            record < handover,
+            "{surfacing} must record the obligation BEFORE the commit crosses \
+             the FFI: the Dart plane's publish-before-apply window is the one \
+             this crate cannot observe, and only a row written ahead of it \
+             survives a process killed between SEND and OK"
+        );
+    }
+}
+
+/// The chokepoint is only a chokepoint while nothing reaches PAST it.
+/// `CircleManager::session()` is `pub`, so a new plane could call the engine's
+/// fail rung directly and skip the owed-removal guard in silence.
+///
+/// Whitespace is squashed because the one legitimate call spans three lines.
+fn assert_nothing_reaches_past_the_fail_rung() {
+    let mut sources = Vec::new();
+    sources_under(&repo_root().join("haven-core/src"), "rs", &mut sources);
+    sources_under(
+        &repo_root().join("haven/rust_builder/src"),
+        "rs",
+        &mut sources,
+    );
+    let mut direct = Vec::new();
+    for path in &sources {
+        let squashed: String = production_source(path)
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        let hits = squashed.matches(".session.publish_failed(").count()
+            + squashed.matches(".session().publish_failed(").count();
+        for _ in 0..hits {
+            direct.push(path.display().to_string());
+        }
+    }
+    assert_eq!(
+        direct,
+        vec![repo_root()
+            .join("haven-core/src/circle/manager.rs")
+            .display()
+            .to_string()],
+        "exactly ONE production call may reach the engine's own `publish_failed`, \
+         and it is the one inside `CircleManager::publish_failed` whose guard the \
+         caller pins. Any other call site discards a peer's eviction permanently \
+         and silently, and nothing else in the tree would notice; found: {direct:?}"
+    );
+}
+
+/// (i)'s half: the terminal verdict reaches the consumer for BOTH causes.
+///
+/// The engine announces its own verdict exactly once per session — after
+/// `mark_unrecoverable`, every later convergence run short-circuits before the
+/// arm that pushes the event — while the consumer acts only on a SECOND
+/// observation, so it does not tell a user to rebuild a circle a peer already
+/// healed. A sweep that reported only orphaned parks would therefore leave every
+/// engine-declared group unreported forever.
+fn assert_the_reanchor_sweep_reports_both_causes() {
+    let processor =
+        production_source(&repo_root().join("haven-core/src/relay/live_sync/processor.rs"));
+    let report = fn_body(&processor, "pub fn report_unrecoverable_circles")
+        .expect("processor.rs must define report_unrecoverable_circles");
+    for cause in ["orphaned_removal_deferrals", "unrecoverable_circles"] {
+        assert!(
+            report.contains(cause),
+            "the re-anchor sweep must report `{cause}`: a terminal verdict the \
+             consumer needs twice, emitted once, is a wedged circle the user is \
+             never told about"
+        );
+    }
+}
+
+/// The body of `fn <name>` in `src`, brace-balanced, or `None`.
+fn fn_body<'a>(src: &'a str, signature: &str) -> Option<&'a str> {
+    let start = src.find(signature)?;
+    let open = start + src[start..].find('{')?;
+    let mut depth = 0usize;
+    for (offset, ch) in src[open..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&src[open..=open + offset]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// The other direction of the same hold-back: only an event this plane would
 /// actually have INGESTED may hold a cursor.
 ///
@@ -638,7 +1134,8 @@ async fn rule12_an_intake_drop_holds_the_cursor_instead_of_discarding_backlog() 
 /// and a circle's `#h` is its PUBLIC `nostr_group_id`. Holding on that would let
 /// an event the worker discards unread stall a circle it names — the shape
 /// P0-5's `RejectedBeforeAuth` arm exists to refuse. A dropped wrap loses
-/// nothing: the inbox stream re-requests a 7-day window on every REQ.
+/// nothing: the inbox stream re-requests a multi-day window on every REQ (49 h
+/// on a re-anchor, 7 d on a cold start).
 #[tokio::test]
 async fn rule12_an_intake_drop_of_a_foreign_kind_holds_no_circle() {
     let dir = unique_temp_dir("rule12_stray_h");
@@ -809,4 +1306,301 @@ async fn rule12_a_delivery_gap_suppresses_every_open_generation() {
     assert_eq!(inbox_cursor(), Some(resumed_at * 1000));
 
     cleanup_dir(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// Rule 13 — publish-before-apply, read as a ROUTING rule.
+// ---------------------------------------------------------------------------
+
+/// The repository root, one level above this crate.
+fn repo_root() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("haven-core sits inside the repository")
+        .to_path_buf()
+}
+
+/// `path`'s production source: everything before the in-file test module, with
+/// comment lines removed so a gate matches CODE and never the prose describing
+/// it.
+///
+/// The cut is at the test MODULE, not at the first `#[cfg(test)]` item: several
+/// files gate a test-only static or clock override far above their test module
+/// (`api.rs:1048`), and cutting there would hide most of the file from the gate
+/// — silently, which is the failure mode a gate must not have.
+fn production_source(path: &std::path::Path) -> String {
+    let src =
+        std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let mut out = String::with_capacity(src.len());
+    let mut previous_gated = false;
+    for line in src.lines() {
+        let trimmed = line.trim_start();
+        if previous_gated && trimmed.starts_with("mod tests") {
+            break;
+        }
+        previous_gated = trimmed.starts_with("#[cfg(test)]");
+        // Keep the line (blanked) rather than dropping it, so the brace and
+        // indentation shape the slicers rely on is unchanged.
+        if trimmed.starts_with("//") {
+            out.push('\n');
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+/// The `{ … }` block introduced by `header`, brace-matched.
+fn block_after(src: &str, header: &str) -> String {
+    let start = src
+        .find(header)
+        .unwrap_or_else(|| panic!("`{header}` is gone; the gate below no longer reads anything"));
+    let mut depth = 0usize;
+    let mut end = None;
+    for (offset, ch) in src[start..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = Some(start + offset + 1);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    src[start..end.expect("an impl block that never closes would not compile")].to_string()
+}
+
+/// The body of the Rust `fn` enclosing the byte offset `at`.
+///
+/// Reads rustfmt's shape — a `fn` line and the `}` at the same indentation —
+/// which `cargo fmt --check` enforces in CI, so no brace counting can be
+/// confused by a `{}` inside a format string.
+fn enclosing_fn(src: &str, at: usize) -> String {
+    let lines: Vec<&str> = src.lines().collect();
+    let line_of = src[..at].matches('\n').count();
+    let (header, indent) = (0..=line_of)
+        .rev()
+        .find_map(|i| {
+            let line = lines[i];
+            let trimmed = line.trim_start();
+            let is_fn = trimmed.starts_with("fn ")
+                || trimmed.starts_with("async fn ")
+                || trimmed.starts_with("pub fn ")
+                || trimmed.starts_with("pub async fn ")
+                || trimmed.starts_with("pub(crate) fn ")
+                || trimmed.starts_with("pub(crate) async fn ");
+            is_fn.then(|| (i, line.len() - trimmed.len()))
+        })
+        .unwrap_or_else(|| panic!("no enclosing fn above line {}", line_of + 1));
+    let closer = format!("{}}}", " ".repeat(indent));
+    let end = (header..lines.len())
+        .find(|i| lines[*i] == closer)
+        .unwrap_or(lines.len() - 1);
+    lines[header..=end].join("\n")
+}
+
+/// Every `.rs` / `.dart` file under `dir`, recursively.
+fn sources_under(dir: &std::path::Path, extension: &str, out: &mut Vec<std::path::PathBuf>) {
+    for entry in
+        std::fs::read_dir(dir).unwrap_or_else(|e| panic!("read_dir {}: {e}", dir.display()))
+    {
+        let path = entry.expect("dir entry").path();
+        if path.is_dir() {
+            sources_under(&path, extension, out);
+        } else if path.extension().and_then(|e| e.to_str()) == Some(extension) {
+            out.push(path);
+        }
+    }
+}
+
+/// (a) + (b): the two `AutoCommitPublisher` impls, which are where a staged
+/// commit meets a transport.
+fn assert_commit_publishers_keep_the_ladder(root: &std::path::Path) {
+    let auto_commit = production_source(&root.join("haven-core/src/relay/auto_commit.rs"));
+
+    let via_manager = block_after(&auto_commit, "impl AutoCommitPublisher for RelayManager {");
+    assert!(
+        via_manager.contains(concat!("publish", "_event(")),
+        "the catch-up sweep publishes commits through the 3-attempt ladder; \
+         found: {via_manager}",
+    );
+    assert!(
+        !via_manager.contains(concat!("publish_location", "_event")),
+        "a commit published on the location path would be re-sent never, and \
+         confirmed or rolled back on one bounded attempt: {via_manager}",
+    );
+
+    let via_client = block_after(
+        &auto_commit,
+        "impl AutoCommitPublisher for nostr_sdk::Client {",
+    );
+    assert!(
+        via_client.contains("send_event_to("),
+        "the engine publishes over its own connected sockets: {via_client}",
+    );
+    assert!(
+        via_client.contains("!output.success.is_empty()"),
+        "\"acked\" means at least one relay returned OK, never merely that the \
+         event was sent (Rule 13): {via_client}",
+    );
+}
+
+/// (c), Rust half: no FUNCTION publishes a location and resolves a staged
+/// commit.
+///
+/// Function-scoped rather than file-scoped because `api.rs` legitimately holds
+/// both planes — it is the FFI surface for all of them — and that file is
+/// exactly where a convenient shortcut between them would be written.
+fn assert_no_rust_function_publishes_a_location_and_a_commit(root: &std::path::Path) {
+    let mut sources = Vec::new();
+    sources_under(&root.join("haven-core/src"), "rs", &mut sources);
+    sources_under(&root.join("haven/rust_builder/src"), "rs", &mut sources);
+    // The FRB dispatcher is one generated function over every FFI method, so it
+    // names both planes by construction. It mirrors `api.rs`, which IS scanned,
+    // and is never hand-edited.
+    sources.retain(|path| {
+        !path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("frb_generated"))
+    });
+
+    let location_publish = concat!("publish_location", "_event");
+    let pending_words = [
+        "PendingStateRef",
+        concat!("confirm", "_published"),
+        concat!("publish", "_failed"),
+    ];
+    let mut files_reached: Vec<String> = Vec::new();
+    for path in &sources {
+        let src = production_source(path);
+        let mut from = 0;
+        while let Some(offset) = src[from..].find(location_publish) {
+            let at = from + offset;
+            from = at + location_publish.len();
+            let body = enclosing_fn(&src, at);
+            for word in pending_words {
+                assert!(
+                    !body.contains(word),
+                    "{} publishes a location from a function that also handles \
+                     `{word}`; a staged commit resolved on one bounded attempt \
+                     is exactly the Rule 13 fork:\n{body}",
+                    path.display(),
+                );
+            }
+            files_reached.push(path.display().to_string().replace('\\', "/"));
+        }
+    }
+
+    assert!(
+        files_reached
+            .iter()
+            .any(|f| f.ends_with("relay/manager.rs")),
+        "the location publish itself has to be in scope or this gate reads \
+         nothing: {files_reached:?}",
+    );
+    assert!(
+        files_reached
+            .iter()
+            .any(|f| f.ends_with("rust_builder/src/api.rs")),
+        "the FFI wrapper has to be in scope: it is the one place where the \
+         location path and the staged-commit path share a file: {files_reached:?}",
+    );
+}
+
+/// (c), Dart half: FILE-level, which is stricter than function-level — a file
+/// that resolves a staged commit may not publish a location at all.
+///
+/// The generated bindings are excluded: they DECLARE every FFI method and so
+/// name both planes by construction, and they hold no call sites.
+///
+/// # Both spellings of "resolve a staged commit"
+///
+/// Dart reaches the resolution two ways: straight through the FFI
+/// (`CircleManagerFfi.confirmPublished` / `.publishFailed`) and through
+/// `CircleService.confirmPendingCommit` / `.failPendingCommit`, the interface
+/// the foreground poll planes hold because they own no Rust-side relay handle.
+/// Listing only the FFI pair left the interface pair — the one the location
+/// planes actually use — free to share a file with the one-shot publish, so the
+/// gate's claim was false where it mattered most.
+fn assert_no_dart_file_publishes_a_location_and_a_commit(root: &std::path::Path) {
+    let mut sources = Vec::new();
+    sources_under(&root.join("haven/lib/src"), "dart", &mut sources);
+    sources.retain(|path| {
+        !path
+            .to_string_lossy()
+            .replace('\\', "/")
+            .contains("/lib/src/rust/")
+    });
+    assert!(
+        sources.len() > 50,
+        "the Dart scan found almost nothing, so it proves nothing: {}",
+        sources.len(),
+    );
+
+    let mut publishers: Vec<String> = Vec::new();
+    for path in &sources {
+        let src = std::fs::read_to_string(path).expect("read dart source");
+        if !src.contains(concat!("publishLocation", "Event(")) {
+            continue;
+        }
+        publishers.push(path.display().to_string().replace('\\', "/"));
+        for word in [
+            concat!("confirm", "Published("),
+            concat!("publish", "Failed("),
+            concat!("confirm", "PendingCommit("),
+            concat!("fail", "PendingCommit("),
+        ] {
+            assert!(
+                !src.contains(word),
+                "{} publishes a location AND resolves a staged commit (`{word}`); \
+                 keep the two planes in separate files so no caller carrying a \
+                 pending ref can reach the one-shot publish",
+                path.display(),
+            );
+        }
+    }
+
+    // Anti-vacuity, on the files the loop actually READ. `sources.len() > 50`
+    // only proves the directory scan found Dart; it says nothing about the
+    // `publishLocationEvent(` filter, so a rename of that method would leave
+    // every file `continue`d and this gate passing while checking nothing.
+    // Both known publishers are named: one is the foreground plane and one is
+    // the foreground service, and each has its own reason to grow a
+    // confirm/rollback next to its publish.
+    for expected in [
+        "services/location_sharing_service.dart",
+        "services/background_location_task.dart",
+    ] {
+        assert!(
+            publishers.iter().any(|f| f.ends_with(expected)),
+            "{expected} no longer reaches the one-shot location publish, so this \
+             gate read nothing there. Either the publish moved (point this at \
+             its new home) or the method was renamed and the whole scan is \
+             vacuous: {publishers:?}",
+        );
+    }
+}
+
+/// A location publish takes the one-shot fan-out; a COMMIT keeps the ladder.
+///
+/// The two paths differ in what a miss costs. A location that no relay acked is
+/// superseded by the next tick within 168 s, so one bounded attempt is the
+/// whole budget. A commit that is neither confirmed nor rolled back leaves the
+/// group at an epoch its peers never received — Rule 13 — so it keeps the
+/// 3-attempt ladder AND the confirm/rollback decision on a real OK-ack.
+///
+/// Nothing in the type system keeps them apart: both take an `&Event` and a
+/// relay list. So the three predicates that DO keep them apart are asserted on
+/// the source, where a reviewer would otherwise have to notice them.
+#[test]
+fn rule13_commits_keep_the_retry_ladder_and_locations_do_not() {
+    let root = repo_root();
+    assert_commit_publishers_keep_the_ladder(&root);
+    assert_no_rust_function_publishes_a_location_and_a_commit(&root);
+    assert_no_dart_file_publishes_a_location_and_a_commit(&root);
 }

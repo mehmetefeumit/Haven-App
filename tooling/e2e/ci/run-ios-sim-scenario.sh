@@ -45,6 +45,13 @@
 #                    relays DISJOINT from the circle relay in HAVEN_E2E_RELAY.
 #                    Same opt-in shape as HAVEN_E2E_BLOSSOM_URL — forwarded only
 #                    when set, so no other lane's build changes.
+#   HAVEN_BGP_EXPECT_TIER  The CoreLocation tier the iOS background-publish
+#                    lane's drive PINS ('whenInUse' or 'always'), set only by
+#                    tooling/e2e/ci/run-ios-bg-publish.sh, which derives it
+#                    from the same HAVEN_BGP_AUTH_TIER that chose the
+#                    `simctl privacy grant`. Same opt-in shape as the blocks
+#                    above: forwarded only when set, so no other lane's
+#                    compiled defines change.
 #   HAVEN_WIRE_SENTINEL  The one-per-job wire-journal sentinel token, set only
 #                    by a lane that runs the recording proxy in front of its
 #                    relay (e2e-ios.yml). Threaded into the build as a
@@ -691,6 +698,22 @@ if [[ -n "${HAVEN_B4_GEO_TOLERANCE_DEG:-}" ]]; then
   EXTRA_DART_DEFINES+=(
     --dart-define=HAVEN_B4_GEO_TOLERANCE_DEG="${HAVEN_B4_GEO_TOLERANCE_DEG}"
   )
+fi
+
+# Optional auth-tier passthrough (the iOS background-publish lane only — set by
+# tooling/e2e/ci/run-ios-bg-publish.sh), same opt-in shape as the blocks above.
+#
+# It names the tier that lane's drive PINS, and it MUST reach the compiler:
+# ios_bg_publish_test.dart has no default for it and fails closed when it is
+# absent, precisely so the Always matrix job can never silently run the
+# When-In-Use assertions. Echoed, unlike B4's coordinates — a tier name is not
+# a payload, and knowing which leg a preserved log came from is the first thing
+# anyone reading it wants.
+if [[ -n "${HAVEN_BGP_EXPECT_TIER:-}" ]]; then
+  EXTRA_DART_DEFINES+=(
+    --dart-define=HAVEN_BGP_EXPECT_TIER="${HAVEN_BGP_EXPECT_TIER}"
+  )
+  echo "iOS E2E — pinned auth tier=${HAVEN_BGP_EXPECT_TIER}"
 fi
 
 # Optional wire-journal SENTINEL passthrough (instrumented lanes only — set by

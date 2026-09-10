@@ -371,6 +371,109 @@ void main() {
       );
     });
 
+    test('a background pause never becomes a relayDisconnected verdict',
+        () async {
+      // A burst closes its sockets on purpose and the gap to the next burst
+      // can exceed the confirmation window many times over. Background sharing
+      // working exactly as designed must never tell the user it had stopped —
+      // a deliberate, user-visible suppression, so it needs a test that fails
+      // when it goes.
+      final h = _Harness();
+      await h.settle();
+      final status = h.container.read(syncStatusProvider.notifier)
+        ..onStatus(FfiSyncStatusReason.disconnected)
+        // Paused before the window could confirm anything.
+        ..onStatus(FfiSyncStatusReason.paused);
+
+      h.advance(kSharingFaultConfirmationWindow * 10);
+      expect(await h.settle(), SharingHealth.healthy);
+
+      // Anti-vacuity, and the other half of the promise: the next burst opens
+      // and the relay is still gone. The disconnect stamp SURVIVED the pause,
+      // so the outage is dated from when the relay actually went — not from
+      // the un-pause, which would report a long outage as brand new and start
+      // the confirmation window over.
+      status.onStatus(FfiSyncStatusReason.disconnected);
+      expect(
+        await h.settle(),
+        SharingHealth.paused(SharingPausedReason.relayDisconnected, _t0),
+      );
+    });
+
+    test('a pause never clears a fault the user is already being shown',
+        () async {
+      // The banner speaks every stopped → healthy edge as "sharing resumed"
+      // (`sharing_health_banner.dart`), so a verdict that clears itself on a
+      // pause tells a screen-reader user the outage is over. Nothing
+      // recovered: the app stopped looking. One relay of the pool can be down
+      // for hours while the others keep acking publishes, which is exactly the
+      // state that reaches here with the banner already up.
+      final h = _Harness();
+      await h.settle();
+      final status = h.container.read(syncStatusProvider.notifier)
+        ..onStatus(FfiSyncStatusReason.disconnected);
+      h.advance(kSharingFaultConfirmationWindow + const Duration(seconds: 1));
+      expect(
+        (await h.settle()).pausedReason,
+        SharingPausedReason.relayDisconnected,
+        reason: 'anti-vacuity: the verdict must be reachable first',
+      );
+
+      status.onStatus(FfiSyncStatusReason.paused);
+      expect(
+        await h.settle(),
+        SharingHealth.paused(SharingPausedReason.relayDisconnected, _t0),
+      );
+
+      h.advance(kSharingFaultConfirmationWindow * 10);
+      expect(
+        await h.settle(),
+        SharingHealth.paused(SharingPausedReason.relayDisconnected, _t0),
+        reason: 'no length of pause is evidence that anything recovered',
+      );
+    });
+
+    test('a pause defers evidence rather than discarding it', () async {
+      // The freeze must not become a hole: a publish that came back unacked
+      // during a burst is real evidence, and it has to reach the user once the
+      // engine is looking again. Recorded while paused, reported on un-pause.
+      final h = _Harness();
+      await h.settle();
+      final status = h.container.read(syncStatusProvider.notifier)
+        ..onStatus(FfiSyncStatusReason.paused);
+
+      h.notifier.recordPublishOutcome('0909', acked: false);
+      h.advance(kSharingFaultConfirmationWindow + const Duration(seconds: 1));
+      expect(
+        await h.settle(),
+        SharingHealth.healthy,
+        reason: 'a paused engine derives nothing, in either direction',
+      );
+
+      status.onStatus(FfiSyncStatusReason.connected);
+      expect(
+        await h.settle(),
+        SharingHealth.publishFailing(_t0),
+        reason: 'the evidence was held, not dropped',
+      );
+    });
+
+    test('un-pausing into a healthy engine reports the recovery', () async {
+      // The freeze is not a latch. A burst that reconnects is real evidence,
+      // and the recovery the banner announces on this edge is then a true one.
+      final h = _Harness();
+      await h.settle();
+      final status = h.container.read(syncStatusProvider.notifier)
+        ..onStatus(FfiSyncStatusReason.disconnected);
+      h.advance(kSharingFaultConfirmationWindow + const Duration(seconds: 1));
+      expect((await h.settle()).state, SharingHealthState.paused);
+
+      status
+        ..onStatus(FfiSyncStatusReason.paused)
+        ..onStatus(FfiSyncStatusReason.connected);
+      expect(await h.settle(), SharingHealth.healthy);
+    });
+
     test('reconnecting clears the disconnect', () async {
       final h = _Harness();
       await h.settle();

@@ -14,6 +14,16 @@ research docs, not re-checked in the clone; INFERRED = derived conclusion (confi
 **GAP** = no upstream equivalent, Haven-side design needed; **RECONCILED** = two expert drafts
 overlapped, one merged position is presented.
 
+> **Superseded detail (2026-08-24):** W9's inner application kind is **25442**, not 9, and the
+> rumor now carries **no tags** — the kind alone discriminates a location update. Kind 9 is
+> Marmot's chat kind, so a kind-9 location rendered as a chat bubble (with unread badge and push)
+> in every other Marmot client; it survives receive-side only when paired with `["t","location"]`,
+> for peers still on v0.1.11/v0.1.12. Everything else W9 requires — unsigned, canonical NIP-01 id,
+> `pubkey` == the MLS-authenticated sender, no collision with the engine's kind-1210 system rows —
+> is unchanged. Rationale and the full reserved-inner-kind list: `MARMOT_PROTOCOL_KNOWLEDGE.md`,
+> "Why Haven's inner kind is not 9". The kind-9 wording below is left as written: it records what
+> was true when the migration was planned.
+
 ---
 
 ## Verification record

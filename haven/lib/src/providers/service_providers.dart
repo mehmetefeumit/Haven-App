@@ -34,6 +34,7 @@ import 'package:haven/src/services/geolocator_location_service.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/ios_background_session_service.dart';
 import 'package:haven/src/services/ios_location_auth_service.dart';
+import 'package:haven/src/services/ios_location_source.dart';
 import 'package:haven/src/services/location_service.dart';
 import 'package:haven/src/services/location_settings_launcher.dart';
 import 'package:haven/src/services/location_sharing_service.dart';
@@ -70,7 +71,9 @@ final identityServiceProvider = Provider<IdentityService>((ref) {
 ///
 /// Uses [GeolocatorLocationService] in production.
 final locationServiceProvider = Provider<LocationService>((ref) {
-  return GeolocatorLocationService();
+  return GeolocatorLocationService(
+    iosSource: ref.read(iosLocationSourceProvider),
+  );
 });
 
 /// Provides the CSPRNG publish stagger shared by the foreground burst
@@ -108,6 +111,16 @@ final iosLocationAuthServiceProvider = Provider<IosLocationAuthService>((ref) {
   return createIosLocationAuthService();
 });
 
+/// Provides Haven's own iOS CoreLocation updates session.
+///
+/// The stream owner and the last-known source on iOS; a source that never
+/// delivers on every other platform, where the position stream stays on
+/// geolocator. Override in tests with a fake to drive the native side; the
+/// E2E drive must NEVER override it, or the lane would prove a fake.
+final iosLocationSourceProvider = Provider<IosLocationSource>((ref) {
+  return createIosLocationSource();
+});
+
 /// Provides the iOS CoreLocation background session bridge.
 ///
 /// Real `MethodChannel`-backed implementation on iOS; a no-op on every other
@@ -116,6 +129,57 @@ final iosBackgroundSessionServiceProvider =
     Provider<IosBackgroundSessionService>((ref) {
       return createIosBackgroundSessionService();
     });
+
+/// Which indicator sentence the iOS guidance copy must use.
+enum IosIndicatorSentence {
+  /// The OS status-bar arrow is the only signal: a POSITIVELY confirmed
+  /// Always, where the handler neither asks for the indicator nor keeps an
+  /// activity session.
+  arrow,
+
+  /// The blue location bar is on screen and cannot be turned off.
+  bar,
+}
+
+/// Which indicator the user will actually see while background sharing runs.
+///
+/// Selected on `alwaysConfirmed`, the SAME value both native branches decide
+/// from — `HavenLocationStreamHandler` sets
+/// `showsBackgroundLocationIndicator = !alwaysConfirmed` and
+/// `HavenBackgroundSessionHandler` gates the activity session on
+/// `status == .authorizedWhenInUse || !alwaysConfirmed` — so Dart and Swift
+/// cannot disagree about what is on screen.
+///
+/// NOT `backgroundActivitySessionHeld`: `CLBackgroundActivitySession` is
+/// iOS 17+ and Haven deploys to iOS 15.5, so on iOS 15/16 nothing is ever held
+/// while the indicator flag is on and the bar is up. Every remaining
+/// bar-showing cohort also reads `alwaysConfirmed == false` — When-In-Use
+/// (where the bar is mandatory), a provisional Always (`.authorizedAlways`
+/// while the OS still treats the app as When-In-Use), and iOS 17 Always (no
+/// diagnostics API to confirm with). The arrow is honest only once Always is
+/// positively confirmed, which is also when the handler stops asking for the
+/// bar.
+///
+/// Null while the handler is NOT armed, which is not a third indicator but the
+/// absence of a reading: `disarm()` clears `alwaysConfirmed` unconditionally,
+/// so with background sharing off (or the background disclosure unaccepted, or
+/// the channel silent) its `false` is a teardown residue, not a measurement of
+/// this device's tier. Selecting from it there promises the blue bar to a user
+/// who may get the arrow the moment sharing starts — the page has no honest
+/// sentence for that reader and renders no card at all.
+///
+/// Invalidate after toggling background sharing and on
+/// `AppLifecycleState.resumed`: the confirmation arrives asynchronously and the
+/// user may have answered the second prompt in Settings.
+final iosIndicatorSentenceProvider = FutureProvider<IosIndicatorSentence?>((
+  ref,
+) async {
+  final status = await ref.read(iosBackgroundSessionServiceProvider).status();
+  if (!status.armed) return null;
+  return status.alwaysConfirmed
+      ? IosIndicatorSentence.arrow
+      : IosIndicatorSentence.bar;
+});
 
 /// Exposes the current iOS location authorization status.
 ///
@@ -330,8 +394,11 @@ Future<DecryptedLocation?> parseStreamedLocation(
 /// [SyncStatusNotifier] already aggregates into the phase the health model
 /// listens to (a momentary drop on mobile is not an outage), and
 /// `unprocessable` / `inboxError` are per-event failures that say nothing about
-/// whether the subscription still exists. The switch is exhaustive so a new FFI
-/// variant is a compile error rather than a silently ignored signal.
+/// whether the subscription still exists. `paused` is the deliberate absence of
+/// a subscription between background bursts — feeding it in either direction
+/// would be a lie: it neither proves the receive plane is whole nor reports it
+/// lost. The switch is exhaustive so a new FFI variant is a compile error
+/// rather than a silently ignored signal.
 ///
 /// Named rather than inlined into [subscriptionServiceProvider] so the
 /// production mapping is what tests exercise (same reason as
@@ -354,6 +421,7 @@ void recordRelaySubscriptionSignal(
     case FfiSyncStatusReason.inboxError:
     case FfiSyncStatusReason.sessionStarted:
     case FfiSyncStatusReason.sessionStopped:
+    case FfiSyncStatusReason.paused:
       break;
   }
 }

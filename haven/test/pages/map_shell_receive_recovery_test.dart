@@ -25,6 +25,11 @@ import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/pages/map_shell.dart';
 import 'package:haven/src/services/live_sync_resubscriber.dart';
 
+// The AST detectors for `map_shell.dart` live next door; a second copy here
+// would be a second thing to keep correct about the same source.
+import 'map_shell_burst_collaborators_test.dart'
+    show assignmentsTo, conditionalArms, methodSource, namedArgumentsOf;
+
 void main() {
   group('MapShell.shouldReanchorOnResume', () {
     final t0 = DateTime.utc(2026, 8, 28, 12);
@@ -40,7 +45,7 @@ void main() {
 
     test('a glance 5 s after the last one does NOT re-anchor', () {
       // Ten shade-pull glances must not become ten pool reconnects and ten
-      // 7-day gift-wrap replays, each wrap costing a secret materialisation
+      // 49-hour gift-wrap replays, each wrap costing a secret materialisation
       // and an FFI NIP-59 unwrap.
       expect(
         MapShell.shouldReanchorOnResume(
@@ -224,6 +229,52 @@ void main() {
       );
     });
 
+    test('the heal repairs a PAUSED engine too, which ensureRunning cannot '
+        'see', () {
+      // `ensureRunning` returns TRUE for a paused engine — `isRunning` is
+      // `!shutdown && !wedged`, and a pause is neither — so the heal used to
+      // report success over an engine holding no REQ and no socket. Since the
+      // pause branch closes on EVERY iOS background pause, a resume whose one
+      // re-anchor attempt failed lands here every time, and this is the only
+      // periodic thing that runs while the app is on screen.
+      final args = namedArgumentsOf(
+        source,
+        className: '_MapShellState',
+        method: '_healLiveSyncIfStopped',
+        constructed: 'reanchorPausedEngine',
+      );
+      expect(
+        args['engine'],
+        'ref.read(subscriptionServiceProvider)',
+        reason: 'the same singleton the resume re-anchors',
+      );
+      expect(
+        args['foregrounded'],
+        'ref.read(appForegroundProvider)',
+        reason: 'a re-anchor while the app is AWAY puts a standing REQ back '
+            'between bursts (R14); the timer can outlive a pause because '
+            '`_startLiveSync` re-arms it from its own completion',
+      );
+      expect(
+        args['lastReanchorAt'],
+        '_lastReanchorAt',
+        reason: 'the SAME clock the resume stamps, which is what stops the '
+            'two spending two pool reconnects and two 49 h `#p` replays on '
+            'one repair',
+      );
+      expect(
+        assignmentsTo(
+          source,
+          className: '_MapShellState',
+          method: '_healLiveSyncIfStopped',
+          target: '_lastReanchorAt',
+        ),
+        ['_lastReanchorAt = at'],
+        reason: 'an unrecorded re-anchor leaves the resume free to repeat it, '
+            'and repeats it itself on the next tick',
+      );
+    });
+
     test('concurrent installs are single-flighted through the latch', () {
       // The behavioural proof is the `SingleFlight` group above; this is what
       // ties it to production. Two installs would build two re-subscribers
@@ -274,6 +325,102 @@ void main() {
             'circle-set change re-anchors even if no session ever started',
       );
     });
+
+    test('the heal refuses to start an engine the build compiled out', () {
+      // The rollback configuration's whole promise is that no live-sync engine
+      // is ever started, and two of the heal's callers reach it without
+      // consulting the flag: `_onResumed` heals AHEAD of its own debounce, and
+      // the R1 consent edge heals from a PAUSED process. Ungated, a
+      // `HAVEN_LIVE_SYNC=false` build therefore stood up a re-subscriber and a
+      // live session on any `resumed` dispatch — an app switch, a shade pull, a
+      // lock-screen check — putting long-lived REQs on the relays of the one
+      // build whose point is that it has none.
+      //
+      // Read off the AST rather than the text, and SCOPED to this method.
+      // Both halves are load-bearing. `conditionalArms` visits `IfStatement`
+      // nodes and refuses to walk comments, so neither prose describing the
+      // gate nor a string literal spelling it can satisfy this; and the file
+      // holds a SECOND, byte-identical `if (!liveSyncEnabled) return;` in
+      // `_rearmLiveSyncHealTimer`, so a file-wide needle would go on passing
+      // with the heal's own gate deleted.
+      final gate = conditionalArms(
+        source,
+        className: '_MapShellState',
+        method: '_healLiveSyncIfStopped',
+        conditionContains: 'liveSyncEnabled',
+      );
+      expect(
+        gate,
+        hasLength(1),
+        reason: 'exactly one flag gate — none is the defect, and a second one '
+            'makes every assertion below about whichever came first',
+      );
+      expect(gate.single.condition.toSource(), '!liveSyncEnabled');
+      expect(
+        gate.single.then,
+        'return;',
+        reason: 'the flag-off arm must LEAVE the method, not fall through to a '
+            'narrower branch that still installs or starts something',
+      );
+      expect(
+        gate.single.orElse,
+        isNull,
+        reason: 'an else arm puts work on the flag-off path, which is the one '
+            'path that must do none',
+      );
+
+      // …and it has to come FIRST, because the install is itself an effect: it
+      // builds a `LiveSyncResubscriber` and registers a `circlesProvider`
+      // listener in a build that owns neither.
+      final body = methodSource(
+        source,
+        className: '_MapShellState',
+        method: '_healLiveSyncIfStopped',
+      );
+      final gateAt = body.indexOf('!liveSyncEnabled');
+      final installAt = body.indexOf('_ensureLiveSyncInstalled()');
+      // Anti-vacuity before the comparison, because `-1 < n` passes: a needle
+      // that quietly stopped matching would otherwise let this report an
+      // ordering it never read — a guard green over a violated invariant.
+      expect(gateAt, isNonNegative, reason: 'the gate must be in the body');
+      expect(
+        installAt,
+        isNonNegative,
+        reason: 'the install must still be here — the heal is also the FIRST '
+            'start, so a body with no install has nothing left to gate',
+      );
+      expect(
+        gateAt,
+        lessThan(installAt),
+        reason: 'the flag gate must precede the install, or a flag-off build '
+            'builds a LiveSyncResubscriber and starts a session on resume — '
+            'the rollback path running the plane its rollback removes',
+      );
+    });
+
+    test('that one door is the only way to a start, so gating it suffices', () {
+      // Why the gate belongs at the door and not at the two ungated call sites:
+      // `ensureRunning` is the only thing in the shell that can bring a session
+      // up, and it is reached from exactly ONE place — inside the gated method.
+      // That is what turns "the heal is gated" into "no engine starts", and it
+      // is what makes a future fifth caller covered for free.
+      expect(
+        methodSource(
+          source,
+          className: '_MapShellState',
+          method: '_healLiveSyncIfStopped',
+        ).contains('ensureRunning()'),
+        isTrue,
+        reason: 'the start must live INSIDE the gated method',
+      );
+      expect(
+        RegExp(r'\.ensureRunning\(\)').allMatches(source).length,
+        1,
+        reason: 'a second call site would start an engine the flag gate never '
+            'saw. The doc comments here name it in backticks without the call '
+            'parentheses, which is what keeps this a count of code',
+      );
+    });
   });
 
   group('resume repairs before the debounce', () {
@@ -292,21 +439,34 @@ void main() {
     });
 
     test('the engine re-anchor runs before the debounce', () {
-      // `resumeAfterBackground()` is the only repair that recovers a REQ a
-      // relay ended with `CLOSED`, and it used to sit AFTER the 30 s debounce —
-      // so the glance pattern the debounce exists to absorb (shade pull,
+      // The engine re-anchor is the only repair that recovers a REQ a relay
+      // ended with `CLOSED`, and it used to sit AFTER the 30 s debounce — so
+      // the glance pattern the debounce exists to absorb (shade pull,
       // lock-screen check, app-switcher peek) was exactly what kept it from
       // running. A user reopening the app BECAUSE peers had stopped appearing
       // routinely got no repair at all.
-      expect(resumeBody.contains('resumeAfterBackground()'), isTrue);
+      //
+      // THIS USED TO NAME `resumeAfterBackground()` DIRECTLY, and is updated
+      // rather than relaxed: the resume no longer calls the engine method
+      // itself, because a re-anchor issued into a burst that is still running
+      // is undone by the `pauseSubscriptions()` that burst is about to take.
+      // `reanchorOnResume` is that same repair plus the ordering that makes it
+      // stick, so the promise here — "the resume re-anchors, ahead of the
+      // debounce" — is unchanged and still fails when it breaks.
+      expect(resumeBody.contains('MapShell.reanchorOnResume('), isTrue);
+      expect(
+        resumeBody.contains('engine.resumeAfterBackground()'),
+        isFalse,
+        reason: 'a direct call re-anchors INTO the race instead of behind it',
+      );
     });
 
     test('but never unthrottled — it goes through its own guard', () {
       // Ahead of the debounce it would otherwise run on EVERY glance, and a
       // re-anchor is not cheap: it reconnects the pool and re-issues every REQ
-      // including the inbox one, whose `since` always asks for 7 days of gift
-      // wraps, each costing a secret materialisation and an FFI NIP-59 unwrap.
-      final call = resumeBody.indexOf('resumeAfterBackground()');
+      // including the inbox one, which asks for 49 hours of gift wraps, each
+      // costing a secret materialisation and an FFI NIP-59 unwrap.
+      final call = resumeBody.indexOf('MapShell.reanchorOnResume(');
       final guard = resumeBody.indexOf('MapShell.shouldReanchorOnResume(');
       expect(guard, isNonNegative, reason: 'the throttle must exist');
       expect(

@@ -110,8 +110,11 @@
 #                                 dialog: the two screens where the user is
 #                                 actively deciding whether to trust the app,
 #                                 the second being the artefact that RECORDS
-#                                 that consent. Ten of this app's factual claims
-#                                 live in these two files and in no ARB.
+#                                 that consent. The prompt's four claims live in
+#                                 no ARB; the dialog's copy moved into it
+#                                 (locationDisclosure*) with OD-P3-g, and the
+#                                 widget is still shown here because it is what
+#                                 chooses WHICH of those strings a user reads.
 #   haven/lib/l10n/*.arb          the translations, not just the template: an
 #                                 existing claim can be silently STRENGTHENED in
 #                                 one language only, which the parity gate
@@ -348,20 +351,20 @@ jobs:
                haven-core/SECURITY.md was reworded to sound smaller than it is.
 
             2. A NEW USER-FACING STRING CLAIMS SOMETHING NO INVARIANT BACKS. A
-               new or edited ARB value, iOS usage description, or
-               LocationDisclosureStrings constant that asserts a checkable fact
-               about Haven's behaviour, where no invariant in the manifest
-               carries that ARB key or non-ARB carrier id, or where the
-               invariant that does carry it cites no test and no guard. Many of
+               new or edited ARB value or iOS usage description that asserts a
+               checkable fact about Haven's behaviour, where no invariant in the
+               manifest carries that ARB key or non-ARB carrier id, or where the
+               invariant that does carry it cites no test and no guard. Some of
                this app's factual claims are not in the ARB at all: the
-               NS*UsageDescription strings in haven/ios/Runner/Info.plist; the
-               fields of LocationDisclosureStrings in
-               haven/lib/src/widgets/location/location_disclosure_dialog.dart,
-               the artefact that records the user's consent; and the Android
-               foreground-service notification strings in
+               NS*UsageDescription strings in haven/ios/Runner/Info.plist, which
+               the user reads at the moment they grant the permission; and the
+               Android foreground-service notification strings in
                haven/lib/src/services/background_location_manager.dart, which a
-               user sees the whole time background sharing is on. The
-               deterministic gate enumerates only the first two, so an
+               user sees the whole time background sharing is on. The consent
+               dialog's locationDisclosure* keys ARE in the ARB (OD-P3-g), and
+               are the strings the user agrees to. The deterministic gate
+               enumerates the usage descriptions and the consent dialog's
+               render site, so an
                unclassified claim in any other non-ARB carrier reaches you with
                that gate green. Read these files whenever the diff touches them.
 

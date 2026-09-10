@@ -18,6 +18,26 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 
+/// The brace-balanced block that opens at the first `{` at or after [from].
+///
+/// Used instead of a fixed character window: a window has to be re-tuned every
+/// time a gate gains a statement — which is exactly when this assertion should
+/// be re-read rather than re-numbered — and it can also be satisfied by a
+/// `return` belonging to whatever follows the block.
+String blockAt(String source, int from) {
+  final open = source.indexOf('{', from);
+  expect(open, isNonNegative, reason: 'no block opens after offset $from');
+  var depth = 0;
+  for (var i = open; i < source.length; i++) {
+    if (source[i] == '{') depth++;
+    if (source[i] == '}') {
+      depth--;
+      if (depth == 0) return source.substring(open, i + 1);
+    }
+  }
+  fail('unbalanced braces after offset $from');
+}
+
 void main() {
   late String taskSource;
   late String cycleBody;
@@ -387,8 +407,8 @@ void main() {
       final at = cycleBody.indexOf('await _ensureSession()');
       expect(at, isNonNegative);
       expect(
-        cycleBody.substring(at, at + 60),
-        contains('return'),
+        blockAt(cycleBody, at),
+        contains('return;'),
         reason: 'without the early return the cycle would dereference a null '
             'manager after an unsuccessful recovery',
       );
@@ -406,10 +426,7 @@ void main() {
         isNonNegative,
         reason: 'a half-initialised isolate must be able to finish wiring',
       );
-      expect(
-        cycleBody.substring(at, at + 60),
-        contains('return'),
-      );
+      expect(blockAt(cycleBody, at), contains('return;'));
     });
   });
 

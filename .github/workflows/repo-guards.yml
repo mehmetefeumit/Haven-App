@@ -117,21 +117,44 @@
 #     or reshaped manifest and prints the file and position counts it read.
 #
 #   iOS background publish            scripts/ci/check_ios_background_publish.sh
-#     The unified-stream invariants that keep iOS background location
-#     PUBLISHING alive (and keep opt-out users suspended): Info.plist
-#     `location` background mode, exactly one geolocator stream call site,
-#     AppleSettings background flags keyed off the background-sharing toggle
-#     (never hardcoded, and BOTH arms of the distance filter — the background
-#     arm must be kCLDistanceFilterNone, the opt-out arm must stay 1 m), the
-#     C4 disable-while-paused watcher installed outside the liveSync-gated
-#     path, presence-only location logging, and the relaunch region armed and
-#     released with SLC under the same consent predicate. Its `--self-test`
-#     runs as its own step: the two function-shaped checks pin invariants
-#     nothing behavioural can observe — a settings object whose only symptom
-#     is "iOS suspended the app" hours later and off-device, and a region that
-#     can only ever fire after a real termination (owner checklist,
-#     docs/M7_BACKGROUND_SHARING.md §6 item 2b) — so a rotted guard would take
-#     both invariants with it in silence.
+#     The invariants that keep iOS background location PUBLISHING alive (and
+#     keep opt-out users suspended). ONE STREAM OWNER PER PLATFORM: Info.plist
+#     `location` background mode, exactly one geolocator call site (Android),
+#     exactly one `positions(` call site and one native EventChannel subscriber
+#     (iOS). The iOS session settings are no longer AppleSettings fields — they
+#     are CoreLocation properties on Haven's own
+#     `HavenLocationStreamHandler.swift`, and each pin moved with the behaviour:
+#     `pausesLocationUpdatesAutomatically = false` and
+#     `distanceFilter = kCLDistanceFilterNone` set once for BOTH profiles (the
+#     opt-out arm's 1 m filter is retired by design — the 16.4 delivery rule
+#     requires no filter of the one session, and the battery lever is now the
+#     accuracy tier); EXACTLY TWO accuracy values ever assigned, because a
+#     third, coarser one re-creates the suspension shape; the background
+#     capability derived from the listen argument on one line and never a
+#     literal, so it stays a pure function of the user's toggle from Dart to
+#     CoreLocation; the background-start refusal pushed through the event SINK
+#     (a RETURNED FlutterError never reaches the stream); one
+#     `startUpdatingLocation()` site; only Best-profile fixes cached, and that
+#     cache dropped on cancel and on demand. Plus the tier policy: under
+#     CONFIRMED Always no activity session and the indicator off, under
+#     When-In-Use / provisional Always / iOS 17 the When-In-Use posture, the
+#     release of that session gated on `applicationState != .background`, the
+#     diagnostics observer re-running the policy rather than only setting a
+#     flag, and `disarm()` UNCONDITIONAL. Plus the C4 disable-while-paused
+#     watcher and its opt-out release, presence-only location logging, the
+#     AppDelegate wiring ORDER, the relaunch region coupled to SLC, and the
+#     four project.pbxproj references without which the Swift file compiles
+#     nowhere and fails as a MissingPluginException Dart reads as "no native
+#     handler". Its `--self-test` runs as its own step: NO Swift unit test runs
+#     in this CI at all, and the other function-shaped checks pin invariants
+#     nothing behavioural can observe — a session whose only symptom is "iOS
+#     suspended the app" hours later and off-device, a branch that only runs
+#     while the process is PAUSED (and `MapShell` cannot be pumped at all), and
+#     a region that can only ever fire after a real termination (owner
+#     checklist, docs/M7_BACKGROUND_SHARING.md §6 item 2b) — so a rotted guard
+#     would take those invariants with it in silence. Every fixture is a
+#     mutation that leaves the file compiling and reading correctly, including
+#     a GUTTED function body and the fully-commented-out anti-vacuity case.
 #
 #   Location access gate ordering     scripts/ci/check_location_access_gate.sh
 #     No stored coordinate may outlive the user's location access. The
@@ -146,6 +169,41 @@
 #     checkPermission still calls whileInUse; and the per-circle publish
 #     chain bounds each link, since a hung future raises no error for
 #     catchError to catch.
+#
+#   Estimate integrity                scripts/ci/check_estimate_integrity.sh
+#     There is no hardware for the power programme (POWER_EFFICIENCY_PLAN.md
+#     §2.5), so every battery figure in this tree is an output of estimation
+#     model E (§6.5a) and none may read as a measurement. Enforced twice by a
+#     manual sweep before this guard existed, and an adversarial review found
+#     three whole classes both sweeps had missed — including the two a numeric
+#     grep can never see: a zero-cost verdict ("no new battery cost") and a
+#     directional claim ("the dominant iOS drain", which model E's own finding
+#     2 contradicts). Also refuses a measurement whose named instrument is
+#     gone: `config.rs` cited a real-relay p50/p99 for weeks after that suite
+#     became a DELETED-WITH-SUBJECT tombstone. Its two checks have DIFFERENT
+#     roots, deliberately: the attribution check reads code and CI only (in
+#     `docs/` the model is the subject and its per-phase table is thirty figures
+#     in six rows, which the sentence unit cannot grade — 54 findings there,
+#     37 inside that section, and the rest are mentions of a unit rather than
+#     claims in it: a column heading, a formula, a start-of-charge band), while the
+#     citation check also reads `docs/`, where it caught the same tombstoned
+#     suite cited twice in M11_ROLLOUT.md. See the script header for both, and
+#     for why the exemption allowlist is now empty.
+#
+#   Publish rotation fairness         scripts/ci/check_publish_rotation_fairness.sh
+#     The multi-circle round-robin queue is rewound in exactly ONE place — a
+#     statement of `build()`, not merely somewhere inside it — the survivor
+#     merge stays in `_syncCircles`' own body BELOW the empty-roster guard, and
+#     the tick reads the roster with a lookup, never `_circles[key]!`. The first
+#     two are pure statement PLACEMENT: clearing on pause REWOUND the queue every
+#     background round trip and re-served the same `updated_at DESC` head
+#     forever (11 of 13 circles), while reconciling against an emission of
+#     nothing RE-PHASES it — `circlesProvider` degrades every roster-read failure
+#     to `[]`. The third is one character: the queue outlives an emptied roster
+#     on purpose, so a bang makes a designed state a crash, and because
+#     `JitteredScheduler._fire` swallows and re-arms, every later tick throws
+#     while the sharing banner stays green. Behavioural tests cover all three;
+#     this is the reorder half, which two mutations previously survived.
 #
 #   Locale stays device-local         scripts/ci/check_locale_privacy.sh
 #     The app language must remain a local preference and never be referenced
@@ -178,14 +236,53 @@
 #     below the new REQ floor). The deleted Dart/FFI group-cursor advance stays
 #     deleted, and no FFI entry point may name the bare `group_445` stream.
 #
-#   Engine client options             scripts/ci/check_engine_client_options.sh
-#     The live-sync engine `Client` must not enable nostr-sdk's
-#     `verify_subscriptions`: it discards the stored events a REQ replays
-#     before nostr-relay-pool registers that REQ's filter — silently, while
-#     the EOSE still advances the cursor past them. The filter is re-checked
-#     in `live_sync::supervisor::plane_wants_event` instead, where no such
-#     window exists. Only a guard can hold this: the drop is probabilistic, so
-#     a build with the option back on still passes the suite most of the time.
+#   Relay pool options                scripts/ci/check_engine_client_options.sh
+#     Two pools with opposite duty cycles, neither allowed to adopt the
+#     other's options. The PUBLISH pool holds no standing REQ, so it sends no
+#     keepalive, never self-reconnects and sleeps between bursts — every
+#     registration must pass `publish_relay_options()`, because a bare
+#     `Client::add_relay` ORs `PING` back onto an already-pooled relay and the
+#     pinger reads that flag live. The ENGINE pool exists to hold a standing
+#     REQ on a socket carrying nothing else, so it KEEPS its ping and never
+#     sleeps; it also must not enable nostr-sdk's `verify_subscriptions`,
+#     which discards the stored events a REQ replays before nostr-relay-pool
+#     registers that REQ's filter — silently, while the EOSE still advances
+#     the cursor past them (the filter is re-checked in
+#     `live_sync::supervisor::plane_wants_event` instead, where no such window
+#     exists). Only a guard can hold either half: the dropped events are
+#     probabilistic, and the wasted radio wakes only show up as battery, hours
+#     later and off-device.
+#     The same script also holds the background BURST, for the same reason —
+#     every way it breaks is silent. Its close path must drain and
+#     `note_delivery_gap` before it disconnects (a `forget_*` there drops an
+#     un-applied hold-back the next burst's EOSE then skips past; a `shutdown()`
+#     instead of a `disconnect()` empties the pool and the next burst's
+#     subscribe fails with the opaque "no relays"), and no standing REQ may be
+#     opened from the burst entry point. On the bridge side, each of the seven
+#     `LiveSyncFfi` burst-lifecycle methods must FORWARD to the core method of
+#     the same name and take no decision of its own: `rust_builder` has no test
+#     that constructs a `LiveSyncFfi` and the Dart tests drive a fake, so a body
+#     replaced by `Ok(())` — a pause that never pauses, a backlog wait that
+#     always answers "settled" — compiles and passes every suite. Reachability,
+#     not text: a guarded early return leaves the required call present and
+#     dead. And the two `#[frb(sync)]` session reads must answer from `SESSION`
+#     and carry no panic token, because a sync FFI read unwinds into Dart and
+#     `unwrap_used`/`expect_used` are restriction lints this repo does not
+#     enable.
+#
+#   Generated bridge pinned           scripts/ci/check_generated_bridge_pinned.sh
+#     The flutter_rust_bridge-generated files are the one place a value's Rust
+#     meaning and its Dart meaning are written twice, and nothing in the repo
+#     compares them: `cargo check` types each half separately, no test crosses
+#     the bridge, `FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH` is derived from
+#     `api.rs` rather than from the generated content, and no job regenerates
+#     and diffs. Inverting one discriminant of `BacklogOutcomeFfi` — whose two
+#     values mean "every endpoint replayed, safe to encrypt" and "promises
+#     nothing" — makes every background burst read a real timeout as settled
+#     and publish at a stale epoch, with clippy, the tests and every other
+#     guard green. This gate pins each generated file's sha256 and the codegen
+#     version stamped in its header; `scripts/regenerate_frb.sh` is the only
+#     writer of the pins, and it regenerates first.
 #
 #   Clock-skew policy parity          scripts/ci/check_clock_skew_policy_parity.sh
 #     The device-clock skew policy lives authoritatively in Rust and is
@@ -200,6 +297,17 @@
 #     Narrowing or widening the Rust fraction alone — constant and pinning
 #     test moved together, correctly — leaves every existing gate green while
 #     the Dart constants become false documentation of the sampled window.
+#
+#   Delta-alphabet parity             scripts/ci/check_delta_alphabet_parity.sh
+#     The observable whole-second `created_at` delta alphabet is quoted in the
+#     privacy manifest (four prose sites), in SECURITY.md and in
+#     `constants/location.dart`, and its truth is the literal tables in
+#     `publish_stagger_test.dart`. Nothing compared the two: all four manifest
+#     sites were mutated from the account bound's `{2,3,4}` to the burst cap's
+#     `{2,3}` — one circle past anything the app admits — and
+#     `check_privacy_invariants.sh` exited 0, because its rules check that
+#     symbols, tests, guards and anchors EXIST, never that a quoted figure
+#     matches the code.
 #
 #   MDK supply-chain shape            scripts/ci/check_mdk_supply_chain.sh
 #     haven-core/Cargo.lock must hold exactly the five Dark Matter crates —
@@ -400,7 +508,14 @@
 #     the secret-leak log scanner must catch planted key material, and the iOS
 #     retry classifier + first-test watchdog must admit exactly one
 #     infrastructure signature and refuse everything else — including an empty
-#     or absent log, where "no evidence" must not read as "flake".
+#     or absent log, where "no evidence" must not read as "flake". The relay
+#     liveness grader belongs to the same group even though it never runs in
+#     CI: it runs on the owner's laptop over a hardware capture, months apart,
+#     and a hardware campaign is the one place a rotted oracle would be
+#     believed. Its step below carries the standing caveat that the plan's
+#     re-based CI liveness gate ALSO wants this grader run over a lane's own
+#     relay export, and that that export step has not been built — so the
+#     self-test here is not, and must never be quoted as, a liveness result.
 #
 #   Wire-journal closed-world oracle  tooling/e2e/ci/check-wire-journal.sh
 #     The one guard here whose SUBJECT is a data file: `tooling/e2e/
@@ -682,10 +797,15 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_ios_background_publish.sh
 
-      # Its two function-shaped checks pin invariants nothing behavioural can
-      # see: a stream-settings object whose only symptom is "iOS suspended the
-      # app" hours later, and a relaunch region that can only ever fire after a
-      # real termination. A rotted guard would take both with it silently.
+      # Its function-shaped checks pin invariants nothing behavioural can see.
+      # Two of them cover Swift that NO test in this CI ever executes — the
+      # location stream handler's session shape and the session handler's tier
+      # policy — and the rest cover a CoreLocation session whose only symptom is
+      # "iOS suspended the app" hours later, a branch that runs only while the
+      # process is paused, and a relaunch region that can only fire after a real
+      # termination. A rotted guard would take all of them with it silently, so
+      # the fixture count is pinned by EQUALITY: a floor would let a deleted
+      # fixture hide under the slack.
       - name: iOS background publish guard self-test
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_ios_background_publish.sh --self-test
@@ -709,6 +829,80 @@ jobs:
       - name: Location access gate guard self-test
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_location_access_gate.sh --self-test
+
+      # A backgrounded location registration has no host-test oracle: the only
+      # symptom is battery, hours later and off-device. Both invariants are one
+      # reorder away from being wrong again — releasing GPS after the ownership
+      # write leaves two isolates holding a client, and a release that rides a
+      # provider rebuild cannot run at all while frames are off.
+      - name: Backgrounded app holds no UI location registration
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_android_location_power.sh
+
+      - name: Location power guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_android_location_power.sh --self-test
+
+      # Every battery figure here is estimation model E's arithmetic, never a
+      # measurement, and the rule saying so had no guard: `grep -rn ESTIMATED
+      # scripts/ .github/` returned nothing before this step existed. Two manual
+      # sweeps enforced it and an adversarial review found three classes both
+      # had missed, so the sweep is now a script.
+      - name: No energy claim reads as a measurement
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_estimate_integrity.sh
+
+      # Fixtures in both directions for every shape — the eight numeric ones (a
+      # discharge rate, a current, an energy, a power, a wake rate, a duty, a
+      # battery delta and a before/after pair), the zero-cost verdict, the
+      # directional claim, the causal assertion and the measurement verdict —
+      # plus the false-positive directions that shaped them: "the dominant
+      # memory consumer", "the DOMINANT generator of MLS forks", a motion
+      # curve's fraction of a timeline, a jitter bound stated as a fraction of
+      # the nominal interval, a coverage table's percent pair, a coverage
+      # floor's percentage-point move, a logcat priority column and a plan
+      # work-item id (both of which read as watts to a looser pattern), "adds no
+      # distinguishing power", and a mechanism argument that names no energy
+      # noun. Attribution must be ANCHORED (a bare "our estimate" fails) and
+      # must REACH: the claim's own sentence or the one next to it, never two
+      # sentences away, never across a blank line, and never across intervening
+      # code. Every PASS fixture also asserts its own non-vacuity — the same
+      # body with attribution ignored must FAIL — because a gutted PASS fixture
+      # exits 0 and the count pin alone cannot see that. Plus the fail-closed
+      # directions: a root that matches no file and a missing root are
+      # MISCONFIGURED rather than clean, and an allowlist entry that has stopped
+      # matching FAILS, because a rotted exemption is a permanent hole.
+      - name: Estimate integrity guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_estimate_integrity.sh --self-test
+
+      - name: Publish rotation is rewound only on rebuild
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_publish_rotation_fairness.sh
+
+      # Fixtures for each way the queue loses its place. A REWIND re-serves the
+      # same head deterministically (the roster is `updated_at DESC`), and is
+      # what the clear does from the wrong place: added to `_cancelScheduling`
+      # (the original starvation), moved to `stopScheduling`, added to the
+      # empty-roster branch, or moved into `build()`'s own `ref..listen`
+      # callback, where it rewinds on EVERY roster emission — a containment
+      # check printed OK for that one. A RE-PHASE is what reconciling against a
+      # degraded-to-empty roster does: the survivor merge hoisted above the
+      # guard, the half-hoist where only the snapshot moves, and the merge
+      # parked in a never-called helper with every line number left in order.
+      # Plus the third placement: `_circles[key]!` in the tick, where the queue
+      # deliberately outlives the roster, so a bang crashes every later tick
+      # while the banner stays green — with the comment naming that trap, and
+      # `_circles[key] != null`, as its false-positive directions. Braces inside
+      # string literals move no brace range in either direction. Both
+      # anti-vacuity directions too: no rewind at all fails (exactly-once, not
+      # at-most-once); a renamed `build()`, `_syncCircles` or `_circles.isEmpty`
+      # guard is MISCONFIGURED rather than clean — the shape that lets a guard
+      # certify nothing after a refactor; and every PASS fixture asserts that
+      # the shape it is about is still in the probe.
+      - name: Publish rotation guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_publish_rotation_fairness.sh --self-test
 
       - name: Locale stays device-local
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
@@ -742,9 +936,49 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_no_event_timestamp_cursor_advance.sh
 
-      - name: Engine client keeps the racy pool-side filter check off
+      - name: Relay pools keep the options each of them needs
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_engine_client_options.sh
+
+      # Fixtures for both directions of all TEN checks, driven through the same
+      # `run_all_checks` list the enforcing run above uses — so a check unwired
+      # from the production path is unwired from these fixtures too and its
+      # fixtures go red, instead of certifying a check that no longer runs.
+      # (They used to be two independent lists, and deleting a check from the
+      # production block left every fixture green.) The clean shapes pass —
+      # including the two comments that NAME `sleep_when_idle` without setting
+      # it — and every mutation must fail with the message naming the check it
+      # broke: the option flipped on or its pin deleted, the publish keepalive
+      # restored by editing `publish_relay_options` or by deleting it, a bare
+      # `add_relay` on either crate, the engine adopting
+      # `ping(false)`/`sleep_when_idle`, a standing REQ back on the publish pool
+      # in any of the five spellings, either allowlist marker used to wave a
+      # second call through, a `forget_*`/`shutdown()` in the burst close path,
+      # a standing REQ from the burst entry point, each of the seven bridge
+      # forwardings swapped, gutted to a constant, bypassed by a guarded early
+      # return or given a second core call, and the two sync session reads made
+      # panicky, stale or constant. One fixture is structural rather than a tree
+      # mutation: every `check_*` function must be invoked by `run_all_checks`,
+      # so a check written and wired nowhere cannot look like coverage.
+      - name: Relay pool options guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_engine_client_options.sh --self-test
+
+      - name: Generated bridge files match their pins
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_generated_bridge_pinned.sh
+
+      # Fixtures for each way a generated file can drift from its pin: the
+      # inverted `SseEncode` discriminant on the Rust half, an edit on the Dart
+      # half, a new generated file nobody pinned, a pinned file deleted, a repin
+      # from a DIFFERENT codegen (the drift a byte pin alone cannot see, because
+      # bytes and pin move together), the two manifests disagreeing about the
+      # runtime — plus the anti-vacuity direction, a tree where the scanner
+      # finds no generated file at all and must FAIL rather than pass over an
+      # empty set.
+      - name: Generated bridge pin guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_generated_bridge_pinned.sh --self-test
 
       - name: Clock-skew policy parity
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
@@ -761,6 +995,28 @@ jobs:
       - name: Publish-jitter fraction parity guard self-test
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_publish_jitter_fraction_parity.sh --self-test
+
+      - name: Delta-alphabet parity
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_delta_alphabet_parity.sh
+
+      # The reviewer's mutation, run at each of the four manifest sites plus
+      # SECURITY.md, `constants/location.dart` and the code file's own doc
+      # comment — including the site that states the alphabet's SIZE as an
+      # English word rather than as a set, which drifts independently. Plus
+      # the opposite direction, which is the one nobody touches the docs for:
+      # the CODE's tables and bounds moving under prose that then quotes a
+      # figure the app no longer produces. Plus both count directions, so the
+      # rule is EQUALITY and not "still mentioned somewhere" — the reading
+      # under which swapping one alphabet for the other passes. Plus the
+      # fail-closed paths: a renamed constant, a renamed table, a moved
+      # manifest entry and a gloss that lost its figure must FAIL, never pass
+      # for want of something to compare. The fixture count is pinned by
+      # equality at the end rather than printed, because a prose count cannot
+      # tell a deleted fixture from a passing run.
+      - name: Delta-alphabet parity guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_delta_alphabet_parity.sh --self-test
 
       - name: MDK supply-chain shape
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
@@ -1249,6 +1505,43 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash tooling/e2e/ci/run-ios-bg-publish.sh --self-test
 
+      # The relay-side liveness grader for the owner-run power measurements
+      # (docs/POWER_MEASUREMENT.md §3). Unlike every other oracle in this job it
+      # never runs in CI — its input is a capture off a real relay, taken beside
+      # a battery window on real phones — so its fixtures are the ONLY thing
+      # that can tell whether it still works, and they run here for the same
+      # reason the wire oracles' do.
+      #
+      # SAY THE QUIET PART (2026-09-03): with the hardware campaign deferred,
+      # POWER_EFFICIENCY_PLAN.md §6.6 re-bases the LIVENESS gate onto this same
+      # grader run over an e2e lane's own relay export — and that export step
+      # DOES NOT EXIST. This self-test is still the only invocation in the tree.
+      # It proves the instrument's fixtures pass and says NOTHING about any
+      # build, so nobody may read this green step as a liveness result. The
+      # blocker is a lane property, not an instrument one: no Android lane has a
+      # publish window that is both longer than the 228 s bound and guaranteed
+      # to carry the two events the grader needs, and the lane that does
+      # (e2e-ios-background-publish, 396 s, >= 2 events already asserted) runs
+      # the in-memory tooling/e2e/local-relay, which has no export path. What it
+      # would take is itemised in POWER_EFFICIENCY_PLAN.md §5.1's LIVENESS block.
+      #
+      # Every battery number that campaign produces can be "improved" by
+      # publishing less, and the cheapest Haven publishes nothing at all, so a
+      # grader that reads a dead device as clean would certify the exact
+      # regression it exists to catch. The fixtures that earn their keep are
+      # therefore the false greens: a device that publishes for 30 min of a
+      # declared 3 h window and then dies, and one silent for the first 2.5 h,
+      # both of which look like a flawless 30 min run against the span of the
+      # events actually observed; a 2-publisher circle graded as one, which
+      # halves both event-count floors; and one circle split across two capture
+      # files, whose seam is then graded by neither series. The rest pin that
+      # "no evidence" keeps its own exit code — absent, empty, malformed,
+      # commit-only and undeclared-window captures must never share the code a
+      # breach gets.
+      - name: E2E harness self-test (relay liveness grader)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/summarize-created-at-gaps.sh --self-test
+
       # The CLOSED-WORLD wire oracle (Workstream C, C2/C3/C4). Every assertion
       # it makes is a set operation, and every set operation passes over an
       # empty input — so its fixtures are almost entirely anti-vacuity ones: an
@@ -1478,6 +1771,16 @@ jobs:
       # most are the ones this workstream exists for: an assertion on an
       # accepted deviation, a deleted disclosure, an unwired guard, a
       # self-test-only wiring cited as proof, and a stale ratchet override.
+      #
+      # All of them are driven through the same `run_all_checks` list the
+      # enforcing step above uses, so a check unwired from production is
+      # unwired from these fixtures too and its fixtures go red. (They used to
+      # be two independent lists, and had already drifted.) One fixture is
+      # structural rather than a manifest mutation: every `check_*` must be in
+      # that list — or, for the two that cannot run over a miniature fixture
+      # tree, invoked by `main` AND carrying fixtures of its own — and `main`
+      # must still drive the list, so neither a check nor the list itself can
+      # be written and wired nowhere while counting as coverage.
       - name: Privacy-invariants guard self-test
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_privacy_invariants.sh --self-test

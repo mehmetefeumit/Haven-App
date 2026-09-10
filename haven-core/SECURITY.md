@@ -258,12 +258,35 @@ Per-wake relay connections here are short-lived (one sweep, then shutdown) —
 this is the **no-foreground-service** background path (receive-only OS wakes),
 distinct from the live-sync engine's *standing* connection. That engine (the M6
 live-sync engine, LIVE by default since M11) keeps its socket up in the
-foreground and — on Android while the background-sharing foreground service is
-active — in the background too; its persistent-connection model is disclosed
-separately under **"Persistent receive connection (live-sync engine)"** in the
-relay-observable-metadata section below. Wake markers logged for diagnostics are
-presence-only (fixed strings + counts) — never coordinates, pubkeys, group ids,
-or event ids.
+**foreground** and nowhere else. On **iOS** with background sharing on it no
+longer holds one through the backgrounded period either — since the P4 power
+phase it is PAUSED between publishes and each publish tick opens one bounded
+burst, so between bursts it holds no standing REQ and no socket it asked for
+(the crate's own retry loop can still re-open one, which the radio-off watch
+cuts and counts — see "iOS background sharing: presence only at publish
+instants (P4)" below); with
+background sharing off the pause STOPS it, as Android's does. On **Android** it
+holds none while backgrounded, in either toggle state: with
+background sharing **ON** pausing the app stops the engine before handing the
+MLS session to the foreground service (`MapShell._handOffMlsSession`), and the
+service isolate never opens an engine socket of its own; with background sharing
+**OFF** the pause path stops it through `MapShell._stopLiveSyncBounded()`
+without releasing the Rule-14 guard, since no isolate reclaims the session in
+that state. Both are selected by the one rule
+`MapShell.shouldStopLiveSyncOnPause`. So on Android these short OS-wake sweeps and — with
+sharing on — the service's own per-cycle poll are the whole of the backgrounded
+receive path, and the engine socket no longer waits for the OS to freeze the
+process. The publish client is a separate socket, closed on the same pause path
+(`MapShell._shutdownPublishPool` →
+`NostrRelayService.shutdown` → `RelayManager`, not the engine's
+`build_engine_client`); since P1 it also carries no keepalive and sleeps between
+publish bursts. (Symbols, not line numbers: every line
+citation this paragraph used to carry had drifted by hundreds of lines.) The
+engine's persistent-connection model is disclosed separately under
+**"Persistent receive connection (live-sync engine)"** in the
+relay-observable-metadata section below. Wake markers logged
+for diagnostics are presence-only (fixed strings + counts) — never coordinates,
+pubkeys, group ids, or event ids.
 
 The iOS keychain accessibility tradeoff that lets a locked-but-unlocked-since-
 boot device read the SQLCipher key during a background wake is documented under
@@ -336,14 +359,23 @@ insider-threat storage-DoS exposure.
 Since M11 (live-sync enabled by default) Haven holds a **persistent foreground
 receive connection**: evolution events (kind:445 Commits and Proposals) arrive
 over a live subscription in **sub-second** time rather than on a poll timer, so
-the evolution-receive term of the window below collapses to the publish jitter
-(`T_pcs ≈ T_publish_jitter_max`). The figures in this section describe the
+the evolution-receive term of the window below collapses to the publish term
+alone (`T_pcs ≈ δ_max`). The figures in this section describe the
 **retained short-poll fallback** (`liveSyncEnabled = false`, the ≥1-release
-rollback path; see `docs/FLUTTER_RUST_BRIDGE.md` and
+rollback path; see `docs/M11_ROLLOUT.md` §8 and
 `haven/lib/src/pages/map_shell.dart`), where evolution events (kind:445 Commits
 and Proposals) are polled on a 60-second timer with a 55-second overlap guard.
-Location publishes from remaining members occur on the jittered cadence
-documented above (uniform on `[72, 168] s`).
+The publish term is the same on both paths — coalescing is in the scheduler, not
+in the receive plane. A remaining member's publishes into one circle arrive on
+the jittered cadence documented above (uniform on `[72, 168] s`) **plus the
+burst-position differential** since `PUB-COALESCE`: one coalesced burst
+publishes every eligible circle, so a circle that leads one burst and trails the
+next waits up to one `kPublishStaggerMaxSpread` (30 s) longer. That is the
+no-gap invariant's `δ_max = 198 s` for a roster of at most `kMaxCirclesPerBurst`
+(11) circles, and it would grow with the deferral past that (the service-period
+figures under "The no-gap invariant" — 366 s scheduled worst at N ≤ 22). Since
+`kMaxCirclesPerAccount` (10) bounds the roster below the burst cap, the 198 s
+figure is the actual worst case rather than a case among several.
 
 Consequence: after an admin issues a removal Commit, a removed member
 can still derive the decryption keys for the **outgoing epoch** until
@@ -351,14 +383,22 @@ at least one remaining member processes the Commit and publishes a new
 location under the new epoch. The worst-case window is approximately:
 
 ```
-T_pcs ≈ T_evolution_poll + T_publish_jitter_max ≈ 60 s + 168 s ≈ 228 s
+T_pcs ≈ T_evolution_poll + δ_max ≈ 60 s + 198 s ≈ 258 s     (N ≤ 11 circles)
 ```
 
-Typical case is closer to `T_evolution_poll/2 + T_publish_jitter_mean ≈
-30 s + 120 s ≈ 150 s`. During this window a removed member who continues
-to receive kind:445 events (e.g., from a relay they already know) can
-decrypt locations published before the remaining member's epoch
-transition lands.
+The `168 s` this term used to carry was the publish-interval ceiling alone,
+which stopped being the worst case at `PUB-COALESCE`. Past eleven circles the
+deferral would push it further, in the same steps the no-gap invariant
+enumerates — a roster the account bound refuses, so `258 s` is the worst case
+and not a rung.
+Typical case is closer to `T_evolution_poll/2 + T_publish_jitter_mean +
+E[burst offset] ≈ 30 s + 120 s + a few seconds ≈ 150 s` — the burst offset is a
+mean of ≈ 2.5–5.5 s per intervening gap, so it moves the typical figure by
+seconds and the worst case by the whole spread.
+
+During this window a removed member who continues to receive kind:445 events
+(e.g., from a relay they already know) can decrypt locations published before
+the remaining member's epoch transition lands.
 
 What this provides (mitigations in place):
 
@@ -379,7 +419,10 @@ What live-sync now provides (M11), inverting the prior limitation:
   Android Doze silently break long-lived sockets; sustained foreground service
   on Android) is accepted and mitigated: the M7 catch-up sweeps + the persisted
   receive cursor make both the flag-off fallback and the backgrounded case
-  **lossless** (eventual-on-next-foreground, nothing dropped), and Haven
+  **lossless** (eventual-on-next-foreground, nothing dropped), and on iOS with
+  background sharing on the backgrounded receive term is one bounded burst per
+  publish tick rather than a held socket, so the receive term there is the
+  publish cadence (72-168 s) plus the burst, not sub-second, and Haven
   deliberately takes **no** APNs/FCM third-party push (M9 deferred). The
   `T_pcs` figures above are the retained-fallback bound.
 
@@ -395,10 +438,17 @@ Mitigation options not currently applied:
 ### KeyPackage consumption race from invitation polling cadence
 
 Since M11 (live-sync enabled by default) Welcome events (gift-wrapped
-kind:1059 wrapping kind:444) arrive over the persistent inbox `#p` live
-subscription with a 7-day lookback, so invitation discovery is **live** (no
-periodic-arrival pattern; the presence signal is the continuous socket, not a
-poll). The 2-minute figure below is the **retained short-poll fallback**
+kind:1059 wrapping kind:444) arrive over the inbox `#p` live subscription, so
+foreground invitation discovery is **live** (no periodic-arrival pattern; the
+presence signal is the socket, not a poll). Two bounds on that, both landed
+since: the 7-day gift-wrap lookback is now the **cold-start** window only — every
+REQ made against a persisted cursor asks for `INBOX_RESUBSCRIBE_LOOKBACK_SECS`
+(2 days + 1 hour), sized to NIP-59's 48 h backdating plus an hour of clock skew —
+and backgrounded on **iOS** the inbox REQ rides every `INBOX_BURSTS_PER_REQ`-th
+publish burst rather than a held socket, so an invitation is picked up at a
+publish instant. An account with nothing publish-eligible has no publish
+instants, so its invitations arrive on the next foreground; both are stated under
+"iOS background sharing: presence only at publish instants (P4)" below. The 2-minute figure below is the **retained short-poll fallback**
 (`liveSyncEnabled = false`): there, Welcome events are polled on a 2-minute
 foreground timer, the resume hook in `map_shell.dart` performs an immediate
 fetch on app foregrounding, and background polling is not active on either
@@ -582,9 +632,16 @@ with `expiration = inner_created_at + retention`.
 `LOCATION_MESSAGE_RETENTION_SECS = 228 s` = 168 s maximum publish interval
 (`kLocationPublishMaxInterval`, the ceiling of the ±40 % cadence jitter) + 2 × 30 s
 network buffer. That is the data-minimizing value that still satisfies the no-gap
-invariant in the publish-cadence section below: a member re-publishes at most
-every 168 s, and per-circle schedules are independent, so a circle's worst-case
-inter-publish gap stays 168 s.
+invariant in the publish-cadence section below — for a roster of at most
+`kMaxCirclesPerBurst` (11) circles. One coalesced burst per interval publishes
+every eligible circle (see "Coalesced multi-circle publish bursts
+(PUB-COALESCE)"), so a member re-publishes at most every 168 s and a circle that
+leads one burst and trails the next waits at most one burst spread
+(`kPublishStaggerMaxSpread`, 30 s) longer: a worst-case **scheduled** gap of
+198 s, leaving one whole `kTtlNetworkBufferSeconds` (30 s of the `2 × 30 s`
+above) for propagation and clock skew, with the burst spread spending the
+other. Past eleven circles a burst defers its tail to the next tick and
+that bound stops holding — stated in full under the no-gap invariant below.
 
 Receivers enforce the tag with a `RECEIVER_EXPIRATION_GRACE_SECS = 60` skew
 window, in `SessionManager::process_event` — the choke point every receive plane
@@ -744,10 +801,28 @@ interval on every rearm.
 
 In addition to the scheduled cadence, a **motion-triggered publish**
 fires when the device has moved more than 100 m since the last publish
-AND a 60-second overlap guard has elapsed. This piggybacks on the GPS
-stream already consumed for the user's own map marker, adding no extra
-battery cost. The overlap guard prevents the motion path from exceeding
-the scheduled publish rate floor (72 s) by more than 12 s.
+AND a 60-second overlap guard has elapsed. The overlap guard prevents the
+motion path from exceeding the scheduled publish rate floor (72 s) by
+more than 12 s.
+
+**What that costs, stated as a mechanism and an ESTIMATE rather than as a
+verdict** (this paragraph said "adding no extra battery cost" until
+2026-09-09, which was untagged and wrong in the same breath). The
+mechanism: the *fix* is free — the trigger reads the GPS stream already
+consumed for the user's own map marker, so it adds no location
+registration and no acquisition of its own. The *publish* is not free: it
+is an additional kind-445, i.e. an additional radio wake that would not
+otherwise have happened. Estimation model E prices radio energy per wake
+(E-A2, `POWER_EFFICIENCY_PLAN.md` §6.5a), so one extra background wake
+per hour is **ESTIMATED** at ≈ 0.021 %/h at `c = 1` and proportionally
+less as wakes coalesce. Nothing here was measured on any handset (§2.5 —
+no hardware for the duration), and the wake count itself is bounded by
+the 60 s overlap guard rather than by the trigger. The shape this
+paragraph used to be — an energy verdict wearing a negation, which no
+`%/h` grep can see — is now caught by
+`scripts/ci/check_estimate_integrity.sh` across code and CI; this file is
+Markdown and outside that guard's roots, so it stays covered by
+`POWER_EFFICIENCY_PLAN.md` §5.6's sweep, which is the stated scope gap.
 
 **Activity-level correlation surface**: motion-triggered publishes
 create a bimodal traffic profile that a relay observer can use to
@@ -781,13 +856,157 @@ What this does **not** provide:
     distinction and is the biggest remaining win — filed as a
     follow-up in `docs/LOCATION_SHARING_SECURITY_BACKLOG.md`.
 - Since M11 (live-sync default) the receiver side holds a **standing REQ**
-  rather than a periodic fetch, so there is no fixed arrival cadence — the
-  relay-visible signal is the continuous socket (see "Persistent receive
-  connection (live-sync engine)" above), not a poll pattern. In the retained
+  rather than a periodic fetch *while the app is foregrounded*, so there is no
+  fixed arrival cadence — the relay-visible signal is the continuous socket (see
+  "Persistent receive connection (live-sync engine)" above), not a poll pattern.
+  Backgrounded on iOS with sharing on there is no standing REQ: each publish tick
+  opens one bounded burst, so for a circle relay the receive REQ arrives on the
+  same jittered publish cadence as the `kind:445` it already carries, while an
+  inbox-ONLY relay sees a REQ/CLOSE cadence that is itself a presence signal —
+  both under "iOS background sharing: presence only at publish instants (P4)". In the retained
   short-poll fallback (`liveSyncEnabled = false`) the 30 s fetch cadence on the
   receiver side (`map_shell.dart`) is fixed and creates a predictable arrival
   pattern at relays; see "Post-Compromise Security window from polling cadence"
   below for the related security-side trade-off.
+
+#### Coalesced multi-circle publish bursts (PUB-COALESCE)
+
+Owner decision **OD3** (accepted 2026-08-29) replaced the per-circle publish
+schedules with **one coalesced burst per interval that publishes every
+publish-eligible circle**. Radio wakes fall from ≈ N × 30/h to ≈ 30/h on every
+plane. This is an accepted deviation, registered as `PUB-COALESCE` in
+`docs/privacy/privacy_invariants.json`; the invariant it replaces
+(`INV-R-PER-CIRCLE-PUBLISH-DECORRELATED`) is downgraded to it rather than
+deleted.
+
+**What was given up was never held.** Per-circle decorrelation did not survive a
+*shared* relay: the live-sync engine's multiplexed `#h` REQ already tells any
+relay in a circle's routing set "this one socket watches circles {A, B, C}", and
+every circle's `kind:445` leaves over one publish socket. What the schedules
+bought was weak protection against colluding relays that ignore IP — and P6
+leaves IP-level joining intact anyway. That is what was dropped.
+
+**Cost 1 — a shared rhythm links circles across disjoint relay sets.** With one
+tick sequence per device, circles held on *disjoint* relay sets emit identical
+inter-burst intervals. Anyone holding two of your circles' relay archives — each
+relay carrying only ONE of those circles — can match the interval sequences and
+tell the two circles belong to the same phone. The linkage is therefore **not**
+limited to relays that carry several of your circles.
+
+**Cost 2 — the number of circles you are in becomes a single-relay,
+duration-shaped observable.** A burst holds its connection across the *whole*
+staggered publish pass, and the span grows by one stagger gap per additional
+eligible circle (mean 5.5 s while the per-gap ceiling is the full 9 s, narrowing
+toward 2.5 s as the burst approaches the cap; the *scheduled* pass is bounded by
+`kPublishStaggerMaxSpread` = 30 s, while the *realized* one is the third
+realized-gap term recorded under "The no-gap invariant" below). Which socket carries it splits by plane, and the split is the claim:
+
+* **iOS background.** The connection is the engine socket: `resume_burst`
+  `add_relay`s and `connect()`s the entire relay **union** — every circle's
+  relays *and* the inbox relays (`relay_union`,
+  `src/relay/live_sync/session.rs`) — at the open, disconnecting only at the
+  pause that follows the pass. Every relay in that union can measure the span:
+  one carrying a single circle of yours, and an inbox-only relay carrying none.
+  Here the span is structural, not merely bounded: `build_engine_client` passes
+  no `RelayOptions` at all, so the engine pool keeps `sleep_when_idle: false`
+  and — holding standing REQs — could not sleep even if it did not.
+* **The Android foreground service.** There is no engine socket on this plane at
+  all — the service holds only a `NostrRelayService` publish pool — so the pool
+  *is* the carrier. `RelayManager::shutdown` is a **collective**
+  `client.disconnect()`, and the service calls it at step 9b of every delivery
+  cycle and again in `onDestroy`, so a relay carrying exactly one circle in a pass sees
+  connect-at-its-own-publish → disconnect-at-teardown: a tail that grows with
+  the circles published *after* it and, over the CSPRNG burst permutation,
+  reaches the whole pass length. That one is a **bound rather than a structural
+  invariant**, and the difference is worth keeping: the publish pool DOES sleep
+  when idle, so a relay left silent for `PUBLISH_POOL_IDLE_TIMEOUT` (10 s) past
+  its own next idle poll can sleep mid-pass and end its own observation early —
+  only reachable on a long cycle whose fetch phase touches other relays, since
+  the publish pass itself sits well inside one poll period. The next send
+  revives it. Nothing sequences that, so it narrows the leak by luck, not by
+  design.
+* **The foreground.** There is no collective disconnect here.
+  `publish_relay_options()` is `ping(false).reconnect(false)
+  .sleep_when_idle(true).idle_timeout(10 s)`, and the idle poll is a one-minute
+  crate constant evaluated inside each relay's own connection task, so each
+  relay's socket sleeps independently in **(60 s, 70 s]** measured from the
+  connect that opened it — the same thing as "after its own last send" for a
+  single-circle publish, where connect and send share one wake, and sooner than
+  that for a relay published to early in a multi-circle pass. The span a
+  foreground relay measures is its own, not the pass's.
+
+Stated sharply: **the old scheme leaked N only as a *rate*, to shared relays
+that already read it off the multiplexed filter; the new scheme leaks it as a
+*duration*, to relays that previously could not know it at all.**
+`kMaxCirclesPerAccount` (10) bounds the roster and therefore the estimator, one
+circle under the `kMaxCirclesPerBurst` (11) at which the per-gap ceiling
+saturates. This cost was found in review of the P5 change and is recorded here
+first; nothing in the plan that authorised OD3 states it.
+
+**Cost 3 — N also leaks through the *signed timestamps*, and this one persists.**
+`PublishStagger.maxGapFor(n)` is deterministic and, in milliseconds, injective
+over n = 5…11 (9 000 / 7 500 / 6 000 / 5 000 / 4 285 / 3 750 / 3 333 / 3 000; only
+2, 3 and 4 collapse, all three at the 9 s ceiling), and the expected whole-burst
+span rises monotonically with it: ≈5.5 s at two circles, ≈11 at three, ≈16.5 at
+four, up to ≈24 s at ten — the largest burst a bounded roster can produce
+(≈25 s at eleven is `maxGapFor`'s answer one circle further, which no observer
+reaches while the bound holds). An observer holding kind-445
+archives of two of your circles — precisely the adversary Cost 1 hands the *link*
+to — reads one whole-second delta per burst. Over a handful of bursts the largest
+delta estimates the burst span (monotone in n) and the lowest cluster's upper
+edge estimates the per-gap ceiling. **That ceiling does not invert to a single n,
+because `created_at` is whole seconds and the millisecond injectivity does not
+survive the quantization**: the observable alphabet resolves the roster exactly
+at five and six circles and only to a PAIR at seven/eight and nine/ten, which
+share `{2…5}` and `{2,3,4}` respectively (the swept table under "What the
+stagger still buys" below; eleven resolves exactly as well, and no roster
+reaches it). Separating a pair needs the span term or the delta
+*frequencies* rather than the ceiling, i.e. more bursts — a cost in samples, not
+a bound: the count still leaks, one bit coarser on the two colliding pairs —
+four of the six sizes above four that the roster bound admits. A relay
+carrying several of your circles reads adjacent pairs directly and converges
+faster. It is worse than Cost 2's duration in three ways: it needs no socket
+observation at all (a passive archive scraper suffices), connection noise does
+not defeat it, and it **persists**, because the delta is inside the signed event
+and therefore in every archive of it. It compounds with Cost 1: link, then
+count. `kMaxCirclesPerAccount` bounds the estimate at ten — a ceiling on the
+estimate, not a mitigation. Pinned by `the per-gap ceiling is the priced table,
+for every burst size` (`haven/test/services/publish_stagger_test.dart`).
+
+**What the stagger still buys — narrower than it used to be stated, and
+roster-scoped.** The CSPRNG gap between consecutive encrypts is kept and its
+constants did not move. It is **not** "the archive-adversary defence": after
+coalescing, the archive reader gets the link anyway from the shared inter-burst
+interval sequence above. What it buys is bounded by *how many distinct
+whole-second offsets a burst can print*, and `maxGapFor` prices every gap at the
+burst's own size, so that alphabet **thins monotonically** with the roster:
+`{2…9}` (eight values) up to four circles, `{2…8}` at five, `{2…6}` at six,
+`{2…5}` at seven and eight, and `{2,3,4}` at `kMaxCirclesPerAccount` (ten), the
+largest burst a bounded roster can produce. (`maxGapFor` keeps answering one
+circle further, at `kMaxCirclesPerBurst`, where the alphabet is exactly `{2,3}`;
+no observer reaches it while the bound holds.) Coalescing is
+what caused the thinning — before it, every gap was priced at the default
+`totalPublishes = 2` and the alphabet was always eight.
+
+At small rosters the downgrade in *kind* is real. A byte-identical `created_at`
+— which is what two encrypts inside one whole second produce, inside the
+*signed* event — is a zero-cost **equality join** over a whole-network index
+(`created_at_A == created_at_B`), decisive on a single burst and requiring no
+hypothesis about who anyone is; eight admissible offsets force a **windowed
+correlation** instead, in which the reader must first hypothesise that two
+specific circles share a device and then test that against a matching sequence
+of offsets. **At the roster bound it barely is.** A three-element alphabet is
+three shifted equality joins over that same whole-network index — still
+un-targeted mass linkage — so what survives at ten circles is a constant factor,
+not a change in kind. Swept, as set equality per burst size, by `expected
+whole-second delta alphabet, swept over every burst size the app admits`; the
+older eight-value assertion is scoped to the two-circle case it actually draws.
+
+**Not affected.** The cadence bounds (`[72, 168] s`, ±40 % CSPRNG), the TTL web,
+the ephemeral per-message author key, the motion trigger and the wire format all
+stand unchanged; nothing here moved a byte on the wire. The burst's per-circle
+freshness is unchanged too: the tick samples the same interval each circle used
+to sample for itself.
 
 #### The no-gap invariant
 
@@ -813,12 +1032,185 @@ publisher. For events `E_n` published at `T_n` with TTL `τ`, gap-freeness
 requires `δ_n ≤ τ` for every `n`, where `δ_n = T_{n+1} − T_n`; worst case
 `δ_max ≤ τ`.
 
-With `PUBLISH_INTERVAL_JITTER_FRACTION_BP = 4_000` around a 2-minute nominal,
-the publish gap `δ` is uniform in `[72, 168] s`, so `δ_max = 168 s`. The TTL is
-the constant `LOCATION_MESSAGE_RETENTION_SECS = 228 s`. Thus
-`τ = 228 s > δ_max = 168 s` ✓, with a 60 s margin for network propagation.
+**Second scope: a roster of at most eleven circles — and the app admits at most
+ten.** Since `PUB-COALESCE` one burst publishes every eligible circle,
+and a burst that runs out of spread budget **defers** its tail. `δ` is therefore
+no longer the sampled interval alone: a circle that leads one burst and trails
+the next also waits that burst's spread. Past `kMaxCirclesPerBurst` the deferral
+multiplies the interval by `ceil(N / 11)` — it does not merely double it — and
+the invariant would fail. It cannot be reached: the owner bounded the account
+roster at `kMaxCirclesPerAccount` = 10 on 2026-09-09, one circle below the burst
+cap, refused at circle creation and at invitation accept
+(`haven/lib/src/services/nostr_circle_service.dart`, the one seam both reach the
+core through — and the only two operations the core CREATES a `circles` row from:
+`create_circle_with_config`, which upserts through `CircleStorage::save_circle`,
+and `record_processed_invitation`, which runs its own `INSERT INTO circles`.
+`save_circle` has three further non-test callers —
+`resync_circle_relays_from_mdk`, `add_members`, `remove_members` — and each
+reads the row back with `get_circle` first and returns early when there is none,
+so none of them can mint one. The gate also RESERVES the admitted slot
+(`_reservedRosterSlots`), because the row exists only once the core write
+returns: without the reservation simultaneous accepts each read the same
+pre-growth roster). So this second scope is a bound on a variable the app itself
+bounds tighter, and the arithmetic below holds for every roster a user can have.
+What a roster past eleven WOULD cost is kept below, unchanged, because the
+deferral code is still there and lifting the bound re-opens it verbatim.
 
-That margin is the constant's own derivation (`168 + 2 × 30`), and it is pinned
+With `PUBLISH_INTERVAL_JITTER_FRACTION_BP = 4_000` around a 2-minute nominal,
+the sampled interval is uniform in `[72, 168] s`, so its ceiling is 168 s. Add
+the burst spread a circle can move across — at most `kPublishStaggerMaxSpread`
+= 30 s, and `maxSpreadFor(11) = 30 s` exactly, which is what fixes the cap at
+eleven — and `δ_max = 168 + 30 = 198 s` for any roster the burst does not
+defer. The TTL is the constant `LOCATION_MESSAGE_RETENTION_SECS = 228 s`. Thus
+`τ = 228 s > δ_max = 198 s` ✓, with 30 s left for propagation and clock skew —
+one whole `kTtlNetworkBufferSeconds`, i.e. half of the `2 × 30 s` the constant
+is built from; the burst spread is what now spends the other half. Swept over
+**every** admissible burst size
+rather than asserted at one point, with an anti-vacuity assertion that one more
+circle than the cap breaks it, by `the no-gap invariant holds across the WHOLE
+admissible range, with the disclosed propagation margin intact`
+(`haven/test/services/publish_stagger_test.dart`).
+
+**What a roster past eleven costs — out of reach since 2026-09-09, and kept
+here because the code that would produce it is.** The burst slice is
+strict round-robin (`_takeBurstSlice` takes `kMaxCirclesPerBurst` per tick and
+rotates), so a deferred circle's worst service period is `ceil(N / 11)` bursts
+rather than two at every roster: **N = 12…22 → 2** sampled intervals (144 s
+best, 240 s mean, 336 s worst — and **366 s** once the burst-position
+differential is added, because a circle may lead one burst and trail the one two
+ticks later, a whole `kPublishStaggerMaxSpread` apart); **N = 23…33 → 3**
+(216 / 360 / 504 s); **N ≥ 34 → 4 or more**, where even the *best* case (288 s)
+exceeds the 228 s retention on **every** publish rather than on some. Most
+deferrals therefore leave a peer's marker expired at the relay *before its
+replacement is created*, and past thirty-three all of them do.
+
+That ladder is **pinned rather than left as prose**, in two halves. The
+round-robin period itself is swept over *both* sides of every rung (11, 12, 13,
+22, 23, 24, 33, 34) by `a deferred circle waits ceil(N / kMaxCirclesPerBurst)
+bursts` (`haven/test/providers/location_publish_scheduler_provider_test.dart`),
+which drives real ticks and records which burst served each circle, so it fails
+if the slice size or the rotate moves; and the seconds those periods are quoted
+in are read off the cadence constants by `and past the cap, the deferral ladder
+in SECONDS` (`haven/test/services/publish_stagger_test.dart`), which also pins
+the two retention crossings — the best case still inside 228 s at two bursts,
+and past it at four.
+
+**One limit on that quotient**, not visible from the arithmetic and stated here
+rather than left to be discovered: the cap bounds what the scheduler *hands
+over*, not what a background pass publishes — while the iOS sink is installed, a
+tick arriving inside a running burst folds into it
+(`BackgroundBurstCoordinator._joinable`) rather than opening a socket of its
+own, so one pass can carry two slices and
+publish more than `kMaxCirclesPerBurst`. That is reachable only at `N ≥ 12`,
+i.e. already outside the roster this invariant is scoped to.
+
+**The period is absolute, and this subsection used to say otherwise (corrected
+with the mechanism, 2026-09-09).** It described the rotation as cleared by every
+`stopScheduling()` — a per-**continuous-run** period — and concluded that a
+circle past the first slice on a device that backgrounds often has an
+**unbounded** gap. The resets were fixed at the source: `_rotation` now outlives
+`stopScheduling()`/`startScheduling()` **and** outlives an emission reporting
+nothing eligible (`circlesProvider` degrades any roster-read failure to `[]`, so
+an empty emission is as often a transient FFI/keyring error as a real
+departure), so neither a backgrounding nor a failed roster read re-phases whose
+turn it is. Three tests in
+`haven/test/providers/location_publish_scheduler_provider_test.dart` hold it: `a
+deferred circle is not deferred again by every resume`, `a transient empty roster
+emission does not re-phase whose turn it is`, and `a roster change keeps
+survivors' places in the queue`; and the guard
+`scripts/ci/check_publish_rotation_fairness.sh` pins the structural half — the
+rewind at exactly ONE site inside `build()`, and the survivor merge below the
+empty-roster guard rather than above it.
+
+**Absolute, but a period of TURNS — and a turn is a SELECTION, not a publish.**
+The rotation advances when the tick FIRES, ahead of the chain, the publish
+window and the sink, so a slice can lose its turn without publishing anything:
+the window refuses it (no identity, the disclosure not accepted, a fix that
+timed out), the app pauses under it, or the iOS coordinator drops a queued
+burst. The health model is told — a refused window is attributed to every circle
+waiting on it — the queue is not, so the circle waits its whole period over
+again: one more burst at `N ≤ 11`, which puts its gap at up to 336 s against the
+228 s retention, and another `ceil(N / 11)` bursts past the cap. So the ladder
+above is the period between a circle's TURNS and a lower bound on the period
+between its publishes, never the latter on its own.
+
+What still rewinds the queue is `build()` — a fresh container, or the invalidate
+in `IdentityNotifier.deleteIdentity` — and a process restart, which does not
+persist it. Because the roster keeps `filterPublishEligibleCircles` order
+(`getVisibleCircles()` orders by `updated_at DESC`), that rewind returns to the
+**same** head and re-serves the same first slice: a deterministic re-service,
+not a re-phase. And the tail's gap across such a boundary is bounded by how
+often the app resumes rather than unbounded, because the deliberately
+**uncapped** one-shot burst (`locationPublisherProvider`) fires on cold start,
+on the motion trigger, on accept/create and on **a resume more than 30 s after
+the last one** — `MapShell`'s resume debounce sits ABOVE its invalidate, so a
+glance inside that window is not a trigger. **That cover stops being a promise
+at twenty-one circles**, which is where the one-shot's own spread outlasts
+`kLocationPublishOverlapGuard`: the next trigger's `invalidate` marks the burst
+in flight superseded and it stops where it stands, the replacement re-shuffling
+from the start, so the abandoned burst never reaches its tail. Past twenty
+circles "every session publishes to every circle at least once" — which this
+paragraph asserted flatly until 2026-09-09 — would be a probability, not a
+promise; that too needs `N ≥ 21` and is out of reach at
+`kMaxCirclesPerAccount`.
+
+**Two baselines, because they answer differently.** Against an **uncapped
+coalesced** burst the hole opened from the twenty-second circle up
+(`168 + 3 × 21 = 231 s`) and the cap moves it to the **twelfth**. Against the
+**actual predecessor** — per-circle schedulers, where δ was each circle's own
+sampled interval, ≤ 168 s at every N, with no spread and no deferral — there was
+**no hole at any roster size** and the full 60 s (`2 × kTtlNetworkBufferSeconds`)
+of margin was intact. So this is a regression at **every N ≥ 12** for the hole,
+with **no upper bound**, and at **every N ≥ 2** for the margin (60 s → 30 s). It
+was taken deliberately (owner decision 2026-09-08, option (a)) because the cap is
+what makes the burst's own span, its single shared GPS fix and
+`kLocationPublishOverlapGuard` hold for **every** roster instead of only for
+small ones. The hole is structural, not a defect to fix in the scheduler: `n`
+events more than `kPublishStaggerMinGap` (2 s) apart cannot fit inside the 60 s
+the retention leaves above the cadence ceiling once `n > 31` — a *different*
+bound from the service period above, because it is about ONE burst's spread
+rather than how many bursts a circle waits — so past about thirty-one circles no
+arrangement of the publishes closes it at all. Closing both needed a **roster
+bound or a longer retention**; the owner took the **roster bound** on
+2026-09-09 (`kMaxCirclesPerAccount` = 10), which moves the whole `N ≥ 12` half
+from live to latent-behind-a-bound without touching the wire. **The `N ≥ 2`
+margin halving is NOT closed by it** — the burst spread still spends one
+`kTtlNetworkBufferSeconds`, so this invariant runs on 30 s of propagation and
+clock-skew margin where the per-circle predecessor had 60 s, at every roster
+from two circles up. That is the residual this entry still carries; the
+`ceil(N / 11)` ladder is no longer one. The arithmetic is on
+`kMaxCirclesPerBurst` and `kMaxCirclesPerAccount`
+(`haven/lib/src/services/publish_stagger.dart`), and the refusal, per entry
+point, in `haven/test/services/nostr_circle_service_roster_bound_test.dart`.
+
+Three **realized**-gap terms sit outside the scheduled bound above, and are
+stated where they arise rather than folded in here. Two are **head** terms that
+do not scale with the roster: the Android foreground service publishes on a
+platform delivery that arrives a TTFF late (worst case 248 s on API 23–30, swept
+per regime in `haven/test/services/background_fix_request_test.dart`), and the
+iOS burst head — connect, backlog wait and one-shot fix — adds up to 40 s before
+the burst's first publish. **Both of those head terms cross the retention, and
+this paragraph used to say so for only one of them** (corrected 2026-09-09). The
+heads themselves do not scale with the roster; the iOS CROSSING does, because the
+head varies between bursts and so enters the realized gap as a differential *on
+top of* the burst spread: `168 + 40 + spread` reaches 235 s at four circles and
+238 s from five up, where the spread saturates. So iOS is inside 228 s only up to
+three circles, and neither crossing is covered by the 30 s this invariant
+reserves — both are realized terms outside its scheduled bound, stated on
+`haven/lib/src/constants/location.dart`. The **third scales with N**, and it is the one
+coalescing introduced: the pass is serial, and the stagger buys separation *on
+top of* each publish rather than inside it. The foreground `_pacedPublish`
+measures the gap from the previous publish's **start**, so the span is
+`Σ max(gap_i, dur_i)`; the background pass awaits the gap **after** the previous
+publish returns, so it is `Σ (dur_i + gap_i+1)` — strictly additive. One publish
+is priced at `kBurstPublishBudget` (10 s), so at the largest burst a bounded
+roster can produce the realized span reaches ≈90 s (foreground shape) or ≈120 s
+(background) — ≈100 s and ≈130 s at the cap one circle further — against a
+**scheduled** 30 s spread. It lands twice: once in a deferred circle's realized
+gap, and once in Cost 2's duration-shaped circle-count estimator. All three are
+documented on `haven/lib/src/constants/location.dart`.
+
+The 60 s figure is the constant's own derivation (`168 + 2 × 30`), and it is pinned
 in **both** directions by `narrowing_the_retention_would_strand_a_returning
 _member` and `widening_the_retention_would_outlive_the_disclosed_expiry`
 (`tests/privacy_copy_ties.rs`), which read the Dart ceiling rather than
@@ -860,8 +1252,13 @@ protocol-level metadata. The following are **accepted** residuals — none
 expose location, usernames, or key material, but they are documented so the
 threat model is honest:
 
-- **Relay-session linking.** Haven uses one persistent `nostr-sdk` client per
-  relay. A relay that serves *both* a user's gift-wrap inbox (kind 1059 REQ
+- **Relay-session linking.** Haven runs at least TWO long-lived `nostr-sdk`
+  clients per process — the live-sync engine's receive client and the publish
+  pool — plus one more for every isolate that builds its own pool, so a shared
+  relay sees two or three connections from the same address and can join them by
+  source address with no protocol help (the accepted deviation `RC1` records
+  this; "one client per relay" was the older, wrong framing).
+  A relay that serves *both* a user's gift-wrap inbox (kind 1059 REQ
   filtered by `#p = <user pubkey>`) and that user's group messages (kind 445
   by `#h = <nostr_group_id>`) over the same connection can correlate the real
   identity pubkey with group membership by connection continuity — even
@@ -870,20 +1267,80 @@ threat model is honest:
   (445), so this only bites when the *same* relay serves both roles for a
   user. Full mitigation needs per-fetch ephemeral connections or onion
   routing (out of scope for v1). Since M11 (live-sync enabled by default) the
-  engine holds this as a **standing** foreground connection rather than a
-  per-fetch one, so the `#p`↔`#h` same-socket correlation is continuous for
-  the session — see the **Persistent receive connection** bullet immediately
-  below.
+  engine holds this as a **standing** connection rather than a per-fetch one
+  while the app is in the **foreground**, on both platforms, so the `#p`↔`#h`
+  same-socket correlation is continuous for as long as that socket is held.
+  Backgrounded it is not held: on Android the pause stops the engine in either
+  toggle state, and on iOS with background sharing on the engine is paused
+  between publishes and the two filters ride one bounded burst per publish tick
+  — the same-socket join is then per-burst rather than continuous, and the
+  inbox filter rides only every `INBOX_BURSTS_PER_REQ`-th burst. Both are set
+  out in the **Persistent receive connection** bullet immediately below.
 
 - **Persistent receive connection (live-sync engine).** Haven holds a standing
-  WebSocket to your configured circle/inbox relays while it is running: always
-  in the **foreground**, and — on **Android while background location sharing
-  (the foreground service) is enabled** (an opt-in) — also in the **background**,
-  until the OS suspends or freezes the process. (iOS background suspension drops
-  the socket; on Android *without* the foreground service the process is
-  eventually frozen and the socket drops — in both cases background delivery
-  falls back to the short, receive-only OS-wake sweeps described under
-  "Scheduled background wakes (M7)", which connect briefly and shut down.) A
+  WebSocket to your configured circle/inbox relays while the app is in the
+  **foreground**, on both platforms. It no longer holds one while the app is
+  backgrounded, in either toggle state, on either platform — that changed on
+  Android with the P1 power phase and on iOS with P4. On **iOS while background
+  location sharing is enabled** (an opt-in) the CoreLocation session keeps the
+  process executable, and the engine spends the background window PAUSED between
+  publishes: each publish tick opens one bounded burst and closes it again, so a
+  circle relay sees the device present at the burst instants and absent between
+  them. At the BURST instants, not at the instants its own kind-445 reveals: one
+  burst re-anchors every circle and connects the whole relay union while only
+  the circles then due publish, and a burst whose publish window refuses sends
+  nothing at all. That is stated in full,
+  with the residuals it carries, under **"iOS background sharing: presence only
+  at publish instants (P4)"** at the end of this section. The foreground socket
+  is not idle: the pool pings every 55 s per relay
+  (`nostr-relay-pool` 0.44.3, `src/relay/constants.rs:34` `PING_INTERVAL`), so a
+  foregrounded client is a continuously present, continuously observed one. That
+  55 s ping is the **engine** pool's alone, and deliberately so — it is the
+  only traffic on a socket that holds standing REQs, and without it a
+  dead-but-open relay would go unnoticed until the 15-minute health tick (which
+  is itself foreground-only, see the P4 subsection). Since P1 the **publish**
+  pool sends no keepalives at all and closes within roughly a minute of the
+  last publish
+  (the module-level `publish_relay_options` in `relay/manager.rs`:
+  `ping(false).reconnect(false).sleep_when_idle(true)` with a 10 s idle timeout
+  polled once a minute inside each relay's own connection task, so the real
+  socket lifetime is (60 s, 70 s] from that connect — the same as "from the last
+  send" whenever a publish is a single event), and every fetch primitive leaves
+  no subscription registered
+  behind it, so nothing holds that socket awake between bursts. A relay in the
+  publish set therefore sees a device present at the publish instants and
+  absent between them, rather than continuously — pinned by
+  `INV-R-PUBLISH-POOL-NO-KEEPALIVE` and
+  `scripts/ci/check_engine_client_options.sh`. On **Android** the engine is
+  STOPPED at the pause, in BOTH toggle states, since the P1 power phase: with
+  background sharing **ON** pausing the app stops the engine before the MLS
+  session is handed to the foreground service (`MapShell._handOffMlsSession`)
+  and the service isolate never opens one; with background sharing **OFF** the
+  pause path stops it through `MapShell._stopLiveSyncBounded()`, which
+  deliberately does not release the Rule-14 guard because no isolate reclaims
+  it, and the resume heal restarts the engine. So a backgrounded Android device
+  holds no receive connection at all — where it previously went on holding one,
+  and on being observed, until the OS froze the process. The publish client is
+  a separate socket with a separate policy and is shut down on the same pause
+  path (`MapShell._shutdownPublishPool` → `NostrRelayService.shutdown` →
+  `RelayManager`, not the engine's `build_engine_client`); on the iOS burst
+  branch that shutdown is the last link of the burst teardown. Wherever the
+  receive connection is absent — Android backgrounded in either toggle state,
+  iOS with background sharing off, or either platform once the OS suspends or
+  freezes the process — background delivery falls back to the short,
+  receive-only OS-wake sweeps described under "Scheduled background wakes
+  (M7)", which connect briefly and shut down. On iOS with background sharing
+  **on**, delivery between bursts is the next burst, and those OS-wake sweeps
+  take over only once the OS suspends the process. One case in that enumeration
+  is NOT an OS-discretionary wake and is called out because it is materially
+  different: in a **rollback build** (`liveSyncEnabled = false`) on iOS with
+  background sharing on, there is no engine to pause, and
+  `MapShell._startIosBackgroundReceiveTimer` — whose only guard is
+  `if (liveSyncEnabled) return;` — arms a 90 s `Timer.periodic` that runs the
+  receive-only catch-up sweep for the whole background window. That is a
+  fixed-cadence background presence signal on the publish pool's own
+  connections, not a wake the OS chose the timing of, and it exists only on the
+  flag-off path. A
   relay learns **that you are online, and which circles you watch, for as long
   as that connection is held** — a continuous presence signal the previous
   short-poll model exposed only in bursts; this is irreducible while a live
@@ -933,11 +1390,18 @@ threat model is honest:
   metadata as the stable-`h`-tag and ephemeral-author-counting residuals above.
   The same applies to the receiver-side path: multiple members' engines
   auto-committing the same peer `SelfRemove` (`PublishWork::AutoPublish`) each
-  publish their commit during convergence, and a process kill between publish
-  and confirm may, on restart, re-publish a fresh same-epoch commit (the engine
-  clears the staged commit at hydrate and emits `PendingCommitRecovered`; the
-  subsequent resync can re-commit) — another superseded same-epoch commit on
-  the relay, never the membership target.
+  publish their commit during convergence — another superseded same-epoch commit
+  on the relay, never the membership target. **What follows a process kill
+  between publish and confirm on that path is NOT a re-publish, and this bullet
+  said otherwise until 2026-09-09.** A receive-side auto-commit is always
+  removal-bearing, and the engine's hydrate deliberately short-circuits on
+  exactly that (`staged_removes_member`), so it neither clears the staged commit
+  nor emits `PendingCommitRecovered`: nothing re-commits, and the group is
+  wedged rather than recovered (residual 4 below). Since 2026-09-09 a BACKGROUND
+  burst does not open that window at all — it parks the eviction as a durable
+  per-circle obligation and the next foreground pass publishes it — so on that
+  plane there is no kill-between-publish-and-confirm to describe. The foreground
+  and Android catch-up paths still publish it, so the residual stands there.
 
 - **Incremental subscribe/unsubscribe REQ shape (live-sync engine).** When the
   live-sync engine is on, a circle added mid-session (create / accept an
@@ -1006,6 +1470,350 @@ threat model is honest:
   it narrows the anonymity set from "all WebSocket clients" to "nostr-sdk
   clients of version X". Suppressing it depends on upstream `nostr-sdk`
   support for overriding the header.
+
+#### iOS background sharing: presence only at publish instants (P4)
+
+Since the P4 power phase, a backgrounded iPhone with background location
+sharing **on** no longer holds the live-sync engine's socket for the whole
+background window. The claim, in the only form that is true — read it with the
+eleven residuals below, every one of which is scoped against it:
+
+> While backgrounded on iOS with sharing on, Haven opens a relay connection only
+> at its own publish *ticks*, and between them holds no standing subscription and
+> no socket it asked for.
+
+Read "publish tick", never "publish": one tick opens **one burst**, and a burst
+re-anchors *every* circle, connects the *whole* relay union, and — since
+`PUB-COALESCE` — publishes every publish-eligible circle rather than the ones a
+per-circle schedule made due. What a burst is still not is a per-circle event,
+what it still does not do is guarantee a send at all, and what it now *adds* is
+a duration that scales with the circle count: all three are residual 11 below.
+
+Each publish tick runs one bounded **burst**, in the isolate that owns the MLS
+session (Security Rule 14): re-issue every REQ at its persisted cursor, wait for
+the stored replay to land (`BURST_BACKLOG_WAIT_SECS`, per `(relay,
+subscription)` endpoint) so a peer's commit received here is applied *before*
+this device encrypts its own location, publish, fold any due KeyPackage /
+relay-list maintenance onto the warm publish pool, settle
+(`COMMIT_SETTLE_WINDOW_SECS` from the last commit activity, capped by
+`BURST_SETTLE_CAP_SECS`, which bounds idle follow-on activity only and never an
+in-flight publish), pause the engine, drain any commit-critical publish still on
+the shared publish pool (uncapped, Security Rule 13), close that pool. The pause
+CLOSEs every REQ, sweeps any that a partial `unsubscribe_all` left registered, drains
+what is already downloaded through a marker rather than forgetting it, waits
+uncapped for every in-flight publish, and only then terminates every relay —
+`client.disconnect()`, re-read and re-asserted, never `client.shutdown()` — so
+that where the termination converges, `nostr-relay-pool`'s per-relay connection
+task and its 55 s pinger exit with it.
+Each of those links except the Rule-13 wait is bounded
+(`RELAY_LIFECYCLE_OP_TIMEOUT`) and logs-and-proceeds on expiry rather than
+refusing to finish, and the drain is best-effort: on a dead ingest worker or an
+unacked marker the router is cleared directly and the undrained backlog is
+re-downloaded by the next re-anchor.
+
+The termination is a **repair plus a watch, not a prevention** — a class of
+exception in its own right, alongside the foreground handback (residual 5) and
+the cold launch (residual 9), and not a detail of either.
+`InnerRelay::disconnect` fires its termination notification *before* it stores
+`Terminated`, and that notification is a single permit; a connection task woken
+inside that window can re-read a live status, mark the relay `Disconnected`,
+sleep its retry interval and then re-open a **real socket** over the pause's
+`Terminated`, holding it with 55 s pings for the rest of the gap. The race is
+inside the pinned crate, between two of its adjacent statements, so the engine
+cannot make it impossible: `terminate_all_relays` re-asserts up to
+`RELAY_TERMINATE_ROUNDS` times and, on non-convergence, warns with a **count
+only**. What is promised instead is that no such socket *survives* —
+`run_monitor`'s radio-off watch cuts every connect transition that happens while
+the radio is off, including the strand the loop cannot see at all (a
+`Disconnected` write that landed *before* the pool's `Terminated` store), and
+`LiveSyncCore::unrequested_connections` is how many there were. A non-zero count
+is the honest reading of this promise, not a contradiction of it.
+
+A pause that has nothing to send runs that same teardown on its own, so the gap
+before the first burst is covered too. The three **relay-contacting** Dart
+maintenance timers — KeyPackage, relay-list and the 15-min subscription-health
+tick — are foreground-only on this branch: `suspendForBackground` cancels all
+three at the pause, health is gated again where it fires and the other two at
+arming only. The burst *is* their repair, at 72–168 s rather than 15 min. The
+fourth timer is **not** foreground-only in that sense; it is residual 2's second
+case. Pinned by `INV-R-BACKGROUND-PRESENCE-ONLY-AT-PUBLISH` and
+`scripts/ci/check_engine_client_options.sh` — which gates the pause body's
+*shape* (no `forget_*`, no literal `client.shutdown()`, no timer inside
+`terminate_all_relays`, the FFI forwarding, the publish pool holding no REQ) and
+not the order of its steps; see that invariant's `residual` for what CI does and
+does not hold here.
+
+What a relay learns depends on its role. A **circle** relay sees the device
+present at every **burst** instant and absent between them. Since
+`PUB-COALESCE` that presence **coincides** with the `kind:445` it carries on
+essentially every burst — one burst publishes every publish-eligible circle — so
+what is left over is not a fraction but two things, both of them residual 11:
+the four narrow classes in which a REQ/CLOSE arrives with **no** `kind:445` for
+the circle it re-anchored, and a burst **length** that scales with the circle
+count. An **inbox-only** relay, one holding this
+account's `kind:10050` inbox but none of its circles, carries no `kind:445` at
+all: where it used to see one continuous socket it now sees a REQ/CLOSE pair
+every 72–168 s (the 120 s nominal cadence, jittered by ±40 %), which is itself
+the inference *"this pubkey is background-sharing right now"* for that relay
+class alone. The lever is
+`INBOX_BURSTS_PER_REQ`, the number of background bursts between two inbox REQs:
+raising it so that `k × kLocationUpdateInterval ≥ 10 min` removes the cadence
+signal at the cost of up to that much background invitation latency, which is an
+accepted decision (OD4-b) currently blocked on a separate defect. At the shipped
+value of that constant the inference stands, and it is accepted here rather than
+mitigated.
+
+Eleven residuals, none of them optional:
+
+1. **72–168 s is the stationary cadence, not a ceiling, and the motion trigger
+   publishes outside the burst plane.** A movement-driven publish goes out
+   through the location publisher rather than through the burst coordinator and
+   issues no REQ, so it is a publish instant holding no subscription and the
+   sentence above survives it. Two things it does change. Its socket is the
+   publish pool's, which the burst plane does not own: it is closed by the next
+   burst's teardown, or failing that by the pool's own idle sleep, which is
+   **(60 s, 70 s]** by construction — a 10 s idle timeout polled once a minute
+   from inside the connection task — not "within seconds". And while the user is
+   moving, the floor between publishes is `kLocationPublishOverlapGuard` (60 s),
+   so 72–168 s describes a stationary device and never bounds how often a
+   backgrounded one connects.
+2. **"No relay traffic between bursts" — never "no timer wake", and the
+   periodic one is not gone either.** Two cases, both CPU-only and neither
+   contacting a relay. (a) A subscription repair armed *before* the pause keeps
+   the deadline it already had and fires once, up to `BACKOFF_MAX_SECS` (30 s)
+   into the pause; it finds the engine paused, re-parks, and arms no new
+   deadline while paused — at most once per pause. (b) The public-profile
+   anti-entropy sweep is the fourth `MaintenanceSchedulerNotifier` timer and the
+   one `suspendForBackground` does **not** cancel: `_armProfileAntiEntropy` has
+   no arming gate, the gate is inside `_runProfileAntiEntropyTick`, and the
+   backgrounded branch *re-arms itself* before returning. So it keeps firing for
+   the whole background window at ~45 min ±25 % — roughly 9–14 wakes over eight
+   hours. It reaches no relay (the tick returns before
+   `MemberProfileRefreshNotifier` is touched) and it opens no socket, so nothing
+   above is falsified; what is falsified is "no periodic wake". Only the three
+   relay-contacting timers are foreground-only, and only those three are what
+   `foregroundGatedTimersArmedForTest` pins.
+3. **`since` ≈ the previous burst is true of the GROUP plane only.** Each
+   circle's REQ opens at its persisted cursor less
+   `GROUP_RESUBSCRIBE_BUFFER_SECS`. The inbox REQ does not: every burst open is
+   a re-subscribe, and a re-subscribe carries `INBOX_RESUBSCRIBE_LOOKBACK_SECS`
+   (2 days + 1 hour), so at the shipped `INBOX_BURSTS_PER_REQ` every burst asks
+   each inbox relay to replay **49 hours of gift wraps keyed on this device's own
+   `#p`**, under a stable subscription id. Narrowing that window is not an
+   available fix — NIP-59 backdates a wrapper by up to 48 h, the extra hour is
+   the clock-skew margin, and a wrap below the floor is lost *silently*, which is
+   indistinguishable from an invitation that was never sent. The lever is the
+   fold period, not the lookback.
+4. **A crash mid-burst does NOT self-heal, and the engine still does not
+   recover a group wedged this way — but a background burst no longer creates
+   one (owner decision OD4-c, both halves implemented 2026-09-09).** The
+   underlying MDK behaviour is unchanged and is the reason the control exists: a
+   group left one epoch behind with a staged commit on disk while peers move on
+   buffers every later peer commit un-chainably, for two independent reasons at
+   the pinned rev — a re-fetched own commit comes back terminal (`OwnEcho`) and
+   is discarded, and the engine's crash-recovery path short-circuits for any
+   staged commit that removes a member, so `PendingCommitRecovered` is never
+   emitted for this case at all. Nothing here describes a recovery, because
+   there is none to describe: no re-REQ restores it.
+
+   **What the control removes.** A receive-side auto-commit is always
+   removal-bearing — it commits a departing peer's `SelfRemove` — and inside a
+   BACKGROUND burst it is now neither published nor rolled back. It is parked as
+   a durable per-circle obligation, the durable row written before the in-memory
+   park, and published only by the next FOREGROUND pass under the same Rule-13
+   ladder; a publish that gets no relay ack stays owed and is retried. So the
+   burst opens no publish-before-apply window for the OS to end mid-flight,
+   which is the exposure P4's premise created. Rolling back instead is not the
+   safe alternative it looks like: at the pinned rev it is a permanent, silent
+   DROP of the removal — the engine discards its in-memory auto-commit schedule
+   before staging, `publish_failed` does not re-arm it, and a redelivered
+   proposal short-circuits on its own durable record — so the departing member
+   would keep deriving the circle's keys until some unrelated commit moved the
+   epoch. Rule 13 is upheld throughout: nothing confirms before a relay ack.
+
+   **What it detects.** A circle that is wedged anyway — the engine's own
+   terminal verdict, or a parked eviction whose session died — is now reported
+   as its own per-circle terminal signal naming the pseudonymous
+   `nostr_group_id` (Rule 4), where it used to be flattened into a per-event,
+   self-clearing status that named no circle. The repair is a re-invite.
+
+   **What remains, and none of it is optional to state.** (a) The verdict is now
+   **consumed**: the live-sync status handler reads it ahead of its null-reason
+   early return, resolves the circle and marks it blocked, and the
+   circle-details banner names that circle and offers a re-create which opens
+   the create flow with the circle's display name pre-filled and touches the
+   broken group not at all, so the cached roster stays readable beneath it. No
+   new copy was needed — the affordance reuses a string already shipped in every
+   locale. What remains here is a **delay**, and it is deliberate: the mark
+   requires two observations of the same circle in different re-anchor
+   generations, counted off the re-anchor marker on the same ordered stream
+   rather than off a clock, because one verdict can race a remaining peer's
+   healing commit and telling a user to rebuild a circle that works costs them
+   the whole roster's invitations. So the banner appears on the SECOND
+   foreground open — the same horizon as the repair itself, since a foreground
+   open is also the only place a parked eviction is published, so the wait costs
+   the announcement and no recovery. (b) While a parked eviction stands, that
+   circle's sends are refused by the engine's `Stable`-only send gate until the
+   next foreground pass — on a rarely-foregrounded device, a real gap in that
+   circle's sharing, surfaced nowhere. (c) A device wedged by a session that
+   predates this code carries no durable row and is **undetectable**: no read
+   accessor at the pinned rev exposes whether a staged commit is present. (d) A
+   circle a remaining peer already healed can be reported once, until that
+   circle's next successful publish discharges the row. (e) The SUPPRESSION is
+   scoped to the live-sync burst plane: the **Android background catch-up
+   sweep** still publishes a removal-bearing auto-commit rather than parking
+   one. That is now a **finding** rather than the argument this list
+   used to record, and it is stated at the call site and asserted by tests: a
+   park needs somewhere to be redeemed, and a `PendingStateRef` is valid only
+   inside the session that staged it, so a sweep driven from a background
+   isolate — which holds its own manager over the same database file — could
+   never publish what it parked. Publishing there trades a removal that usually
+   lands for a circle that is certainly wedged, so it publishes; what it pays
+   instead are the two guarantees that are now **tree-wide**. It records the
+   obligation BEFORE the publish, so a wake window the OS ends mid-publish
+   leaves a durable row and the next foreground open reports the wedge rather
+   than it being invisible; and it never rolls the commit back on a no-ack,
+   because that is the permanent silent drop above — the obligation simply
+   stands. Both guarantees live at the one rung all four planes share
+   (`CircleManager::publish_failed` for the no-rollback half,
+   `CircleManager::owe_removal_publish` for the write-ahead half), which is what
+   makes them bind the two planes that resolve the commit from Dart as well as
+   the two that resolve it in Rust. (f) **No plane can redeem an obligation
+   another session recorded.** The live `PendingStateRef`s die with their
+   isolate and hydrate short-circuits on a staged commit that removes a member,
+   so nothing at the pinned rev can re-derive a staged eviction from group
+   state. A row the Android foreground service or the WorkManager catch-up
+   worker wrote is therefore REPORTED on the next foreground open and never
+   published: that wedge is loud and terminal, and its repair is re-creating the
+   circle. Strictly better than the silent permanent drop it replaced, and not a
+   heal. Both halves of the control are covered by tests that redden when they
+   break, and so are the two tree-wide guarantees and the consumer in (a); (b)
+   through (d) and (f) are not, because each is an absence rather than a
+   behaviour.
+5. **A teardown that stops at the foreground handback does not close the publish
+   pool.** Each teardown link re-reads whether the foreground has taken the
+   engine back and stops there rather than pausing an engine the foreground now
+   owns; a teardown that stops before the pool shutdown leaves that pool open.
+   Deliberate: the app is on screen and publishing over it, and forcing the
+   shutdown at the handback would race the resume publish — the shutdown
+   disconnects with no drain of *ordinary* publishes — and cost a cold reconnect
+   at the moment the user is watching the map. It is bounded rather than
+   open-ended: the next pause closes it, through the burst that pause drives or
+   through the idle close it takes instead, and a teardown that outlives the
+   widget still closes the pool handle captured at startup.
+6. **The past-epoch outer peel is pinned by no gate of ours.**
+   `security_rule_gates.rs` pins the engine's epoch retention window
+   (`DEFAULT_MAX_PAST_EPOCHS`, `app_message_past_epoch_limit()`), but the outer
+   peel a one-epoch-behind burst relies on runs on
+   `ConvergencePolicy::max_rewind_commits`, taken from the upstream default and
+   pinned nowhere in this repository. Extending the gate is owed; until it lands
+   this part of the guarantee rests on an upstream default rather than on a test,
+   and is stated that way rather than as unconditional.
+7. **An account with nothing publish-eligible receives NOTHING while
+   backgrounded.** The teardown runs at the pause instant even when no circle is
+   eligible to publish — a fresh install, the last circle left, every circle
+   blocked, legacy-orphaned or still pending — and with no eligible circle there
+   is no publish tick, so nothing reopens the engine until the next foreground.
+   Gift-wrapped invitations (`kind:1059`) therefore arrive on resume rather than
+   in the background, where the inherited foreground REQ used to deliver them.
+   This is the intended trade — the alternative is an unbounded standing REQ for
+   an account sharing with nobody, and the background-wake rules forbid a Dart
+   timer to reach the inbox any other way — but it is a real change to the
+   receive plane and is not presented as pure gain.
+8. **The 60 s resume re-anchor throttle is bypassed on this branch.** A resume
+   re-anchors whenever the engine is paused or a burst is still in flight, and
+   after the teardown the engine is paused at essentially every resume here, so
+   the throttle never fires. The bypass is individually correct — a paused engine
+   held no REQ, so "the first re-anchor already covered that window" is false of
+   it — but the cost recurs: a quick out-and-back (app switcher, lock and unlock,
+   fetching a code) now costs a pause, a publish-pool reconnect and a 49 h `#p`
+   gift-wrap replay each time, where before it cost nothing. Over a long
+   background window the trade is clearly a win; over rapid app-switching it is a
+   loss. A notification-shade pull is unaffected, because
+   `AppLifecycleState.inactive` does not reach the pause path.
+9. **A cold launch that backgrounds before the engine has started comes up Live
+   in the background.** The engine start is launched from the shell's startup
+   tasks without being awaited. A pause landing first runs the teardown against a
+   session that does not exist yet — the pause returns "no session", which is
+   caught and logged — and the start then completes in the background, with
+   standing REQs and the 55 s pinger. Bounded by the first publish tick's own
+   teardown in the ordinary case, and unbounded in residual 7's case, where no
+   tick is coming. The periodic backstop that re-anchors a paused engine cannot
+   make this worse — it is gated on the app being foregrounded, precisely so a
+   re-arm landing after a pause cannot put a REQ back — and it does not close it
+   either.
+10. **The idle close can cut an ordinary in-flight publish.** The publish-pool
+    shutdown disconnects with no drain of ordinary publishes, and the pause path
+    now reaches it where it previously did not. Security Rule 13 is **upheld** —
+    commit-critical ladders are awaited, unbounded, before the shutdown — and the
+    motion trigger is largely self-excluded, because the idle arm is taken
+    precisely when the last publish is still inside the same 60 s guard the
+    motion trigger obeys. The exposure is therefore at most one location sample,
+    superseded by the next tick. For residual 7's case it is strictly safer than
+    before, where the same pool was shut with no drain at all.
+11. **A circle relay's REQ/CLOSE pair still does not coincide with this
+    device's `kind:445` for its circle — in four narrow classes — and the
+    burst now has a LENGTH that leaks the circle count.**
+    `LiveSyncCore::resume_burst` re-anchors the whole stored live set — every
+    `active.group_subs` entry — and calls `client.connect()` on the whole relay
+    union, while `BackgroundBurstCoordinator._publishPass` sends to
+    `_pendingCircles()`. Since `PUB-COALESCE` those two sets are the same set on
+    essentially every burst: one burst publishes every publish-eligible circle,
+    so a relay carrying circle B sees the REQ/CLOSE pair and this device's
+    `kind:445` for B together. What remains is four classes, not a fraction.
+    (a) The open precedes the publish *unconditionally*: if
+    `openBurstPublishWindow` returns null — no identity, the prominent
+    disclosure not accepted, location permission revoked, a one-shot GPS fix
+    that timed out — or consent flips inside the pass, the pass clears the due
+    set and returns, and the burst that already re-issued every REQ publishes
+    **zero** `kind:445`. (b) The two sets are read from different places, and
+    the subscription side is a **stored snapshot**. `resume_burst` re-anchors
+    `active.group_subs`, which is mutated only by `subscribe_circle`,
+    `unsubscribe_circle` and the relay-update paths — all driven by
+    `LiveSyncResubscriber._applyDelta` off a `circlesProvider` emission, and
+    nothing re-derives it while backgrounded (the coordinator drives its work by
+    direct call precisely because a provider invalidation schedules a rebuild a
+    paused app never performs). So the subscribed set is every **accepted**
+    circle *as of the last foreground emission*
+    (`LiveSyncResubscriber.groupsForCircles`), while the publish target is
+    re-read **fresh** at encrypt time (`encrypt_location` → `get_circle` →
+    `circle.relays`) and `filterPublishEligibleCircles` additionally excludes an
+    `isLegacyOrphaned` circle and one the engine has flagged `Unrecoverable` — so
+    such a circle is re-anchored on every burst and never published to at all, a
+    permanent mismatch rather than a fractional one. (c) A send that fails or is
+    deferred by the engine (`CircleError::SendDeferred`), and the tail of a
+    roster past `kMaxCirclesPerBurst`, which the burst itself defers to the next
+    tick. (d) A change applied **during** the background window, where the two
+    sides diverge because only one of them is re-read. A circle **removed**
+    while backgrounded keeps its `#h` REQ re-anchored on every burst with no
+    `kind:445` behind it, unbounded until the next foreground emission reaches
+    `_applyDelta`; and a **relay-set change** applied while backgrounded leaves
+    the OLD relays subscribed and the NEW ones published to, so each set sees one
+    half of the pair.
+    So the argument this section makes correctly for inbox-only relays ("a
+    REQ/CLOSE pair is itself an inference") still applies to circle relays, now
+    minus a correlation with a `kind:445` that is almost always there.
+    **What coalescing added** is the burst's *duration*: the union connection is
+    held across the whole staggered publish pass, so its connect→disconnect span
+    grows with the number of eligible circles (saturating at
+    `kMaxCirclesPerBurst`) and is a single-relay estimator of that count for
+    every relay in the union — one carrying a single circle, and an inbox-only
+    relay carrying none. That is registered as `PUB-COALESCE`, not as a lever:
+    the levers here are `INBOX_BURSTS_PER_REQ` for the inbox plane only, and
+    for the group plane nothing short of per-circle bursts, which would multiply
+    connections by N, restore the per-circle wake cost OD3 removed, and is not
+    proposed.
+
+The complementary arm is simpler and is stated with it: on **iOS with background
+sharing off**, and on **Android in both toggle states**, the pause STOPS the
+engine rather than pausing it (`MapShell.shouldStopLiveSyncOnPause` =
+`!(isIOS && backgroundSharingEnabled)` — "every pause except the one whose
+process keeps receiving"), and stopping is the recoverable direction, since the
+resume heal restarts a stopped engine where a paused one is invisible to it. The
+iOS sharing-off arm is the one that rule used to miss: `!isIOS` made it false
+there, so a user who had explicitly turned background sharing off still held
+every per-circle REQ, the inbox REQ, the engine socket and the 55 s pinger until
+the OS suspended the process.
 
 ## Public Nostr Profiles (kind 0 + Blossom)
 
@@ -1103,10 +1911,15 @@ the FFI, and `Image.network` stays banned.
   and the FFI's own doc comment on `delete_my_public_profile` records the blob
   DELETE as deferred. The uploaded image therefore survives profile deletion
   indefinitely, as does any copy already fetched. The user-facing copy has
-  always said so (`privacyPublicProfileRemovalIsNotDeletion`,
-  `photoHeaderRemoveBody`, `identityAdvancedDeleteBody`); it was this document
-  that was wrong, in the direction that would make a maintainer read the copy
-  as over-cautious. Nothing here guarantees erasure.
+  always said so, and still does — `photoHeaderRemoveBody` ("the image file
+  stays on the server that hosts it") and `identityAdvancedDeleteBody` ("your
+  photo on the image host that stores it"); a third carrier,
+  `privacyPublicProfileRemovalIsNotDeletion`, was cited here until 2026-09-09
+  and no longer exists, because the owner removed the Privacy page and every
+  `privacy*` key with it on 2026-08-29 (`docs/privacy/README.md` — such a key
+  must not be recreated). It was this document that was wrong about the DELETE,
+  in the direction that would make a maintainer read the copy as over-cautious.
+  Nothing here guarantees erasure.
 - **Same pubkey as your circles.** The public profile is not a separate
   persona: it binds the name/photo to the same pubkey used for circle
   invitations and KeyPackages. The onboarding and Identity-page disclosures

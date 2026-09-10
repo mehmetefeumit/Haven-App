@@ -56,6 +56,47 @@ use nostr_relay_builder::MockRelay;
 use nostr_sdk::Client;
 use tempfile::TempDir;
 
+/// Scales the DELIVERY budgets in this file — the two waits whose expiry FAILS
+/// a test.
+///
+/// **This is not what fixed this file's flake, and it must not be credited with
+/// it.** The cursor wait below used to expire while the cursor never moved at
+/// all, which looks exactly like a budget that is too small; it was not.
+/// Measured against a 120 s budget under saturating load the advance still never
+/// arrived, because the wait was for a SECOND advance that a spent anchor
+/// generation never issues — see [`wait_cursor_at_least`]. A bigger number would
+/// only have made the same failure slower.
+///
+/// What the scale is for is the ordinary slowness of an instrumented build,
+/// where every basic block carries a counter update. A delivery budget bounds
+/// how long an arrival may take and fails on expiry, so a larger one can only
+/// remove a false negative — an arrival that never comes exhausts any budget —
+/// and it costs nothing when the arrival comes, because each wait returns on its
+/// condition.
+///
+/// The file's three fixed sleeps are deliberately NOT scaled: none of them is a
+/// budget. Two are ABSENCE windows (nothing may move / no regression), whose
+/// expiry is their success path and which spend their full length on every run;
+/// each already dwarfs the millisecond in-process ingest path by three orders of
+/// magnitude, instrumented or not. The third exists only to put whole seconds
+/// between two candidate timestamps, and its own precondition `assert!` fails
+/// loudly if it ever stops doing so.
+///
+/// Set by the coverage workflow and `scripts/ci/check_coverage.sh`. Absent or
+/// unparsable means 1, so an ordinary `cargo test` keeps today's timings.
+fn wait_scale() -> u32 {
+    std::env::var("HAVEN_TEST_WAIT_SCALE")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|s| *s >= 1)
+        .unwrap_or(1)
+}
+
+/// `base`, scaled for instrumented runs.
+fn wait_budget(base: Duration) -> Duration {
+    base * wait_scale()
+}
+
 /// Publishes an undecryptable `kind:445` carrying `#h = h_value` at
 /// `created_at_secs` via a fresh publisher.
 async fn publish_kind445_at(url: &str, h_value: &str, created_at_secs: u64) {
@@ -77,23 +118,39 @@ async fn publish(url: &str, event: &Event) {
     publisher.send_event(event).await.expect("publish");
 }
 
-/// Polls `manager`'s `key` cursor until it exceeds `floor` (or the budget
+/// Polls `manager`'s `key` cursor until it reaches `target_ms` (or the budget
 /// elapses). Returns the final cursor value.
-async fn wait_cursor_above(
+///
+/// # Why a fixed target, and not "above the value we just read"
+///
+/// The obvious baseline — sample the cursor, then wait for it to grow — is a
+/// race this file lost. A cursor can only be sampled AFTER `start` returns,
+/// because nothing before it has written one; by then the session's REQ is open,
+/// and on an in-process relay its `EOSE` regularly anchors the cursor BEFORE the
+/// sample is taken. The sampled "cold seed" is then the advance itself, and
+/// waiting for a value strictly above it waits for a SECOND advance that a spent
+/// generation never issues (`anchor::CircleAnchor::eose_consumed`): one
+/// generation advances at most once, and nothing here re-issues the REQ. That
+/// wait burns its whole budget and fails whatever the budget is — held open for
+/// 120 s under load, the advance still never came — so it presented as a flake
+/// that "passes in isolation", the sample winning the race on an idle machine
+/// and losing it on a loaded one.
+///
+/// The value the `EOSE` justifies is knowable before the session exists (the
+/// REQ's local open time), so waiting for THAT is independent of when anything
+/// is sampled: it is true exactly once the anchor has fired, and false while the
+/// cursor sits on its cold seed (24 h back) or on a replayed event's
+/// `created_at`.
+async fn wait_cursor_at_least(
     manager: &CircleManager,
     key: &str,
-    floor: Option<i64>,
+    target_ms: i64,
     budget: Duration,
 ) -> Option<i64> {
     let deadline = tokio::time::Instant::now() + budget;
     loop {
         let cur = manager.read_sync_cursor(key).ok().flatten();
-        let advanced = match (cur, floor) {
-            (Some(c), Some(f)) => c > f,
-            (Some(_), None) => true,
-            _ => false,
-        };
-        if advanced || tokio::time::Instant::now() >= deadline {
+        if cur.is_some_and(|c| c >= target_ms) || tokio::time::Instant::now() >= deadline {
             return cur;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -146,6 +203,14 @@ async fn delivered_445_never_sets_the_cursor_but_eose_does() {
     publish_kind445_at(&url, &group_hex, u64::try_from(planted_secs).unwrap()).await;
 
     // --- Session 1: the REQ opens, the stored event is delivered, EOSE lands. ---
+    // Sampled BEFORE the session: the only cursor reading this test can take
+    // that the session cannot already have written (see `wait_cursor_at_least`).
+    // It is what makes every value below attributable to session 1.
+    assert_eq!(
+        circle.read_sync_cursor(&cursor_key).unwrap(),
+        None,
+        "precondition: this circle has never synced, so its cursor is unset"
+    );
     let opened_at = now_secs();
     let engine1 = LiveSyncCore::new_local(Arc::clone(&circle), Keys::generate().public_key());
     engine1
@@ -153,22 +218,29 @@ async fn delivered_445_never_sets_the_cursor_but_eose_does() {
         .await
         .expect("start session 1");
 
-    let seed = circle.read_sync_cursor(&cursor_key).unwrap();
-    assert!(seed.is_some(), "start seeds the per-circle group cursor");
-
-    let advanced = wait_cursor_above(&circle, &cursor_key, seed, Duration::from_secs(10))
-        .await
-        .expect("the cursor is seeded, so it always reads back");
     assert!(
-        advanced > seed.unwrap(),
-        "the subscription's EOSE must advance the cursor off its cold seed \
-         (otherwise the assertions below hold vacuously)"
+        circle.read_sync_cursor(&cursor_key).unwrap().is_some(),
+        "start seeds the per-circle group cursor"
     );
+
+    let advanced = wait_cursor_at_least(
+        &circle,
+        &cursor_key,
+        opened_at * 1000,
+        wait_budget(Duration::from_secs(10)),
+    )
+    .await
+    .expect("the cursor is seeded, so it always reads back");
+    // One assertion carries both claims, because the second implies the first:
+    // the cold seed is 24 h below the REQ's open time and the replayed event an
+    // hour below it, so a cursor at or above the open time is necessarily one
+    // the EOSE moved — which is what keeps the invariant below non-vacuous.
     assert!(
         advanced >= opened_at * 1000,
-        "the cursor must land on the REQ's own local open time ({opened_at} s), \
-         not on the replayed event's remotely-chosen created_at \
-         ({planted_secs} s). Got {advanced} ms.",
+        "the subscription's EOSE must advance the cursor onto the REQ's own \
+         local open time ({opened_at} s) — off its cold seed (otherwise the \
+         assertions below hold vacuously), and never onto the replayed event's \
+         remotely-chosen created_at ({planted_secs} s). Got {advanced} ms.",
     );
 
     // --- THE INVARIANT, live. Let whole seconds pass so a per-event advance
@@ -393,7 +465,7 @@ async fn busy_circle_high_cursor_does_not_bury_a_quiet_co_multiplexed_circle() {
     // The oracle: B's backdated location is decrypted and routed. Only reachable
     // if the multiplexed REQ went back to MIN (B's low seed).
     let mut delivered = false;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let deadline = tokio::time::Instant::now() + wait_budget(Duration::from_secs(15));
     while tokio::time::Instant::now() < deadline {
         match tokio::time::timeout(Duration::from_secs(1), bus.recv()).await {
             Ok(Ok(LiveSyncEvent::Location {

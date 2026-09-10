@@ -1,9 +1,18 @@
 /// iOS-only bridge for the CoreLocation "Always" authorization.
 ///
-/// Continuous background location delivery — which Haven's background-sharing
-/// feature depends on — requires the iOS "Always" authorization. The
-/// `geolocator` plugin can only ever request "When In Use" on iOS: its native
-/// handler calls `requestWhenInUseAuthorization` whenever
+/// Background *continuation* does NOT require "Always". A CoreLocation session
+/// started while the app is foregrounded — which Haven's is, the toggle living
+/// in foreground-only UI — keeps delivering after the app is backgrounded under
+/// plain When-In-Use, and that is what background sharing runs on
+/// (`geolocator_location_service.dart:641-643`). What "Always" buys is the
+/// receive-only relaunch path: significant-location-change and region
+/// monitoring waking a *terminated* app (`HavenSLCHandler.swift`; the wake
+/// stays receive-only per `INV-L-IOS-WAKES-RECEIVE-ONLY` in
+/// `docs/privacy/privacy_invariants.json`).
+///
+/// Haven has to ask for that authorization itself: the `geolocator` plugin can
+/// only ever request "When In Use" on iOS — its native handler calls
+/// `requestWhenInUseAuthorization` whenever
 /// `NSLocationWhenInUseUsageDescription` is present and short-circuits once a
 /// status is set, so `requestAlwaysAuthorization` is never reached. Haven
 /// therefore talks to a small native handler (`HavenLocationAuthHandler`)

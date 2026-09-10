@@ -35,7 +35,10 @@ import 'package:haven/src/providers/location_publish_scheduler_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
 import 'package:haven/src/providers/maintenance_scheduler_provider.dart';
 import 'package:haven/src/providers/relay_preferences_provider.dart';
+import 'package:haven/src/providers/resume_extras_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
+import 'package:haven/src/providers/sharing_health_provider.dart';
+import 'package:haven/src/services/background_burst_coordinator.dart';
 import 'package:haven/src/services/background_idle_waiter.dart';
 import 'package:haven/src/services/background_location_manager.dart';
 import 'package:haven/src/services/circle_service.dart';
@@ -49,6 +52,7 @@ import 'package:haven/src/services/nostr_relay_service.dart';
 import 'package:haven/src/services/pending_leave_service.dart';
 import 'package:haven/src/services/subscription_service.dart';
 import 'package:haven/src/theme/theme.dart';
+import 'package:haven/src/utils/geo_distance.dart';
 import 'package:haven/src/utils/profile_refresh_trigger.dart';
 import 'package:haven/src/utils/profile_sync_trigger.dart';
 import 'package:haven/src/widgets/circles/circles_bottom_sheet.dart';
@@ -94,6 +98,105 @@ class SingleFlight<T> {
       _inFlight ??= body().whenComplete(() => _inFlight = null);
 }
 
+/// Who holds a relay connection while this isolate is paused.
+///
+/// Three answers, because the pause has three genuinely different shapes — see
+/// [MapShell.pausedRelayOwner], which decides between them.
+enum PausedRelayOwner {
+  /// Nobody, and both socket sets are closed at the pause instant.
+  ///
+  /// Background sharing is off: nothing publishes or receives while the app is
+  /// away, on either platform, so a socket left open is a standing "this
+  /// pubkey is online" signal with nothing to show for it.
+  ///
+  /// This value closes only the PUBLISH pool. The engine's own socket, its
+  /// standing REQs and the crate's 55 s pinger belong to the other plane and
+  /// are closed by the [MapShell.shouldStopLiveSyncOnPause] stop on the same
+  /// branch — which is why that rule is not "Android", but "every pause except
+  /// the one whose process keeps receiving".
+  none,
+
+  /// The Android foreground service's own isolate, which dials its own pool.
+  ///
+  /// This isolate still closes its socket at the pause instant — the handoff
+  /// moves the MLS session (Rule 14), and the service does not reuse this
+  /// isolate's connections.
+  foregroundService,
+
+  /// One [BackgroundBurstCoordinator] burst per publish tick.
+  ///
+  /// The socket is neither kept nor closed HERE: this branch hands EVERY iOS
+  /// background pause to the coordinator, and the coordinator answers each
+  /// with a teardown — the burst this pause drove, or the
+  /// [BackgroundBurstCoordinator.closeIdle] it took instead when nothing was
+  /// eligible or the last publish was still inside the overlap guard. Two
+  /// owners of one plane would be worse than either alone: the pool shutdown
+  /// at this call site is unawaited, so it could cut the socket while the
+  /// coordinator's teardown is deliberately waiting on a commit ladder
+  /// (Security Rule 13).
+  ///
+  /// R14: the burst rides the publish tick that already exists. Nothing on
+  /// this branch may add a background timer of its own to reach it.
+  burst,
+}
+
+/// Mirror of `RELAY_LIFECYCLE_OP_TIMEOUT_SECS` in
+/// `haven-core/src/relay/live_sync/config.rs` — the engine's own bound on ONE
+/// relay control-plane op.
+const int _kRelayLifecycleOpSecs = 10;
+
+/// How many [_kRelayLifecycleOpSecs]-bounded steps `pause_subscriptions` takes
+/// before it reaches its uncapped Rule-13 publish drain: `unsubscribe_all`,
+/// the leftover-subscription probe, the `RawSignal::Pause` marker send, and
+/// the worker's ack of it.
+///
+/// The leftover SWEEP adds one more per REQ a partial `unsubscribe_all` left
+/// registered, and the drain that follows has no cap at all — which is exactly
+/// why [kOptOutBurstWait] is a bound and not an await.
+const int _kPauseBoundedSteps = 4;
+
+/// Mirror of `BURST_SETTLE_CAP_SECS` in the same Rust module — the cap on the
+/// follow-on commit quiesce a burst holds its sockets open for.
+const int _kBurstSettleCapSecs = 18;
+
+/// Mirror of [kBurstPublishBudget] in seconds, so [kOptOutBurstWait] can be a
+/// compile-time sum (`Duration.inSeconds` is not a const expression).
+const int _kBurstPublishSecs = 10;
+
+/// How long a mid-pause opt-out waits on a burst in flight before it pauses
+/// the engine itself (C4).
+///
+/// Derived from the teardown a cancelled burst still owes, not chosen. Consent
+/// is re-read between links, so what remains is at most:
+///
+///  * the single-attempt location publish it is already inside —
+///    [_kBurstPublishSecs] (`LOCATION_PUBLISH_ATTEMPTS` is 1, so
+///    `CONNECTION_TIMEOUT` 5 s + `LOCATION_ACK_WINDOW` 5 s);
+///  * its own `settleBeforePause`, capped at [_kBurstSettleCapSecs]; and
+///  * the BOUNDED prefix of its `pauseSubscriptions` —
+///    [_kPauseBoundedSteps] × [_kRelayLifecycleOpSecs] = 40 s.
+///
+/// The last term used to be priced at a single 10 s relay OK wait, which is
+/// the crate's per-relay `wait_for_ok` and not the engine's pause at all: the
+/// pause spends four separately bounded lifecycle ops before it even reaches
+/// the drain. At 38 s the wait therefore expired on HEALTHY bursts and the
+/// direct pause below ran underneath one — the exact thing the wait exists to
+/// avoid. Pinned to the Rust source by
+/// `test/pages/map_shell_burst_wiring_test.dart`.
+///
+/// The uncapped publish drain that follows those four steps is deliberately
+/// NOT priced: it is unbounded by design (Security Rule 13), and being
+/// unpriceable is what makes a bound necessary rather than an await.
+///
+/// It bounds the WAIT, never the burst — see
+/// [MapShell.releaseBurstPlaneOnOptOut].
+const Duration kOptOutBurstWait = Duration(
+  seconds:
+      _kBurstPublishSecs +
+      _kBurstSettleCapSecs +
+      _kPauseBoundedSteps * _kRelayLifecycleOpSecs,
+);
+
 /// The main shell containing the map, bottom sheet, and floating controls.
 ///
 /// This widget serves as the primary container for the Haven app, featuring:
@@ -105,25 +208,61 @@ class MapShell extends ConsumerStatefulWidget {
   /// Creates the map shell.
   const MapShell({super.key});
 
-  /// Whether the relay WebSocket should stay connected while the app is
-  /// paused.
+  /// Who owns a relay connection while this isolate is paused.
   ///
-  /// On the iOS background-sharing branch the main isolate stays alive
-  /// (held by the CLLocationManager retention stream) and keeps publishing
-  /// plus running the 90 s receive timer, so tearing the socket down here
-  /// only forces a cold reconnect — and a dropped first publish — on the
-  /// very next tick. Everywhere else the relay is disconnected for metadata
-  /// minimisation: Android hands publishing off to the foreground-service
-  /// isolate (which owns its own relay), and with background sharing off the
-  /// app is genuinely going idle.
+  /// This used to be a bool ("keep the socket warm?"), true only on the iOS
+  /// background branch. P4 gave that branch an answer neither value describes:
+  /// the socket is neither kept for the whole background window nor closed
+  /// once at the pause — a [BackgroundBurstCoordinator] opens and closes it
+  /// per publish tick. Flipping the bool to `false` would have said "closed at
+  /// the pause", which is not what happens and would have made the ONE branch
+  /// that behaves differently indistinguishable from the two that do not.
   ///
-  /// Exposed as a static so the pause/resume decision is unit-tested without
-  /// pumping the widget (which requires the Rust bridge).
+  /// It used to take the eligible set as a third input, so an account with
+  /// nothing to publish fell through to [PausedRelayOwner.none]. That is no
+  /// longer a case: the branch drives a burst or a
+  /// [BackgroundBurstCoordinator.closeIdle], and the coordinator owns the
+  /// close either way — see [PausedRelayOwner.burst] for why a second owner
+  /// here would be worse than none.
+  ///
+  /// Exposed as a static so the pause decision is unit-tested without pumping
+  /// the widget (which requires the Rust bridge).
   @visibleForTesting
-  static bool shouldKeepRelayConnectedWhilePaused({
+  static PausedRelayOwner pausedRelayOwner({
     required bool backgroundSharingEnabled,
     required bool isIOS,
-  }) => backgroundSharingEnabled && isIOS;
+  }) {
+    if (!backgroundSharingEnabled) return PausedRelayOwner.none;
+    if (!isIOS) return PausedRelayOwner.foregroundService;
+    return PausedRelayOwner.burst;
+  }
+
+  /// Whether entering the paused burst branch should drive a burst NOW instead
+  /// of waiting for the publish scheduler to tick.
+  ///
+  /// [lastPublishAt] is the shell's own last one-shot publish (`null` before
+  /// the first); [now] is the pause instant.
+  ///
+  /// Without this the branch pauses with a live engine, a standing REQ and an
+  /// open socket until whichever circle ticks first — up to
+  /// [kLocationUpdateInterval] plus jitter, i.e. the very "one continuous
+  /// socket while backgrounded" the burst design removes. With it, at least
+  /// half of all pauses close everything within seconds of going away.
+  ///
+  /// [kLocationPublishOverlapGuard] (60 s) is the app's existing "do not
+  /// repeat a relay round-trip sooner than this" quantum — the same one
+  /// `_guardedPublish` uses — so a pause that lands right after a resume or a
+  /// motion publish does not re-send what was just sent. That makes it a
+  /// derived bound, not a chosen one.
+  ///
+  /// Exposed as a static for the same reason the rules around it are.
+  @visibleForTesting
+  static bool shouldBurstImmediatelyOnPause({
+    required DateTime? lastPublishAt,
+    required DateTime now,
+  }) =>
+      lastPublishAt == null ||
+      now.difference(lastPublishAt) > kLocationPublishOverlapGuard;
 
   /// Whether the publish machinery (the jittered send scheduler and the
   /// motion-trigger listener) should keep running while the app is paused.
@@ -136,14 +275,48 @@ class MapShell extends ConsumerStatefulWidget {
   /// publishing off to the foreground-service isolate instead, and with
   /// background sharing off the app must genuinely go idle.
   ///
-  /// Same truth table as [shouldKeepRelayConnectedWhilePaused] today, but a
-  /// deliberately separate concept — if the two ever diverge, collapsing
-  /// them would make the divergence a silent bug.
+  /// The branch this selects is also the ONLY one that may install the burst
+  /// coordinator: the other three call `stopScheduling()`, which clears the
+  /// scheduler's active flag, and both `BurstPublisher` methods hard-gate on
+  /// it — a sink installed there would open a burst, wait out its backlog,
+  /// publish nothing and pause.
   @visibleForTesting
   static bool shouldKeepPublishingWhilePaused({
     required bool backgroundSharingEnabled,
     required bool isIOS,
   }) => backgroundSharingEnabled && isIOS;
+
+  /// Whether pausing should stop the live-sync engine outright.
+  ///
+  /// Every pause EXCEPT iOS-with-sharing-on, which is the one configuration
+  /// where this paused process is itself the receiver — the burst plane owns
+  /// the engine there and stopping it would end background delivery.
+  ///
+  /// Everywhere else nothing in this isolate needs the engine while the app is
+  /// away, and leaving it up costs one standing WebSocket per relay, its
+  /// standing REQs and the crate's 55 s pinger for the whole background window
+  /// — a continuous "this pubkey is online" signal with nothing to show for
+  /// it. On Android with sharing ON the stop is redundant but not skipped: the
+  /// MLS handoff stops the engine first anyway (it holds its own `Arc` on the
+  /// circle manager, so the foreground service cannot open the database until
+  /// it lets go). The iOS sharing-OFF arm is the one this rule used to miss:
+  /// `!isIOS` made it false there, so a user who had turned background sharing
+  /// off still held every REQ and socket until the OS suspended the process.
+  ///
+  /// Stopping is the recoverable direction, which is why it is preferred to a
+  /// pause here: `_healLiveSyncIfStopped()` restarts a STOPPED engine on every
+  /// resume and on every heal tick, and `ensureRunning` short-circuits when it
+  /// is already up. A paused engine is invisible to that path — `isRunning`
+  /// stays true across a pause — and needs the separate repair
+  /// [reanchorPausedEngine].
+  ///
+  /// Exposed as a static so the pause/resume decision is unit-tested without
+  /// pumping the widget (which requires the Rust bridge).
+  @visibleForTesting
+  static bool shouldStopLiveSyncOnPause({
+    required bool isIOS,
+    required bool backgroundSharingEnabled,
+  }) => !(isIOS && backgroundSharingEnabled);
 
   /// Whether a resume should re-anchor the live-sync engine's subscriptions.
   ///
@@ -153,7 +326,7 @@ class MapShell extends ConsumerStatefulWidget {
   /// The re-anchor runs AHEAD of the 30 s resume debounce (it is the only
   /// repair for a relay-`CLOSED` REQ, and behind the debounce the glance
   /// pattern reliably suppressed it), so it needs a throttle of its own or ten
-  /// shade-pull glances become ten pool reconnects and ten 7-day gift-wrap
+  /// shade-pull glances become ten pool reconnects and ten 49-hour gift-wrap
   /// replays — see `_onResumed` for that cost in full.
   ///
   /// [kLocationPublishOverlapGuard] (60 s) is the app's existing "do not repeat
@@ -162,6 +335,15 @@ class MapShell extends ConsumerStatefulWidget {
   /// a second re-anchor inside it re-queries a window the first already
   /// covered and can deliver nothing new. That makes 60 s a derived floor, not
   /// a chosen one.
+  ///
+  /// It is the throttle, not the whole decision, and its two callers use it in
+  /// opposite directions on purpose. `_onResumed` EXEMPTS a paused engine from
+  /// it, because "the first re-anchor already covered that window" is a
+  /// statement about an engine that held its REQs, and a paused one held none.
+  /// [reanchorPausedEngine] — which runs only for a paused engine — APPLIES
+  /// it, because it is the periodic backstop behind that resume and must not
+  /// spend a second pool reconnect and a second 49 h `#p` replay on the same
+  /// repair the resume has just launched.
   ///
   /// Exposed as a static so the throttle is unit-tested without pumping the
   /// widget (which requires the Rust bridge).
@@ -172,6 +354,295 @@ class MapShell extends ConsumerStatefulWidget {
   }) =>
       lastReanchorAt == null ||
       now.difference(lastReanchorAt) > kLocationPublishOverlapGuard;
+
+  /// Tears the burst plane down when background sharing is switched OFF while
+  /// the app is paused (C4), leaving NO socket behind — unconditionally.
+  ///
+  /// Two states, and the difference is not cosmetic:
+  ///
+  ///  * [runningBurst] non-null — a burst is in flight, and the consent read
+  ///    it re-runs between links already answers `false`, so it stops at its
+  ///    next link and its own `finally` settles, pauses and shuts both pools.
+  ///    Pausing underneath it instead would cut its ingest mid-replay and
+  ///    shorten the settle that exists to keep a commit's OK from being lost.
+  ///  * `null` — nothing was opened, so there is nothing to wait for.
+  ///
+  /// The wait is BOUNDED because the burst's settle ends in an uncapped
+  /// publish-gauge wait (Security Rule 13, by design): a wedged one never
+  /// completes, and an unbounded wait here would hold the opt-out open — with
+  /// the socket still up — for the rest of the process's life. On expiry the
+  /// pause and the pool shutdown are issued anyway, which is what makes "an
+  /// opt-out leaves no socket" unconditional rather than conditional on the
+  /// burst being healthy.
+  ///
+  /// Bounding the wait is NOT bounding the commit-critical work, and the
+  /// distinction is the whole reason this is safe: `Future.timeout` cancels
+  /// nothing, so the burst runs on to its own pause, and the direct pause
+  /// taken on expiry cannot cut a commit between SEND and OK either — the
+  /// engine's `pause_subscriptions` drains its in-flight publish gauge before
+  /// it disconnects. The cost of expiry is at most a shortened follow-on
+  /// quiesce window on a burst that was already ending.
+  ///
+  /// Both links run whatever the wait did: a burst that finished has already
+  /// paused and shut the pool, and re-issuing an idempotent pause is a cheap
+  /// price for not making the promise depend on the coordinator's own error
+  /// handling.
+  ///
+  /// ## Why the two links are STARTED together
+  ///
+  /// They used to be sequential `await`s in independent try/catches, which
+  /// contains a throw and nothing else. The wedge [kOptOutBurstWait] exists
+  /// for is the engine's uncapped `wait_publishes_drained()` — and
+  /// `pauseSubscriptions` enters that same wait, so a wedged engine meant the
+  /// pool shutdown behind it never ran AT ALL: consent withdrawn, publish
+  /// sockets open for the life of the process. Neither may be given a
+  /// `.timeout(` (it cancels no Rust future — it would only let this return
+  /// with a commit between SEND and OK, Security Rule 13, and is pinned
+  /// against by `test/lints/commit_critical_no_timeout_test.dart`), so instead
+  /// both are ISSUED before either is awaited. Independence is the bound.
+  ///
+  /// A static over injected collaborators, because this is the one edge that
+  /// runs only while the process is PAUSED — `MapShell` cannot be pumped
+  /// (CLAUDE.md), so this is what makes the promise testable at all.
+  @visibleForTesting
+  static Future<void> releaseBurstPlaneOnOptOut({
+    required SubscriptionService engine,
+    required Future<void> Function() shutdownPublishPool,
+    Future<void>? runningBurst,
+    Duration burstWait = kOptOutBurstWait,
+  }) async {
+    if (runningBurst != null) {
+      try {
+        await runningBurst.timeout(
+          burstWait,
+          onTimeout: () => debugPrint(
+            '[MapShell] opt-out: the burst in flight has not settled within '
+            '${burstWait.inSeconds}s — pausing the engine directly',
+          ),
+        );
+      } on Object catch (e) {
+        // Rule 8: the type only. The burst's own links log their causes.
+        debugPrint('[MapShell] opt-out: burst failed: ${e.runtimeType}');
+      }
+    }
+    // Both calls happen HERE, in one synchronous sweep, so neither can starve
+    // the other however long it takes to answer.
+    final links = <Future<void>>[
+      _optOutLink('pause', () => engine.pauseSubscriptions()),
+      _optOutLink('pool shutdown', shutdownPublishPool),
+    ];
+    await Future.wait(links);
+  }
+
+  /// Runs one opt-out teardown link, absorbing its failure.
+  ///
+  /// Each link owns a different socket, so a throw from one must not skip the
+  /// other — and neither may escape: the opt-out is launched with `unawaited`
+  /// from a `listenManual` callback, where an escaping error is an unhandled
+  /// async error rather than a caught one.
+  static Future<void> _optOutLink(
+    String what,
+    Future<void> Function() link,
+  ) async {
+    try {
+      await link();
+    } on Object catch (e) {
+      // Rule 8: the type only — an FFI error string is remote text.
+      debugPrint('[MapShell] opt-out $what failed: ${e.runtimeType}');
+    }
+  }
+
+  /// Re-anchors the engine's subscriptions on resume, and AGAIN if a burst
+  /// that was still in flight paused it underneath the foreground.
+  ///
+  /// [burstInFlight] is the coordinator's `runningBurst` read at the resume
+  /// instant, `null` when no burst was running.
+  ///
+  /// Clearing the tick sink does not cancel a burst already on the chain, and
+  /// the coordinator's own consent read (`burstEnabled`) cannot cancel it
+  /// either — background sharing is still ON in the foreground. The
+  /// coordinator therefore stops its teardown as soon as the foreground owns
+  /// the engine, which makes the common case cost one `isPaused` read here.
+  /// What that cannot stop is a `pauseSubscriptions` ALREADY under way when
+  /// the resume landed: it completes, and it completes after the re-anchor
+  /// below.
+  ///
+  /// Nothing else recovers that. `ensureRunning` reads `isRunning`, which
+  /// stays true across a pause, so the periodic heal short-circuits;
+  /// `_fullRestart` declines while paused; and
+  /// `SharingHealthNotifier.refresh()` early-returns while paused — so the
+  /// banner holds at its last verdict, "healthy", while the device receives
+  /// nothing until the next full background→foreground cycle.
+  ///
+  /// The wait on [burstInFlight] is deliberately unbounded: a `Future.timeout`
+  /// cancels nothing, so a bounded one would simply re-anchor into the same
+  /// race again, and the only link that can still be running at that point is
+  /// one of the engine's two uncapped Rule-13 drains, which must not be cut.
+  ///
+  /// A static over injected collaborators for the same reason its neighbours
+  /// are: `MapShell` cannot be pumped (CLAUDE.md).
+  @visibleForTesting
+  static Future<void> reanchorOnResume({
+    required SubscriptionService engine,
+    Future<void>? burstInFlight,
+  }) async {
+    await _reanchor(engine);
+    if (burstInFlight == null) return;
+    try {
+      await burstInFlight;
+    } on Object catch (e) {
+      debugPrint('[MapShell] resume: burst in flight failed: ${e.runtimeType}');
+    }
+    if (!engine.isPaused) return;
+    debugPrint(
+      '[MapShell] resume: a burst paused the engine behind the re-anchor — '
+      're-anchoring again',
+    );
+    await _reanchor(engine);
+  }
+
+  /// Re-anchors an engine that is still PAUSED while the app is on screen, and
+  /// reports whether it did — the caller records [now] as the last re-anchor
+  /// when it did.
+  ///
+  /// ## The state this exists for
+  ///
+  /// [reanchorOnResume] gets ONE attempt. `resume_after_background` exhausts
+  /// the engine's `SUBSCRIBE_MAX_ATTEMPTS` and gives up, and a burst's
+  /// `resume_burst` deliberately re-pauses and stays silent on that failure —
+  /// correct for a burst, whose next tick retries 72-168 s later, and wrong
+  /// for a foreground that has no next tick. So a user returning while the
+  /// radio is cold (a captive portal, a dead zone, a lock-screen unlock) lands
+  /// foregrounded with a paused engine.
+  ///
+  /// Nothing else in the app sees that. `ensureRunning` reads `isRunning`,
+  /// which a pause leaves TRUE; the subscription-health tick short-circuits on
+  /// the paused state; a circle-set delta only stages into the engine's model
+  /// while paused; and `_fullRestart` declines outright. Meanwhile publishing
+  /// keeps acking on the SEPARATE publish pool, so the sharing banner stays
+  /// green while the map receives nothing — for the whole foreground session,
+  /// recoverable only by another background→foreground cycle.
+  ///
+  /// ## Why it is the heal tick that pays for it
+  ///
+  /// The heal timer is the only periodic thing that runs while foregrounded
+  /// and is cancelled at every pause, so it is already exactly "while the app
+  /// is on screen" and adds no background wake (R14). [foregrounded] is still
+  /// required rather than assumed: `_startLiveSync` re-arms that timer from
+  /// its own completion, which can land after a pause, and a re-anchor there
+  /// would put a standing REQ back between bursts.
+  ///
+  /// Throttled on [shouldReanchorOnResume] against the same `_lastReanchorAt`
+  /// the resume stamps, which is what stops the two racing: `_onResumed`
+  /// records the instant BEFORE it launches its own re-anchor, so a heal
+  /// running behind it declines, and the 90-150 s heal cadence is always
+  /// outside the 60 s throttle by the time a repair is genuinely owed.
+  @visibleForTesting
+  static Future<bool> reanchorPausedEngine({
+    required SubscriptionService engine,
+    required bool foregrounded,
+    required DateTime now,
+    DateTime? lastReanchorAt,
+  }) async {
+    if (!foregrounded || !engine.isPaused) return false;
+    if (!shouldReanchorOnResume(lastReanchorAt: lastReanchorAt, now: now)) {
+      return false;
+    }
+    debugPrint(
+      '[MapShell] heal: the engine is paused with the app on screen — '
+      're-anchoring',
+    );
+    await _reanchor(engine);
+    return true;
+  }
+
+  static Future<void> _reanchor(SubscriptionService engine) async {
+    try {
+      await engine.resumeAfterBackground();
+    } on Object catch (e) {
+      // Rule 8: the type only — an FFI error string can carry relay urls.
+      debugPrint('[MapShell] resume re-anchor failed: ${e.runtimeType}');
+    }
+  }
+
+  /// Issues [ticks] to [sink] as ONE burst — however many circles are in it.
+  ///
+  /// ## Why the head tick is issued alone
+  ///
+  /// `BurstSink.onTick` folds a circle into the burst that is RUNNING and
+  /// QUEUES another one otherwise. Issued in one synchronous sweep, all N
+  /// ticks find no burst running yet and queue a burst EACH — and a publish
+  /// window that refuses (no identity, no accepted disclosure, a dead GPS)
+  /// returns WITHOUT draining the due set, so bursts 2..N do not find it empty
+  /// either. Measured at four circles on a refusal: four opens, four pauses,
+  /// four pool cycles and four REQ sets, each replaying 49 hours of `#p`
+  /// gift wraps, to publish nothing — on the branch this phase exists to make
+  /// quiet. On success it was already one, which is what made it invisible.
+  ///
+  /// So the tail is issued from a continuation of the head: a burst queued on
+  /// an idle chain starts on the next microtask, and one already in its
+  /// publish pass folds them all in regardless.
+  ///
+  /// One residual is NOT closed here, because it cannot be from this side:
+  /// ticks arriving while a burst is in its TEARDOWN (past joinable, chain
+  /// still pending) queue behind it, and a refusal in the burst they queued
+  /// costs one burst each again. That is fixed where the due set lives —
+  /// `_publishPass` must drain it when the window refuses, exactly as
+  /// `_runBurst` already does when consent is gone.
+  ///
+  /// A static over an injected [BurstSink] because `MapShell` cannot be pumped
+  /// (CLAUDE.md), and "N ticks cost ONE burst" is a claim about a real
+  /// coordinator rather than about the shape of a loop.
+  @visibleForTesting
+  static Future<void> queueOneBurst(
+    BurstSink sink,
+    List<({String key, Circle circle})> ticks,
+  ) async {
+    if (ticks.isEmpty) return;
+    final head = ticks.first;
+    final burst = sink.onTick(circleKey: head.key, circle: head.circle);
+    if (ticks.length > 1) {
+      await Future<void>.value();
+      for (final tick in ticks.skip(1)) {
+        unawaited(sink.onTick(circleKey: tick.key, circle: tick.circle));
+      }
+    }
+    try {
+      await burst;
+    } on Object catch (e) {
+      // The coordinator's chain absorbs its own errors, so this is defence in
+      // depth against an unhandled async error on a lifecycle path. Rule 8:
+      // the type only.
+      debugPrint('[MapShell] immediate burst failed: ${e.runtimeType}');
+    }
+  }
+
+  /// Reports a burst open to the sharing-health model: the RECEIVE plane's
+  /// signals, never the send plane's.
+  ///
+  /// [consecutiveFailures] is `0` when the open succeeded. A failed open leaves
+  /// the burst holding no subscription at all, so it ingests nothing — but it
+  /// still publishes, over the separate publish pool, and those publishes
+  /// genuinely get their relay acks. Recording it as a publish failure would
+  /// make the banner name a plane that is working, and send the user to a
+  /// remedy for a fault they do not have.
+  ///
+  /// A run of them is the silent failure this phase can produce: the device
+  /// keeps publishing every 72-168 s while peers' commits pile up unread. So
+  /// the first failure raises the subscription-lost onset (which the model
+  /// confirms only after [kSharingFaultConfirmationWindow], so one transient
+  /// open failure never reaches the user) and the first success clears it.
+  @visibleForTesting
+  static void recordBurstOpenOutcome(
+    SharingHealthNotifier health,
+    int consecutiveFailures,
+  ) {
+    if (consecutiveFailures == 0) {
+      health.recordRelaySubscriptionRestored();
+    } else {
+      health.recordRelaySubscriptionLost();
+    }
+  }
 
   /// Vertical space the top-edge floating buttons occupy, measured from the
   /// safe-area inset: `HavenSpacing.sm` of offset plus the 48 dp Material
@@ -302,10 +773,14 @@ class _MapShellState extends ConsumerState<MapShell>
   final DraggableScrollableController _sheetController =
       DraggableScrollableController();
   // Recurring location publishing is driven by `locationPublishSchedulerProvider`
-  // (one independent jittered schedule PER circle, so a relay cannot correlate
-  // a device's circles by co-timing — privacy decorrelation). MapShell only
-  // starts/stops it across the app lifecycle; the per-circle timers live in the
-  // notifier. The one-shot "publish all now" burst still goes through
+  // — ONE jittered schedule for the device, whose tick publishes every eligible
+  // circle in a CSPRNG-staggered burst. Per-circle schedules are gone, and so
+  // is the claim they carried: co-timing does NOT hide a device's circles from
+  // a shared relay, which reads the set off the multiplexed `#h` subscription
+  // and off the single publish socket. What the stagger still buys is that two
+  // circles never share a whole-second `created_at`. MapShell only starts/stops
+  // the tick across the app lifecycle; the timer lives in the notifier. The
+  // one-shot "publish all now" burst still goes through
   // `locationPublisherProvider` (cold-start / resume / motion / accept-create).
   Timer? _receiveTimer;
   Timer? _invitationTimer;
@@ -354,6 +829,10 @@ class _MapShellState extends ConsumerState<MapShell>
   /// dispose so no re-subscribe fires after teardown.
   ProviderSubscription<AsyncValue<List<Circle>>>? _liveSyncCirclesSub;
 
+  /// The engine stop a sharing-off iOS pause issued, so the R1 consent edge can
+  /// order its restart BEHIND it — see [_restartReceiveAfterPausedStop].
+  Future<void>? _pausedEngineStop;
+
   DateTime? _lastPublishTime;
   DateTime? _lastLocationFetchTime;
   DateTime? _lastInvitationPollTime;
@@ -386,8 +865,8 @@ class _MapShellState extends ConsumerState<MapShell>
   // On iOS with background sharing enabled, the SINGLE geolocator stream
   // (see `locationStreamProvider`) carries `allowsBackgroundLocationUpdates:
   // true`, so CoreLocation keeps this process fully executable while
-  // backgrounded: the per-circle publish scheduler
-  // (`locationPublishSchedulerProvider`) keeps firing on its jittered cadences
+  // backgrounded: the publish scheduler
+  // (`locationPublishSchedulerProvider`) keeps firing on its jittered cadence
   // and `_motionSub` keeps delivering movement-driven publishes. There is no
   // second "background stream" — geolocator supports exactly one stream, and
   // a second request would silently inherit the first stream's settings
@@ -402,6 +881,44 @@ class _MapShellState extends ConsumerState<MapShell>
   // edge re-arms them when a pause raced the notifier's async load of the
   // persisted consent (R1). Closed on resume and on dispose.
   ProviderSubscription<bool>? _bgSharingPausedSub;
+
+  // ---- iOS background burst receive (P4) ----
+  //
+  // ONE coordinator per mount, built lazily by [_installBurstCoordinator] the
+  // first time an iOS pause hands it the publish ticks. One rather than one
+  // per pause because it is what serializes bursts: a second coordinator built
+  // while the first still had a burst in flight would hold two engine opens
+  // and two socket sets at once, which is the state this whole phase exists to
+  // remove. Its chain absorbs that instead — a tick arriving mid-burst joins
+  // or queues behind it.
+  BackgroundBurstCoordinator? _burstCoordinator;
+
+  /// The scheduler the sink was installed on, captured so `dispose()` can
+  /// clear it without `ref` (repo convention: no `ref` use in `dispose`).
+  LocationPublishSchedulerNotifier? _burstScheduler;
+
+  /// Whether the FOREGROUND owns the live-sync engine right now, read by
+  /// [BackgroundBurstCoordinator] before it opens a burst and before each link
+  /// of a burst's teardown.
+  ///
+  /// A PULL, deliberately, and never a latch: one coordinator serves every
+  /// pause of a mount (`_burstCoordinator ??=`), so a flag that only ever went
+  /// true would leave every burst after the first resume holding its sockets
+  /// for the whole background window — strictly worse than the defect it
+  /// closes. [_installBurstCoordinator] takes it back to `false` on every
+  /// install, which is the single site both the pause branch and the R1
+  /// consent edge go through.
+  ///
+  /// Starts `true` because a mount that has never paused is foregrounded, and
+  /// `dispose()` deliberately leaves it alone: an unmounted shell is not a
+  /// foreground owner, and flipping it there would stop a burst's teardown and
+  /// leave the engine subscribed with the pool open.
+  bool _foregroundOwnsEngine = true;
+
+  /// The publish pool, captured while mounted so a shutdown that outlives this
+  /// State still closes its sockets — at startup, and refreshed on every
+  /// mounted [_shutdownPublishPool].
+  NostrRelayService? _publishPool;
 
   @override
   void initState() {
@@ -482,6 +999,11 @@ class _MapShellState extends ConsumerState<MapShell>
     _deferredStartupSub = null;
     final relay = ref.read(relayServiceProvider);
     if (relay is NostrRelayService) {
+      // Captured HERE, not only on the last mounted shutdown: an unmounted
+      // shell's `_shutdownPublishPool` reads no provider, so a teardown that
+      // is the FIRST to reach the shutdown after the unmount (a burst that
+      // outlived the widget) would close nothing at all.
+      _publishPool = relay;
       await relay.initialize();
     }
     // The widget may have been disposed during the async relay init (rapid
@@ -752,14 +1274,13 @@ class _MapShellState extends ConsumerState<MapShell>
       unawaited(BackgroundLocationManager.markForegroundActive(active: true));
     });
 
-    // Recurring location publishing: each accepted circle publishes on its OWN
-    // independent jittered cadence (nominal `kLocationUpdateInterval`, ±40% via
-    // Rust-side CSPRNG per tick), owned by `locationPublishSchedulerProvider`.
-    // Independent per-circle schedules mean a relay can't correlate a device's
-    // circles by co-timing (privacy decorrelation). Reading the notifier builds
-    // it (arming a schedule per current circle); `startScheduling` re-activates
-    // after a background pause. Cancelled on pause (below), on dispose
-    // (Ref.onDispose), and on `deleteIdentity`.
+    // Recurring location publishing: ONE jittered cadence for the device
+    // (nominal `kLocationUpdateInterval`, ±40% via Rust-side CSPRNG per tick),
+    // owned by `locationPublishSchedulerProvider`, whose every tick publishes
+    // the whole eligible roster in a staggered burst. Reading the notifier
+    // builds it (arming that one tick); `startScheduling` re-activates after a
+    // background pause. Cancelled on pause (below), on dispose (Ref.onDispose),
+    // and on `deleteIdentity`.
     ref.read(locationPublishSchedulerProvider.notifier).startScheduling();
 
     // Motion-triggered publish: subscribe to the GPS stream that the map
@@ -887,6 +1408,145 @@ class _MapShellState extends ConsumerState<MapShell>
     });
   }
 
+  /// Closes the publish pool's sockets.
+  ///
+  /// `shutdown()` is a [NostrRelayService] concern, not part of the
+  /// `RelayService` interface every test double implements, so the type test
+  /// belongs here rather than at each of the three call sites.
+  ///
+  /// Works after this State is gone, through the handle captured at startup
+  /// and refreshed here. It used to `return` on `!mounted` instead, which
+  /// quietly made "an opt-out leaves no socket" conditional on the shell still
+  /// being mounted: a burst can outlive the widget (a logout taken while
+  /// paused), and the sockets then stayed up until the pool's own idle sweep
+  /// noticed. The provider is container-scoped and outlives the widget, so
+  /// holding the handle keeps nothing alive that was not already alive.
+  ///
+  /// The refresh stays even though `relayServiceProvider` is a plain
+  /// `Provider` nothing invalidates: no guard pins that, and re-reading a
+  /// singleton costs nothing.
+  Future<void> _shutdownPublishPool() async {
+    if (mounted) {
+      final relay = ref.read(relayServiceProvider);
+      if (relay is NostrRelayService) _publishPool = relay;
+    }
+    await _publishPool?.shutdown();
+  }
+
+  /// Hands the publish ticks to a [BackgroundBurstCoordinator], so
+  /// each one becomes a bounded open → ingest → publish → fold → close burst
+  /// instead of a publish over a socket held for the whole background window.
+  ///
+  /// Only ever called from the iOS + background-sharing-on pause states (the
+  /// pause branch itself and the R1 consent edge that arrives at the same
+  /// state late): everywhere else the scheduler has been stopped, and both
+  /// [BurstPublisher] methods refuse while it is, so a sink installed there
+  /// would produce bursts that open a socket, wait, publish nothing and pause.
+  ///
+  /// Every collaborator is read ONCE here except the two that must not be:
+  /// consent is re-read per link (it is what cooperative cancellation is made
+  /// of), and the health notifier is re-read per report. `mounted` gates both,
+  /// so an unmounted shell reads as "not enabled" — which cancels the burst
+  /// cooperatively and still runs its teardown, rather than throwing out of
+  /// it.
+  BackgroundBurstCoordinator _installBurstCoordinator() {
+    final scheduler = ref.read(locationPublishSchedulerProvider.notifier);
+    final coordinator =
+        _burstCoordinator ??= BackgroundBurstCoordinator(
+          engine: ref.read(subscriptionServiceProvider),
+          publisher: scheduler,
+          maintenance: ref.read(maintenanceSchedulerProvider.notifier),
+          stagger: ref.read(locationPublishStaggerProvider),
+          shutdownPublishPool: _shutdownPublishPool,
+          // Security Rule 13. The burst awaits its OWN publishes by structure,
+          // but the pool is not the burst's: the motion trigger keeps running
+          // while backgrounded on iOS and publishes over the same one,
+          // unawaited by and invisible to the coordinator. That path reaches
+          // the deferred-send ladder, and `shutdownPublishPool` disconnects
+          // with no drain of any kind — so a commit between SEND and OK loses
+          // its ack and is rolled back on a relay that may already have stored
+          // and served it. This is the read that lets the teardown wait for
+          // it. `mounted` fails safe in the same direction as the shutdown it
+          // guards: an unmounted shell's `_shutdownPublishPool` closes only
+          // what it captured, and there is nothing here to wait for.
+          pendingCommitCritical: () => mounted
+              ? ref.read(locationSharingServiceProvider).inFlightCommitCritical
+              : null,
+          burstEnabled: () => mounted && ref.read(backgroundSharingProvider),
+          foregrounded: () => _foregroundOwnsEngine,
+          onOpenOutcome: (failures) {
+            if (!mounted) return;
+            MapShell.recordBurstOpenOutcome(
+              ref.read(sharingHealthProvider.notifier),
+              failures,
+            );
+          },
+        );
+    _burstScheduler = scheduler;
+    // Backgrounded again, whether this built the coordinator or reused it: one
+    // instance serves every pause of the mount, so the handback flag has to be
+    // taken back here or the second background window would be served by a
+    // coordinator that thinks the foreground still owns the engine — no burst
+    // opened, no socket ever closed.
+    _foregroundOwnsEngine = false;
+    scheduler.setTickSink(coordinator);
+    return coordinator;
+  }
+
+  /// The circles a burst may publish to, in exactly the scheduler's terms
+  /// ([filterPublishEligibleCircles]) — accepted, not legacy-orphaned, not
+  /// blocked.
+  ///
+  /// Empty for an unmounted shell: `ref` is unusable there, and "nothing is
+  /// eligible" is the answer that makes every caller close what it holds.
+  List<Circle> _burstEligibleCircles() {
+    if (!mounted) return const [];
+    return filterPublishEligibleCircles(
+      ref.read(circlesProvider).valueOrNull ?? const <Circle>[],
+      ref.read(circleServiceProvider),
+    );
+  }
+
+  /// Runs ONE burst now over [circles], the set currently eligible to publish.
+  ///
+  /// The same key the schedulers use ([sharingCircleKey]) over the same set
+  /// ([filterPublishEligibleCircles]), so this is exactly their ticks arriving
+  /// at once rather than a second notion of "due".
+  Future<void> _driveBurstNow(
+    BackgroundBurstCoordinator coordinator,
+    List<Circle> circles,
+  ) => MapShell.queueOneBurst(coordinator, [
+    for (final circle in circles)
+      (key: sharingCircleKey(circle.nostrGroupId), circle: circle),
+  ]);
+
+  /// Stops the live-sync engine and reports whether it actually let go.
+  ///
+  /// The ONE stop path: the pause-time handoff, the sharing-off pause branch
+  /// and [_onDetached] all route through it, so a stop that timed out is
+  /// classified the same way everywhere. A second, unclassified `stop()` would
+  /// let a timed-out teardown read as a release and orphan the Rule-14 guard —
+  /// which is a database no isolate can open until a Force Stop.
+  ///
+  /// Never throws: every caller runs on a lifecycle path the framework
+  /// dispatches without awaiting. A failure is reported as
+  /// [LiveSyncStopOutcome.stillHolding] — the wrong guess in the other
+  /// direction is the one that wedges the app.
+  Future<LiveSyncStopOutcome> _stopLiveSyncBounded() async {
+    final liveSync = _liveSync;
+    if (liveSync == null) return LiveSyncStopOutcome.idle;
+    var outcome = LiveSyncStopOutcome.stillHolding;
+    try {
+      outcome = await liveSync.stop();
+    } on Object catch (e) {
+      // Never the raw error (Rule 8): an FFI error string can carry MLS
+      // group ids.
+      debugPrint('[MapShell] live-sync stop failed: ${e.runtimeType}');
+    }
+    debugPrint('[MapShell] live-sync stop=${outcome.name}');
+    return outcome;
+  }
+
   /// Releases this isolate's MLS session so the foreground service can take it.
   ///
   /// Android + background-sharing only: it is the one configuration where
@@ -899,21 +1559,7 @@ class _MapShellState extends ConsumerState<MapShell>
   Future<bool> _handOffMlsSession() async {
     // The engine holds its own Arc on the circle manager, so it must go first
     // or the release frees nothing.
-    final liveSync = _liveSync;
-    var stopOutcome = LiveSyncStopOutcome.idle;
-    if (liveSync != null) {
-      try {
-        stopOutcome = await liveSync.stop();
-      } on Object catch (e) {
-        debugPrint(
-          '[MapShell] handoff: live-sync stop failed: ${e.runtimeType}',
-        );
-        // Cannot tell whether the engine let go, so assume it did not: the
-        // wrong guess in the other direction is the one that wedges the app.
-        stopOutcome = LiveSyncStopOutcome.stillHolding;
-      }
-    }
-    debugPrint('[MapShell] handoff: live-sync stop=${stopOutcome.name}');
+    final stopOutcome = await _stopLiveSyncBounded();
 
     if (stopOutcome == LiveSyncStopOutcome.stillHolding) {
       // Releasing now would be strictly destructive. The engine's supervisor
@@ -1032,12 +1678,39 @@ class _MapShellState extends ConsumerState<MapShell>
   /// `ensureRunning` answers within `kLiveSyncRestartBudget` whatever the
   /// engine does, which is what lets the caller's `whenComplete` re-arm be
   /// trusted.
+  ///
+  /// It heals the OTHER dead receive plane too. `ensureRunning` cannot see a
+  /// PAUSED engine — `isRunning` stays true across a pause — so a resume whose
+  /// single re-anchor attempt failed would otherwise stay paused, receiving
+  /// nothing behind a green banner, until the next background→foreground
+  /// cycle. See [MapShell.reanchorPausedEngine].
+  ///
+  /// Gated on `liveSyncEnabled` HERE rather than at each call site, because two
+  /// of the four callers reach it unconditionally: `_onResumed` deliberately
+  /// heals ahead of its own debounce, and the R1 consent edge heals from a
+  /// PAUSED process. Neither re-read the flag, so a flag-off build used to
+  /// START an engine on its first resume — the rollback path running the very
+  /// receive plane its one-line rollback removes, with the pollers still armed
+  /// beside it. Nothing below can be started for the flag-off plane's benefit:
+  /// `_runStartupTasks` gives that build the invitation + evolution pollers
+  /// instead, and `_startIosBackgroundReceiveTimer` its own background sweep.
   Future<void> _healLiveSyncIfStopped() async {
+    if (!liveSyncEnabled) return;
     final resubscriber = await _ensureLiveSyncInstalled();
     if (resubscriber != null) {
       try {
         if (await resubscriber.ensureRunning()) {
           _consecutiveHealFailures = 0;
+          if (!mounted) return;
+          final at = DateTime.now();
+          if (await MapShell.reanchorPausedEngine(
+            engine: ref.read(subscriptionServiceProvider),
+            foregrounded: ref.read(appForegroundProvider),
+            now: at,
+            lastReanchorAt: _lastReanchorAt,
+          )) {
+            _lastReanchorAt = at;
+          }
           return;
         }
       } on Object catch (e) {
@@ -1051,6 +1724,24 @@ class _MapShellState extends ConsumerState<MapShell>
     if (_consecutiveHealFailures < _healBackoffMaxMultiplier) {
       _consecutiveHealFailures++;
     }
+  }
+
+  /// Brings the receive plane back for the R1 consent edge (a pause that read a
+  /// stale `false` and stopped the engine, then saw the persisted consent
+  /// resolve `true`), ordered BEHIND that stop.
+  ///
+  /// The ordering is the whole point. `NostrSubscriptionService.stop()` nulls
+  /// its engine handle synchronously and only then awaits the FFI teardown, so
+  /// a heal landing inside that window reads a stopped engine and starts a
+  /// FRESH session — which the original stop, still unwinding, then cancels the
+  /// event subscription of on its way out. A live-looking engine delivering
+  /// nothing, for the whole background window.
+  Future<void> _restartReceiveAfterPausedStop() async {
+    final stop = _pausedEngineStop;
+    _pausedEngineStop = null;
+    if (stop != null) await stop;
+    if (!mounted) return;
+    await _healLiveSyncIfStopped();
   }
 
   // ---- Motion-triggered publish helpers ----
@@ -1108,7 +1799,7 @@ class _MapShellState extends ConsumerState<MapShell>
       _lastMotionTriggerPosition = position;
       return;
     }
-    final distance = _haversineMeters(
+    final distance = haversineMeters(
       last.latitude,
       last.longitude,
       position.latitude,
@@ -1116,9 +1807,9 @@ class _MapShellState extends ConsumerState<MapShell>
     );
     if (distance < kMotionTriggerDistanceMeters) return;
 
-    // Sufficient movement detected — check the overlap guard before
-    // actually publishing. This shares the guard with the scheduler
-    // and the resume-branch so none of them can stampede.
+    // Sufficient movement detected — check the overlap guard first. This is
+    // the guard's only gated caller; resume and the background handoff just
+    // WRITE `_lastPublishTime`, which is what suppresses a trigger behind them.
     if (_guardedPublish()) {
       _lastMotionTriggerPosition = position;
       debugPrint('[MapShell] motion-triggered publish');
@@ -1147,27 +1838,6 @@ class _MapShellState extends ConsumerState<MapShell>
       ..read(locationPublisherProvider);
     return true;
   }
-
-  /// Haversine distance in metres between two WGS-84 points.
-  static double _haversineMeters(
-    double lat1,
-    double lon1,
-    double lat2,
-    double lon2,
-  ) {
-    const r = 6371000.0; // Earth mean radius in metres
-    final dLat = _toRadians(lat2 - lat1);
-    final dLon = _toRadians(lon2 - lon1);
-    final a =
-        math.sin(dLat / 2) * math.sin(dLat / 2) +
-        math.cos(_toRadians(lat1)) *
-            math.cos(_toRadians(lat2)) *
-            math.sin(dLon / 2) *
-            math.sin(dLon / 2);
-    return r * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a));
-  }
-
-  static double _toRadians(double degrees) => degrees * math.pi / 180;
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
@@ -1223,26 +1893,36 @@ class _MapShellState extends ConsumerState<MapShell>
     // the stop below with a restart, which is the one thing that could leave a
     // fresh session orphaned instead of releasing the old one.
     _liveSyncHealTimer?.cancel();
-    final liveSync = _liveSync;
-    if (liveSync == null) return;
-    try {
-      await liveSync.stop();
-    } on Object catch (e) {
-      // Never the raw error (Rule 8), and never rethrow: this runs on a
-      // best-effort teardown path with no one to handle a failure.
-      debugPrint('[MapShell] detached live-sync release: ${e.runtimeType}');
-    }
+    // The shared bounded stop, not a second one of its own: an unclassified
+    // stop here would read a timed-out teardown as a release and leave the
+    // Rule-14 guard orphaned — see [_stopLiveSyncBounded].
+    await _stopLiveSyncBounded();
+  }
+
+  /// The location service when it is the real one, else null.
+  ///
+  /// The stream gate ([GeolocatorLocationService.suspendStream] /
+  /// [GeolocatorLocationService.resumeStream]) and the foreground-active hint
+  /// are implementation concerns, not part of the `LocationService` interface
+  /// every test double implements.
+  GeolocatorLocationService? get _geolocatorService {
+    final service = ref.read(locationServiceProvider);
+    return service is GeolocatorLocationService ? service : null;
   }
 
   /// Mirrors the pause/resume transition into
-  /// [GeolocatorLocationService.foregroundActive] so a backgrounded
-  /// `getCurrentLocation()` with a stale cache skips the one-shot GPS
-  /// request that iOS can never fulfil in the background.
+  /// [GeolocatorLocationService.foregroundActive] — so a backgrounded
+  /// `getCurrentLocation()` with a stale cache skips the one-shot GPS request
+  /// that iOS can never fulfil in the background — and into
+  /// [appForegroundProvider], which is what makes a provider build that
+  /// happens while the app is away refuse to START a location session.
   void _setForegroundActive(bool active) {
-    final locationService = ref.read(locationServiceProvider);
-    if (locationService is GeolocatorLocationService) {
-      locationService.foregroundActive = active;
-    }
+    // `ref` on a `ConsumerState` is only usable while the element is mounted,
+    // and `detached` dispatches this from a tear-down that may already have
+    // unmounted it — a provider read or write there throws.
+    if (!mounted) return;
+    _geolocatorService?.foregroundActive = active;
+    ref.read(appForegroundProvider.notifier).state = active;
   }
 
   // Fix 6: _onPaused is now async so it can await the ordered writes.
@@ -1261,6 +1941,33 @@ class _MapShellState extends ConsumerState<MapShell>
 
     final bgEnabled = ref.read(backgroundSharingProvider);
 
+    // Only the iOS sharing-on branch can burst, so no other pause pays for the
+    // roster read.
+    final burstCircles = bgEnabled && Platform.isIOS
+        ? _burstEligibleCircles()
+        : const <Circle>[];
+
+    // Release the platform location subscription BEFORE the ownership write
+    // below hands publishing to the foreground service — this isolate must
+    // have let go of GPS before another one is told to take over.
+    //
+    // A direct, synchronous service call, never a provider rebuild: a watched
+    // write cancels the running subscription at once but SCHEDULES the rebuild
+    // inside a frame, and Flutter disables frames before the lifecycle
+    // observers run — so a release that rides a rebuild lands at RESUME.
+    final locationService = _geolocatorService;
+    if (!shouldKeepLocationStreamWhilePaused(
+      backgroundSharingEnabled: bgEnabled,
+      isIOS: Platform.isIOS,
+    )) {
+      locationService?.suspendStream();
+    }
+    // Cleared on the CONSENT condition, not on the keep rule: with sharing on
+    // the warm Android fix still serves the resume publish inside its
+    // freshness window, and with sharing off no coordinate may survive the
+    // pause on either platform (privacy Rule 10).
+    if (!bgEnabled) locationService?.clearCachedPosition();
+
     // Stop the foreground-active heartbeat before any handoff. On the
     // Android branch this prevents the heartbeat from racing the
     // `markForegroundActive(active: false)` write below; on iOS /
@@ -1273,11 +1980,23 @@ class _MapShellState extends ConsumerState<MapShell>
     _coldStartProfileRefreshTimer?.cancel();
     // Stop the location-access silence watchdog. It drives a banner nobody can
     // see while backgrounded, and its recovery edge invalidates
-    // `locationStreamProvider` — which with background sharing OFF also runs
-    // that provider's `clearCachedPosition()`, throwing away the fix the
-    // publish path serves from. `_onResumed` calls `refresh()` before anything
-    // else, which re-arms it from a fresh platform read.
+    // `locationStreamProvider` — which would cancel the kept iOS session now
+    // and rebuild it only at the resume frame, and with background sharing OFF
+    // also runs that provider's `clearCachedPosition()`. `_onResumed` calls
+    // `resume()` and then `refresh()`, which re-decides it from a fresh
+    // platform read.
     ref.read(locationAccessProvider.notifier).suspend();
+
+    // Cancel the maintenance timers a backgrounded app must not run. The
+    // scheduler's arming gate only refuses to RE-ARM after a tick settles, so
+    // without this a pause landing between two ticks still bought one
+    // KeyPackage and one relay-list relay round-trip from the timers already
+    // armed. Health goes with them on every branch since P4: the iOS
+    // keep-alive branch now receives by bounded burst, so a health tick
+    // between bursts could only put back the standing REQs the burst exists to
+    // close. The public-profile sweep is the one timer left armed — it gates
+    // inside its own tick instead. See `suspendForBackground`.
+    ref.read(maintenanceSchedulerProvider.notifier).suspendForBackground();
 
     if (bgEnabled && Platform.isAndroid) {
       // Android: hand off publishing to the already-running foreground
@@ -1332,34 +2051,68 @@ class _MapShellState extends ConsumerState<MapShell>
               : l10n.fgsNotificationPaused,
         ),
       );
+      if (handedOff) {
+        // Prompt the service to start its first cycle now instead of at its
+        // next watchdog tick. Only on a handoff that COMPLETED: a declined one
+        // means the bounded stop timed out and this isolate still holds the
+        // Rule-14 guard, so signalling would move the service's reclaim probe
+        // from "≤ 72 s later" to "now, while that stop may still be unwinding".
+        BackgroundLocationManager.signalTask(kForegroundPausedSignal);
+      }
     } else if (Platform.isIOS) {
       if (MapShell.shouldKeepPublishingWhilePaused(
         backgroundSharingEnabled: bgEnabled,
         isIOS: Platform.isIOS,
       )) {
         // iOS + background sharing on: nothing to stop. The unified
-        // `locationStreamProvider` stream already carries background-capable
-        // AppleSettings (it watches `backgroundSharingProvider` directly), so
-        // the CLLocationManager session that keeps this process executing was
+        // `locationStreamProvider` stream already asked Haven's own
+        // CoreLocation session for background capability (it watches
+        // `backgroundSharingProvider` directly), so the session that keeps
+        // this process executing was
         // established the moment the toggle turned on — necessarily while
         // foregrounded, as iOS requires — and the native
         // `HavenBackgroundSessionHandler` holds the CoreLocation session
         // objects that make that keep-alive effective on iOS 17+. The
-        // per-circle publish scheduler and `_motionSub` keep running exactly
+        // publish scheduler and `_motionSub` keep running exactly
         // as in the foreground, giving background publishing both a periodic
         // floor and movement-driven responsiveness.
         //
-        // RECEIVE needs nothing armed here. The `maintenanceSchedulerProvider`
-        // health tick keeps running on this branch — the process stays fully
-        // executable, which is the branch's whole premise — and since Unit C's
-        // Rust half it is probe-first and repairs a dropped relay, a missing
-        // REQ and a delivery-silent REQ. A Dart-side re-anchor on top of it
-        // would be strictly worse than nothing: `resume_after_background`
-        // re-issues the INBOX REQ too, and `since_for_stream` takes the inbox
-        // branch BEFORE the phase match, so every call asks for
-        // `INBOX_GIFTWRAP_LOOKBACK_SECS` (7 days) of gift wraps keyed on this
-        // npub — replaying them all, each costing an identity-secret
-        // materialisation and an FFI NIP-59 unwrap.
+        // RECEIVE is those same ticks. Each one now runs a bounded burst
+        // instead of a bare publish — open every REQ at its persisted cursor,
+        // let the stored replay land, publish at the resulting epoch, fold any
+        // due KeyPackage/relay-list maintenance onto the warm pool, settle,
+        // pause, close — so between publishes the engine holds no subscription
+        // and no socket at all.
+        //
+        // NO timer arms any of that, and none may. The maintenance timers are
+        // cancelled on every branch, health included: a health tick landing
+        // between bursts inspects a paused engine and learns nothing, and one
+        // landing DURING a burst passes the engine's paused gate, reads the
+        // mid-`connect()` pool as dropped and repairs it through the FOREGROUND
+        // re-anchor — standing REQs, an inbox REQ replaying
+        // `INBOX_RESUBSCRIBE_LOOKBACK_SECS` (49 h) of gift wraps keyed on this
+        // npub, and a socket held to the next burst's pause, at an instant that
+        // is not a publish. The burst IS the repair, at 72-168 s rather than
+        // 15 min.
+        final pausedAt = DateTime.now();
+        final coordinator = _installBurstCoordinator();
+        // Start closed rather than open, on BOTH arms: without this the engine
+        // keeps the foreground's standing REQ, its socket and the crate's 55 s
+        // pinger — to the first tick after a recent publish, and for the whole
+        // background window with nothing eligible, where no tick is coming.
+        // The stamp rides the burst arm only, for the same reason
+        // `_guardedPublish` writes it: that arm publishes every eligible
+        // circle, so a motion trigger seconds later would be a duplicate.
+        if (burstCircles.isNotEmpty &&
+            MapShell.shouldBurstImmediatelyOnPause(
+              lastPublishAt: _lastPublishTime,
+              now: pausedAt,
+            )) {
+          _lastPublishTime = pausedAt;
+          unawaited(_driveBurstNow(coordinator, burstCircles));
+        } else {
+          unawaited(coordinator.closeIdle());
+        }
       } else {
         // Toggle off — or its persisted value not yet loaded: the notifier
         // constructs `false` and resolves the stored value asynchronously,
@@ -1368,6 +2121,30 @@ class _MapShellState extends ConsumerState<MapShell>
         // below re-arms them if the load resolves `true` while paused (R1).
         ref.read(locationPublishSchedulerProvider.notifier).stopScheduling();
         _stopMotionTrigger();
+      }
+      // The engine, on the same rule Android uses. `PausedRelayOwner.none`
+      // closes only the PUBLISH pool; the standing per-circle REQs (the
+      // receive plane's, one per circle — unrelated to the publish tick), the
+      // inbox
+      // REQ, the engine's own socket and the crate's 55 s pinger are this
+      // plane's, and with sharing off nothing in this process needs any of
+      // them for the whole background window. Stopping is also the recoverable
+      // direction — the resume heal restarts a stopped engine, where a paused
+      // one is invisible to it.
+      //
+      // Only the engine: nothing reclaims this session on iOS, so
+      // `releaseForHandoff()` would latch every `getCircleManagerFfi()` closed
+      // until the next resume for no one's benefit.
+      //
+      // Issued, not awaited: the R1 watcher below has to be installed in this
+      // same synchronous run or a consent that resolves during the stop's
+      // round trip is never delivered at all. Kept in [_pausedEngineStop] so
+      // that edge can order its restart behind it.
+      if (MapShell.shouldStopLiveSyncOnPause(
+        isIOS: Platform.isIOS,
+        backgroundSharingEnabled: bgEnabled,
+      )) {
+        _pausedEngineStop = _stopLiveSyncBounded();
       }
       // ONE watcher for BOTH consent edges while paused, installed
       // regardless of the toggle's value at pause time:
@@ -1393,30 +2170,98 @@ class _MapShellState extends ConsumerState<MapShell>
       ) {
         if (next) {
           // Idempotent replays of what the enabled pause branch keeps
-          // running; the relay reconnects lazily on the next publish.
+          // running; the sockets come back with the next burst.
           ref.read(locationPublishSchedulerProvider.notifier).startScheduling();
           _startMotionTrigger();
           _startIosBackgroundReceiveTimer();
+          // Including the receive path: this process has just become the
+          // background receiver, and its receive path is the burst. AFTER
+          // `startScheduling()`, which is what re-raises the scheduler's
+          // active flag — the burst publisher hard-gates on it, so a sink
+          // installed ahead of it would open a socket and publish nothing.
+          //
+          // A timer would be the wrong repair here even though the process is
+          // executable: it is a background wake whose tick can put a standing
+          // REQ back between bursts (R14).
+          //
+          // The stale-`false` arm above STOPPED the engine, so the session has
+          // to come back before the burst that is supposed to carry it — a
+          // burst opened against a stopped session receives nothing and
+          // reports a failed open to the sharing banner for this branch's own
+          // fault.
+          final receiving = _restartReceiveAfterPausedStop();
+          final coordinator = _installBurstCoordinator();
+          // And start closed on both arms, exactly as the pause branch does.
+          // This edge arrives at the same state late, and `startScheduling()`
+          // above arms FRESH jittered schedules — so its first tick is a full
+          // 72-168 s away, and its first tick is also the only thing that
+          // would ever close what it inherited. Same rule and same stamp:
+          // [MapShell.shouldBurstImmediatelyOnPause] is what stops a consent
+          // flip landing seconds after a publish from re-sending it.
+          final armedAt = DateTime.now();
+          final armedCircles = _burstEligibleCircles();
+          if (armedCircles.isNotEmpty &&
+              MapShell.shouldBurstImmediatelyOnPause(
+                lastPublishAt: _lastPublishTime,
+                now: armedAt,
+              )) {
+            _lastPublishTime = armedAt;
+            unawaited(
+              receiving.then((_) => _driveBurstNow(coordinator, armedCircles)),
+            );
+          } else {
+            unawaited(receiving.then((_) => coordinator.closeIdle()));
+          }
           return;
         }
         ref.read(locationPublishSchedulerProvider.notifier).stopScheduling();
         _stopMotionTrigger();
         _receiveTimer?.cancel();
         _receiveTimer = null;
-        // Parity with the pause-time relay decision: had the toggle been
-        // off at pause, `shouldKeepRelayConnectedWhilePaused` would have
-        // shut the socket down. The stream itself downgrades via the
-        // `locationStreamProvider` rebuild (its `backgroundSharingProvider`
-        // watch), removing the keep-alive so the process can suspend.
-        final relay = ref.read(relayServiceProvider);
-        if (relay is NostrRelayService) {
-          unawaited(relay.shutdown());
-        }
+        // The process is about to suspend and nothing here receives any
+        // more. Idempotent with the pause above — nothing between them arms a
+        // maintenance timer since P4 — and kept because this branch is the
+        // opt-out's own teardown: it states what must be true when consent is
+        // withdrawn, rather than inheriting it.
+        ref.read(maintenanceSchedulerProvider.notifier).suspendForBackground();
+        // Withdraw the keep-alive DIRECTLY, here. The rebuild this used to
+        // rely on cannot run while the app is paused (frames are off), so the
+        // CLLocationManager session would have outlived the consent until the
+        // next foreground. Cancelling the subscription and releasing the
+        // CoreLocation session objects lets the process suspend at once, and
+        // the cached fix goes with the consent that produced it (Rule 10).
+        _geolocatorService
+          ?..suspendStream()
+          ..clearCachedPosition();
+        unawaited(ref.read(iosBackgroundSessionServiceProvider).disarm());
+        // Leave NO socket, whatever the burst plane is doing: with a burst in
+        // flight this waits (bounded) for it to reach its own settle-and-pause
+        // rather than cutting it, and with none it pauses the engine and shuts
+        // the pool directly — the state the toggle-off pause branch would have
+        // been in all along. Withdrawn consent must not leave the engine
+        // subscribed and a socket open for the rest of the background window.
+        unawaited(
+          MapShell.releaseBurstPlaneOnOptOut(
+            engine: ref.read(subscriptionServiceProvider),
+            shutdownPublishPool: _shutdownPublishPool,
+            runningBurst: _burstCoordinator?.runningBurst,
+          ),
+        );
       });
     } else {
-      // Background sharing disabled — original behaviour.
+      // Android with background sharing off — the `else if` above owns iOS.
       ref.read(locationPublishSchedulerProvider.notifier).stopScheduling();
       _stopMotionTrigger();
+      if (MapShell.shouldStopLiveSyncOnPause(
+        isIOS: Platform.isIOS,
+        backgroundSharingEnabled: bgEnabled,
+      )) {
+        // Stop the engine, and stop ONLY the engine: with sharing off no
+        // isolate reclaims this session, so `releaseForHandoff()` would latch
+        // every `getCircleManagerFfi()` closed until the next resume for no
+        // one's benefit. The resume heal restarts the engine.
+        await _stopLiveSyncBounded();
+      }
     }
 
     // Cancel any one-shot burst still mid-flight, on every pause path above.
@@ -1447,19 +2292,16 @@ class _MapShellState extends ConsumerState<MapShell>
     // regular pollers (resumed below) cover them.
     ref.read(joinWatcherProvider.notifier).cancel();
 
-    // Disconnect idle relay WebSockets — unless the iOS background branch
-    // is keeping the main isolate alive, where a warm socket lets the next
-    // background publish/fetch land instead of racing a cold reconnect
-    // (which silently drops the first publish). See
-    // [shouldKeepRelayConnectedWhilePaused].
-    if (!MapShell.shouldKeepRelayConnectedWhilePaused(
-      backgroundSharingEnabled: bgEnabled,
-      isIOS: Platform.isIOS,
-    )) {
-      final relay = ref.read(relayServiceProvider);
-      if (relay is NostrRelayService) {
-        unawaited(relay.shutdown());
-      }
+    // Disconnect idle relay WebSockets — unless the burst plane owns them, in
+    // which case the coordinator closes them at the end of every burst and of
+    // every idle close, and closing here would only make its first burst pay a
+    // cold reconnect (or race a Rule-13 drain). See [PausedRelayOwner].
+    if (MapShell.pausedRelayOwner(
+          backgroundSharingEnabled: bgEnabled,
+          isIOS: Platform.isIOS,
+        ) !=
+        PausedRelayOwner.burst) {
+      unawaited(_shutdownPublishPool());
     }
 
     if (bgEnabled && Platform.isIOS) {
@@ -1480,13 +2322,14 @@ class _MapShellState extends ConsumerState<MapShell>
       // retention, and iOS holds the same coordinates in
       // CLLocationManager state regardless.
       //
-      // The relay is kept connected on this branch (see
-      // [shouldKeepRelayConnectedWhilePaused]) so the 90 s receive tick
-      // and the scheduler/motion publishes (still running — see
-      // [MapShell.shouldKeepPublishingWhilePaused]) reuse a warm socket
-      // instead of racing a cold reconnect. Both `relayServiceProvider`
-      // and the relay handle inside `locationSharingServiceProvider`
-      // resolve to the same singleton, so the warm connection is shared.
+      // The pause hands both socket sets to the burst plane
+      // ([PausedRelayOwner.burst]), which closes them AT ONCE — the burst this
+      // pause drove, or its idle close. So the 90 s receive tick (flag-off
+      // builds only) and the scheduler/motion publishes (still running — see
+      // [MapShell.shouldKeepPublishingWhilePaused]) dial a cold pool unless
+      // they land inside a burst. Both `relayServiceProvider` and the relay
+      // handle inside `locationSharingServiceProvider` resolve to the same
+      // singleton, so what is open is shared.
       _startIosBackgroundReceiveTimer();
       if (!mounted) return;
     } else {
@@ -1502,14 +2345,12 @@ class _MapShellState extends ConsumerState<MapShell>
 
   /// Starts the iOS background-mode `_receiveTimer` at a slower cadence.
   ///
-  /// The body mirrors `_startTimers`'s 30 s receive timer (overlap-guarded
-  /// invalidate) but at 90 s. Unlike the foreground variant, this fires
-  /// while the map widget is paused — no widget is actively watching
-  /// `memberLocationsProvider`, so we explicitly drive the future to
-  /// completion to keep the SQLCipher last-known store warm. The
-  /// returned `AsyncValue` is intentionally discarded; the side effect
-  /// we care about is the `upsertLastKnownLocation` write inside
-  /// `LocationSharingService.fetchMemberLocations`.
+  /// Same overlap-guarded shape as `_startTimers`'s 30 s receive timer, at
+  /// 90 s. It does NOT invalidate `memberLocationsProvider` the way the
+  /// foreground one does: no widget watches it while the app is paused, so
+  /// there is nothing to rebuild. It runs the fork-safe catch-up sweep
+  /// instead, whose side effect — the SQLCipher last-known store — is what the
+  /// resume rehydrates from.
   ///
   /// Does not check `BackgroundLocationManager.isForegroundActive()`
   /// because that flag coordinates with the Android foreground service,
@@ -1573,6 +2414,30 @@ class _MapShellState extends ConsumerState<MapShell>
     _bgSharingPausedSub?.close();
     _bgSharingPausedSub = null;
 
+    // Take the engine back BEFORE the sink, and take both back here. The flag
+    // is what a burst already on the chain reads: it drops a burst queued
+    // while paused, and stops the teardown of one in flight before each of its
+    // settle / pause / pool-shutdown links. `burstEnabled` cannot do that job
+    // — it reads the background-sharing consent, which is still true in the
+    // foreground, so nothing else cancels a burst that started at the pause
+    // instant and is still running 1-3 s later when the user comes back.
+    _foregroundOwnsEngine = true;
+    // Take the publish ticks back from the burst coordinator. This one line is
+    // the whole of "the foreground publishes directly": with no sink a tick is
+    // published here and now, over the engine's own standing subscription,
+    // which is what a foregrounded app is allowed to hold. Leaving the sink
+    // installed would keep every foreground publish paying an open/settle/pause
+    // cycle and — worse — would pause the engine after each one, so a
+    // foregrounded map would go blind between its own publishes.
+    _burstScheduler?.setTickSink(null);
+
+    // Re-establish the platform location subscription FIRST, and only here:
+    // this is the one restart site, and it is foregrounded by construction —
+    // iOS refuses to start a background-capable session from the background,
+    // so a restart anywhere else is a silent end to background publishing.
+    // A no-op on the iOS branch that never suspended.
+    _geolocatorService?.resumeStream();
+
     // Re-check location access BEFORE the debounce, deliberately.
     //
     // Leaving the app to change a system toggle and coming straight back is
@@ -1581,10 +2446,69 @@ class _MapShellState extends ConsumerState<MapShell>
     // would leave the banner stale in exactly the case it exists for — both
     // directions: still showing after the user turned location back on, and
     // still absent after they turned it off. Cheap: two local platform reads.
+    //
+    // `resume()` first: `refresh()` deliberately does NOT lift the suspension
+    // (it is also reached from a stream error and from the retry button, and
+    // a permission revoked while away must not re-open the probe loop for the
+    // whole background window).
+    ref.read(locationAccessProvider.notifier).resume();
     unawaited(ref.read(locationAccessProvider.notifier).refresh());
 
-    // End the pause-time MLS handoff FIRST, before the debounce and before the
-    // heal below. Everything that follows — the heal's engine restart, the
+    // Reclaim publishing ownership and seed the overlap guard from any
+    // background publish that happened while we were paused — BEFORE the
+    // debounce, and before the handoff ends below.
+    //
+    // Before the debounce because the ownership stamp is what stops the
+    // foreground service publishing on behalf of a foregrounded app: a
+    // glance-and-return inside 30 s used to return above this and leave the
+    // stamp at its paused value, so nothing at all published until some later
+    // resume finally landed outside the window.
+    //
+    // Before the handoff ends because the service must be told to stand down
+    // and be given time to drain BEFORE this isolate starts re-opening the
+    // MLS database it was handed.
+    if (Platform.isAndroid) {
+      // Mark the foreground active so the background service skips its
+      // next `onRepeatEvent` and doesn't race with the foreground
+      // scheduler we are about to start. The service itself stays
+      // running across resume — restarting it on every resume would
+      // pay a teardown and a re-acquisition for nothing (an ESTIMATED
+      // cost, model E E-A1/E-A2, `docs/POWER_EFFICIENCY_PLAN.md`
+      // §6.5a) and (more importantly) re-trigger Android 12+
+      // background-start checks the next time the user backgrounds
+      // the app.
+      await BackgroundLocationManager.markForegroundActive(active: true);
+      // With the stamp written, tell the service to drop its own platform
+      // location request; without the signal it keeps it until its next
+      // watchdog tick. AFTER the stamp, never before — a cancel taken while
+      // the service still reads "no foreground owner" is undone by that same
+      // tick. The brief overlap with the UI stream restarted at the top of
+      // this method coalesces at the provider to the tighter interval, which
+      // is the foreground policy anyway.
+      BackgroundLocationManager.signalTask(kForegroundResumedSignal);
+      // Wait briefly for any in-flight background publish cycle to
+      // drain. The 60 s overlap guard provides defense-in-depth, but
+      // explicit handoff avoids stepping on an in-flight encrypt.
+      await const BackgroundIdleWaiter().waitUntilIdle();
+      if (!mounted) return;
+      // Refresh the notification text so the user sees an honest
+      // representation of what the service is doing while the app is
+      // in the foreground.
+      unawaited(
+        BackgroundLocationManager.updateNotification(
+          text: ref.read(appLocalizationsProvider).fgsNotificationOpen,
+        ),
+      );
+      final bgLastPublish =
+          await BackgroundLocationManager.readLastPublishTime();
+      if (bgLastPublish != null) {
+        _lastPublishTime = bgLastPublish;
+      }
+      if (!mounted) return;
+    }
+
+    // End the pause-time MLS handoff before the debounce and before the heal
+    // below. Everything that follows — the heal's engine restart, the
     // publisher invalidations, the resume catch-up — needs the circle manager,
     // and while the handoff holds every one of those opens fails closed by
     // design. Running them ahead of this would spend the whole resume failing
@@ -1609,106 +2533,134 @@ class _MapShellState extends ConsumerState<MapShell>
     // Guarded because a re-anchor is not the cheap REQ replace it looks like.
     // `resume_after_background` reconnects the pool, waits out
     // `SUBSCRIBE_CONNECT_WAIT`, and re-issues every REQ — including the inbox
-    // one, whose `since` is computed by `since_for_stream`'s inbox branch
-    // BEFORE the phase match, so it always asks for
-    // `INBOX_GIFTWRAP_LOOKBACK_SECS` (7 days) of gift wraps keyed on this
-    // npub. Every replayed wrap costs an identity-secret materialisation and
-    // an FFI NIP-59 unwrap. Ten glances must not be ten of those.
+    // one, which asks for `INBOX_RESUBSCRIBE_LOOKBACK_SECS` (49 h) of gift
+    // wraps keyed on this npub. Every replayed wrap costs an identity-secret
+    // materialisation and an FFI NIP-59 unwrap, and every REQ re-advertises
+    // that `#p` query. Ten glances must not be ten of those.
+    //
+    // A PAUSED engine bypasses the throttle, because the throttle's premise
+    // does not hold for it: "a second re-anchor inside 60 s re-queries a window
+    // the first already covered" is true of a LIVE engine, which kept its REQs
+    // and its cursors moving. A paused one holds no REQ at all, so it covered
+    // nothing, and a glance landing inside 60 s of the last background burst
+    // would otherwise return to the foreground with the engine still paused —
+    // no standing subscription until the next publish tick, on the one plane a
+    // foregrounded app must have live.
+    //
+    // A burst still in flight is the third way in, and it bypasses the
+    // throttle for a stronger reason than a paused engine does: the pause it
+    // is going to take has not happened YET. It lands after this method
+    // returns, on an engine the foreground now owns, and no periodic repair
+    // sees it — see [MapShell.reanchorOnResume], which is what orders the
+    // repair behind it.
+    final engine = ref.read(subscriptionServiceProvider);
+    final burstInFlight = _burstCoordinator?.runningBurst;
     final resumeAt = DateTime.now();
     if (liveSyncEnabled &&
-        MapShell.shouldReanchorOnResume(
-          lastReanchorAt: _lastReanchorAt,
-          now: resumeAt,
-        )) {
+        (engine.isPaused ||
+            burstInFlight != null ||
+            MapShell.shouldReanchorOnResume(
+              lastReanchorAt: _lastReanchorAt,
+              now: resumeAt,
+            ))) {
       _lastReanchorAt = resumeAt;
-      unawaited(ref.read(subscriptionServiceProvider).resumeAfterBackground());
+      unawaited(
+        MapShell.reanchorOnResume(engine: engine, burstInFlight: burstInFlight),
+      );
     }
 
     // Heal BEFORE the debounce, deliberately.
     //
-    // `_onPaused` cancels `_liveSyncHealTimer` and only `_startTimers()` (below,
-    // after the debounce) re-arms it. So a resume inside the debounce window
-    // used to skip the heal AND skip the re-arm — leaving a foregrounded app
-    // with a dead engine and no periodic backstop at all, indefinitely, until
-    // some resume finally landed more than 30 s after the previous one. The
-    // glance pattern the debounce exists to absorb (shade pull, lock-screen
-    // check, app-switcher peek) is exactly what keeps resumes inside that
-    // window, so the debounce was gating recovery precisely when it was least
-    // likely to recover on its own.
+    // `_onPaused` cancels `_liveSyncHealTimer`, and only `_startTimers()`
+    // re-arms it. So a resume inside the debounce window used to skip the heal
+    // AND skip the re-arm — leaving a foregrounded app with a dead engine and
+    // no periodic backstop at all, indefinitely, until some resume finally
+    // landed more than 30 s after the previous one. The glance pattern the
+    // debounce exists to absorb (shade pull, lock-screen check, app-switcher
+    // peek) is exactly what keeps resumes inside that window, so the debounce
+    // was gating recovery precisely when it was least likely to recover on its
+    // own.
     //
     // Safe to run unconditionally: `ensureRunning` short-circuits on a running
     // engine, so the repeated-resume case costs one `isRunning` read.
     unawaited(_healLiveSyncIfStopped());
 
+    // Re-arm the maintenance timers, which are not armed while backgrounded.
+    ref.read(maintenanceSchedulerProvider.notifier).rearmForForeground();
+
+    // Restart all timers (cancelled on pause), unconditionally.
+    //
+    // NOT behind the debounce. `_onPaused` stops the publish scheduler, the
+    // motion trigger and the foreground-active heartbeat on every pause, and
+    // this is the only thing that starts them again — so a glance-and-return
+    // inside 30 s used to return above with every one of them dead, and the
+    // app sat foregrounded publishing nothing until some later resume landed
+    // outside the window. Idempotent by construction: it cancels each timer
+    // before arming it, and both `startScheduling()` and `_startMotionTrigger`
+    // are replays of what is already running.
+    _startTimers();
+
     // Debounce rapid resume cycles (e.g. notification shade pull on Android).
+    // Only the one-shot extras below are debounced — everything above is
+    // either idempotent or a repair that a glance must not skip.
     if (_resumeStopwatch.isRunning &&
         _resumeStopwatch.elapsed < const Duration(seconds: 30)) {
-      // Re-arm the heal backstop even on the debounced path: `_onPaused`
-      // cancelled it, and returning here skips the `_startTimers()` that would
-      // otherwise bring it back.
-      _rearmLiveSyncHealTimer();
       return;
     }
     _resumeStopwatch
       ..reset()
       ..start();
 
-    // Reclaim publishing ownership and seed the overlap guard from any
-    // background publish that happened while we were paused.
-    if (Platform.isAndroid) {
-      // Mark the foreground active so the background service skips its
-      // next `onRepeatEvent` and doesn't race with the foreground
-      // scheduler we are about to start. The service itself stays
-      // running across resume — restarting it on every resume would
-      // waste battery and (more importantly) re-trigger Android 12+
-      // background-start checks the next time the user backgrounds
-      // the app.
-      await BackgroundLocationManager.markForegroundActive(active: true);
-      // Wait briefly for any in-flight background publish cycle to
-      // drain. The 60 s overlap guard provides defense-in-depth, but
-      // explicit handoff avoids stepping on an in-flight encrypt.
-      await const BackgroundIdleWaiter().waitUntilIdle();
-      if (!mounted) return;
-      // Refresh the notification text so the user sees an honest
-      // representation of what the service is doing while the app is
-      // in the foreground.
-      unawaited(
-        BackgroundLocationManager.updateNotification(
-          text: ref.read(appLocalizationsProvider).fgsNotificationOpen,
-        ),
-      );
-      final bgLastPublish =
-          await BackgroundLocationManager.readLastPublishTime();
-      if (bgLastPublish != null) {
-        _lastPublishTime = bgLastPublish;
-      }
-    }
-    // (The pause-installed C4 watcher was already closed at the top of this
-    // method, before the debounce — see the comment there.)
-
-    // Restart all timers (cancelled on pause).
-    _startTimers();
-
     // Immediate send + receive on app resume. Update _lastPublishTime
     // so the overlap guard prevents a motion trigger from double-firing
     // within seconds of resume.
     _lastPublishTime = DateTime.now();
     if (!mounted) return;
-    // Publishers + the location view refresh on every resume.
+    // Publishers + the location view refresh on every resume that REACHES
+    // here, never behind the extras window below: sending on return and
+    // showing where peers are now are the two things the user can SEE, and a
+    // throttled promise is a broken one. The contrast is with that window, not
+    // with the debounce — the 30 s `_resumeStopwatch` return above gates this
+    // too, so a quicker return refreshes neither. Anything that leans on the
+    // one-shot burst as a per-resume backstop has to price that in.
     ref
       ..invalidate(locationPublisherProvider)
       ..invalidate(memberLocationsProvider)
-      ..invalidate(keyPackagePublisherProvider)
       ..read(locationPublisherProvider)
-      ..read(memberLocationsProvider)
-      ..read(keyPackagePublisherProvider);
-    // §6.2: refresh member/own public profiles on app resume.
-    triggerProfileRefresh(
-      ref,
-      maxAge: profileInteractiveMaxAge,
-      circles: ref.read(circlesProvider).valueOrNull,
+      ..read(memberLocationsProvider);
+
+    // The one-shot EXTRAS: work a resume repeats "just in case", every piece
+    // of which already runs on a periodic timer of its own. Ten shade-pull
+    // glances an hour used to be ten KeyPackage probes, ten profile fetches,
+    // ten prunes and ten tile-cache sweeps — none of which returned anything
+    // the timers were not about to fetch anyway.
+    //
+    // The stamp is also the SIGNAL: `MapPage` evicts its tile cache off a
+    // listener on this provider rather than off its own resume callback,
+    // because both widgets observe the same lifecycle edge and whichever ran
+    // first would otherwise stamp the other out of its turn.
+    final runExtras = shouldRunResumeExtras(
+      lastAt: ref.read(lastResumeExtrasAtProvider),
+      now: resumeAt,
     );
-    // Resume any own-profile publish left queued while backgrounded.
+    if (runExtras) {
+      ref
+        ..read(lastResumeExtrasAtProvider.notifier).state = resumeAt
+        ..invalidate(keyPackagePublisherProvider)
+        ..read(keyPackagePublisherProvider);
+      // §6.2: refresh member/own public profiles on app resume.
+      triggerProfileRefresh(
+        ref,
+        maxAge: profileInteractiveMaxAge,
+        circles: ref.read(circlesProvider).valueOrNull,
+      );
+      // Prune in case the device slept past the hourly tick — the tick this
+      // backstops is itself hourly, so a per-glance sweep backstops nothing.
+      unawaited(_runPrune());
+    }
+    // Resume any own-profile publish left queued while backgrounded. Not an
+    // extra: it dials nothing unless a publish is actually queued, and it
+    // honours its own persisted backoff.
     triggerProfileSyncRetry(ref);
     // (The engine re-anchor ran before the debounce — see the comment there.)
     if (!liveSyncEnabled) {
@@ -1726,9 +2678,6 @@ class _MapShellState extends ConsumerState<MapShell>
     // their respective overlap windows.
     _lastEvolutionPollTime = DateTime.now();
     _lastInvitationPollTime = DateTime.now();
-
-    // Prune on resume in case the device slept past the hourly tick.
-    unawaited(_runPrune());
   }
 
   // Sheet snap points mirrored from `circles/circles_bottom_sheet.dart`
@@ -1791,7 +2740,7 @@ class _MapShellState extends ConsumerState<MapShell>
 
   @override
   void dispose() {
-    // The per-circle publish scheduler lives in
+    // The publish scheduler lives in
     // `locationPublishSchedulerProvider` (container-scoped, like
     // `maintenanceSchedulerProvider`): its timers are cancelled via
     // Ref.onDispose + the explicit invalidate in `deleteIdentity`, NOT here
@@ -1810,6 +2759,21 @@ class _MapShellState extends ConsumerState<MapShell>
     _deferredStartupSub = null;
     _bgSharingPausedSub?.close();
     _bgSharingPausedSub = null;
+    // Take the publish ticks back, through the captured handle rather than
+    // `ref` (forbidden in dispose): the scheduler is container-scoped and
+    // outlives this State, so a sink left behind would keep routing every
+    // later tick into a coordinator whose `burstEnabled` now reads false
+    // through `mounted` — each one opening nothing, publishing nothing and
+    // reporting nothing, for the rest of the process. Silent, not loud, which
+    // is why the handle is captured rather than reached for.
+    //
+    // `_foregroundOwnsEngine` is deliberately left as it is: an unmounted
+    // shell is not a foreground owner, and flipping it here would stop the
+    // teardown of a burst that is still running and leave the engine
+    // subscribed with the publish pool open.
+    _burstScheduler?.setTickSink(null);
+    _burstScheduler = null;
+    _burstCoordinator = null;
     // Stop re-subscribing BEFORE tearing the engine down (B0): close the
     // circles listener and cancel any pending / in-flight restart so no
     // start-after-dispose can race the stop below.

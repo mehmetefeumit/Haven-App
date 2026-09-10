@@ -191,8 +191,12 @@ final sharingHealthClockProvider = Provider<DateTime Function()>(
 ///
 /// The re-derivation tick exists to keep a BANNER honest, and a backgrounded
 /// app has no banner on screen. At [kSharingHealthTick] it would also fire
-/// about twice as often as the app's own background wake cadence — burning
-/// wakeups, and therefore battery, for a surface nobody can see.
+/// about twice as often as the app's own background wake cadence, for a surface
+/// nobody can see. What those extra wakeups would cost is ESTIMATED and has
+/// never been measured: model E prices one background wake at `c` × 0.0208 %/h
+/// (E-A2, `docs/POWER_EFFICIENCY_PLAN.md` §6.5a), and its coalescing factor
+/// `c` ∈ [0.15, 1.0] (E-P2) is itself unmeasured. The wake COUNT is the only
+/// part of that this code decides.
 ///
 /// A `ValueListenable` rather than a stream so the notifier can read the
 /// current value synchronously when it re-arms, and injectable because
@@ -285,11 +289,27 @@ class SharingHealthNotifier extends Notifier<SharingHealth> {
   SharingHealth build() {
     // A disconnect has no timestamp of its own — `SyncStatus` carries a phase,
     // not an instant — so the transition edge is where the clock is read.
+    //
+    // `SyncConnectionPhase.paused` neither sets nor clears it. Clearing was
+    // wrong in the one direction that matters: it turned a confirmed
+    // `relayDisconnected` into `healthy` the moment a burst paused, and the
+    // banner speaks every stopped → healthy edge as "sharing resumed" — so a
+    // screen-reader user was told the outage was over when all that happened
+    // was the app closing its sockets. Retaining the stamp keeps the ONSET
+    // honest too: an outage that spans a pause is still dated from when it
+    // started, not re-dated to the un-pause. The pause is instead prevented
+    // from confirming a fault by [refresh], which derives nothing at all while
+    // the engine is paused.
     ref.listen<SyncStatus>(syncStatusProvider, (previous, next) {
-      if (next.phase == SyncConnectionPhase.disconnected) {
-        _disconnectedSince ??= _now();
-      } else {
-        _disconnectedSince = null;
+      switch (next.phase) {
+        case SyncConnectionPhase.disconnected:
+          _disconnectedSince ??= _now();
+        case SyncConnectionPhase.paused:
+          break;
+        case SyncConnectionPhase.idle:
+        case SyncConnectionPhase.connecting:
+        case SyncConnectionPhase.connected:
+          _disconnectedSince = null;
       }
       unawaited(refresh());
     });
@@ -375,8 +395,22 @@ class SharingHealthNotifier extends Notifier<SharingHealth> {
   /// Safe to call concurrently: the verdict comes from an async storage read,
   /// so two overlapping calls can complete out of order, and the older one
   /// would otherwise overwrite the newer with a stale answer.
+  ///
+  /// A PAUSED engine derives nothing and the last verdict stands. Between
+  /// background bursts there is no REQ and no socket: the app is not looking,
+  /// so it learns nothing in either direction, and both directions do harm.
+  /// Deriving `healthy` announces a recovery that did not happen — the app
+  /// stopped looking, the relay did not come back — and deriving a fault dates
+  /// an outage from a silence the app chose. The generation bump lands BEFORE
+  /// the early return so a derivation already in flight when the pause began
+  /// cannot land its answer either. The status listener above refreshes on
+  /// every phase change, so the verdict is re-derived the moment the next
+  /// burst opens.
   Future<void> refresh() async {
     final generation = ++_generation;
+    if (ref.read(syncStatusProvider).phase == SyncConnectionPhase.paused) {
+      return;
+    }
     final next = await _evaluate();
     // Riverpod disposes the notifier on logout / identity change; a late async
     // completion must not resurrect it, nor overtake a newer derivation.

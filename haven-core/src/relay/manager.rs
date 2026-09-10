@@ -19,9 +19,7 @@ use nostr::{
     ClientMessage, Event, EventId, Filter, Kind, PublicKey, RelayMessage, RelayUrl, SubscriptionId,
 };
 use nostr_sdk::pool::relay::{RelayNotification, ReqExitPolicy};
-use nostr_sdk::{
-    Client, Relay, RelayPoolNotification, SubscribeAutoCloseOptions, SubscribeOptions,
-};
+use nostr_sdk::{Client, Relay, RelayOptions, SubscribeAutoCloseOptions, SubscribeOptions};
 
 use super::clock_skew;
 use super::discovery::discovery_relays;
@@ -91,17 +89,21 @@ const CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
 /// previous WebSocket was closed on background — races the 5 s connection
 /// handshake against the per-event `OK` acknowledgement. When the handshake
 /// loses that race the relay never acknowledges in time, `accepted_by` comes
-/// back empty, and the event (a location, MLS commit, or welcome) is silently
-/// dropped. Retrying re-drives [`RelayManager::add_relays_and_connect`] — a
-/// fast no-op once the socket is warm — and republishes the **same** event id,
-/// which relays dedupe by id, so the retry is idempotent and lands on the
-/// now-established connection.
+/// back empty, and the event (an MLS commit, a welcome, a key package) is
+/// silently dropped. Retrying re-drives
+/// [`RelayManager::add_relays_and_connect`] — a fast no-op once the socket is
+/// warm — and republishes the **same** event id, which relays dedupe by id, so
+/// the retry is idempotent and lands on the now-established connection.
+///
+/// This ladder is worth its cost precisely for what it carries: a commit that
+/// is neither confirmed nor rolled back forks the group (Security Rule 13), and
+/// nothing later re-sends it. A LOCATION is the opposite — the next tick
+/// carries a fresher one — so it takes
+/// [`RelayManager::publish_location_event`]'s single bounded attempt instead.
 ///
 /// Worst case (a genuinely unreachable relay): ~3 × (`CONNECTION_TIMEOUT` +
 /// `DEFAULT_TIMEOUT`) + 2 × `PUBLISH_RETRY_BACKOFF` ≈ 49 s before
-/// `AllRelaysFailed` surfaces. That stays under the 72 s background publish
-/// cadence and is guarded against overlap by the caller (`_inFlightPublish` in
-/// the background isolate; `kLocationPublishOverlapGuard` in the foreground).
+/// `AllRelaysFailed` surfaces.
 const MAX_PUBLISH_ATTEMPTS: u32 = 3;
 
 /// Backoff between [`RelayManager::publish_event`] attempts.
@@ -136,7 +138,7 @@ const PROFILE_PUBLISH_RETRY_BACKOFF: Duration = Duration::from_secs(1);
 /// the per-relay cost stays a number this module chose. Worst case for one
 /// attempt is therefore `CONNECTION_TIMEOUT` (5 s) + this (6 s) = 11 s, and the
 /// full ladder is `2 × 11 + PROFILE_PUBLISH_RETRY_BACKOFF` ≈ 23 s — roughly half
-/// the location path's ~49 s.
+/// the commit path's ~49 s, and a bit over twice the location path's 10 s.
 ///
 /// The one upstream path that could exceed the pool's own bound is the NIP-42
 /// re-send: on `auth-required` it waits for authentication and sends AGAIN,
@@ -144,6 +146,102 @@ const PROFILE_PUBLISH_RETRY_BACKOFF: Duration = Duration::from_secs(1);
 /// signer, so `has_signer()` is false and the branch is skipped — but this
 /// timeout bounds it regardless of that fact.
 const PROFILE_PUBLISH_ACK_TIMEOUT: Duration = Duration::from_secs(6);
+
+/// Per-relay bound on ONE relay's `OK` for a kind-445 LOCATION publish.
+///
+/// Tighter again than the profile plane's window, and strictly tighter than
+/// the 10 s wait `nostr-relay-pool` applies inside `Relay::send_event`, so
+/// this is the deadline that fires. With the connect it bounds the whole
+/// publish at `CONNECTION_TIMEOUT` + this = 10 s of radio — the number that
+/// decides how long one location tick keeps the modem awake.
+///
+/// Cutting at five seconds does not un-send the event: a relay that acks at
+/// six has stored it, Haven simply records that relay as silent. If no relay
+/// acked, the circle stays due and the next tick sends a fresh event; if one
+/// did, the late relay's copy is an extra archive.
+const LOCATION_ACK_WINDOW: Duration = Duration::from_secs(5);
+/// `DEFAULT_TIMEOUT` stands in for the pool's own `WAIT_FOR_OK_TIMEOUT`
+/// (`nostr-relay-pool-0.44.3 relay/constants.rs:10`), which is `pub(super)` and
+/// so unreachable from here; the two are both 10 s, and a crate bump that
+/// widened the upstream one would only make this proxy stricter. Strictly less
+/// than, not at most: at equality the two deadlines race and which one fires is
+/// scheduler-dependent — the whole point of this constant is that OURS is the
+/// one that decides how long the modem stays awake.
+const _: () = assert!(
+    LOCATION_ACK_WINDOW.as_millis() < DEFAULT_TIMEOUT.as_millis(),
+    "the per-relay window must stay tighter than the pool's own ack wait, or \
+     it is not the deadline that fires",
+);
+
+/// Attempts (initial try + retries) for
+/// [`RelayManager::publish_location_event`] — exactly one, forever.
+///
+/// A retry buys back a dropped sample only when the sample still matters, and
+/// a location's does not: the next tick publishes a *fresher* position within
+/// 168 s, so a second attempt spends a second radio wake re-sending a stale
+/// one. That is the opposite trade from a COMMIT, which is neither superseded
+/// nor re-sendable later — commits, welcomes, key packages and profiles keep
+/// [`MAX_PUBLISH_ATTEMPTS`] (Security Rule 13).
+///
+/// The single attempt still runs through [`publish_with_retry`] so the ladder
+/// keeps supplying the error contract Dart already handles — zero acks →
+/// [`RelayError::AllRelaysFailed`], every answering relay blaming the clock →
+/// [`RelayError::DeviceClockRejected`].
+const LOCATION_PUBLISH_ATTEMPTS: u32 = 1;
+const _: () = assert!(
+    LOCATION_PUBLISH_ATTEMPTS == 1,
+    "a location publish is ONE bounded attempt; anything more keeps the radio \
+     awake to re-send a position the next tick already supersedes",
+);
+
+/// How long a publish socket may sit idle before the pool closes it.
+///
+/// Only has to be short enough that the FIRST idle poll after a burst already
+/// sees the socket idle: the pool polls once a minute from inside the
+/// connection task, so the real socket lifetime after the last send is
+/// (60 s, 70 s] whatever value below a minute is chosen here.
+const PUBLISH_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The options every relay in the publish pool is registered with.
+///
+/// This pool is a *burst* pool: it connects, sends, collects the `OK`s and then
+/// has nothing to say until the next location tick, key-package rotation or
+/// profile save — nothing here holds a standing REQ. So `ping(false)` removes a
+/// keepalive frame that keeps nothing alive (~65 radio wakes an hour, one per
+/// relay per 55 s), and `sleep_when_idle` lets the socket close between bursts
+/// instead of being held open for the same reason.
+///
+/// `reconnect(false)` is not optional once sleeping is on: the idle monitor runs
+/// only inside a live connection task, so a relay that DROPS while reconnection
+/// is enabled never reaches `Sleeping` — it retries every 10–60 s forever,
+/// waking the radio for a relay nobody is publishing to. Neither option can
+/// strand a publish, because every send path re-drives
+/// [`RelayManager::add_relays_and_connect`], and `try_connect_relay` reconnects
+/// from `Sleeping` *and* `Terminated` inside the caller's own wake.
+///
+/// # These must be registered through `RelayPool::add_relay`, never `Client::add_relay`
+///
+/// For a URL already in the pool, `Client::add_relay` ORs its own flags onto the
+/// live ones — `relay.flags().add(flag)` with `RelayServiceFlags::default()` =
+/// `READ | WRITE | PING` (`nostr-sdk-0.44.1 client/mod.rs:300`,
+/// `nostr-relay-pool-0.44.3 flags.rs:24-28`) — and the pinger re-reads that flag
+/// on every tick (`inner.rs:982-994`), so one such call silently restores the
+/// keepalive on every socket. `RelayPool::add_relay` returns `Ok(false)` and
+/// leaves an existing relay untouched (`pool/mod.rs:281-284`). Pinned by
+/// `a_second_add_of_the_same_url_never_restores_ping`, which re-runs all three
+/// registration sites against a relay the pool already holds.
+///
+/// The ENGINE pool (`live_sync::session::build_engine_client`) deliberately does
+/// NOT get these options: it holds standing REQs, so its socket carries no other
+/// traffic and a ping-less NAT drop there would be silent until the 15-minute
+/// health tick.
+fn publish_relay_options() -> RelayOptions {
+    RelayOptions::default()
+        .ping(false)
+        .reconnect(false)
+        .sleep_when_idle(true)
+        .idle_timeout(PUBLISH_POOL_IDLE_TIMEOUT)
+}
 
 /// Runs an idempotent publish `attempt` up to `max_attempts` times,
 /// returning the first result for which [`PublishResult::is_success`] holds.
@@ -220,11 +318,13 @@ where
     Err(last_err)
 }
 
-/// What ONE relay did with a profile publish, before it is folded into a
+/// What ONE relay did with a harvested publish, before it is folded into a
 /// [`PublishResult`].
 ///
-/// The third case is the one the pooled send cannot express and the retry loop
-/// needs: a relay that neither accepted nor refused, because it never answered.
+/// The third case is the one the pooled send cannot express and both harvesting
+/// callers need: a relay that neither accepted nor refused, because it never
+/// answered. The profile plane retries on it; the location plane reports it and
+/// moves on.
 enum AckOutcome {
     /// The relay returned `OK true`.
     Accepted,
@@ -234,6 +334,36 @@ enum AckOutcome {
     Refused(String),
     /// No answer inside the ack bound (or the relay was not in the pool).
     Unanswered,
+}
+
+/// Sends `event` to ONE relay and waits at most `bound` for that relay's `OK`.
+///
+/// The unit both harvesting fan-outs are built from, so the location and
+/// profile planes cannot drift on what "this relay answered" means: only
+/// `OK true` is [`AckOutcome::Accepted`]; an `OK false` and a transport-level
+/// send failure arrive as the same `Err` and are both
+/// [`AckOutcome::Refused`], exactly as they are in the pooled path's `failed`
+/// list, because both are answers from a relay that spoke to us; silence
+/// inside `bound` is [`AckOutcome::Unanswered`].
+///
+/// A URL missing from the pool is `Unanswered` rather than an error:
+/// [`RelayManager::add_relays_and_connect`] logs and swallows an `add_relay`
+/// failure, so a URL can legitimately not be there, and that is this relay's
+/// outcome — never a verdict on the publish.
+async fn send_to_one(
+    client: &Client,
+    url: &RelayUrl,
+    event: &Event,
+    bound: Duration,
+) -> (String, AckOutcome) {
+    let Ok(relay) = client.relay(url.as_str()).await else {
+        return (url.to_string(), AckOutcome::Unanswered);
+    };
+    match tokio::time::timeout(bound, relay.send_event(event)).await {
+        Ok(Ok(_)) => (url.to_string(), AckOutcome::Accepted),
+        Ok(Err(e)) => (url.to_string(), AckOutcome::Refused(e.to_string())),
+        Err(_) => (url.to_string(), AckOutcome::Unanswered),
+    }
 }
 
 /// Interprets ONE harvested profile-publish attempt for [`publish_with_retry`].
@@ -251,8 +381,8 @@ enum AckOutcome {
 /// retry alive and keeps the clock verdict for the case where every relay
 /// really did answer.
 ///
-/// The location path cannot reach this: its harvest leaves `failed` empty by
-/// construction, so its early-exit behaviour is untouched.
+/// The location path never calls this: it has no second attempt to keep alive
+/// and one ack is all it wants, so its harvest reaches the ladder as it is.
 fn profile_attempt_outcome(result: PublishResult) -> RelayResult<PublishResult> {
     if result.is_success() || result.failed.is_empty() {
         return Ok(result);
@@ -302,9 +432,14 @@ impl RelayManager {
     /// publish retry path can drive it from a closure that owns a cheap
     /// `Client` clone without borrowing the manager across `await` points.
     async fn add_relays_and_connect(client: &Client, relay_urls: &[RelayUrl]) {
-        // Register relays sequentially (cheap metadata operation)
+        // Register relays sequentially (cheap metadata operation). Through the
+        // POOL, never `Client::add_relay` — see `publish_relay_options`.
         for url in relay_urls {
-            match client.add_relay(url.as_str()).await {
+            match client
+                .pool()
+                .add_relay(url.as_str(), publish_relay_options())
+                .await
+            {
                 Ok(newly_added) => {
                     log::debug!("[RelayManager] add_relay({url}): newly_added={newly_added}");
                 }
@@ -338,9 +473,15 @@ impl RelayManager {
         futures::future::join_all(connect_futures).await;
     }
 
-    /// Publishes an event to the specified relays.
+    /// Publishes an event to the specified relays, with a retry ladder.
     ///
-    /// The event will be published to all specified relays.
+    /// The path for everything that is NOT a location: MLS commits, welcomes,
+    /// proposals, key packages and relay lists. Each is lost for good if this
+    /// call gives up — and a commit that is neither confirmed nor rolled back
+    /// forks the group (Security Rule 13) — so they pay
+    /// [`MAX_PUBLISH_ATTEMPTS`]. Locations take
+    /// [`publish_location_event`](Self::publish_location_event).
+    ///
     /// Returns a [`PublishResult`] indicating which relays accepted or
     /// rejected the event.
     ///
@@ -525,6 +666,74 @@ impl RelayManager {
         .await
     }
 
+    /// Publishes a kind-445 LOCATION event: one bounded fan-out, no retry.
+    ///
+    /// The third publish path, and the cheapest, because a location sample is
+    /// the only thing Haven publishes that is superseded rather than lost when
+    /// it misses: validate, connect once (≤ [`CONNECTION_TIMEOUT`]), offer the
+    /// event to every relay in parallel with each relay's `OK` bounded by
+    /// [`LOCATION_ACK_WINDOW`], and return at the slowest bounded relay. Worst
+    /// case 10 s of radio per tick, against ~49 s for the commit ladder. There
+    /// is no second attempt and no separate drain phase.
+    ///
+    /// Success is **one relay's `OK`**, not a full harvest: a location that
+    /// reached the network reached its circle. Relays that refused and relays
+    /// that stayed silent are still reported — that partition is where a clock
+    /// verdict is read from — but they never hold the publish back.
+    ///
+    /// # NEVER for anything carrying a `PendingStateRef` (Security Rule 13)
+    ///
+    /// Commits, welcomes, proposals, key packages, relay lists and profiles
+    /// keep [`publish_event`](Self::publish_event)'s 3-attempt ladder. A
+    /// location that misses is superseded by the next tick; a commit that is
+    /// neither confirmed nor rolled back forks the group. Nothing that resolves
+    /// a `PendingStateRef` may be published through here, and nothing on this
+    /// path takes one — pinned by
+    /// `security_rule_gates::rule13_commits_keep_the_retry_ladder_and_locations_do_not`.
+    ///
+    /// # Errors
+    ///
+    /// The same contract [`publish_event`](Self::publish_event) has, minus the
+    /// retries: [`RelayError::AllRelaysFailed`] when no relay acknowledged, and
+    /// [`RelayError::DeviceClockRejected`] when every relay that answered
+    /// blamed the timestamp (the one publish failure a user can act on, mapped
+    /// in Dart to `RelayClockRejectionException`). Also errors when a relay URL
+    /// is not `wss://`.
+    pub async fn publish_location_event(
+        &self,
+        event: &Event,
+        relays: &[String],
+    ) -> RelayResult<PublishResult> {
+        let relay_urls = Self::validate_relay_urls(relays)?;
+
+        log::debug!(
+            "[RelayManager] publish_location_event: sending kind {} to {} relays",
+            event.kind.as_u16(),
+            relay_urls.len()
+        );
+
+        let client = self.client.clone();
+        publish_with_retry(LOCATION_PUBLISH_ATTEMPTS, Duration::ZERO, move |_| {
+            let client = client.clone();
+            let relay_urls = relay_urls.clone();
+            let event = event.clone();
+            // Always `Ok`: a relay that refused or stayed silent is that
+            // relay's outcome, and the ladder reads the fan-out's own
+            // partition — one ack is a success, no ack is classified for a
+            // clock verdict before it collapses to `AllRelaysFailed`.
+            async move {
+                Ok(Self::try_publish_once_harvesting(
+                    &client,
+                    &relay_urls,
+                    &event,
+                    LOCATION_ACK_WINDOW,
+                )
+                .await)
+            }
+        })
+        .await
+    }
+
     /// Performs a single connect-and-publish attempt that waits for EVERY
     /// relay's acknowledgement, each bounded independently by `ack_timeout`.
     ///
@@ -536,9 +745,11 @@ impl RelayManager {
     /// swallows an `add_relay` failure, so a URL can legitimately be missing
     /// from the pool here.
     ///
-    /// `ack_timeout` is a parameter rather than the constant so a test can
-    /// prove the harvest against a hung relay without spending the production
-    /// bound in wall-clock time.
+    /// `ack_timeout` is a parameter because the two callers bound a relay
+    /// differently — [`PROFILE_PUBLISH_ACK_TIMEOUT`] for an edit a user is
+    /// waiting on, [`LOCATION_ACK_WINDOW`] for a sample the next tick replaces
+    /// — and because a test can then prove the harvest against a hung relay
+    /// without spending either bound in wall-clock time.
     ///
     /// # Why not `Client::send_event_to`
     ///
@@ -556,19 +767,9 @@ impl RelayManager {
         // Add relays, connect, and wait for WebSocket handshakes.
         Self::add_relays_and_connect(client, relay_urls).await;
 
-        let sends = relay_urls.iter().map(|url| async move {
-            let Ok(relay) = client.relay(url.as_str()).await else {
-                return (url.to_string(), AckOutcome::Unanswered);
-            };
-            match tokio::time::timeout(ack_timeout, relay.send_event(event)).await {
-                Ok(Ok(_)) => (url.to_string(), AckOutcome::Accepted),
-                // `OK false` and a transport-level send failure arrive as the
-                // same `Err`, exactly as they do in the pooled path's `failed`
-                // list; both are answers from a relay that spoke to us.
-                Ok(Err(e)) => (url.to_string(), AckOutcome::Refused(e.to_string())),
-                Err(_) => (url.to_string(), AckOutcome::Unanswered),
-            }
-        });
+        let sends = relay_urls
+            .iter()
+            .map(|url| send_to_one(client, url, event, ack_timeout));
 
         let mut accepted_by = Vec::new();
         let mut rejected_by = Vec::new();
@@ -581,10 +782,11 @@ impl RelayManager {
             }
         }
 
-        // Counts only: the profile plane's relay set is itself sensitive, so no
-        // URL is logged here (matching the per-relay fetch probe).
+        // Counts only: which relays a device publishes to is itself linkable
+        // metadata and a refusal is remote prose (Rule 8), so neither a URL nor
+        // a reason is logged here (matching the per-relay fetch probe).
         log::debug!(
-            "[RelayManager] publish_profile_event: accepted={}, refused={}, silent={}",
+            "[RelayManager] publish harvest: accepted={}, refused={}, silent={}",
             accepted_by.len(),
             rejected_by.len(),
             failed.len()
@@ -612,9 +814,13 @@ impl RelayManager {
         let client = self.client.clone();
 
         tokio::spawn(async move {
-            // Register and connect
+            // Register and connect. Through the POOL, never `Client::add_relay`
+            // — see `publish_relay_options`.
             for url in &relay_urls {
-                let _ = client.add_relay(url.as_str()).await;
+                let _ = client
+                    .pool()
+                    .add_relay(url.as_str(), publish_relay_options())
+                    .await;
             }
             let connect_futures = relay_urls.iter().map(|url| async {
                 let _ = client
@@ -650,78 +856,6 @@ impl RelayManager {
         });
 
         Ok(())
-    }
-
-    /// Subscribes to events matching the given filters.
-    ///
-    /// Returns a receiver that will yield events as they arrive.
-    ///
-    /// # Arguments
-    ///
-    /// * `filters` - Nostr filters for the subscription
-    /// * `relays` - List of relay URLs to subscribe to
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if subscription fails.
-    pub async fn subscribe(
-        &self,
-        filters: Vec<Filter>,
-        relays: &[String],
-    ) -> RelayResult<tokio::sync::mpsc::Receiver<Event>> {
-        let relay_urls = Self::validate_relay_urls(relays)?;
-
-        // Add relays, connect, and wait for WebSocket handshakes
-        Self::add_relays_and_connect(&self.client, &relay_urls).await;
-
-        // Create a channel for events
-        let (tx, rx) = tokio::sync::mpsc::channel(100);
-
-        // Subscribe to each filter individually
-        for filter in filters {
-            let subscription_output = self
-                .client
-                .subscribe_to(relay_urls.iter().map(RelayUrl::as_str), filter, None)
-                .await
-                .map_err(|e| {
-                    log::debug!(
-                        "[RelayManager] subscribe_to error: {}",
-                        redact_hex_sequences(&e.to_string())
-                    );
-                    RelayError::Subscription(e.to_string())
-                })?;
-
-            // Spawn event handling task for this subscription
-            let client_clone = self.client.clone();
-            let tx_clone = tx.clone();
-            let subscription_id = subscription_output.val;
-
-            tokio::spawn(async move {
-                let _ = client_clone
-                    .handle_notifications(|notification| async {
-                        if let RelayPoolNotification::Event {
-                            subscription_id: sid,
-                            event,
-                            ..
-                        } = notification
-                        {
-                            if sid == subscription_id
-                                && tx_clone.send((*event).clone()).await.is_err()
-                            {
-                                // Receiver dropped — exit to trigger unsubscribe
-                                return Ok(true);
-                            }
-                        }
-                        Ok(false)
-                    })
-                    .await;
-
-                // Sends NIP-01 CLOSE to relays when receiver is dropped
-                client_clone.unsubscribe(&subscription_id).await;
-            });
-        }
-
-        Ok(rx)
     }
 
     /// Gets the relay connection status for all connected relays.
@@ -1246,11 +1380,16 @@ impl RelayManager {
                 };
                 let relay_url = url.as_str().to_string();
 
-                // Register the relay (cheap) then attempt a bounded handshake.
-                // `try_connect_relay` returns Ok if the socket is (or becomes)
-                // connected within CONNECTION_TIMEOUT — the transport-level
-                // equivalent of the relay answering our knock.
-                let _ = client.add_relay(url.as_str()).await;
+                // Register the relay (cheap; through the POOL, never
+                // `Client::add_relay` — see `publish_relay_options`) then
+                // attempt a bounded handshake. `try_connect_relay` returns Ok if
+                // the socket is (or becomes) connected within CONNECTION_TIMEOUT
+                // — the transport-level equivalent of the relay answering our
+                // knock.
+                let _ = client
+                    .pool()
+                    .add_relay(url.as_str(), publish_relay_options())
+                    .await;
                 let responded = client
                     .try_connect_relay(url.as_str(), CONNECTION_TIMEOUT)
                     .await
@@ -1366,6 +1505,10 @@ impl RelayManager {
                 .exit_policy(ReqExitPolicy::ExitOnEOSE)
                 .timeout(Some(DEFAULT_TIMEOUT)),
         ));
+        // auto-closing REQ: `opts` exits on EOSE, so this registers nothing in
+        // the pool's long-lived subscription map and the socket can still sleep.
+        // The marker is what `check_engine_client_options.sh` check 7 allows it
+        // by; an unmarked subscribe anywhere in this file is a standing REQ.
         if let Err(e) = relay.subscribe_with_id(id.clone(), filter, opts).await {
             // Presence-only: no own-relay URL at debug (may be sensitive),
             // matching the branches above.
@@ -1649,6 +1792,9 @@ pub const fn ws_loopback_allowed_for_test(_relay: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use nostr_relay_builder::prelude::{BoxedFuture, PolicyResult, QueryPolicy};
+    use nostr_relay_builder::{LocalRelay, RelayBuilder};
+
     use super::*;
 
     #[test]
@@ -2152,6 +2298,40 @@ mod tests {
         assert_eq!(calls.get(), 1, "max_attempts=1 must not retry");
     }
 
+    /// The ladder's wall-clock cost is `attempts × attempt + (attempts − 1) ×
+    /// backoff`: the backoff runs BETWEEN attempts and never after the last
+    /// one. That relation is what bounds how long a single publish keeps the
+    /// radio awake, so it is pinned rather than left to the doc comment.
+    ///
+    /// Pure futures under a paused clock — with no I/O to wait on, tokio
+    /// auto-advances straight to each deadline, so the elapsed time is exact
+    /// and the test costs no wall clock. Measured against a real socket the
+    /// same assertion would race the handshake.
+    #[tokio::test(start_paused = true)]
+    async fn publish_with_retry_pays_the_backoff_between_attempts_and_never_after_the_last() {
+        let backoff = Duration::from_secs(7);
+
+        let started = tokio::time::Instant::now();
+        let exhausted =
+            publish_with_retry(3, backoff, |_| async { Ok(dummy_publish_result(false)) }).await;
+        assert!(matches!(exhausted, Err(RelayError::AllRelaysFailed)));
+        assert_eq!(
+            started.elapsed(),
+            backoff * 2,
+            "three attempts pay two backoffs, and none after the final one",
+        );
+
+        let started = tokio::time::Instant::now();
+        publish_with_retry(3, backoff, |_| async { Ok(dummy_publish_result(true)) })
+            .await
+            .expect("first attempt accepted");
+        assert_eq!(
+            started.elapsed(),
+            Duration::ZERO,
+            "a publish that lands on the first attempt pays no backoff at all",
+        );
+    }
+
     #[tokio::test]
     async fn publish_with_retry_clamps_zero_attempts_to_one() {
         let calls = std::cell::Cell::new(0u32);
@@ -2189,8 +2369,12 @@ mod tests {
         }
     }
 
+    /// Renamed with the location path's move off this ladder: `publish_event`
+    /// is now the COMMIT/welcome/key-package/relay-list ladder, and the
+    /// location worst case is pinned separately (and is shorter than both) by
+    /// `location_ladder_worst_case_equals_one_publish_attempt`.
     #[test]
-    fn profile_publish_ladder_is_strictly_shorter_than_the_location_ladder() {
+    fn profile_publish_ladder_is_strictly_shorter_than_the_commit_ladder() {
         // Worst case for a ladder: every attempt pays a full handshake plus a
         // full per-relay wait, with a backoff between attempts.
         let worst = |attempts: u32, wait: Duration, backoff: Duration| {
@@ -2203,7 +2387,7 @@ mod tests {
             PROFILE_PUBLISH_ACK_TIMEOUT,
             PROFILE_PUBLISH_RETRY_BACKOFF,
         );
-        let location = worst(MAX_PUBLISH_ATTEMPTS, DEFAULT_TIMEOUT, PUBLISH_RETRY_BACKOFF);
+        let commit = worst(MAX_PUBLISH_ATTEMPTS, DEFAULT_TIMEOUT, PUBLISH_RETRY_BACKOFF);
 
         assert_eq!(
             profile,
@@ -2211,10 +2395,11 @@ mod tests {
             "the documented profile worst case moved",
         );
         assert!(
-            profile < location,
+            profile < commit,
             "a user is waiting on the profile publish and the edit survives a \
-             failure in the outbox; a location sample does not, so the profile \
-             ladder must stay the shorter of the two: {profile:?} vs {location:?}",
+             failure in the outbox; a commit that is neither confirmed nor \
+             rolled back forks the group, so it keeps the longer ladder: \
+             {profile:?} vs {commit:?}",
         );
         assert!(
             PROFILE_PUBLISH_ACK_TIMEOUT < DEFAULT_TIMEOUT,
@@ -2693,5 +2878,897 @@ mod tests {
             RelayManager::pick_keypackage_from_events(vec![unrelated]).is_none(),
             "unrelated kinds must not be returned"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Publish-pool relay options.
+    //
+    // This pool connects, sends, collects the `OK`s and then has nothing more
+    // to say until the next tick — it holds no standing REQ. These tests pin
+    // what that makes possible (no keepalive frame, no self-driven retry loop,
+    // a socket that closes between bursts) and the crate trap that silently
+    // undoes the first of them.
+    // ------------------------------------------------------------------
+
+    /// A relay that is never dialled: the flag assertions read what the pool
+    /// recorded at registration, which needs no socket.
+    const UNDIALLED_RELAY: &str = "wss://relay.example";
+
+    #[tokio::test]
+    async fn publish_relay_options_turn_ping_off() {
+        let manager = RelayManager::new();
+        manager
+            .client
+            .pool()
+            .add_relay(UNDIALLED_RELAY, publish_relay_options())
+            .await
+            .expect("register a relay in a fresh pool");
+
+        let relay = manager
+            .client
+            .relay(UNDIALLED_RELAY)
+            .await
+            .expect("the relay was just registered");
+
+        assert!(
+            !relay.flags().has_ping(),
+            "the publish pool must send no keepalive frame: nothing here listens \
+             between bursts, so a ping is a radio wake that keeps nothing alive",
+        );
+        assert!(
+            relay.flags().has_write(),
+            "a publish pool that cannot write is not a publish pool",
+        );
+        assert!(
+            relay.flags().has_read(),
+            "...and it has to read the OK acknowledging what it published",
+        );
+    }
+
+    /// The trap that would silently undo the whole thing: every publish and
+    /// every fetch RE-registers its relays, and on an already-known relay a bare
+    /// `Client::add_relay` ORs `PING` back on. So the assertion is made after
+    /// each of the three registration sites has run against a relay the pool
+    /// already knows — a bare call at any one of them turns this red.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_second_add_of_the_same_url_never_restores_ping() {
+        let _ = allow_ws_loopback_for_test();
+        let server = LocalRelay::new(RelayBuilder::default());
+        server.run().await.expect("local relay runs");
+        let url = server.url().await.to_string();
+        let relays = vec![url.clone()];
+
+        let manager = RelayManager::new();
+        manager
+            .publish_event(&throwaway_note("registers the relay"), &relays)
+            .await
+            .expect("the relay is up");
+        let relay = manager
+            .client
+            .relay(url.as_str())
+            .await
+            .expect("the publish added the relay to the pool");
+        assert!(!relay.flags().has_ping(), "the first publish registers it");
+
+        manager
+            .publish_event(&throwaway_note("re-registers it"), &relays)
+            .await
+            .expect("the relay is still up");
+        assert!(
+            !relay.flags().has_ping(),
+            "add_relays_and_connect must not OR the keepalive back onto a relay \
+             the pool already holds",
+        );
+
+        let mut notifications = relay.notifications();
+        let backgrounded = throwaway_note("re-registers it from the background path");
+        let backgrounded_id = backgrounded.id;
+        manager
+            .publish_event_background(backgrounded, &relays)
+            .expect("the fire-and-forget path validates its urls");
+        assert!(
+            await_ok_for(&mut notifications, backgrounded_id, wait_budget(30)).await,
+            "the background publish has to reach the relay before its \
+             registration can be judged",
+        );
+        assert!(
+            !relay.flags().has_ping(),
+            "publish_event_background must not OR the keepalive back on either",
+        );
+
+        manager
+            .fetch_events_per_relay(Filter::new().kind(Kind::TextNote).limit(1), &relays)
+            .await
+            .expect("per-relay probe never fails as a whole");
+        assert!(
+            !relay.flags().has_ping(),
+            "nor may the per-relay fetch, which registers its relays itself",
+        );
+    }
+
+    /// `true` once the relay has acknowledged `event_id`, which is the earliest
+    /// point at which the fire-and-forget publish is known to have registered
+    /// and used its relay.
+    async fn await_ok_for(
+        notifications: &mut tokio::sync::broadcast::Receiver<RelayNotification>,
+        event_id: EventId,
+        budget: Duration,
+    ) -> bool {
+        tokio::time::timeout(budget, async {
+            loop {
+                match notifications.recv().await {
+                    Ok(RelayNotification::Message {
+                        message: RelayMessage::Ok { event_id: id, .. },
+                    }) if id == event_id => return true,
+                    Ok(_) => {}
+                    Err(_) => return false,
+                }
+            }
+        })
+        .await
+        .unwrap_or(false)
+    }
+
+    /// Documents the crate behaviour the pool-level call exists to avoid, so a
+    /// silent change to it in a future `nostr-sdk` surfaces here rather than as
+    /// a keepalive nobody asked for.
+    ///
+    /// The ONE deliberate `Client::add_relay` in this file, kept on a single
+    /// line and marked, so the guard that bans the call everywhere else can
+    /// exclude exactly this one.
+    #[tokio::test]
+    async fn client_add_relay_ors_ping_back_onto_a_registered_relay() {
+        let manager = RelayManager::new();
+        manager
+            .client
+            .pool()
+            .add_relay(UNDIALLED_RELAY, publish_relay_options())
+            .await
+            .expect("register without a ping");
+
+        let client = manager.client.clone();
+        client.add_relay(UNDIALLED_RELAY).await.expect("re-add"); // negative control
+
+        let relay = manager
+            .client
+            .relay(UNDIALLED_RELAY)
+            .await
+            .expect("still registered");
+        assert!(
+            relay.flags().has_ping(),
+            "nostr-sdk 0.44.1 `Client::add_relay` ORs READ|WRITE|PING onto an \
+             existing relay (client/mod.rs:300); the day that stops being true \
+             the pool-level call is no longer load-bearing, and this is how we \
+             find out",
+        );
+    }
+
+    /// Scales the wall-clock budget of the relay-backed waits below, as the
+    /// `*_e2e` targets do. Each budget bounds how long a TRANSITION may take,
+    /// never the property under test, so a larger budget can only remove a
+    /// false negative: a transition that never happens exhausts any budget.
+    fn wait_budget(base_secs: u64) -> Duration {
+        let scale: u64 = std::env::var("HAVEN_TEST_WAIT_SCALE")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|s| *s >= 1)
+            .unwrap_or(1);
+        Duration::from_secs(base_secs * scale)
+    }
+
+    /// The next relay status transition broadcast on `notifications`, or `None`
+    /// if the budget expires first. Panics if the channel closes, which is a
+    /// dropped relay handle rather than an answer about the relay.
+    ///
+    /// Event-driven on purpose: polling `status()` could both miss a transition
+    /// and pass on a lucky sample.
+    async fn next_relay_status(
+        notifications: &mut tokio::sync::broadcast::Receiver<RelayNotification>,
+        budget: Duration,
+    ) -> Option<nostr_sdk::RelayStatus> {
+        tokio::time::timeout(budget, async {
+            loop {
+                match notifications.recv().await {
+                    Ok(RelayNotification::RelayStatus { status }) => return status,
+                    // Any other notification — and an overrun, which means
+                    // messages were SKIPPED, not that the relay stood still.
+                    // Giving up on an overrun would turn a busy machine into a
+                    // `None` nobody can tell apart from a timeout.
+                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => panic!(
+                        "the relay's notification channel closed before any \
+                         status transition; the relay handle was dropped, so \
+                         this test cannot observe what it is asserting",
+                    ),
+                }
+            }
+        })
+        .await
+        .ok()
+    }
+
+    /// A loopback port that was free at the instant it was returned.
+    ///
+    /// The only way to learn a free port is to HOLD it, and `RelayBuilder`
+    /// takes a port number rather than a listener — so the probe socket is
+    /// released before anything can claim the port, and the answer is stale by
+    /// construction (TOCTOU). Callers that BIND it must therefore treat a lost
+    /// race as a retry, not as a failure: see [`relay_on_a_fixed_port`].
+    /// Callers that want a port with nothing listening on it take the same
+    /// staleness in the other direction — a foreign socket arriving there turns
+    /// an expected connection refusal into a live relay.
+    async fn ephemeral_port() -> u16 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral port");
+        listener.local_addr().expect("local addr").port()
+    }
+
+    /// Runs a `LocalRelay` on a KNOWN loopback port, retrying the whole
+    /// pick-then-bind if another socket took the port in between.
+    ///
+    /// Returns the relay and the port it took, so the caller can restart on the
+    /// same address later — the reason a fixed port is wanted at all.
+    async fn relay_on_a_fixed_port() -> (LocalRelay, u16) {
+        for _ in 0..8 {
+            let port = ephemeral_port().await;
+            let relay = LocalRelay::new(RelayBuilder::default().port(port));
+            if relay.run().await.is_ok() {
+                return (relay, port);
+            }
+        }
+        panic!("no loopback port stayed free long enough for a relay to bind it");
+    }
+
+    /// Refuses every REQ that names `0` as an author, so ONE relay can serve
+    /// both the ordinary `EOSE` read path and the `CLOSED` one.
+    #[derive(Debug)]
+    struct RefuseAuthor(PublicKey);
+
+    impl QueryPolicy for RefuseAuthor {
+        fn admit_query<'a>(
+            &'a self,
+            query: &'a Filter,
+            _addr: &'a std::net::SocketAddr,
+        ) -> BoxedFuture<'a, PolicyResult> {
+            Box::pin(async move {
+                if query
+                    .authors
+                    .as_ref()
+                    .is_some_and(|authors| authors.contains(&self.0))
+                {
+                    PolicyResult::Reject("author not served here".to_string())
+                } else {
+                    PolicyResult::Accept
+                }
+            })
+        }
+    }
+
+    /// A signed note nobody reads, for driving one publish.
+    fn throwaway_note(content: &str) -> Event {
+        nostr::EventBuilder::new(Kind::TextNote, content)
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("sign")
+    }
+
+    /// The socket a burst leaves behind must close itself, and the next burst
+    /// must bring it back.
+    ///
+    /// ~60–70 s of wall clock by construction: the pool's idle poll is a
+    /// one-minute crate constant evaluated inside the live connection task, so
+    /// no clock trick reaches it against a real socket. The wait is bounded and
+    /// event-driven, so a build whose socket never sleeps fails at the budget
+    /// rather than hanging.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_publish_socket_sleeps_after_a_burst_and_wakes_for_the_next() {
+        let _ = allow_ws_loopback_for_test();
+        let server = LocalRelay::new(RelayBuilder::default());
+        server.run().await.expect("local relay runs");
+        let url = server.url().await.to_string();
+
+        let manager = RelayManager::new();
+        assert!(manager
+            .publish_event(&throwaway_note("burst one"), std::slice::from_ref(&url))
+            .await
+            .expect("the first burst reaches the relay")
+            .is_success(),);
+
+        let relay = manager
+            .client
+            .relay(url.as_str())
+            .await
+            .expect("the publish added the relay to the pool");
+        let mut notifications = relay.notifications();
+
+        assert_eq!(
+            next_relay_status(&mut notifications, wait_budget(180)).await,
+            Some(nostr_sdk::RelayStatus::Sleeping),
+            "an idle publish socket must close itself; with nothing else \
+             happening, the only transition after a finished burst is to sleep",
+        );
+
+        assert!(
+            manager
+                .publish_event(&throwaway_note("burst two"), &[url])
+                .await
+                .expect("the second burst reaches the relay")
+                .is_success(),
+            "a sleeping socket must be woken by the next publish, inside that \
+             publish's own wake",
+        );
+        assert!(relay.is_connected(), "the woken relay is connected again");
+    }
+
+    /// `reconnect(false)`: a dropped publish socket goes straight to
+    /// `Terminated` and stays there.
+    ///
+    /// With reconnection on it would go `Disconnected` and retry every 10–60 s
+    /// forever — and never reach `Sleeping`, because the idle monitor lives
+    /// inside the connection task. The second half proves the option cannot
+    /// strand a later publish (a commit, a welcome): every send path re-drives
+    /// `add_relays_and_connect`, and `try_connect_relay` connects from
+    /// `Terminated`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_dropped_publish_socket_does_not_reconnect_on_its_own() {
+        let _ = allow_ws_loopback_for_test();
+        let (server, port) = relay_on_a_fixed_port().await;
+        let url = server.url().await.to_string();
+
+        let manager = RelayManager::new();
+        assert!(manager
+            .publish_event(
+                &throwaway_note("before the drop"),
+                std::slice::from_ref(&url)
+            )
+            .await
+            .expect("the relay is up")
+            .is_success(),);
+
+        let relay = manager
+            .client
+            .relay(url.as_str())
+            .await
+            .expect("the publish added the relay to the pool");
+        let mut notifications = relay.notifications();
+        server.shutdown();
+
+        assert_eq!(
+            next_relay_status(&mut notifications, wait_budget(30)).await,
+            Some(nostr_sdk::RelayStatus::Terminated),
+            "a dropped publish socket must terminate, not enter a retry loop \
+             that wakes the radio every 10-60 s for a relay nobody is \
+             publishing to",
+        );
+
+        let restarted = LocalRelay::new(RelayBuilder::default().port(port));
+        restarted
+            .run()
+            .await
+            .expect("the relay comes back on its port");
+        assert!(
+            manager
+                .publish_event(&throwaway_note("after the drop"), &[url])
+                .await
+                .expect("the next publish reconnects")
+                .is_success(),
+            "reconnect(false) must never strand a later publish: the send path \
+             reconnects from Terminated inside its own attempt",
+        );
+    }
+
+    /// A REQ Haven forgets to close is a socket that can never sleep:
+    /// `should_sleep` is false while ANY subscription is registered
+    /// (`nostr-relay-pool-0.44.3 inner.rs:444-456`), and this pool no longer
+    /// pings, so such a socket stays open carrying nothing at all.
+    ///
+    /// Two assertions, because neither can see the other's leak.
+    /// `subscriptions()` reports only LONG-LIVED registrations (`inner.rs:294`
+    /// filters the auto-closing ones out) — the `subscribe_to` class, caught
+    /// the instant a fetch returns. The auto-closing REQs are invisible there
+    /// and are covered by the socket actually reaching `Sleeping`, which reads
+    /// the unfiltered map.
+    ///
+    /// # What is driven, and what is NOT
+    ///
+    /// Two of `read_one_relays_answer`'s exits run here: the clean `EOSE`, and
+    /// the `CLOSED` arm — the interesting one, because it returns while the
+    /// pool's own auto-close handler is still waiting for an `EOSE` that will
+    /// never come, which is why that arm sends its own `CLOSE`.
+    ///
+    /// Its remaining exits are NOT covered by this test and are unproven here:
+    /// the intake cap (an in-process relay serves a bounded fixture, so it never
+    /// overflows) and the outer [`DEFAULT_TIMEOUT`], which would need a relay
+    /// that accepts the REQ and then goes silent for ten seconds — a wall-clock
+    /// cost with no way to shorten it, since the bound is a production constant
+    /// rather than an injected one. Both exits return `drained == false` through
+    /// the same tail as the `CLOSED` arm, so what is unproven is the exit
+    /// CONDITION, not the cleanup that follows it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn every_fetch_primitive_leaves_no_subscription_registered() {
+        let _ = allow_ws_loopback_for_test();
+        let refused_author = nostr::Keys::generate().public_key();
+        let server =
+            LocalRelay::new(RelayBuilder::default().query_policy(RefuseAuthor(refused_author)));
+        server.run().await.expect("local relay runs");
+        let url = server.url().await.to_string();
+        let relays = vec![url.clone()];
+
+        let manager = RelayManager::new();
+        let answered = Filter::new().kind(Kind::TextNote).limit(4);
+        let refused = Filter::new().author(refused_author).limit(4);
+
+        manager
+            .fetch_events(answered.clone(), &relays, None)
+            .await
+            .expect("the relay answers");
+        assert_no_long_lived_subscription(&manager, "fetch_events").await;
+
+        manager
+            .check_event_on_relay(&url, answered.clone())
+            .await
+            .expect("the relay answers");
+        assert_no_long_lived_subscription(&manager, "check_event_on_relay").await;
+
+        let drained = manager
+            .fetch_events_per_relay(answered, &relays)
+            .await
+            .expect("per-relay probe never fails as a whole");
+        assert!(
+            drained[0].drained,
+            "the relay served this filter, so the page ends at an EOSE: {drained:?}",
+        );
+        assert_no_long_lived_subscription(&manager, "fetch_events_per_relay (EOSE)").await;
+
+        let closed = manager
+            .fetch_events_per_relay(refused, &relays)
+            .await
+            .expect("per-relay probe never fails as a whole");
+        assert!(closed[0].responded, "the socket was up: {closed:?}");
+        assert!(
+            !closed[0].drained,
+            "a relay that CLOSED the REQ never vouched for the page: {closed:?}",
+        );
+        assert_no_long_lived_subscription(&manager, "fetch_events_per_relay (CLOSED)").await;
+
+        let relay = manager
+            .client
+            .relay(url.as_str())
+            .await
+            .expect("the fetches added the relay to the pool");
+        let mut notifications = relay.notifications();
+        assert_eq!(
+            next_relay_status(&mut notifications, wait_budget(180)).await,
+            Some(nostr_sdk::RelayStatus::Sleeping),
+            "a socket the fetches left a REQ on can never sleep, and this pool \
+             sends no keepalive — it would stay open forever carrying nothing",
+        );
+    }
+
+    /// Fails with the name of the primitive that left a REQ behind, so a red
+    /// run names the leak instead of only reporting a non-empty map.
+    async fn assert_no_long_lived_subscription(manager: &RelayManager, after: &str) {
+        let registered = manager.client.subscriptions().await;
+        assert!(
+            registered.is_empty(),
+            "{after} left a long-lived subscription registered; the socket can \
+             never sleep while one exists: {registered:?}",
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Location publish: ONE bounded fan-out, never a retry.
+    //
+    // A location sample is neither durable nor worth a ladder — the next tick
+    // carries a fresher position within 168 s — so the entire budget is one
+    // attempt bounded by `CONNECTION_TIMEOUT + LOCATION_ACK_WINDOW`. What must
+    // survive from the 3-attempt ladder is its ERROR contract, which Dart
+    // matches on (`AllRelaysFailed`, `DeviceClockRejected`).
+    // ------------------------------------------------------------------
+
+    /// The whole location ladder costs one attempt and nothing else: no
+    /// backoff (there is no second attempt to space) and no second connect.
+    /// Worst case is `CONNECTION_TIMEOUT + LOCATION_ACK_WINDOW` = 10 s, which
+    /// is what bounds how long one publish keeps the radio awake.
+    ///
+    /// Driven through the REAL [`publish_with_retry`] with the REAL constants,
+    /// on a pure attempt future: the ladder's arithmetic is the thing under
+    /// test, and a socket would only add a race to it.
+    #[tokio::test(start_paused = true)]
+    async fn location_ladder_worst_case_equals_one_publish_attempt() {
+        let attempts = std::cell::Cell::new(0u32);
+
+        let started = tokio::time::Instant::now();
+        let result = publish_with_retry(LOCATION_PUBLISH_ATTEMPTS, Duration::ZERO, |_| {
+            attempts.set(attempts.get() + 1);
+            async {
+                // The worst one attempt can cost: a full handshake against a
+                // relay that never completes it, then a fan-out that returns
+                // at its own window because nothing answered.
+                tokio::time::sleep(CONNECTION_TIMEOUT).await;
+                let _ = tokio::time::timeout(LOCATION_ACK_WINDOW, futures::future::pending::<()>())
+                    .await;
+                Ok(dummy_publish_result(false))
+            }
+        })
+        .await;
+
+        assert!(
+            matches!(result, Err(RelayError::AllRelaysFailed)),
+            "a publish no relay acknowledged is still an error, so Dart's \
+             existing failure handling is unchanged",
+        );
+        assert_eq!(
+            attempts.get(),
+            1,
+            "a location is never re-sent: the retry would spend a second wake \
+             on a position the next tick already supersedes",
+        );
+        assert_eq!(
+            started.elapsed(),
+            CONNECTION_TIMEOUT + LOCATION_ACK_WINDOW,
+            "one connect plus one per-relay window is the whole budget",
+        );
+        assert_eq!(
+            started.elapsed(),
+            Duration::from_secs(10),
+            "the documented worst case moved",
+        );
+
+        let commit_ladder = (CONNECTION_TIMEOUT + DEFAULT_TIMEOUT)
+            .saturating_mul(MAX_PUBLISH_ATTEMPTS)
+            + PUBLISH_RETRY_BACKOFF.saturating_mul(MAX_PUBLISH_ATTEMPTS - 1);
+        assert!(
+            started.elapsed() * 4 < commit_ladder,
+            "the point of the location path is that it is a fraction of the \
+             ladder a commit still pays: {:?} vs {commit_ladder:?}",
+            started.elapsed(),
+        );
+    }
+
+    /// Counts every event a relay was asked to store and refuses each one with
+    /// `reason`, so "how many times was this relay asked" is observable from
+    /// the test rather than inferred from timing.
+    #[derive(Debug)]
+    struct RefuseAndCount {
+        reason: String,
+        seen: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl nostr_relay_builder::prelude::WritePolicy for RefuseAndCount {
+        fn admit_event<'a>(
+            &'a self,
+            _event: &'a Event,
+            _addr: &'a std::net::SocketAddr,
+        ) -> BoxedFuture<'a, PolicyResult> {
+            Box::pin(async move {
+                self.seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                PolicyResult::Reject(self.reason.clone())
+            })
+        }
+    }
+
+    /// A relay that refuses every event with `reason`, plus the counter of how
+    /// many events it was offered.
+    async fn refusing_relay(
+        reason: &str,
+    ) -> (
+        LocalRelay,
+        String,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        let seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let server = LocalRelay::new(RelayBuilder::default().write_policy(RefuseAndCount {
+            reason: reason.to_string(),
+            seen: std::sync::Arc::clone(&seen),
+        }));
+        server.run().await.expect("local relay runs");
+        let url = server.url().await.to_string();
+        (server, url, seen)
+    }
+
+    /// One relay that never answers must not extend the publish past its own
+    /// window, and must not cost the ack the other relay gave.
+    ///
+    /// # Why the wall-clock bound is two-sided, and tight
+    ///
+    /// [`LOCATION_ACK_WINDOW`] is the only thing that decides how long ONE
+    /// location tick holds the modem awake, and nothing else pins its VALUE: a
+    /// window widened to [`DEFAULT_TIMEOUT`] keeps every other assertion in this
+    /// file green (the outcome partition is identical) while a wedged relay
+    /// holds the radio for 15 s instead of 10. So the upper bound is the
+    /// documented sum plus a small scaled slack, not "twice the contract".
+    ///
+    /// The lower bound is that same sum, because the wedged relay forces BOTH
+    /// phases in sequence: the WebSocket handshake can only end at
+    /// [`CONNECTION_TIMEOUT`], and the send that follows can only end at the ack
+    /// window. A timer never fires early, so this cannot flake — and it is what
+    /// catches the opposite regression, a window cut so short that a healthy but
+    /// slow relay is recorded silent.
+    ///
+    /// The arithmetic of the LADDER (one attempt, no backoff) is pinned without
+    /// a socket by `location_ladder_worst_case_equals_one_publish_attempt`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn publish_location_event_folds_a_stalled_relay_after_its_own_window() {
+        let _ = allow_ws_loopback_for_test();
+        let fast = LocalRelay::new(RelayBuilder::default());
+        fast.run().await.expect("local relay runs");
+        let relays = vec![fast.url().await.to_string(), hung_relay_url().await];
+        let expected = RelayManager::validate_relay_urls(&relays)
+            .expect("ws:// loopback urls validate with the opt-in installed");
+
+        let manager = RelayManager::new();
+        let started = std::time::Instant::now();
+        let result = manager
+            .publish_location_event(&throwaway_note("one live relay is enough"), &relays)
+            .await
+            .expect("one relay accepted, so the publish succeeded");
+        let elapsed = started.elapsed();
+
+        assert_eq!(
+            result.accepted_by,
+            vec![expected[0].to_string()],
+            "a location needs one ack, and it got one: {result:?}",
+        );
+        assert_eq!(
+            result.failed,
+            vec![expected[1].to_string()],
+            "the relay that never spoke is silent, not a rejection: {result:?}",
+        );
+        assert!(
+            result.rejected_by.is_empty(),
+            "nobody refused this event: {result:?}",
+        );
+        assert!(
+            elapsed >= CONNECTION_TIMEOUT + LOCATION_ACK_WINDOW,
+            "the wedged relay forces the connect timeout and then the full ack \
+             window; finishing sooner means one of the two was shortened, and a \
+             shortened ack window records a healthy-but-slow relay as silent; \
+             took {elapsed:?}",
+        );
+        assert!(
+            elapsed < CONNECTION_TIMEOUT + LOCATION_ACK_WINDOW + wait_budget(3),
+            "a wedged relay must not hold the radio awake past this publish's \
+             own bound of {:?}; took {elapsed:?}. Widening LOCATION_ACK_WINDOW \
+             to DEFAULT_TIMEOUT changes no outcome anywhere else in this file — \
+             this is the assertion that costs it",
+            CONNECTION_TIMEOUT + LOCATION_ACK_WINDOW,
+        );
+    }
+
+    /// Zero acks is an error, and the refused event is offered exactly once.
+    ///
+    /// Both halves in one test on purpose: "never retries" is only meaningful
+    /// on the outcome that WOULD retry on the commit ladder.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn publish_location_event_never_retries() {
+        let _ = allow_ws_loopback_for_test();
+        let (_server, url, seen) = refusing_relay("rate-limited: slow down").await;
+
+        let manager = RelayManager::new();
+        let result = manager
+            .publish_location_event(&throwaway_note("refused everywhere"), &[url])
+            .await;
+
+        assert!(
+            matches!(result, Err(RelayError::AllRelaysFailed)),
+            "no relay acknowledged, so the publish failed: {result:?}",
+        );
+        assert_eq!(
+            seen.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the location was offered once; a retry spends another radio wake \
+             re-sending a position the next tick supersedes",
+        );
+    }
+
+    /// One relay's `OK true` is the whole success condition — but the relay
+    /// that said `OK false` still has to survive into the result, because that
+    /// is the only place a clock verdict can be read from.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn publish_location_event_succeeds_on_one_ok_and_still_reports_the_refusal() {
+        let _ = allow_ws_loopback_for_test();
+        let accepting = LocalRelay::new(RelayBuilder::default());
+        accepting.run().await.expect("local relay runs");
+        let (_refuser, refused_url, _seen) = refusing_relay("rate-limited: slow down").await;
+        let relays = vec![accepting.url().await.to_string(), refused_url];
+        let expected = RelayManager::validate_relay_urls(&relays)
+            .expect("ws:// loopback urls validate with the opt-in installed");
+
+        let manager = RelayManager::new();
+        let result = manager
+            .publish_location_event(&throwaway_note("one ack is enough"), &relays)
+            .await
+            .expect("one relay accepted");
+
+        assert!(result.is_success());
+        assert_eq!(
+            result.accepted_by,
+            vec![expected[0].to_string()],
+            "only the relay that returned OK true accepted it: {result:?}",
+        );
+        assert_eq!(
+            result.rejected_by.len(),
+            1,
+            "the refusal is an answer and must be reported: {result:?}",
+        );
+        assert_eq!(result.rejected_by[0].0, expected[1].to_string());
+        assert!(result.failed.is_empty(), "both relays answered: {result:?}");
+    }
+
+    /// The one error contract Dart acts on rather than merely reports.
+    ///
+    /// `nostr_relay_service.dart` maps this variant's token to
+    /// `RelayClockRejectionException`, which drives the clock-skew banner
+    /// (`b8_clock_skew_test.dart` pins the branch on the production service).
+    /// Dropping the ladder around the fan-out would silently flatten it to
+    /// `AllRelaysFailed` and the fast-clock outage would go quiet again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn publish_location_event_reports_a_clock_rejection_without_retrying() {
+        let _ = allow_ws_loopback_for_test();
+        let (_server, url, seen) = refusing_relay("created_at is in the future").await;
+
+        let manager = RelayManager::new();
+        let result = manager
+            .publish_location_event(&throwaway_note("too new for this relay"), &[url])
+            .await;
+
+        assert!(
+            matches!(
+                result,
+                Err(RelayError::DeviceClockRejected {
+                    complaint: clock_skew::DeviceClockComplaint::Ahead,
+                }),
+            ),
+            "the relay said the timestamp was in the future, and that verdict \
+             is the one publish failure the user can act on: {result:?}",
+        );
+        assert_eq!(
+            seen.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a hopeless clock rejection is not retried either",
+        );
+    }
+
+    /// Captures `log` records emitted on the CURRENT thread while armed.
+    ///
+    /// Thread-local, so a test that arms it sees only its own records however
+    /// many other tests run beside it; the publish under test runs on a
+    /// current-thread runtime, so every line it emits lands here.
+    struct ThreadLocalCapture;
+
+    thread_local! {
+        static CAPTURED: std::cell::RefCell<Option<Vec<String>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    impl log::Log for ThreadLocalCapture {
+        fn enabled(&self, _metadata: &log::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn log(&self, record: &log::Record<'_>) {
+            // Haven's own lines only. Everything else on this thread belongs to
+            // the in-process relay and the WebSocket stack, which log whole
+            // frames at trace — including the relay's own refusal prose. What
+            // this app promises about its diagnostics is what THIS crate
+            // writes.
+            if !record.target().starts_with("haven_core") {
+                return;
+            }
+            CAPTURED.with_borrow_mut(|captured| {
+                if let Some(lines) = captured.as_mut() {
+                    lines.push(record.args().to_string());
+                }
+            });
+        }
+
+        fn flush(&self) {}
+    }
+
+    /// Runs `body` with capture armed on this thread and returns what it
+    /// logged.
+    async fn capture_log_lines(body: impl std::future::Future<Output = ()>) -> Vec<String> {
+        static INSTALL: std::sync::Once = std::sync::Once::new();
+        /// Whether OUR logger won the process-wide slot. `log` allows exactly
+        /// one logger per process and reports the loser only as an `Err` from
+        /// `set_boxed_logger` — a value a `let _ =` throws away. Any future
+        /// helper that installs its own logger would therefore make this one
+        /// capture NOTHING, and the anti-vacuity assertions below would be the
+        /// only thing standing between that and a silently green test. Record
+        /// the verdict and fail on it directly instead.
+        static OWNS_LOGGER: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
+        INSTALL.call_once(|| {
+            OWNS_LOGGER.store(
+                log::set_boxed_logger(Box::new(ThreadLocalCapture)).is_ok(),
+                std::sync::atomic::Ordering::SeqCst,
+            );
+            log::set_max_level(log::LevelFilter::Trace);
+        });
+        assert!(
+            OWNS_LOGGER.load(std::sync::atomic::Ordering::SeqCst),
+            "another logger already owns this process, so this capture sees \
+             nothing at all. `log` permits exactly one; whoever installed the \
+             other one has to route through ThreadLocalCapture instead.",
+        );
+
+        CAPTURED.with_borrow_mut(|captured| *captured = Some(Vec::new()));
+        body.await;
+        CAPTURED
+            .with_borrow_mut(Option::take)
+            .expect("capture was armed above")
+    }
+
+    /// The location publish names no relay in its own log lines: the relay set
+    /// a device publishes to is linkable metadata, and a relay's refusal text
+    /// is remote prose (Rule 8).
+    ///
+    /// The connect helper's per-URL debug lines are shared by every publish
+    /// path and predate this packet, so they are exempted BY PREFIX — which
+    /// means a NEW url-bearing line, or a rename of one of theirs, fails here
+    /// rather than being silently swallowed by the exemption.
+    #[tokio::test]
+    async fn publish_location_event_logs_counts_only() {
+        /// The pre-existing per-URL debug lines of
+        /// [`RelayManager::add_relays_and_connect`], shared by every publish
+        /// path and unchanged by the location one.
+        const CONNECT_PHASE_PREFIXES: &[&str] = &[
+            "[RelayManager] add_relay(",
+            "[RelayManager] connected to ",
+            "[RelayManager] failed to connect to ",
+        ];
+
+        let _ = allow_ws_loopback_for_test();
+        // Every bucket of the fold is non-empty, so a summary that printed any
+        // of them instead of counting them leaks a url here: one relay refuses
+        // (with prose it chose), one accepts, and nothing listens on the third
+        // port at all.
+        let (_refuser, refused_url, _seen) =
+            refusing_relay("blocked because wss://leak.example said so").await;
+        let accepting = LocalRelay::new(RelayBuilder::default());
+        accepting.run().await.expect("local relay runs");
+        let relays = vec![
+            refused_url,
+            accepting.url().await.to_string(),
+            format!("ws://127.0.0.1:{}", ephemeral_port().await),
+        ];
+
+        let manager = RelayManager::new();
+        let lines = capture_log_lines(async {
+            manager
+                .publish_location_event(&throwaway_note("who is listening"), &relays)
+                .await
+                .expect("one relay accepted");
+        })
+        .await;
+
+        let is_connect_phase =
+            |line: &String| CONNECT_PHASE_PREFIXES.iter().any(|p| line.starts_with(p));
+
+        assert!(
+            lines.iter().any(is_connect_phase),
+            "nothing was captured, so this test proves nothing: {lines:?}",
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("[RelayManager] publish_location_event:")),
+            "the publish path has to have spoken for its silence to mean \
+             anything: {lines:?}",
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("[RelayManager] publish harvest:")),
+            "the fan-out's summary is the line most likely to grow a url, so \
+             it has to be present: {lines:?}",
+        );
+        for line in lines.iter().filter(|line| !is_connect_phase(line)) {
+            assert!(
+                !line.contains("ws://") && !line.contains("wss://"),
+                "a location publish must not name a relay: {line}",
+            );
+        }
     }
 }

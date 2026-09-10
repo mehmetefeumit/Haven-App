@@ -5,12 +5,13 @@ import android.app.Application
 import android.os.Bundle
 import android.util.Log
 import android.view.WindowManager
+import com.pravera.flutter_foreground_task.FlutterForegroundTaskPlugin
 import io.crates.keyring.Keyring
 
 /**
  * Process-wide setup that must run before any Activity, Service or worker: the
- * app-wide screenshot block, and the Android context the Rust `ndk_context`
- * crate needs.
+ * app-wide screenshot block, the [PublishWakeLock] task-lifecycle listener, and
+ * the Android context the Rust `ndk_context` crate needs.
  *
  * The Rust keyring backend
  * (`android_native_keyring_store::Store::from_ndk_context()`) reads this context
@@ -36,10 +37,22 @@ class HavenApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         registerActivityLifecycleCallbacks(SecureWindowCallbacks)
+        // The foreground-service task engine is created without an Activity
+        // (boot restart, headless wake), and its `onEngineCreate` is the only
+        // hook that hands that engine over before the Dart entrypoint runs. A
+        // listener registered from MainActivity would therefore miss exactly
+        // the process starts background sharing depends on.
+        PublishWakeLock.attach(applicationContext)
+        FlutterForegroundTaskPlugin.addTaskLifecycleListener(PublishWakeLock)
         try {
             Keyring.initializeNdkContext(applicationContext)
         } catch (t: Throwable) {
-            Log.e(TAG, "onCreate: Keyring.initializeNdkContext failed", t)
+            // Class name only, the Kotlin twin of the repo's Dart
+            // `${e.runtimeType}` convention (Security Rule 8): android.util.Log
+            // is NOT stripped from release builds, so passing `t` here would
+            // print a keyring/JNI message and stack trace into every user's
+            // logcat. The class is what says which failure this was.
+            Log.e(TAG, "onCreate: Keyring.initializeNdkContext failed: ${t::class.java.simpleName}")
         }
     }
 

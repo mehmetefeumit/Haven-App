@@ -3,12 +3,29 @@
 #
 # Proves that Haven actually publishes location from the Android foreground
 # service while the UI is hidden AND the foreground MLS session is still live —
-# the one configuration in which P0-1 says publishing is dead:
+# the one configuration in which P0-1 says publishing is dead — and that it does
+# so the way POWER_EFFICIENCY_PLAN.md phase P2a says it does. What the
+# orchestrator asserts, in order (its own header carries the full reasoning):
 #
-#   1. the FGS isolate boots at all              (onStart marker present)
-#   2. it opened the MLS database                (onStart FAILED absent — Rule 14)
-#   3. it published to >= 1 circle               (count PARSED, not grepped)
-#   4. the hermetic relay saw the traffic        (network-layer corroboration)
+#   1. the drive delivered a REAL pause and the handoff COMPLETED
+#   2. the FGS isolate acquired an MLS session (Rule 14) — a POSITIVE marker,
+#      not the absence of a failure one
+#   3. it published to >= 1 circle              (count PARSED, not grepped)
+#   4. the publish came from the SAME OS process as the foreground that handed
+#      off — without which a START_STICKY restart passes 2 and 3 proving nothing
+#   5. `dumpsys location`: ONE long-interval platform request, no 1 m filter,
+#      no `minUpdateInterval=`, no unattributed one-shot
+#   6. `dumpsys power`: the scoped `Haven:publish` lock stays inside its own
+#      ceiling; the plugin's permanent lock (P2a keeps it) is held throughout
+#   7. the cadence is delivery-driven and spaced by the registered interval
+#   8. publishing survives the no-fix chain under `dumpsys deviceidle force-idle`
+#
+# There is deliberately NO relay-side corroboration step. An earlier revision
+# compared strfry's log line count before and after; it could not fail (the
+# FGS's own connect plus strfry's expiry cron guarantee new lines) and it added
+# nothing (`Published to N` is reached only after `publish_with_retry` returns,
+# which happens only on a relay OK-ack — Security Rule 13). A gate that cannot
+# fail was removed rather than kept as decoration.
 #
 # # Why a SEPARATE workflow (not a new e2e-integration.yml target)
 #
@@ -16,7 +33,11 @@
 # between targets. `am force-stop` kills the foreground service and releases the
 # foreground MLS session — destroying the exact contention this lane exists to
 # observe. This lane instead keeps the app alive after the drive
-# (`--keep-app-running`) and backgrounds it with HOME, never `am kill`.
+# (`--keep-app-running`) and never `am kill`s it. The backgrounding is delivered
+# from INSIDE the drive (a real `AppLifecycleState.paused` while the tree is
+# still mounted), not by a HOME keypress afterwards: `flutter_test` unmounts the
+# widget tree on a passing test, so by the time the drive exits there is no
+# lifecycle observer left to receive one.
 #
 # # Why this is not covered by e2e-background-catchup.yml
 #
@@ -41,10 +62,11 @@ jobs:
     name: e2e_fgs_publish
     runs-on: ubuntu-latest
     # One APK build (<=30m) + boot + a drive that internally holds ~200s of
-    # background publish cycles (<=18m of drive timeout). The step-level
-    # timeout-minutes below bound a hung phase so GitHub kills the STEP rather
-    # than the runner, letting the if: always() artifact upload still run; this
-    # job-level cap is the outer envelope over both.
+    # background publish cycles and then ~332s of forced-idle no-fix chain
+    # (<=20m of drive timeout). The step-level timeout-minutes below bound a
+    # hung phase so GitHub kills the STEP rather than the runner, letting the
+    # if: always() artifact upload still run; this job-level cap is the outer
+    # envelope over both (30 + 38 = 68).
     timeout-minutes: 70
     env:
       HAVEN_E2E_RELAY: ws://10.0.2.2:7777
@@ -162,20 +184,25 @@ jobs:
       # pressure) ALONGSIDE the resident app and its live foreground MLS session.
       # Both sessions are held simultaneously here by design, so the peak is at
       # least as high as that lane's.
-      # BOUNDS. Three of them, innermost first:
-      #   18m  the `flutter drive` (run-b1-fgs-publish.sh's B1_DRIVE_TIMEOUT).
-      #   25m  this step's inner deadline (run-with-deadline.sh below) — covers
+      # BOUNDS. Four of them, innermost first:
+      #   14m  the drive target's own `Timeout` — the only one that fails with
+      #        an attributable, test-level message.
+      #   20m  the `flutter drive` (run-b1-fgs-publish.sh's B1_DRIVE_TIMEOUT),
+      #        covering install + VM-service connect on top of the test body.
+      #   28m  this step's inner deadline (run-with-deadline.sh below) — covers
       #        the drive PLUS install/grants/GPS-seed/assertions, none of which
       #        the per-drive timeout bounds, and is the bound that actually
       #        reaps (CI_HARDENING_BACKLOG.md A8).
-      #   35m  this step's timeout-minutes = 25 + 1 (kill grace) + 7
+      #   38m  this step's timeout-minutes = 28 + 1 (kill grace) + 7
       #        (emulator-boot-timeout) + margin, a belt over the deadline.
       # Sizing evidence: this lane is new (2026-08-02) and has no green run
-      # yet, so the number comes from the FAILED runs, where the step ran 5.2-
-      # 12.1 min (14 runs). 25m is ~2x the observed max and 1.4x the inner
-      # drive bound; revise it against p95 once this lane has green history.
+      # yet, so the base number came from the FAILED runs, where the step ran
+      # 5.2-12.1 min (14 runs) — none of which reached the forced-idle phase.
+      # That phase adds 332 s (5.5 min) of hold, so a full green run should sit
+      # near 17-18 min and 28m is ~1.6x that. Revise against p95 once this lane
+      # has green history.
       - name: Run the FGS publish proof on the emulator
-        timeout-minutes: 35
+        timeout-minutes: 38
         uses: reactivecircus/android-emulator-runner@v2
         env:
           STRFRY_IMAGE: ${{ vars.STRFRY_IMAGE || 'dockurr/strfry@sha256:545555da5dd2c2b502f2c0d159f4dc4996d0e488e3bf25905ce881722d63d2c5' }}
@@ -192,7 +219,7 @@ jobs:
           # Bound the boot (which happens BEFORE `script:` runs, and is
           # therefore outside the deadline below).
           emulator-boot-timeout: 420
-          script: bash tooling/e2e/ci/run-with-deadline.sh 25m "e2e-fgs-publish drive" -- bash tooling/e2e/ci/run-b1-fgs-publish.sh /tmp/integration-apks/b1_fgs_live_foreground_test.apk integration_test/b1_fgs_live_foreground_test.dart
+          script: bash tooling/e2e/ci/run-with-deadline.sh 28m "e2e-fgs-publish drive" -- bash tooling/e2e/ci/run-b1-fgs-publish.sh /tmp/integration-apks/b1_fgs_live_foreground_test.apk integration_test/b1_fgs_live_foreground_test.dart
 
       - name: Capture host + emulator diagnostics
         if: failure()

@@ -11,6 +11,7 @@ library;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/providers/location_disclosure_provider.dart';
 import 'package:haven/src/test_keys.dart';
@@ -28,6 +29,11 @@ void main() {
   }) {
     return ProviderScope(
       child: MaterialApp(
+        // The disclosure dialog reads its copy through AppLocalizations since
+        // the strings moved out of hard-coded Dart, so the harness must supply
+        // the delegates the app supplies.
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
         home: Scaffold(
           body: Consumer(
             builder: (context, ref, _) => ElevatedButton(
@@ -256,6 +262,8 @@ void main() {
           UncontrolledProviderScope(
             container: container,
             child: MaterialApp(
+              localizationsDelegates: AppLocalizations.localizationsDelegates,
+              supportedLocales: AppLocalizations.supportedLocales,
               home: Scaffold(
                 body: Consumer(
                   builder: (context, ref, _) => ElevatedButton(

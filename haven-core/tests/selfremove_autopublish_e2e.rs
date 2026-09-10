@@ -13,8 +13,10 @@
 //! live-sync consumer ([`haven_core::relay::live_sync::EngineProcessor`]):
 //!
 //! - the auto-commit is PUBLISHED and confirmed ONLY after a ≥1-relay OK-ack;
-//! - a no-ack publish ROLLS BACK (never an optimistic confirm), keeping the
-//!   leaver in the roster at the prior epoch;
+//! - a no-ack publish neither confirms nor discards: the commit stays staged and
+//!   the publish stays OWED, because discarding a peer's eviction is a permanent
+//!   silent drop of the removal at the pinned MDK rev (OD4-c — the behavioural
+//!   proofs of the obligation itself are in `od4c_removal_deferral_e2e`);
 //! - a THIRD remaining member, receiving the published auto-commit, converges on
 //!   the post-eviction roster — the invariant the gap broke.
 
@@ -27,7 +29,7 @@ use haven_core::circle::{CircleConfig, CircleManager, MemberKeyPackage};
 use haven_core::location::LocationMessage;
 use haven_core::nostr::mls::types::{GroupId, PendingStateRef, PublishWork, TransportMessage};
 use haven_core::relay::auto_commit::{
-    resolve_receive_publish_work, rollback_receive_publish_work, AutoCommitPublisher,
+    park_or_rollback_receive_publish_work, resolve_receive_publish_work, AutoCommitPublisher,
 };
 use haven_core::relay::maintenance::build_kp_maintenance_events;
 use nostr::{Event, Keys};
@@ -328,10 +330,18 @@ async fn auto_commit_is_published_then_confirmed_and_a_third_member_converges() 
 }
 
 /// Rule 13 fail path: when NO relay acks the publish, the staged auto-commit is
-/// ROLLED BACK (never optimistically confirmed) — the leaver stays in the roster
-/// at the prior epoch, so the group never applies a commit no peer received.
+/// neither confirmed NOR discarded — the publish stays OWED and the next pass
+/// lands it.
+///
+/// Rolling it back is the disposition this replaces, and it was never the safe
+/// choice: at MDK `e391adc` `do_publish_failed` drops the eviction for good (the
+/// engine's in-memory `SelfRemove` auto-commit schedule is cleared before
+/// staging, is not re-armed, and a redelivered proposal short-circuits to
+/// `Buffered`), so the leaver would stay in the circle deriving its keys while
+/// the circle could not send either. Staying owed keeps both the removal and the
+/// only route to it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn auto_commit_rolls_back_when_no_relay_acks() {
+async fn auto_commit_stays_owed_when_no_relay_acks() {
     let fx = build_three_member_circle(vec!["wss://group.example.com".to_string()]).await;
     let bob_hex = fx.bob_keys.public_key().to_hex();
     let epoch_before = epoch(&fx.alice, &fx.mls_group_id).await;
@@ -356,15 +366,37 @@ async fn auto_commit_rolls_back_when_no_relay_acks() {
         1,
         "a publish IS attempted (never a bare confirm)"
     );
+    assert_eq!(
+        fx.alice.owed_removal_commits(),
+        vec![fx.nostr_group_id],
+        "the obligation is recorded DURABLY, and by the plane that published — \
+         so a process killed between SEND and OK is detectable at the next \
+         foreground open instead of invisible"
+    );
     assert!(
-        roster(&fx.alice, &fx.mls_group_id).await.contains(&bob_hex),
-        "with no relay ack the eviction must roll back — Bob stays in the roster \
-         (Rule 13: never apply an unpublished commit)"
+        !roster(&fx.alice, &fx.mls_group_id).await.contains(&bob_hex),
+        "the eviction is NOT discarded: a rollback would put Bob back in the \
+         roster and no later ingest re-derives the commit"
     );
     assert_eq!(
         epoch(&fx.alice, &fx.mls_group_id).await,
-        epoch_before,
-        "a rolled-back auto-commit leaves the epoch unchanged"
+        epoch_before + 1,
+        "the projected epoch of a commit that is still staged — the no-ack \
+         changes what is published, not what the engine staged"
+    );
+
+    // The next pass with a relay that acks lands it, which is what makes "owed"
+    // mean something: the same live ref resolves.
+    let acking = FakePublisher::new(true);
+    resolve_receive_publish_work(&fx.alice, &acking, &work).await;
+    assert!(
+        !roster(&fx.alice, &fx.mls_group_id).await.contains(&bob_hex),
+        "Bob is evicted for real once a relay acks"
+    );
+    assert!(
+        fx.alice.owed_removal_commits().is_empty(),
+        "and a confirmed publish discharges the obligation — otherwise every \
+         peer-leave would leave a row behind and report a healthy circle wedged"
     );
 }
 
@@ -579,11 +611,16 @@ async fn relay_manager_publisher_acks_only_on_a_real_relay_ok() {
     );
 }
 
-/// A receive path with no relay plane wired rolls the staged commit back rather
-/// than applying it: the leaver stays in the roster at the prior epoch, and the
-/// eviction re-derives when a relay-backed path next sees the proposal.
+/// A receive path with no relay plane wired applies nothing — and PARKS the
+/// eviction instead of discarding it, while every other staged shape in the batch
+/// is still rolled back.
+///
+/// The two need opposite treatment. A `GroupCreated` / `GroupEvolution` is a
+/// commit this device authored and can re-author, so rolling it back costs a
+/// retry. A peer's eviction cannot be re-derived at all once discarded, so the
+/// only disposition that keeps the removal is to leave it staged and owed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn rollback_receive_publish_work_never_applies_a_staged_commit() {
+async fn a_receive_path_with_no_publisher_parks_the_eviction_and_rolls_back_the_rest() {
     let ArmedAutoCommit {
         fx,
         msg,
@@ -598,7 +635,7 @@ async fn rollback_receive_publish_work_never_applies_a_staged_commit() {
     // so the ordering here (unknown refs AFTER the real one) is not the
     // interesting case; the un-ordered coverage of every arm is.
     let unknown = PendingStateRef::new(u64::MAX);
-    rollback_receive_publish_work(
+    park_or_rollback_receive_publish_work(
         &fx.alice,
         &[
             PublishWork::AutoPublish {
@@ -621,15 +658,36 @@ async fn rollback_receive_publish_work_never_applies_a_staged_commit() {
     )
     .await;
 
+    assert_eq!(
+        fx.alice.owed_removal_commits(),
+        vec![fx.nostr_group_id],
+        "the eviction is PARKED as a durable obligation, so a plane with no relay \
+         handle records the wedge it leaves instead of hiding it"
+    );
     assert!(
-        roster(&fx.alice, &fx.mls_group_id).await.contains(&bob_hex),
-        "a rolled-back eviction must leave the leaver in the roster — applying it \
-         with no relay plane to publish through would fork the group"
+        !roster(&fx.alice, &fx.mls_group_id).await.contains(&bob_hex),
+        "and it is not discarded: a rollback would put the leaver back in the \
+         roster with no path left to evict them"
     );
     assert_eq!(
         epoch(&fx.alice, &fx.mls_group_id).await,
-        epoch_before,
-        "a rolled-back auto-commit leaves the epoch unchanged"
+        epoch_before + 1,
+        "the staged commit's projected epoch — nothing was applied and nothing \
+         was reverted"
+    );
+    assert!(
+        fx.alice
+            .encrypt_location(
+                &fx.mls_group_id,
+                &fx.alice_keys.public_key(),
+                &LocationMessage::new(1.0, 2.0),
+                300,
+            )
+            .await
+            .is_err(),
+        "the circle cannot send while the eviction is owed — the engine refuses \
+         from `PendingPublish`, which is what distinguishes a parked commit from \
+         a merged one (every projected read already shows the post-merge roster)"
     );
 }
 
@@ -691,7 +749,9 @@ async fn send_side_work_on_the_receive_path_is_rolled_back_never_confirmed() {
 /// "Still live" needs an observation, not an absence. A staged commit already
 /// reads as applied (see [`ArmedAutoCommit`]), so it is indistinguishable from a
 /// confirmed one; what only a LIVE ref can still do is roll back. The skip is
-/// therefore followed by a rollback, and the state reverting is the proof.
+/// therefore followed by the ENGINE's own rollback — `SessionManager` directly,
+/// below Haven's planes, because no Haven plane may roll a removal-bearing commit
+/// back any more — and the state reverting is the proof.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn work_without_a_pending_ref_is_skipped_and_disturbs_nothing() {
     let ArmedAutoCommit {
@@ -724,8 +784,14 @@ async fn work_without_a_pending_ref_is_skipped_and_disturbs_nothing() {
     );
 
     // Only a ref the engine still holds can be rolled back, so the revert below
-    // is what proves the skip consumed nothing.
-    rollback_receive_publish_work(&fx.alice, &[PublishWork::AutoPublish { msg, pending }]).await;
+    // is what proves the skip consumed nothing. Deliberately the raw engine call:
+    // Haven's own planes now keep such a commit owed, which would prove nothing
+    // about whether the ref was still live.
+    fx.alice
+        .session()
+        .publish_failed(pending)
+        .await
+        .expect("the skipped ref must still be resolvable");
     assert!(
         roster(&fx.alice, &fx.mls_group_id).await.contains(&bob_hex),
         "the staged commit must still have been rollable — proof the skip left \

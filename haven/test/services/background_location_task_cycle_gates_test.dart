@@ -134,6 +134,15 @@ void main() {
               'publishing to one MLS group is a fork, not a duplicate',
         );
         expect(harness.manager.encryptCalls, isEmpty);
+        expect(
+          harness.location.streamListeners,
+          0,
+          reason: 'a platform location request is collection for as long as '
+              'it lives, so deferring must mean registering nothing either — '
+              'otherwise the restarted service holds a second registration '
+              'beside the live UI isolate on exactly the cold start this '
+              'branch exists for',
+        );
       },
     );
 
@@ -167,6 +176,13 @@ void main() {
           reason: 'an emptied schedule is what makes every circle due-now on '
               'the NEXT handoff, bounding the gap across it to one background '
               'cycle instead of a full jittered interval',
+        );
+        expect(
+          harness.location.streamListeners,
+          0,
+          reason: 'the registration goes back with the schedule: the UI '
+              'isolate re-takes its own 1 m / 1 s stream on resume, and two '
+              'live requests coalesce at the provider to the tighter one',
         );
         expect(
           harness.manager.encryptCalls,
@@ -203,6 +219,67 @@ void main() {
         expect(harness.relay.published, hasLength(1));
       },
     );
+  });
+
+  group('current background-sharing consent', () {
+    test('with the toggle off the cycle registers nothing and collects '
+        'nothing', () async {
+      // The disclosure flags below are STICKY: they record that the dialogs
+      // were accepted and are never cleared on opt-out, so they cannot stand
+      // in for CURRENT consent. And the teardown that follows the toggle is
+      // best-effort (`stop()` is unawaited on every path that flips it), so a
+      // service that outlives it keeps cycling — which now means a standing
+      // platform request producing coordinates for a user who said stop.
+      seedPrefs(<String, Object?>{kBackgroundSharingKey: false});
+      final harness = await BackgroundTaskHarness.start(
+        circles: [circleFixture(seed: 1)],
+      );
+
+      await harness.tick(DateTime.now());
+
+      expect(
+        harness.location.capturedProfiles,
+        isEmpty,
+        reason: 'a platform location request outlives the cycle that armed '
+            'it, so arming one is the collection this gate has to precede',
+      );
+      expect(harness.location.fixRequests, 0);
+      expect(harness.manager.encryptCalls, isEmpty);
+      expect(harness.relay.published, isEmpty);
+    });
+
+    test('an opt-out releases the standing registration on the next cycle',
+        () async {
+      // The field shape of the finding: the service is already registered when
+      // consent is withdrawn, and the platform keeps delivering into it.
+      final harness = await BackgroundTaskHarness.start(
+        circles: [circleFixture(seed: 1)],
+      );
+      harness.location.historicalFix = freshFix();
+      await harness.tick(DateTime.now());
+      expect(harness.location.streamListeners, 1);
+
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(kBackgroundSharingKey, false);
+
+      // A delivery, not a tick: the request the user opted out of is exactly
+      // what keeps waking this isolate, so it is the input that must end it.
+      await harness.deliverFix(freshFix());
+
+      expect(
+        harness.location.streamListeners,
+        0,
+        reason: 'the request must be released, not merely left unpublished — '
+            'a GNSS receiver running for a user who opted out is the cost the '
+            'toggle exists to remove',
+      );
+      expect(
+        harness.manager.encryptCalls,
+        hasLength(1),
+        reason: 'nothing was published after the opt-out',
+      );
+      expect(harness.handler.dueTrackerForTest.nextDueForTest, isEmpty);
+    });
   });
 
   group('Play disclosure before collection', () {
@@ -262,6 +339,40 @@ void main() {
         );
       });
     }
+
+    test('a disclosure withdrawn under a live registration releases it',
+        () async {
+      // The disclosure flags are re-read from disk every cycle precisely so a
+      // withdrawal takes effect on the next one. Refusing to PUBLISH is only
+      // half of that: the registration already issued is the platform
+      // producing this device's coordinates for Haven, which is the thing the
+      // disclosure covers — and the watchdog re-enters the cycle every 72 s
+      // and reaches the same refusal, so "left running" means "left running
+      // for the rest of the session".
+      final harness = await BackgroundTaskHarness.start(
+        circles: [circleFixture(seed: 1)],
+      );
+      harness.location.historicalFix = freshFix();
+      await harness.tick(DateTime.now());
+      expect(harness.location.streamListeners, 1);
+
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(kLocationDisclosureBackgroundAcceptedKey, false);
+
+      await harness.deliverFix(freshFix());
+
+      expect(
+        harness.location.streamListeners,
+        0,
+        reason: 'collection, not just publication, is what the disclosure '
+            'gates',
+      );
+      expect(
+        harness.manager.encryptCalls,
+        hasLength(1),
+        reason: 'and nothing was published after the withdrawal',
+      );
+    });
 
     test('both disclosures accepted is what unblocks publishing', () async {
       // The complement: without this the refusals above would also pass on a
@@ -374,6 +485,15 @@ void main() {
       );
 
       await harness.tick(DateTime.now());
+      // Due again, stated rather than borrowed from a zero-second fake
+      // interval: a burst re-arms its circles on `nextBurstDue`, which never
+      // re-arms one sooner than `kLocationPublishMinInterval` after its own
+      // publish, so a second tick a millisecond later has nothing to publish
+      // for reasons that have nothing to do with the single-flight guard.
+      harness.handler.dueTrackerForTest.markBurstPublished(
+        [scheduleKeyOf(circleFixture(seed: 1))],
+        DateTime.now(),
+      );
       await harness.tick(DateTime.now());
 
       expect(

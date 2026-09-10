@@ -27,10 +27,10 @@
 //!   endpoints that went quiet, never the whole session.
 //!
 //! The inbox plane is deliberately exempt from the silence arm. A silent inbox
-//! is the NORMAL state — invitations are rare — and its REQ carries a seven-day
+//! is the NORMAL state — invitations are rare — and its REQ carries a 49-hour
 //! gift-wrap lookback, so treating that silence as a reason to act would have
-//! this device ask its relays to replay a week of wraps keyed on its own `#p` on
-//! every tick, forever: battery, relay load, and a standing re-advertisement of
+//! this device ask its relays to replay two days of wraps keyed on its own `#p`
+//! on every tick, forever: battery, relay load, and a standing re-advertisement of
 //! the one query that links this npub to itself. The inbox failure that does
 //! matter — a relay ending the REQ — is caught by the presence arm and repaired
 //! in seconds by [`super::repair`].
@@ -50,6 +50,12 @@
 //! | `Initialized` / `Pending` / `Connecting`  | still-connecting  | no (transient) |
 //! | `Disconnected` / `Terminated` / `Banned`  | dropped           | **yes**      |
 //! | `Sleeping`                                | (neither)         | no (idle)    |
+//!
+//! While the session is PAUSED between background bursts, none of the three
+//! buckets is even sampled: the tick answers [`HealthAction::Paused`] before it
+//! probes. A paused pool is `Terminated` by construction, which the table above
+//! reads as "dropped → resubscribe", so probing would re-open in the background
+//! the standing REQs the pause exists to close.
 //!
 //! Only a **dropped** relay warrants a re-anchor. Relays that are merely
 //! mid-setup (`Initialized` / `Pending` / `Connecting`) are counted in a
@@ -96,6 +102,21 @@ pub enum HealthAction {
     /// circles are simply idle — reporting it as a full re-anchor would make a
     /// normal quiet device look like it was repeatedly losing its relays.
     TargetedReanchor,
+    /// The session is PAUSED between background bursts: it holds no standing REQ
+    /// and no socket, so there is nothing for this tick to heal.
+    ///
+    /// The single most important gate in the burst design, and it is read
+    /// TWICE: once before the connectivity probe, and once under the lifecycle
+    /// lock the remedy runs in. A paused engine's relays are all `Terminated`,
+    /// which [`health_needs_resubscribe`] reads as "dropped" — so a tick that
+    /// reached the probe would re-anchor and silently re-open standing REQs in
+    /// the background, undoing the whole pause. The first read cannot stop a
+    /// tick that was already inside the probe when the pause began; the second
+    /// can, and shares its acquisition with the remedy so nothing slips between
+    /// them. Nothing is given up: the next burst re-subscribes every REQ at its
+    /// persisted cursor by construction, which is exactly what the healer would
+    /// have done.
+    Paused,
 }
 
 /// Presence-only snapshot of the engine pool's relay connectivity AND of
@@ -332,6 +353,27 @@ impl SubscriptionHealthOutcome {
             subscriptions_silent: 0,
         }
     }
+
+    /// The no-op returned while the session is paused between background bursts.
+    ///
+    /// Every counter is zero because a paused pool has no honest reading to
+    /// report: its relays are all `Terminated` by design, and publishing that
+    /// would be a relay-outage-shaped snapshot of a deliberate pause. The tick
+    /// that short-circuits before `health_probe` never took one; the one that
+    /// finds the pause under the lifecycle lock DISCARDS the snapshot it took,
+    /// for the same reason.
+    #[must_use]
+    pub const fn paused() -> Self {
+        Self {
+            action: HealthAction::Paused,
+            relays_total: 0,
+            relays_still_connecting: 0,
+            relays_disconnected: 0,
+            subscriptions_expected: 0,
+            subscriptions_live: 0,
+            subscriptions_silent: 0,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -466,7 +508,7 @@ mod tests {
         );
         assert!(
             !health_needs_resubscribe(s),
-            "silence must not escalate to a whole-session re-anchor: every socket is up and every REQ is registered, so replaying every REQ (the inbox's seven-day gift-wrap lookback included) is pure cost on a signal indistinguishable from a circle where nobody is sharing"
+            "silence must not escalate to a whole-session re-anchor: every socket is up and every REQ is registered, so replaying every REQ (the inbox's 49-hour gift-wrap lookback included) is pure cost on a signal indistinguishable from a circle where nobody is sharing"
         );
     }
 

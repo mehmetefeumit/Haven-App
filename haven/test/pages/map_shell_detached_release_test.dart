@@ -60,12 +60,19 @@ void main() {
     );
   });
 
-  test('the release stops the live-sync engine', () {
+  test('the release stops the live-sync engine, through the shared path', () {
+    // Stopping the engine is what releases its Arc on the circle manager, its
+    // supervisor tasks, and the process-global session slot.
+    //
+    // Through `_stopLiveSyncBounded` and never a `stop()` of its own: a second
+    // stop path that swallows its outcome reads a timed-out teardown as a
+    // release, which orphans the Rule-14 guard — a database no isolate can
+    // open until a Force Stop.
+    expect(detachedBody.contains('_stopLiveSyncBounded()'), isTrue);
     expect(
       detachedBody.contains('liveSync.stop()'),
-      isTrue,
-      reason: 'stopping the engine is what releases its Arc on the circle '
-          'manager, its supervisor tasks, and the process-global session slot',
+      isFalse,
+      reason: 'one bounded implementation, one classification of a timeout',
     );
   });
 
@@ -74,7 +81,7 @@ void main() {
     // is tearing it down — leaving a FRESH session orphaned instead of
     // releasing the old one, which is strictly worse than doing nothing.
     final cancel = detachedBody.indexOf('_liveSyncHealTimer?.cancel()');
-    final stop = detachedBody.indexOf('liveSync.stop()');
+    final stop = detachedBody.indexOf('_stopLiveSyncBounded()');
     expect(cancel, isNonNegative);
     expect(stop, isNonNegative);
     expect(
@@ -102,11 +109,13 @@ void main() {
 
   test('it never throws out of the lifecycle callback', () {
     // Runs on a best-effort teardown path with no one to handle a failure, and
-    // the framework dispatches it without awaiting.
-    expect(detachedBody.contains('on Object catch'), isTrue);
-    // Anchored on the STATEMENT, not the word: the body's own comment says
-    // "never rethrow", and a bare substring match would read that as a
-    // violation. Source scans have to match syntax, not prose.
+    // the framework dispatches it without awaiting. The catch itself lives in
+    // the shared `_stopLiveSyncBounded` (pinned in
+    // `map_shell_location_access_lifecycle_test.dart`); what this body must
+    // not do is add a rethrow of its own.
+    //
+    // Anchored on the STATEMENT, not the word: a bare substring match would
+    // read the prose above as a violation. Source scans have to match syntax.
     expect(
       RegExp(r'\brethrow\s*;').hasMatch(detachedBody),
       isFalse,
@@ -121,7 +130,6 @@ void main() {
       isFalse,
       reason: 'log the type, never the message',
     );
-    expect(detachedBody.contains(r'${e.runtimeType}'), isTrue);
   });
 
   test('a resume after detached can restart the engine', () {
@@ -157,7 +165,7 @@ void main() {
         src.indexOf('\n  /// Takes the MLS session back', at),
       );
 
-      final stop = body.indexOf('liveSync.stop()');
+      final stop = body.indexOf('_stopLiveSyncBounded()');
       final release = body.indexOf('releaseForHandoff()');
       expect(stop, isNonNegative);
       expect(release, isNonNegative);

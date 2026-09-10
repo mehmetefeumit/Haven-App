@@ -114,7 +114,16 @@ class MockRelayService implements RelayService {
   /// relay list was used rather than a stale caller-held snapshot).
   final List<List<String>> publishEventRelayCalls = [];
 
-  /// When `true`, [publishEvent] reports that NO relay accepted the event
+  /// The same, for [publishLocationEvent].
+  ///
+  /// Kept apart from [publishEventRelayCalls] because nothing in the types
+  /// keeps the two ladders apart: both take an event JSON and a relay list,
+  /// so which one a send path took is only observable in which method it
+  /// called. A commit on the one-shot ladder would be neither confirmed nor
+  /// rolled back after a single missed ack (Security Rule 13).
+  final List<List<String>> publishLocationRelayCalls = [];
+
+  /// When `true`, either publish reports that NO relay accepted the event
   /// (every relay rejects) — simulates a publish failure so a caller's
   /// rollback (publish-before-apply, Rule 13) path can be exercised.
   /// Defaults to `false` (every relay acks).
@@ -127,7 +136,7 @@ class MockRelayService implements RelayService {
   /// time") to exercise the device-clock classification path.
   String publishRejectionReason = 'mock rejection';
 
-  /// When set, [publishEvent] throws this instead of returning a result —
+  /// When set, either publish throws this instead of returning a result —
   /// simulating the FFI raising `RelayError::DeviceClockRejected`, which is
   /// the shape a fully-rejected publish actually takes in production (Rust
   /// returns `Err`, so no `PublishResult` reaches Dart at all).
@@ -150,8 +159,25 @@ class MockRelayService implements RelayService {
     required List<String> relays,
   }) async {
     methodCalls.add('publishEvent');
-    publishedEvents.add(eventJson);
     publishEventRelayCalls.add(List.of(relays));
+    return _publish(eventJson, relays);
+  }
+
+  @override
+  Future<PublishResult> publishLocationEvent({
+    required String eventJson,
+    required List<String> relays,
+  }) async {
+    methodCalls.add('publishLocationEvent');
+    publishLocationRelayCalls.add(List.of(relays));
+    return _publish(eventJson, relays);
+  }
+
+  /// The relay-side outcome, shared by both ladders: [shouldRejectPublish],
+  /// [publishRejectionReason] and [publishThrows] describe how the RELAYS
+  /// answer, which is independent of how many attempts the caller makes.
+  Future<PublishResult> _publish(String eventJson, List<String> relays) async {
+    publishedEvents.add(eventJson);
     final thrown = publishThrows;
     if (thrown != null) {
       throw thrown;

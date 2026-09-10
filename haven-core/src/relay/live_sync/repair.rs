@@ -243,6 +243,19 @@ fn jittered(base: Duration) -> Duration {
 pub struct RepairQueue {
     schedule: Mutex<RepairSchedule>,
     wake: Notify,
+    /// How many times the repair task has woken and evaluated this queue.
+    ///
+    /// The ONE thing that tells a PARKED repair task from a spinning one. This
+    /// schedule is a backoff (see the module docs), so while the session is
+    /// paused — when the gate defers every due entry without clearing its
+    /// `due_at` — the task must wake once per notification and park again. A
+    /// loop that re-polls an elapsed deadline instead burns a core for the whole
+    /// pause while passing every functional assertion: nothing is re-issued,
+    /// nothing is consumed, nothing is observable except battery.
+    ///
+    /// Counted unconditionally, so the loop a test observes is the loop that
+    /// ships; only the accessor is test-only.
+    wakeups: std::sync::atomic::AtomicU64,
 }
 
 impl std::fmt::Debug for RepairQueue {
@@ -297,6 +310,38 @@ impl RepairQueue {
     /// Parks until a `CLOSED` is recorded.
     pub(crate) async fn wake(&self) {
         self.wake.notified().await;
+    }
+
+    /// Drops every scheduled re-issue.
+    ///
+    /// Called when the session PAUSES. A background burst re-issues every REQ
+    /// under a fresh anchor generation by construction, so a repair that fired
+    /// after the burst opened would replace a live REQ and reset its generation
+    /// mid-burst — the anchor would then vouch for a window the burst's own REQ
+    /// never asked for. Dropping the queue costs only the `next_allowed_at`
+    /// throttle of a `rate-limited:` close, which today's `resume_after_background`
+    /// already ignores for the same reason.
+    ///
+    /// The schedule is derived state — every entry came from a `CLOSED` on a REQ
+    /// the next burst re-issues anyway — so clearing it can lose no delivery.
+    pub(crate) fn clear(&self) {
+        self.schedule
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entries
+            .clear();
+    }
+
+    /// Records one wake of the repair task (see [`Self::wakeups`]).
+    pub(crate) fn note_wakeup(&self) {
+        self.wakeups
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
+
+    /// How many times the repair task has woken (tests only).
+    #[cfg(test)]
+    pub(crate) fn wakeups(&self) -> u64 {
+        self.wakeups.load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Re-issues still pending (tests only).

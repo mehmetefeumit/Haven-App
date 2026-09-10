@@ -210,10 +210,24 @@ rust|src/relay/live_sync/|95                 # measured 97.24% (2921/3004)
 rust|src/relay/live_sync/session.rs|94       # measured 96.19% (1491/1550)
 rust|src/relay/publishers.rs|88              # measured 90.28% (260/288)
 rust|src/relay/maintenance/|96               # measured 98.46% (640/650)
-rust|src/relay/manager.rs|78                 # measured 80.14% (1122/1400)
+rust|src/relay/manager.rs|88                 # measured 90.52% (1777/1963)
 rust|src/relay/auto_commit.rs|100            # measured 100.00% (59/59)
 rust|src/relay/catchup.rs|96                 # measured 98.71% (996/1009); was 92 (94.61%) before the
                                              # fetch-window cursor anchor brought its own tests
+
+# cursor.rs decides what a REQ ASKS FOR — the `since` every subscription and
+# every re-anchor carries. Two promises live in it and neither has a partial
+# form. (1) A cursor never advances on an event's own `created_at`, so a forged
+# future timestamp cannot pin a plane's window past the local clock
+# (check_no_event_timestamp_cursor_advance.sh is the static half). (2) Since P1,
+# the inbox `since` is phase-dependent: 7 days on a cold `Initial` subscribe,
+# INBOX_RESUBSCRIBE_LOOKBACK_SECS = 49 h on every `Resubscribe` — which is every
+# re-anchor, every CLOSED repair and every health-tick re-issue. That bound is a
+# metadata property as much as a battery one: a device that re-anchors on every
+# glance was re-advertising a week-wide `#p` query keyed to its own npub. Pure
+# arithmetic with no I/O and no unreachable arms, so anything uncovered here is
+# a missing test; pinned exactly at 100 for the same reason tags.rs is.
+rust|src/relay/cursor.rs|100                 # measured 100.00% (174/174)
 
 # --- Encrypted tile cache ---------------------------------------------------
 # Must never persist the Stadia key (Security Rule 6/10); the static half is
@@ -266,6 +280,27 @@ flutter|lib/src/services/subscription_service.dart|100      # measured 100.00% (
 # prologue (RustLib init, keyring, data dir, identity load) and
 # `backgroundCallback`.
 flutter|lib/src/services/background_location_task.dart|80   # measured 82.95% (287/346)
+# NO ROW YET for lib/src/services/background_burst_coordinator.dart either,
+# for the same reason and with the same instruction. It is P4's whole receive
+# plane on iOS — one bounded burst per publish tick, and the file whose ORDER
+# properties (ingest before publish, settle before pause, teardown on every
+# exit including a throw) are the phase's promise — so it warrants a floor of
+# its own rather than dissolving into the services aggregate. Measured 98.25%
+# (112/114) on Flutter 3.41.0, which would pin at 96; recorded as an ORDER OF
+# MAGNITUDE, not as provenance, because this branch's aggregate rows already
+# read several points above their pins on the same local SDK. Add the row with
+# `--repin flutter <lcov>` from the next CI coverage artifact, in the same
+# sweep that discharges the P3 floor debt.
+# NO ROW YET for lib/src/services/background_deferred_send.dart, and that is a
+# pending item rather than a decision. It carries the Rule-13 commit ladder the
+# location plane may never take — the reason it is a separate file at all (the
+# gate `assert_no_dart_file_publishes_a_location_and_a_commit` is file-level) —
+# so it warrants its own floor. It cannot be pinned from a local run: floors are
+# ratios whose denominator is the Flutter SDK's instrumented-line count, and the
+# rows here were pinned on the SDK in coverage_toolchain.env. Measured 81.82%
+# (18/22) on Flutter 3.41.0, which would pin at 79 — recorded as an ORDER OF
+# MAGNITUDE, not as provenance. Add the row with `--repin flutter <lcov>` from
+# the next CI coverage artifact.
 flutter|lib/src/services/background_location_manager.dart|52 # measured 54.08% (53/98)
 flutter|lib/src/services/background_catchup_worker.dart|26  # measured 28.40% (23/81)
 

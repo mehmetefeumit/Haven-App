@@ -29,6 +29,7 @@ library;
 
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -192,20 +193,103 @@ class _SharingHealthBannerState extends ConsumerState<SharingHealthBanner> {
   /// Owned here, not in the model, because this is a presentation cadence: the
   /// timer only exists while the banner is mounted, i.e. while the map is on
   /// screen and no higher-precedence banner has taken the slot.
+  ///
+  /// Armed only while there is something to re-render AND somebody able to see
+  /// it — see [_armRerender]. Mounted is NOT the same as visible here: the
+  /// healthy banner is `SizedBox.shrink()` rather than an unmounted widget, and
+  /// a backgrounded app keeps this `State` alive, so an ungated 72 s tick costs
+  /// about eight wake-ups per ten minutes for a surface nobody is looking at.
   Timer? _rerender;
+
+  /// Whether the app is foreground-visible.
+  ///
+  /// The same signal the health model gates its own tick on, so the banner and
+  /// the verdict behind it stop and start together.
+  late final ValueListenable<bool> _foreground;
 
   @override
   void initState() {
     super.initState();
+    _foreground = ref.read(sharingHealthForegroundProvider)
+      ..addListener(_onForegroundChanged);
+  }
+
+  @override
+  void dispose() {
+    _foreground.removeListener(_onForegroundChanged);
+    _rerender?.cancel();
+    super.dispose();
+  }
+
+  /// Arms or cancels the re-render tick, idempotently.
+  ///
+  /// Called from `build` because [armed] depends on the copy `build` derives;
+  /// it touches no widget state, so it cannot schedule a frame of its own.
+  void _armRerender({required bool armed}) {
+    if (armed == (_rerender != null)) return;
+    if (!armed) {
+      _rerender?.cancel();
+      _rerender = null;
+      return;
+    }
     _rerender = Timer.periodic(kSharingHealthTick, (_) {
       if (mounted) setState(() {});
     });
   }
 
-  @override
-  void dispose() {
-    _rerender?.cancel();
-    super.dispose();
+  void _onForegroundChanged() {
+    if (!_foreground.value) {
+      // An armed tick is exactly the condition "a fault is drawn and the user
+      // is looking at it" — i.e. one they have already been told about. A
+      // fault that appears while they are AWAY brings a new live region with
+      // it, which the platform announces on its own.
+      _announceOnReturn = _rerender != null;
+      _rerender?.cancel();
+      _rerender = null;
+      return;
+    }
+    if (!mounted) return;
+    // Re-derive immediately rather than at the next tick: the first thing a
+    // returning user reads must not be the age that was true when they left.
+    // `build` re-arms from here.
+    setState(() {});
+    if (_announceOnReturn) {
+      _announceOnReturn = false;
+      _announcePersistingFault();
+    }
+  }
+
+  /// Whether a fault was already on screen when the app went away.
+  ///
+  /// Consumed by the next return: see [_onForegroundChanged].
+  bool _announceOnReturn = false;
+
+  /// Speaks the fault once, on return, when it is still there.
+  ///
+  /// A live region announces its APPEARANCE, and this one appeared before the
+  /// user left; it is still mounted, and its label no longer carries the age,
+  /// so nothing re-announces it. Without this, coming back to a pipeline that
+  /// is still broken is completely silent to a screen-reader user.
+  ///
+  /// Derived from the verdict as it is at this instant — the same one `build`
+  /// is about to draw. When the fault cleared while the app was away the model
+  /// has already published `healthy` (its own listener runs on the same
+  /// signal), so this finds no copy and the recovery announcement in `build` is
+  /// the only thing spoken.
+  void _announcePersistingFault() {
+    final copy = resolveSharingHealthCopy(
+      ref.read(sharingHealthProvider),
+      AppLocalizations.of(context),
+      ref.read(sharingHealthClockProvider)(),
+    );
+    if (copy == null) return;
+    unawaited(
+      SemanticsService.sendAnnouncement(
+        View.of(context),
+        '${copy.title}\n${copy.message}',
+        Directionality.of(context),
+      ),
+    );
   }
 
   Future<void> _repair() async {
@@ -359,6 +443,7 @@ class _SharingHealthBannerState extends ConsumerState<SharingHealthBanner> {
       l10n,
       ref.read(sharingHealthClockProvider)(),
     );
+    _armRerender(armed: copy != null && _foreground.value);
     if (copy == null) return const SizedBox.shrink();
 
     final colorScheme = Theme.of(context).colorScheme;
@@ -393,63 +478,75 @@ class _SharingHealthBannerState extends ConsumerState<SharingHealthBanner> {
             Flexible(
               child: SingleChildScrollView(
                 child: Semantics(
-                  // ONE node carrying the whole status, so a screen reader
-                  // speaks cause and age as a single sentence rather than two
+                  // ONE node carrying the CAUSE and its remedy, so a screen
+                  // reader speaks them as a single sentence rather than as
                   // orphaned fragments. `liveRegion` makes TalkBack/VoiceOver
                   // speak it the moment it appears without stealing focus
                   // (WCAG 2.1 SC 4.1.3 Status Messages).
                   container: true,
                   liveRegion: true,
-                  // The epoch outcome is part of the STATUS, not a decoration:
-                  // it is often the remedy. It has to be in this label, because
-                  // everything below is inside `ExcludeSemantics` and would
-                  // otherwise reach a screen reader only as one transient
-                  // announcement that cannot be re-read. Changing a
-                  // `liveRegion` label re-announces it, which is why `_repair`
-                  // deliberately does NOT also send one.
+                  // The age is deliberately NOT here. A `liveRegion`
+                  // re-announces on every label change, and the age changes on
+                  // every 72 s tick — so a fault that persisted for an hour was
+                  // spoken over the user fifty times with nothing new to say.
+                  // It lives in its own node below instead (WCAG 1.3.1: still
+                  // programmatically determinable, just not shouted), and a
+                  // resume with the fault still present gets ONE explicit
+                  // announcement (`_announcePersistingFault`).
+                  //
+                  // The epoch outcome, by contrast, IS part of the status: it
+                  // is often the remedy, it changes only when the user presses
+                  // Repair, and its visual copy is excluded below. Changing
+                  // this label re-announces it, which is why `_repair`
+                  // deliberately does not also send one.
+                  explicitChildNodes: true,
                   label: [
                     copy.title,
-                    copy.message,
                     if (epochMessage != null) epochMessage,
                   ].join('\n'),
-                  child: ExcludeSemantics(
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        // Decorative: the headline beside it carries the same
-                        // meaning, so an unlabelled icon avoids a duplicate
-                        // read.
-                        Icon(
-                          LucideIcons.radioTower,
-                          color: colorScheme.onErrorContainer,
-                        ),
-                        const SizedBox(width: HavenSpacing.md),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      // Decorative and unlabelled: the headline beside it
+                      // carries the same meaning, so it contributes no node.
+                      Icon(
+                        LucideIcons.radioTower,
+                        color: colorScheme.onErrorContainer,
+                      ),
+                      const SizedBox(width: HavenSpacing.md),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            ExcludeSemantics(
+                              child: Text(
                                 copy.title,
                                 style: textTheme.titleSmall?.copyWith(
                                   color: colorScheme.onErrorContainer,
                                 ),
                               ),
-                              const SizedBox(height: HavenSpacing.xs),
-                              Text(
-                                copy.message,
-                                style: textTheme.bodySmall?.copyWith(
-                                  color: colorScheme.onErrorContainer,
-                                ),
+                            ),
+                            const SizedBox(height: HavenSpacing.xs),
+                            // Outside the exclusions on purpose: this is the
+                            // one line the live label does not speak, so its
+                            // own node is the only way a screen-reader user can
+                            // read how long the fault has lasted.
+                            Text(
+                              copy.message,
+                              style: textTheme.bodySmall?.copyWith(
+                                color: colorScheme.onErrorContainer,
                               ),
-                              // What the epoch-repair leg answered, when it had
-                              // something the user has to act on. Rendered in
-                              // the banner rather than a snackbar: it is often
-                              // a REMEDY ("ask the owner…"), and a message that
-                              // disappears on its own is the wrong place for
-                              // one.
-                              if (epochMessage != null) ...[
-                                const SizedBox(height: HavenSpacing.xs),
-                                Text(
+                            ),
+                            // What the epoch-repair leg answered, when it had
+                            // something the user has to act on. Rendered in
+                            // the banner rather than a snackbar: it is often
+                            // a REMEDY ("ask the owner…"), and a message that
+                            // disappears on its own is the wrong place for
+                            // one.
+                            if (epochMessage != null) ...[
+                              const SizedBox(height: HavenSpacing.xs),
+                              ExcludeSemantics(
+                                child: Text(
                                   epochMessage,
                                   key: const Key(
                                     'sharing_health_epoch_repair_message',
@@ -458,12 +555,12 @@ class _SharingHealthBannerState extends ConsumerState<SharingHealthBanner> {
                                     color: colorScheme.onErrorContainer,
                                   ),
                                 ),
-                              ],
+                              ),
                             ],
-                          ),
+                          ],
                         ),
-                      ],
-                    ),
+                      ),
+                    ],
                   ),
                 ),
               ),

@@ -823,7 +823,12 @@ YAML
 }
 
 self_test() {
-  local tmp failures=0
+  # Fixture count pinned by EQUALITY. Nothing else pinned it, and the count was
+  # carried in prose instead (docs/CI_HARDENING_BACKLOG.md, Workstream C) — the
+  # one arrangement in which deleting a fixture reports "self-test: OK" while
+  # checking one thing fewer. Same pin as check_e2e_step_timeout_ordering.sh.
+  local -r SELF_TEST_CASES=39
+  local tmp failures=0 cases=0
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
   trap "rm -rf '${tmp}'" RETURN
@@ -841,6 +846,9 @@ self_test() {
     local desc="$1" dir="$2" exempt="$3" want="$4" want_grep="${5:-}"
     local harness="${6:-${tmp}/harness-empty}"
     local out rc=0
+    # Counted BEFORE any early return below, so a fixture that fails still
+    # counts as run — the pin measures fixtures, not passes.
+    cases=$(( cases + 1 ))
     VIOLATIONS=0; BROKEN=0
     check_dir "${dir}" "${exempt}" "${harness}" >"${tmp}/out.txt" 2>"${tmp}/err.txt"
     out="$(cat "${tmp}/out.txt" "${tmp}/err.txt")"
@@ -1341,11 +1349,17 @@ YAML
   _expect "declaring only one job of a two-job lane fails, naming the other" \
     "${j}" 'e2e-profile.yml:e2e_profile_android' 1 "e2e-profile.yml:e2e_profile_ios"
 
+  if (( cases != SELF_TEST_CASES )); then
+    echo "self-test: ran ${cases} fixture(s), expected exactly ${SELF_TEST_CASES}" >&2
+    echo "  A fixture was added or removed without moving the pin. If that was" >&2
+    echo "  deliberate, move SELF_TEST_CASES in the same commit." >&2
+    failures=1
+  fi
   if (( failures )); then
     echo "self-test: FAILED" >&2
     return 1
   fi
-  echo "self-test: OK"
+  echo "self-test: OK (${cases} fixtures)"
   return 0
 }
 

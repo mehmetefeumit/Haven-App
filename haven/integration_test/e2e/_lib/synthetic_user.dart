@@ -657,11 +657,13 @@ class SyntheticUser {
       final eventJson = jsonEncode(event.raw);
       try {
         // `decryptLocationCollectingCommits`, NOT `decryptLocation`: the
-        // latter is a shim that ROLLS BACK any receive-side auto-commit the
-        // engine staged. Using it here made a synthetic peer silently
-        // discard the eviction commit for a peer's `SelfRemove`, so the
-        // leaver never left anyone's roster and every leave scenario
-        // deadlocked (Rule 13 — publish, then confirm on an ack).
+        // latter is a shim that surfaces no receive-side auto-commit to its
+        // caller — it reports each as failed, which now PARKS the eviction as
+        // an owed publish rather than discarding it. Using it here made a
+        // synthetic peer publish nothing, leaving the circle owing the
+        // eviction for a peer's `SelfRemove`, so the leaver never left
+        // anyone's roster and every leave scenario deadlocked (Rule 13 —
+        // publish, then confirm on an ack).
         final outcome = await user.circleManager
             .decryptLocationCollectingCommits(eventJson: eventJson);
         await _publishAutoCommits(
@@ -787,7 +789,7 @@ class SyntheticUser {
       } on Object catch (e) {
         debugPrint(
           '[SyntheticUser:$label] $context: auto-commit '
-          '${published ? "confirm" : "rollback"} failed: ${e.runtimeType}',
+          '${published ? "confirm" : "fail-report"} failed: ${e.runtimeType}',
         );
       }
     }

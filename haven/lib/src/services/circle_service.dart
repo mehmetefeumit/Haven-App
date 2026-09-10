@@ -23,6 +23,18 @@ class CircleServiceException implements Exception {
   String toString() => 'CircleServiceException: $message';
 }
 
+/// Thrown when creating a circle or accepting an invitation would push the
+/// account past `kMaxCirclesPerAccount` (`publish_stagger.dart`).
+///
+/// Its own type because it is a POLICY refusal and not a failure: the caller
+/// must name the limit and the remedy (leave a circle) instead of the generic
+/// "please try again" copy, and only a distinct type lets it do that without
+/// reading an error string.
+class CircleRosterFullException extends CircleServiceException {
+  /// Creates a [CircleRosterFullException].
+  const CircleRosterFullException() : super('Circle roster is full');
+}
+
 /// The local user's own invitation state for a circle.
 ///
 /// Never a statement about a peer: processing an MLS Welcome emits nothing
@@ -619,7 +631,10 @@ abstract class CircleService {
   /// empty list if the creator has no inbox relays; delivery then fails
   /// closed (no public-default fallback) when tiers 1–2 are also empty.
   ///
-  /// Throws [CircleServiceException] if creation fails.
+  /// Throws [CircleRosterFullException] when the account already holds
+  /// `kMaxCirclesPerAccount` circles — checked before anything is staged, so a
+  /// refusal leaves no MLS group and nothing on the wire. Throws
+  /// [CircleServiceException] if creation fails.
   Future<CircleCreationResult> createCircle({
     required List<int> identitySecretBytes,
     required List<KeyPackageData> memberKeyPackages,
@@ -665,7 +680,10 @@ abstract class CircleService {
   ///
   /// Returns the circle with updated membership.
   ///
-  /// Throws [CircleServiceException] if acceptance fails.
+  /// Throws [CircleRosterFullException] when the account already holds
+  /// `kMaxCirclesPerAccount` circles — checked before the held Welcome is
+  /// ingested, so the invitation stays pending and acceptable once the user
+  /// leaves a circle. Throws [CircleServiceException] if acceptance fails.
   Future<Circle> acceptInvitation(List<int> mlsGroupId);
 
   /// Declines an invitation to join a circle.

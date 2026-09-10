@@ -141,6 +141,15 @@ class BackgroundLocationManager {
         // background sharing toggled off means no service existed, so user
         // opt-out is preserved across reboots.
         autoRunOnBoot: true,
+        // `allowWakeLock` is deliberately ABSENT, so the plugin's default
+        // (true) stands and its permanent PARTIAL_WAKE_LOCK is held for the
+        // whole session. It is the only wake source for the no-fix watchdog
+        // (indoors on a GNSS-only device nothing else wakes the isolate) and
+        // for the "armed but never delivered" recovery, so setting it false
+        // here stops background sharing silently rather than saving battery.
+        // The scoped `Haven:publish` lock (PublishWakeLock.kt) is additive
+        // until that wake source exists; guard check (1) and
+        // `fgs_plugin_wake_lock_policy_test.dart` pin the absence.
       ),
     );
 
@@ -356,6 +365,19 @@ class BackgroundLocationManager {
       debugPrint('[BackgroundManager] Update failed: ${e.runtimeType}');
     }
   }
+
+  /// Sends a presence-only [signal] to the foreground-service task.
+  ///
+  /// The string IS the whole message ([kForegroundPausedSignal] /
+  /// [kForegroundResumedSignal]) and it never leaves the process: the task
+  /// re-reads identity, consent and foreground ownership from its own gates,
+  /// so a signal prompts work rather than authorising it.
+  ///
+  /// Silently dropped when the service is not running — the plugin checks that
+  /// itself (`ForegroundService.sendData`), and a signal to a dead task has
+  /// nothing to prompt.
+  static void signalTask(String signal) =>
+      FlutterForegroundTask.sendDataToTask(signal);
 
   /// Stops the background location sharing service.
   static Future<void> stopService() async {

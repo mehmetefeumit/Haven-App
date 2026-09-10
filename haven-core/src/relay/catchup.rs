@@ -1075,9 +1075,38 @@ fn persist_locations(
 ///
 /// Publish-before-apply (Rule 13 / security F13): a receive-side auto-commit (a
 /// peer `SelfRemove` eviction) is published over the sweep's own [`RelayManager`]
-/// and confirmed ONLY after ≥1 relay OK-acks — else rolled back. This background
-/// sweep therefore re-broadcasts the eviction to the rest of the group instead of
-/// optimistically applying a commit no peer received (the old fork).
+/// and confirmed ONLY after ≥1 relay OK-acks. This background sweep therefore
+/// re-broadcasts the eviction to the rest of the group instead of optimistically
+/// applying a commit no peer received (the old fork).
+///
+/// # Why this sweep PUBLISHES where a live-sync burst parks (OD4-c)
+///
+/// Not because a foreground service and a wake lock make the window safe. That
+/// argument is wrong on its own terms — in the poll configuration this sweep is
+/// the ONLY receive path, so nothing else has to park a commit first for this
+/// window to be reachable, and the `WorkManager` / `BGTask` wakes that also drive
+/// it are exactly the lifecycle OD4-c is about.
+///
+/// The reason is that a park needs somewhere to be redeemed, and a
+/// `PendingStateRef` is valid only inside the session that staged it. The
+/// redemption pass (`EngineProcessor::redeem_removal_deferrals`) runs on a
+/// FOREGROUND live-sync open; a sweep driven from a background isolate (the
+/// Android foreground service, the catch-up worker) holds its own
+/// [`CircleManager`] over the same DB file, so a commit parked there could never
+/// be published by anyone — parking it would trade a removal that usually LANDS
+/// for a circle that is certainly wedged. Publishing is therefore correct here,
+/// and the sweep pays the two costs that come with it:
+///
+/// * it records the obligation BEFORE the publish
+///   ([`CircleManager::owe_removal_publish`], inside
+///   [`crate::relay::auto_commit::resolve_receive_publish_work`]), so a wake
+///   window the OS ends mid-publish leaves a durable row and the next foreground
+///   LIVE-SYNC open REPORTS the wedge instead of it being invisible. The
+///   qualifier is load-bearing: both the redeemer and the reporter are reached
+///   only from [`crate::relay::live_sync`]'s foreground burst, so in a
+///   `HAVEN_LIVE_SYNC=false` build the row is written and nothing reads it;
+/// * it never rolls the commit back on a no-ack, because that is a permanent
+///   silent drop of the removal — the obligation simply stands.
 async fn resolve_publish_work(
     circle_mgr: &CircleManager,
     relay_mgr: &RelayManager,

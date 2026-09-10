@@ -14,11 +14,34 @@
 ///   no-op while `liveSyncEnabled` is off (the engine is never started).
 /// - **Public-profile anti-entropy** — bound how stale a co-member's kind-0
 ///   name/photo can get in a long session where no resume or circle-select
-///   ever fires. Nominal 45 min, and the only task gated on the app being
-///   foregrounded (see `_appIsForegrounded`). Unlike the other three, this one
-///   *dispatches* work rather than awaiting it: overlap protection lives in
+///   ever fires. Nominal 45 min. Unlike the other three, this one *dispatches*
+///   work rather than awaiting it: overlap protection lives in
 ///   `MemberProfileRefreshNotifier`, so `_profileAntiEntropyInFlight` does not
 ///   bound the fetch's duration the way the other in-flight flags do.
+///
+/// Every task is foreground-only, on every platform, since every one of them
+/// contacts relays with no UI to render the result. The first three are gated
+/// at ARMING time (`suspendForBackground` on the way out, `rearmForForeground`
+/// on the way in, both called by `MapShell`) and health again when its tick
+/// fires; the profile sweep keeps its armed timer and gates inside the tick
+/// (`_appIsForegrounded`).
+///
+/// Subscription health used to carve itself out of that rule on the iOS
+/// keep-alive branch, where the paused process kept a standing subscription and
+/// this tick was its only Dart-side repair. P4 removed the thing that was being
+/// repaired: on that branch the background receive path is now ONE BOUNDED
+/// BURST PER PUBLISH TICK, and every burst re-anchors every REQ at its
+/// persisted cursor — every 72-168 s, an order of magnitude more often than a
+/// 15-minute tick, and at the only instants Haven is permitted to hold a socket
+/// at all. A health timer surviving there could only take that back: between
+/// bursts the engine answers `paused`, so the tick is a wake that inspects
+/// nothing; one landing DURING a burst passes the engine's `paused` gate (a
+/// burst clears the flag for its whole duration), reads the mid-`connect()`
+/// pool as dropped, and repairs it through the FOREGROUND re-anchor — standing
+/// REQs, an inbox REQ replaying 49 h of gift wraps keyed on this npub, and a
+/// socket left open until the next burst's pause, at an instant that is not a
+/// publish. So the burst is the repair, and health is gated exactly like
+/// `KeyPackage` and relay-list.
 ///
 /// ## Why Dart-timer-driven (not a Rust cron)
 ///
@@ -85,6 +108,7 @@ import 'dart:math' as math;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'package:haven/src/services/background_burst_coordinator.dart';
 import 'package:haven/src/services/mls_session_handover.dart';
 import 'package:haven/src/constants/profile_refresh_tiers.dart';
 import 'package:haven/src/providers/key_package_provider.dart';
@@ -155,6 +179,15 @@ const Duration _profileAntiEntropyInitialDelay = Duration(minutes: 10);
 /// maintenance forever).
 const Duration _loginPublishSettleTimeout = Duration(seconds: 60);
 
+/// Clock behind the deadline bookkeeping the background burst fold reads.
+///
+/// Injectable so a fold can be driven at an exact instant in tests instead of
+/// against the wall clock. `FakeAsync` fakes timers, not [DateTime.now], so
+/// without this the due-time arithmetic could only be exercised by waiting.
+final maintenanceClockProvider = Provider<DateTime Function()>(
+  (_) => DateTime.now,
+);
+
 // ---------------------------------------------------------------------------
 // Notifier
 // ---------------------------------------------------------------------------
@@ -165,7 +198,8 @@ const Duration _loginPublishSettleTimeout = Duration(seconds: 60);
 /// cancelled. Each task self-reschedules after every fire (one-shot timers, so
 /// the next tick is only armed once the current one settles — the no-overlap
 /// guard additionally protects against any external/concurrent trigger).
-class MaintenanceSchedulerNotifier extends Notifier<void> {
+class MaintenanceSchedulerNotifier extends Notifier<void>
+    implements BurstMaintenance {
   Timer? _keyPackageTimer;
   Timer? _relayListTimer;
   Timer? _healthTimer;
@@ -191,6 +225,17 @@ class MaintenanceSchedulerNotifier extends Notifier<void> {
   /// must not touch the current one — every tick captures its generation and
   /// bails (no reschedule, no state mutation) once it is stale.
   int _generation = 0;
+
+  /// When the `KeyPackage` / relay-list tasks next come due.
+  ///
+  /// Recorded at every arm, whether or not a timer was actually armed for it —
+  /// both tasks stay un-armed while the app is backgrounded, and a background
+  /// burst folds them in at exactly the deadline the foreground timer would
+  /// have fired at. Without a deadline kept across the background window the
+  /// fold could only guess, and would either re-publish on every burst or
+  /// never publish at all.
+  DateTime? _keyPackageDueAt;
+  DateTime? _relayListDueAt;
 
   // Secure CSPRNG — shared across ticks to avoid per-tick allocation.
   final math.Random _rng = math.Random.secure();
@@ -224,8 +269,9 @@ class MaintenanceSchedulerNotifier extends Notifier<void> {
     _armKeyPackage(_keyPackageInitialDelay, generation);
     _armRelayList(_relayListInitialDelay, generation);
     // M8-4 subscription health: engine-coupled but ships inert (its FFI
-    // self-gates on the engine SESSION), so the timer is always armed — the
-    // tick is a cheap no-op while `liveSyncEnabled` is off.
+    // self-gates on the engine SESSION), so the timer is armed on the same
+    // foreground rule as the other two and the tick is a cheap no-op while
+    // `liveSyncEnabled` is off.
     _armHealth(_healthInitialDelay, generation);
     // Public-profile anti-entropy: the only trigger that bounds staleness in a
     // long foreground session where no resume or circle-select ever fires.
@@ -252,22 +298,138 @@ class MaintenanceSchedulerNotifier extends Notifier<void> {
   /// Arms (or re-arms) the `KeyPackage` timer for [generation], cancelling any
   /// prior one first so the single [Timer] field is always the sole live timer
   /// — no orphan can leak even if a tick is ever driven out-of-band.
+  ///
+  /// Nothing is armed while the app is backgrounded — see
+  /// [rearmForForeground].
   void _armKeyPackage(Duration delay, int generation) {
     _keyPackageTimer?.cancel();
+    _keyPackageTimer = null;
+    // Before the foreground gate: the deadline outlives the timer, so a
+    // background burst can fold this task in when it comes due.
+    _keyPackageDueAt = ref.read(maintenanceClockProvider)().add(delay);
+    if (!_appIsForegrounded()) return;
     _keyPackageArmCount++;
     _keyPackageTimer = Timer(delay, () => _runKeyPackageTick(generation));
   }
 
-  /// Arms (or re-arms) the relay-list timer for [generation].
+  /// Arms (or re-arms) the relay-list timer for [generation]. Foreground-only,
+  /// like [_armKeyPackage].
   void _armRelayList(Duration delay, int generation) {
     _relayListTimer?.cancel();
+    _relayListTimer = null;
+    _relayListDueAt = ref.read(maintenanceClockProvider)().add(delay);
+    if (!_appIsForegrounded()) return;
     _relayListTimer = Timer(delay, () => _runRelayListTick(generation));
   }
 
+  /// Runs a `KeyPackage` tick if one is due at [now] — the background burst's
+  /// fold, on the burst's already-warm publish pool.
+  ///
+  /// Direct call, never a provider invalidation: an invalidation schedules
+  /// work for a rebuild, and a paused app renders no frames, so the rebuild
+  /// would land at the next resume — which is exactly when the task is least
+  /// needed.
+  ///
+  /// Reuses [_runKeyPackageTick] wholesale, so the generation fence, the
+  /// no-overlap guard, the retry ladder and the re-arm are the same ones the
+  /// timer path gets. The re-arm records the next deadline and — being
+  /// backgrounded — arms no timer, which is what keeps R14 true: the fold adds
+  /// no background Dart timer.
+  @override
+  Future<void> runKeyPackageIfDue(DateTime now) async {
+    if (_disposed) return;
+    final dueAt = _keyPackageDueAt;
+    if (dueAt == null || now.isBefore(dueAt)) return;
+    await _runKeyPackageTick(_generation);
+  }
+
+  /// Runs a relay-list tick if one is due at [now] — the relay-list half of
+  /// [runKeyPackageIfDue], with the same reasoning.
+  @override
+  Future<void> runRelayListIfDue(DateTime now) async {
+    if (_disposed) return;
+    final dueAt = _relayListDueAt;
+    if (dueAt == null || now.isBefore(dueAt)) return;
+    await _runRelayListTick(_generation);
+  }
+
   /// Arms (or re-arms) the subscription-health timer for [generation].
+  ///
+  /// Foreground-only, exactly like [_armKeyPackage] — the iOS keep-alive
+  /// carve-out is gone because the branch it served is now burst-driven (see
+  /// the library doc). The single place that decides whether this timer may
+  /// exist, so every caller (the tick's own `finally`, [rearmForForeground],
+  /// [rearmHealthForBackgroundReceive]) obeys the same rule.
+  ///
+  /// No deadline is recorded, unlike the two publishing tasks: there is nothing
+  /// here for a background burst to fold in — the burst's own re-anchor IS this
+  /// task's work.
   void _armHealth(Duration delay, int generation) {
     _healthTimer?.cancel();
+    _healthTimer = null;
+    if (!_appIsForegrounded()) return;
     _healthTimer = Timer(delay, () => _runHealthTick(generation));
+  }
+
+  /// Cancels the maintenance timers a backgrounded app must not run.
+  ///
+  /// Called from `MapShell._onPaused`. The arming gate alone is not enough:
+  /// it only refuses to re-arm AFTER a tick settles, so a pause landing
+  /// between two ticks still bought one round-trip per task from the timers
+  /// already armed — relay sockets opened for a backgrounded device,
+  /// unrelated to any send.
+  ///
+  /// All three, on every branch. Health kept its timer on the iOS keep-alive
+  /// branch until P4 made that branch burst-driven; a timer left armed there
+  /// is a background wake whose tick can re-open exactly the standing REQs the
+  /// burst design exists to close (see the library doc).
+  void suspendForBackground() {
+    if (_disposed) return;
+    _keyPackageTimer?.cancel();
+    _keyPackageTimer = null;
+    _relayListTimer?.cancel();
+    _relayListTimer = null;
+    _healthTimer?.cancel();
+    _healthTimer = null;
+  }
+
+  /// Re-evaluates the subscription-health arming on the mid-pause consent edge
+  /// R1: a pause that raced the background-sharing notifier's async load read a
+  /// stale `false`, and the persisted consent then resolves `true` while the
+  /// app is away. `MapShell`'s mid-pause consent watcher calls this alongside
+  /// the publish drivers it re-arms on the same edge.
+  ///
+  /// Since P4 it deliberately arms NOTHING while the app is paused, and that is
+  /// the answer the edge needs: the process that just became a background
+  /// receiver receives by BURST, and a health timer is the one thing that can
+  /// put a standing REQ back between bursts. It routes through [_armHealth]
+  /// rather than deciding for itself — the caller cannot know the arming rule,
+  /// and there is exactly one place that does.
+  void rearmHealthForBackgroundReceive() {
+    if (_disposed) return;
+    _armHealth(_jittered(subscriptionHealthInterval), _generation);
+  }
+
+  /// Re-arms the three gated maintenance timers.
+  ///
+  /// Called from `MapShell._onResumed`, and the ONLY thing that brings any of
+  /// the three back: each of them contacts relays, so none is armed while the
+  /// app is backgrounded — a tick that settles (or fires) while away
+  /// deliberately leaves its timer unarmed, and [suspendForBackground] cancels
+  /// the ones already armed at the pause. Before this gate the `KeyPackage`
+  /// (10 min) and relay-list (30 min) probes woke a backgrounded device to
+  /// open relay sockets unrelated to any send, and health (15 min) went on
+  /// re-anchoring the whole session between background bursts.
+  ///
+  /// Their NORMAL jittered delays, never the short initial settle: a resume
+  /// must not become a relay-probe burst, and a fixed post-resume delay would
+  /// be a Haven-shaped signature to a passive relay observer.
+  void rearmForForeground() {
+    if (_disposed) return;
+    final generation = _generation;
+    _armKeyPackage(_jittered(keyPackageMaintenanceInterval), generation);
+    _armRelayList(_jittered(relayListMaintenanceInterval), generation);
+    _armHealth(_jittered(subscriptionHealthInterval), generation);
   }
 
   /// Arms (or re-arms) the public-profile anti-entropy timer for [generation].
@@ -418,6 +580,19 @@ class MaintenanceSchedulerNotifier extends Notifier<void> {
     if (_healthInFlight) {
       return;
     }
+    if (!_appIsForegrounded()) {
+      // The arming gate is not the only way a tick reaches here: a timer armed
+      // in the foreground fires whenever it fires, and on the branch that keeps
+      // this isolate executable that can be after the pause and before
+      // `MapShell` has called [suspendForBackground]. Refuse without touching
+      // the engine — while backgrounded this call is either a wake that
+      // inspects nothing (`paused`) or, inside a burst, a foreground re-anchor
+      // that re-opens standing REQs. No re-arm and no reschedule:
+      // [rearmForForeground] owns the way back in, so nothing survives the
+      // window.
+      debugPrint('[Maintenance] health tick skipped (background)');
+      return;
+    }
     _healthInFlight = true;
     try {
       // No secret + no circle handle: the FFI reads the engine SESSION and
@@ -435,7 +610,7 @@ class MaintenanceSchedulerNotifier extends Notifier<void> {
       // Clear the sharing-health model's lost-subscription latch when this
       // tick proves the receive plane is whole again.
       //
-      // NOTHING else can clear it. The engine raises `RelayError` on every
+      // No PASSIVE signal clears it. The engine raises `RelayError` on every
       // relay `CLOSED`, emits nothing when its own jittered repair task
       // successfully re-issues the REQ, and `Connected` fires only on a SOCKET
       // transition — which a `CLOSED` does not cause. So
@@ -444,12 +619,21 @@ class MaintenanceSchedulerNotifier extends Notifier<void> {
       // stopped" banner up while locations kept arriving on the other relays,
       // which is a worse failure than the silence it replaced.
       //
+      // The one OTHER reset is a re-anchor's `BackgroundResumed`, which the
+      // engine's status listener maps to `recordRelaySubscriptionRestored`
+      // (`service_providers.dart`) — and since P4 every background burst open
+      // emits it. So while the app is away the burst resets this latch, every
+      // 72-168 s, which is why nothing is lost by this tick being foreground-
+      // only.
+      //
       // `healthy`, `resubscribed` and `targetedReanchor` are all proof: this
       // tick probes the pool AND the live subscription model, so each verdict
       // means every REQ the session expects is present (`targetedReanchor`
       // differs from `resubscribed` only in repair COST — see its doc on
       // `SubscriptionHealthAction`). `engineOff` proves nothing — there is no
-      // session to inspect — and must not clear anything.
+      // session to inspect — and neither does `paused`: a paused engine holds
+      // no REQ at all, so the tick inspected nothing and short-circuited before
+      // the probe. Neither may clear anything.
       switch (result.action) {
         case SubscriptionHealthAction.healthy:
         case SubscriptionHealthAction.resubscribed:
@@ -458,6 +642,7 @@ class MaintenanceSchedulerNotifier extends Notifier<void> {
               .read(sharingHealthProvider.notifier)
               .recordRelaySubscriptionRestored();
         case SubscriptionHealthAction.engineOff:
+        case SubscriptionHealthAction.paused:
           break;
       }
     } on Object catch (e) {
@@ -559,6 +744,28 @@ class MaintenanceSchedulerNotifier extends Notifier<void> {
   /// [visibleForTesting] — total `KeyPackage` timer arms (build + reschedules).
   @visibleForTesting
   int get keyPackageArmCountForTest => _keyPackageArmCount;
+
+  /// [visibleForTesting] — whether the subscription-health timer is armed.
+  ///
+  /// Named apart from [foregroundGatedTimersArmedForTest] because the promise
+  /// it pins is about THIS timer: health is the one that used to survive a
+  /// pause, and a timer left armed while the app is away is a background wake
+  /// whose tick can re-open a standing REQ — an OR over three timers cannot
+  /// say which one came back.
+  @visibleForTesting
+  bool get healthArmedForTest => _healthTimer?.isActive ?? false;
+
+  /// [visibleForTesting] — whether any of the three relay-contacting timers
+  /// (`KeyPackage`, relay list, subscription health) is armed. These are the
+  /// ones [suspendForBackground] cancels and [rearmForForeground] brings back;
+  /// the profile sweep's timer stays armed and self-gates inside its tick.
+  ///
+  /// False whenever the app is backgrounded, on every platform and branch.
+  @visibleForTesting
+  bool get foregroundGatedTimersArmedForTest =>
+      (_keyPackageTimer?.isActive ?? false) ||
+      (_relayListTimer?.isActive ?? false) ||
+      (_healthTimer?.isActive ?? false);
 
   /// [visibleForTesting] — whether any maintenance timer is currently armed
   /// (only an *active* timer counts — a fired-but-not-yet-rescheduled one-shot

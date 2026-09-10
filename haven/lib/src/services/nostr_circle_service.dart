@@ -44,6 +44,8 @@ import 'package:haven/src/services/mls_session_handover.dart'
     show HandoverOutcome, appIsForegrounded;
 import 'package:haven/src/services/nostr_relay_service.dart';
 import 'package:haven/src/services/pending_leave_service.dart';
+import 'package:haven/src/services/publish_stagger.dart'
+    show kMaxCirclesPerAccount;
 import 'package:haven/src/services/relay_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -199,6 +201,10 @@ class NostrCircleService implements CircleService {
   /// state this session (Rule 8 blocked-circle UI state). See
   /// [markCircleBlocked] / [isCircleBlocked].
   final Set<String> _blockedCircleIds = {};
+
+  /// Roster-growing operations admitted by [_refuseIfRosterFull] whose circle
+  /// row the core has not written yet, so a concurrent read cannot see them.
+  int _reservedRosterSlots = 0;
 
   /// Set by [releaseForHandoff], cleared by [endSessionHandoff] (or by the
   /// first foregrounded open — see [_handoffHolds]). While it holds, every
@@ -620,6 +626,40 @@ class NostrCircleService implements CircleService {
     );
   }
 
+  /// Refuses a roster-growing operation once the account holds
+  /// [kMaxCirclesPerAccount] circles.
+  ///
+  /// Enforced HERE and not in the pages because this file holds the only two
+  /// calls that grow the roster (`createCircle`, `acceptInvitation` — the same
+  /// two the Rust core writes a circle row from), so a page-level check would
+  /// be one every other caller of this service bypasses.
+  ///
+  /// Only ACCEPTED memberships count; see [kMaxCirclesPerAccount]. Fails
+  /// CLOSED: a roster read that throws propagates, so an unreadable roster
+  /// refuses growth rather than guessing at its size.
+  ///
+  /// On admission this RESERVES the slot, and the caller must release it in a
+  /// `finally` ([_releaseRosterSlot]). The row only exists once the core write
+  /// returns, so without the reservation every accept in flight reads the same
+  /// pre-growth roster: two Accept buttons tapped together (each invitation
+  /// card owns its own spinner, so both stay enabled) would each see nine and
+  /// each proceed, and enough simultaneous taps would carry the roster past
+  /// `kMaxCirclesPerBurst` — the deferral the bound exists to make unreachable.
+  Future<void> _refuseIfRosterFull() async {
+    final held = (await getVisibleCircles())
+        .where((c) => c.membershipStatus == MembershipStatus.accepted)
+        .length;
+    if (held + _reservedRosterSlots >= kMaxCirclesPerAccount) {
+      throw const CircleRosterFullException();
+    }
+    _reservedRosterSlots++;
+  }
+
+  /// Releases a slot [_refuseIfRosterFull] reserved, on success and on failure
+  /// alike: a failed create writes no row, and a successful one is already in
+  /// the roster the next read returns.
+  void _releaseRosterSlot() => _reservedRosterSlots--;
+
   @override
   Future<CircleCreationResult> createCircle({
     required List<int> identitySecretBytes,
@@ -631,6 +671,13 @@ class NostrCircleService implements CircleService {
     List<String> creatorFallbackRelays = const [],
   }) async {
     final manager = await _ensureInitialized();
+    // Outside the try because the `finally` below releases the reservation the
+    // gate takes: a refusal raised INSIDE would give back a slot it never took,
+    // the count would drift negative, and the bound would loosen by one circle
+    // per refusal (`a refusal does not loosen the next check` pins that).
+    // Not for flattening — the `on CircleServiceException { rethrow; }` clause
+    // below already preserves the refusal, which is a subtype of it.
+    await _refuseIfRosterFull();
 
     try {
       // Validate identity secret bytes length
@@ -747,6 +794,8 @@ class NostrCircleService implements CircleService {
     } on Object catch (_) {
       debugPrint('[Circle] Create failed');
       throw const CircleServiceException('Failed to create circle');
+    } finally {
+      _releaseRosterSlot();
     }
   }
 
@@ -810,6 +859,12 @@ class NostrCircleService implements CircleService {
   @override
   Future<Circle> acceptInvitation(List<int> mlsGroupId) async {
     final manager = await _ensureInitialized();
+    // Before the ingest, so a refused accept leaves the held Welcome untouched
+    // and the invitation is still there once the user makes room. Outside the
+    // try for `createCircle`'s reservation reason and for one only this method
+    // has: its catch is `on Object`, which WOULD flatten the refusal into the
+    // generic "Failed to accept invitation".
+    await _refuseIfRosterFull();
 
     try {
       // `mlsGroupId` here is the pre-join stand-in id — actually the
@@ -823,6 +878,8 @@ class NostrCircleService implements CircleService {
     } on Object catch (e) {
       debugPrint('Failed to accept invitation: ${e.runtimeType}');
       throw const CircleServiceException('Failed to accept invitation');
+    } finally {
+      _releaseRosterSlot();
     }
   }
 

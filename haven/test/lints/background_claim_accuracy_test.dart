@@ -24,6 +24,14 @@
 // updated around the clock"), and a self-contradicting sentence that both
 // asserts continuation and states the limit. The widget assertions below cover
 // the realistic regression instead by pinning the promise each platform makes.
+//
+// A second tie lives here too. Two surfaces state the same receive-only
+// asymmetry — the consent dialog's iOS sentence and the Location settings
+// page's opening paragraph — and until the consent copy moved into the ARB
+// nothing checked that they still agreed: a doc comment asked for it and only
+// a reader could enforce it. They are different surfaces and word it
+// differently on purpose, so what is compared is the CLAIM (sharing stops, a
+// wake may fetch, it never sends), never the bytes.
 @TestOn('vm')
 library;
 
@@ -31,6 +39,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/widgets/location/location_disclosure_dialog.dart';
 
@@ -107,6 +116,35 @@ RegExp _anyOf(List<String> phrases) => RegExp('\\b(${phrases.join('|')})');
 /// sentence cannot launder a claim made in an earlier one.
 final RegExp _sentenceEnd = RegExp('[.!?]');
 
+/// The receive-only asymmetry, as four predicates that must hold on EVERY
+/// surface stating it.
+///
+/// The consent dialog and the Location settings page word this differently and
+/// legitimately so — one is a Play disclosure shown before a permission prompt,
+/// the other a settings paragraph that also covers Android — so the tie between
+/// them is the CLAIM, never the bytes. Each predicate is written against the
+/// fact, not the phrasing: that the app can be closed by the system, that the
+/// user's own sharing then stops, that a wake may still fetch the circles'
+/// locations, and that it never sends the user's own. Drop any one of them from
+/// either surface and the two stop promising the same thing.
+final Map<String, RegExp> _receiveOnlyClaim = {
+  'names the system closing Haven': _notRunning,
+  'says sharing stops': RegExp(r'\bsharing stops\b'),
+  'says a wake still fetches the circles': RegExp(
+    r'\bwake\w*\b[^.]*\b(fetch|receive)\w*\b',
+  ),
+  "says a wake never sends the user's own": RegExp(r'\bnever\b[^.]*\bsends?\b'),
+};
+
+/// Which halves of [_receiveOnlyClaim] [text] actually carries.
+Map<String, bool> receiveOnlyClaimProfile(String text) {
+  final normalized = normalizeCopy(text);
+  return {
+    for (final entry in _receiveOnlyClaim.entries)
+      entry.key: entry.value.hasMatch(normalized),
+  };
+}
+
 /// Lowercases, folds typographic punctuation, and collapses whitespace so the
 /// markers match regardless of the quote/dash style the copy happens to use.
 String normalizeCopy(String text) => text
@@ -168,6 +206,11 @@ Future<List<String>> renderedDisclosureText(
 }) async {
   await tester.pumpWidget(
     MaterialApp(
+      // The consent copy is ARB-backed, so without the delegates the dialog
+      // throws instead of rendering and every scan below would see nothing.
+      locale: const Locale('en'),
+      localizationsDelegates: AppLocalizations.localizationsDelegates,
+      supportedLocales: AppLocalizations.supportedLocales,
       home: Scaffold(
         body: Builder(
           builder: (context) => ElevatedButton(
@@ -195,6 +238,16 @@ Future<List<String>> renderedDisclosureText(
 }
 
 void main() {
+  // The consent copy lives in the ARB now (`locationDisclosure*`), so the
+  // English values are read the way the app reads them — through the generated
+  // localizations — rather than from constants a refactor could quietly detach
+  // from what actually renders.
+  late AppLocalizations en;
+
+  setUpAll(() async {
+    en = await AppLocalizations.delegate.load(const Locale('en'));
+  });
+
   group('detector self-tests', () {
     test('flags the string the iOS permission prompt used to ship', () {
       const shipped =
@@ -223,7 +276,7 @@ void main() {
       // be what an iOS user reads.
       expect(
         findUnqualifiedClosedAppClaims(
-          LocationDisclosureStrings.backgroundAndroid,
+          en.locationDisclosureBackgroundAndroid,
           source: 'x',
         ),
         hasLength(1),
@@ -347,8 +400,8 @@ void main() {
       );
 
       // Anti-vacuity: the dialog must actually have rendered its copy.
-      expect(rendered, contains(LocationDisclosureStrings.title));
-      expect(rendered, contains(LocationDisclosureStrings.backgroundIos));
+      expect(rendered, contains(en.locationDisclosureTitle));
+      expect(rendered, contains(en.locationDisclosureBackgroundIos));
 
       final offenders = <BackgroundClaimViolation>[];
       for (final text in rendered) {
@@ -424,10 +477,10 @@ void main() {
       );
       expect(
         ios,
-        isNot(contains(LocationDisclosureStrings.backgroundAndroid)),
+        isNot(contains(en.locationDisclosureBackgroundAndroid)),
       );
-      expect(android, contains(LocationDisclosureStrings.backgroundAndroid));
-      expect(android, isNot(contains(LocationDisclosureStrings.backgroundIos)));
+      expect(android, contains(en.locationDisclosureBackgroundAndroid));
+      expect(android, isNot(contains(en.locationDisclosureBackgroundIos)));
     });
 
     testWidgets('third-party policy is attributed, never asserted as '
@@ -459,6 +512,64 @@ void main() {
         joined,
         isNot(contains('Stadia Maps does not sell')),
         reason: "unattributed assertion of another company's policy",
+      );
+    });
+  });
+
+  // Both surfaces that state the receive-only limit, tied to each other.
+  //
+  // `locationDisclosureBackgroundIos` is the sentence the user consents to
+  // before the permission prompt; `locationSettingsIntro` is the paragraph they
+  // meet later above the toggle. The consent string was written by copying the
+  // intro's wording, its doc comment said "the two must not diverge", and
+  // nothing enforced it — the intro has since been reworded twice while the
+  // consent copy sat in a Dart constant. The user who reads both must not be
+  // told two different things about what happens when the system closes Haven.
+  group('the consent dialog and the settings intro state one claim', () {
+    test('the receive-only claim detector notices a half-stated claim', () {
+      // Without this, the equality below would pass on two surfaces that had
+      // BOTH lost the never-send half.
+      const halfStated =
+          'This app uses location data to enable sharing with your circles. '
+          'If iOS closes Haven, sharing stops until you open it again.';
+      final profile = receiveOnlyClaimProfile(halfStated);
+      expect(profile['says sharing stops'], isTrue);
+      expect(profile['says a wake still fetches the circles'], isFalse);
+      expect(profile["says a wake never sends the user's own"], isFalse);
+    });
+
+    test('the consent dialog and the settings intro each carry the whole '
+        'receive-only claim', () {
+      for (final surface in <String, String>{
+        'locationDisclosureBackgroundIos': en.locationDisclosureBackgroundIos,
+        'locationSettingsIntro': en.locationSettingsIntro,
+      }.entries) {
+        final profile = receiveOnlyClaimProfile(surface.value);
+        expect(
+          profile.values,
+          everyElement(isTrue),
+          reason:
+              '${surface.key} no longer states the receive-only asymmetry in '
+              'full: $profile. Every half is load-bearing — dropping the '
+              'never-send clause turns a wake into something the user may '
+              'reasonably read as continued sharing.',
+        );
+      }
+    });
+
+    test('the consent dialog and the settings intro state the SAME '
+        'receive-only claim', () {
+      final consent = receiveOnlyClaimProfile(
+        en.locationDisclosureBackgroundIos,
+      );
+      final settings = receiveOnlyClaimProfile(en.locationSettingsIntro);
+      expect(
+        consent,
+        equals(settings),
+        reason:
+            'The consent artefact and the settings paragraph disagree about '
+            'what happens when the system closes Haven. Whichever one is now '
+            'weaker, the user has been shown both.',
       );
     });
   });

@@ -53,15 +53,45 @@ The **Marmot Protocol** is a messaging protocol that combines:
 crates.io) and self-describes as *"0.9.0, single internal consumer, not semver-stable"*
 (`crates/cgka-engine/README.md:72`). Haven pins all five crates to one 40-char rev of the **v0.9.4**
 release tag (`e391adc133a9b60e420da7a0446f014a180ac8d2`, 2026-07-10) — bump only to released tags,
-never `master` (CLAUDE.md, MDK pinning rule). Known upstream state at pin time:
+never `master` (CLAUDE.md, MDK pinning rule). Known upstream state at pin time, **re-verified
+2026-09-05** against a full bare clone of `marmot-protocol/mdk` with both endpoints extracted via
+`git archive`, plus `gh api` (Haven's rev `e391adc` is byte-identical to tag `v0.9.4`). The ladder
+now runs v0.9.4 → **v0.9.18** (`f734b31`, 2026-09-05) — 15 tags, 452 commits, 166 of them non-merge
+commits touching Haven's five pinned crates, and **no CHANGELOG exists for any of the five**. The
+bump is scoped as milestone **P4M** in `docs/POWER_EFFICIENCY_PLAN.md` §5.7:
 
-- The **commit-loss / fork-recovery train** (#825, #877, #892 epoch-gap backfill) is in master but
-  **unreleased** — a `v0.9.5+` tag containing it is the next bump target.
-- **#757 OPEN**: the stored-convergence buffer has no per-group cap and no eviction API (Security
-  Rule 12). **#864 OPEN**: five validators embed full group-id hex in error strings (Haven keeps
-  `redact_hex_sequences` at the error boundary). **#866 OPEN**: a `SQLITE_BUSY` lock-upgrade window
-  in `storage-sqlite`. **#885 OPEN**: phantom `committed_from` fork quarantine.
-- The **reference client has not migrated**: whitenoise-rs master still pins old `mdk-core 0.8.0`.
+- ~~The **commit-loss / fork-recovery train** (#825, #877, #892 epoch-gap backfill) is in master but
+  **unreleased** — a `v0.9.5+` tag containing it is the next bump target.~~
+  **CORRECTED 2026-09-05 — both of the two verified PRs SHIPPED, and neither is REACHABLE from
+  Haven's pinned crates.** #825 (`363b1fe3`) and #892 (`e6654ece`) both first appear in **v0.9.5**,
+  but they land almost entirely outside the five pinned crates and **#892 touches none of them at
+  all**; #825's `CursorPersistence{Advance,Frozen}` policy hangs off `MarmotAppConfig` in
+  **`marmot-app`**, a crate `haven-core/Cargo.toml:52-53` rejects by name and
+  `scripts/ci/check_mdk_supply_chain.sh` (check 1) hard-fails on. **No tag on the ladder makes
+  either reachable**, so "bump to a released tag to get the backfill" is not an available move at
+  any version — which is what killed option (ii) of the plan's OD4-c. #877 was NOT re-verified and
+  stays **UNVERIFIED**.
+- **#757 CONFIRMED STILL OPEN** (`gh api` 2026-09-05 → `{"state":"open"}`): the stored-convergence
+  buffer has no per-group cap and no eviction API (Security Rule 12), so Haven's intake cap keeps
+  its subject at every tag on the ladder — the caps that DID tighten upstream govern the separate
+  `PeelDeferred` store, not this buffer. **#864 / #866 / #885 were NOT re-queried**: the "OPEN"
+  below is the pin-time record, not a 2026-09-05 fact.
+- **#864 (pin-time OPEN, state at v0.9.18 UNVERIFIED)**: five validators embed full group-id hex in
+  error strings (Haven keeps `redact_hex_sequences` at the error boundary). **#866 (pin-time OPEN,
+  UNVERIFIED)**: a `SQLITE_BUSY` lock-upgrade window in `storage-sqlite`. **#885 (pin-time OPEN,
+  UNVERIFIED)**: phantom `committed_from` fork quarantine.
+- **The next bump is a coordinated WIRE migration, not a dependency bump.** v0.9.18 introduces
+  `ProtocolProfile { Legacy, Current }` (`crates/traits/src/group.rs:25-31`; absent at v0.9.4) and
+  moves the account identity proof off leaf extension `0xF2F1` onto app component **`0x8009`**
+  (`ACCOUNT_IDENTITY_PROOF_COMPONENT_ID`, `crates/traits/src/app_components/mod.rs:106`; a grep for
+  it at v0.9.4 returns empty). Every `Group` this pin wrote loads as `Legacy`
+  (`Group.protocol_profile` is `#[serde(default)]`), `AccountDeviceSession::open` REFUSES a `Legacy`
+  session, and the opt-out `legacy_compatibility_profile()` is `#[cfg(debug_assertions)]` — i.e.
+  **absent from release builds**. Membership changes across the boundary are rejected on send and on
+  receive, so an existing circle would keep publishing locations and could never add or remove a
+  member again. Blockers, gains and the honest recommendation on whether to take it: P4M.
+- The **reference client has not migrated**: whitenoise-rs master still pins old `mdk-core 0.8.0`
+  (pin-time record; NOT re-verified 2026-09-05).
 - The published **Marmot v2 spec is behind the code** in places — see the
   [identity-proof divergence](#the-identity-proof-spec-vs-code-divergence) below. Where they
   disagree, **the code is authoritative** for Haven.
@@ -98,16 +128,35 @@ BasicCredential.identity (Nostr pubkey) → kind-0` (see `docs/PUBLIC_PROFILE_MI
 
 ### The identity-proof spec-vs-code divergence
 
-The published spec *body* `foundation/account-identity-proof-v1.md` specifies **version `0x01`**,
-domain **`marmot.account-identity-proof.v1`**, and states the proof *"is NOT a Nostr event and is
-never published"* (no kind-450). The **shipped code** (`cgka-engine/src/account_identity_proof.rs`)
-is **version 2**, domain **`marmot.account-identity-proof.v2`**, extension type **`0xF2F1`**, and
-frames the signing input as a **canonical kind-450 Nostr event** (`created_at = 0`, `d` tag = the
-domain string). The code is ahead of the spec on the version byte, the domain string, and the
-event-vs-not-event construction. **Haven implements to the code** (v2 / `0xF2F1` / kind-450) —
-this is the interop-correct choice because the engine enforces it on ingest
-(`InvalidAccountIdentityProof`). Watch for the spec body catching up; a change there is a
-wire-format change.
+The **shipped code** (`cgka-engine/src/account_identity_proof.rs`) carries the proof as custom MLS
+**extension type `0xF2F1`**, version 2, domain **`marmot.account-identity-proof.v2`**, signing a
+**canonical kind-450 Nostr event** (`created_at = 0`, `d` tag = the domain string). **Haven
+implements to the code** — the engine enforces exactly that on ingest
+(`InvalidAccountIdentityProof`), so interop is with the pinned MDK, not with the spec text.
+
+The adopted spec has since moved past that carrier: `app-components/account-identity-proof-v2.md`
+makes v2 a **required LeafNode app component, id `0x8009`**
+(`marmot.member.account-identity-proof.v2`), whose data is a 104-byte `MarmotAuthorizationProof` —
+the kind-450 signing event survives, the extension does not, and v0.9.4 knows nothing of `0x8009`.
+`foundation/account-identity-proof-v1.md` is now **superseded**, kept only so `0xf2f1` is never
+reinterpreted. The pin is therefore *behind* the spec here, where this note once recorded it as
+ahead; closing the gap is a wire-format change that arrives with an MDK bump.
+
+> **CORRECTED 2026-09-05 — the CODE has since caught the spec up, upstream, and that is exactly what
+> makes the bump a wire break.** `ACCOUNT_IDENTITY_PROOF_COMPONENT_ID = 0x8009` is live in
+> `crates/traits/src/app_components/mod.rs:106` at **v0.9.18** (grep for the symbol at v0.9.4 returns
+> empty); `0xF2F1` survives there only as the **legacy classifier**, and a leaf mixing the two
+> carriers is explicitly rejected. So "arrives with an MDK bump" is now concrete: it arrives with
+> `ProtocolProfile::Current`, under the same `Legacy`-refusing session-open gate as everything else
+> in that cutover (`docs/POWER_EFFICIENCY_PLAN.md` §5.7, milestone P4M, blocker 3).
+>
+> **Everything this section and the rest of this document say about `0xF2F1` remains TRUE** for
+> Haven's pin and for every circle written under it — it is the UPSTREAM carrier that moved, not
+> Haven's. Two further sites still name `0xF2F1` as *the* identity-proof carrier and are **FLAGGED
+> here, deliberately NOT changed**, because changing them before the bump would make them wrong
+> today: the leaf-extension list under [MLS Configuration](#mls-configuration) (`0xF2F1` MANDATORY,
+> and the matching `mls_extensions` tag value in the kind-30443 shape) and `CLAUDE.md:243`'s kind-450
+> row. Both are correct at v0.9.4 and both are P4M's to rewrite, in the same commit as the bump.
 
 ---
 
@@ -259,8 +308,9 @@ Every on-wire value below is what Haven actually publishes/ingests on the pinned
 | Kind | Name | Status | Notes |
 |------|------|--------|-------|
 | 0 | Public profile metadata | Live | NIP-01/24; identity-key-signed; public-by-default (see CLAUDE.md) |
-| 9 | Inner application message | Live | Location/chat content **inside** 445; never published bare |
-| 1210 | Inner system rows | Live (engine) | Engine-generated membership-change rows inside 445; do NOT collide with kind 9 |
+| 9 | Marmot chat message | **Never emitted** | Marmot's chat kind; receive-only and only paired with `["t","location"]` (see "Why Haven's inner kind is not 9") |
+| 1210 | Inner system rows | Live (engine) | Engine-generated membership-change rows inside 445 |
+| 25442 | Inner application message | Live | Haven's location content **inside** 445; never published bare |
 | 30443 | KeyPackage (addressable) | Live | Replaces 443; published to and fetched from NIP-65 (10002) relays |
 | 443 | KeyPackage (legacy) | **RETIRED** | One-time cutover retraction; fetch-filter residue only (see below) |
 | 444 | Welcome rumor | Live | UNSIGNED, inside 1059; strict `e` + `relays` tags |
@@ -522,13 +572,86 @@ The decrypted 445 payload is a `MarmotAppEvent`: an **unsigned** Nostr-shaped in
   ingest, and Haven *also* fail-closes on send (`SessionManager::create_message` rejects a rumor
   whose pubkey is not the local identity).
 - **No `sig`** field.
-- MUST NOT include `h` tags or any group identifier.
+
+**Inner tags are application content, and nothing else.** "Decoders do not police inner tag names.
+Tags carry application content; the active transport binding builds the outer envelope's routing
+tags from group state, never from the inner event, so an inner tag never affects delivery"
+(`foundation/application-messages.md`, adopted); "An inner tag therefore carries application
+content only: it never affects addressing, routing, expiry, or branch selection"
+(`protocol-core/group-messaging.md`). The MIP-03-era "MUST NOT include `h` tags or any group
+identifier" was **replaced by that framing and no longer exists in the spec**. So emitting no tags
+at all is trivially conformant; dropping the old `["t","location"]` hashtag was a metadata
+improvement, not a compliance fix; and the kind-9 receive gate below reads a `t` tag as application
+content — exactly what the spec says it is — not as a protocol-layer read.
 
 Kinds inside the tunnel:
-- **kind 9** — application content. Haven's location updates are inner kind-9 events with a
-  `["t","location"]` tag and the location JSON as content (`src/location/nostr.rs`).
+- **kind 25442** (`KIND_LOCATION_UPDATE`, `haven-core/src/nostr/event.rs`) — Haven's location
+  updates: the `LocationMessage` JSON as content and **no tags at all**. The kind, not a tag, is
+  what marks a payload as a location update, on both sides (`location_rumor` /
+  `is_location_rumor`, `haven-core/src/nostr/mls/manager.rs`).
 - **kind 1210** — engine-generated **system rows** (membership changes, renames, retention
-  changes; backs `GroupStateChanged`). Do not collide application content with 1210.
+  changes; backs `GroupStateChanged`).
+- **kind 9** — Marmot's chat message. Haven never sends it, and accepts it inbound only when it
+  carries `["t","location"]`; see below.
+
+`inner_location_content` gates on the kind before touching the content. An inner event of any
+other kind yields empty content, which still surfaces as `LocationMessageResult::Location` with
+no location — the caller sees that an authenticated message arrived at this cursor position and
+advances past it, rather than treating a peer's chat message as a retriable decrypt failure.
+Before this gate every authenticated inner event reached the map layer, excluded only by failing to
+deserialize as a `LocationMessage` — a weak filter, because `deny_unknown_fields` is deliberately
+**absent** from that struct (an old client's payload still carrying `display_name` must parse, not
+hard-fail; pinned by a wire-compat test in `haven-core/src/location/types.rs`), so any foreign
+payload carrying the five location keys rendered as a member marker.
+
+#### Why Haven's inner kind is not 9
+
+Kind 9 is `MARMOT_APP_EVENT_KIND_CHAT`, Marmot's default chat kind, so an MDK-based client draws
+anything sent on it as chat: the chat-list preview, the unread/mention scan
+(`storage-sqlite/src/chat_list.rs`, `marmot-app/src/notifications.rs`) and the notification
+classifier (`is_notifiable_message_kind`) are all kind-9 allowlists — White Noise would render a
+Haven circle as a stream of unreadable messages with unread badges and push notifications. An
+unrecognised kind takes the other path: MDK's timeline projection drops it with
+`_ => return Ok(None)` (`storage-sqlite/src/timeline.rs`), so it never becomes a row at all.
+Marmot's `foundation/application-messages.md` (adopted) permits exactly that: "Protocol
+processing MUST NOT reject an otherwise-valid app payload merely because its event kind is
+unknown", and "A client MAY ignore or decline to render unsupported application semantics after
+delivering the accepted payload to its application layer". A foreign kind is delivered and then
+silently ignored, which is the behaviour Haven wants.
+
+This is an application-layer contract with other Marmot clients, not a Nostr-registry matter: the
+inner kind exists only after MLS decryption and never reaches a relay.
+
+**25442** was drawn at random from the ephemeral band (NIP-01: `20000 <= n < 30000`) and checked
+unallocated in `nostr-protocol/registry-of-kinds`, the NIPs README kind table, MDK, and Haven.
+The band choice is descriptive only — no relay ever classifies this kind.
+
+**Never reuse these inner kinds.** Marmot's registry (`foundation/registries.md`) allocates
+`9` chat, `447`/`448`/`449` push-token update/list/removal, `1009` message edit, `1200` agent
+text stream start, and `1210` group system rows. `1201`/`1202` (agent activity/operation) read as
+"reserved for possible experimental" use in the registry, but are already live in MDK: both are
+`cgka-traits` constants and its timeline projection renders both as rows. `446` is the
+push-notification rumor; `450`/`451`/`452` are local signing templates that MUST NOT be published.
+MDK additionally defines `5` (delete) and `7` (reaction) as inner app kinds. Haven's collision test
+also reserves `1209`, which is **not** an allocation — it is in no Marmot registry and no MDK rev —
+but deliberate margin next to `1210`.
+
+**Upstream registration of 25442 is advisable, not required.** "The registry is not an allowlist
+of inner event kinds" (`foundation/application-messages.md`) — an unallocated kind is conformant on
+its own, and other clients handle 25442 under the ordinary unknown-app-event rules. The registry's
+"Future adoption MUST add their exact semantics to the main table before relying on them for
+interoperability" governs Marmot's own reserved `1201`/`1202` and future *Marmot-defined* app-event
+kinds; it does not bind a third party choosing an unallocated number. Filing an entry is still
+worth doing, because Marmot defines no third-party or private-use range for inner app kinds:
+nothing else stops a future Marmot allocation from landing on 25442.
+
+**The kind-9 receive window is transitional and deliberately narrow.**
+`LEGACY_KIND_LOCATION_UPDATE` is accepted on receive only when the rumor also carries
+`["t","location"]`. Every Haven build that can still share a group with a current one (v0.1.11,
+v0.1.12 — anything earlier is pre-Dark-Matter and cannot decrypt a current 445 at all) stamped
+that hashtag, while a White Noise chat message is a bare kind 9. The pair is what keeps a
+not-yet-updated member on the map without admitting one chat message. Nothing constructs a rumor
+at kind 9 any more.
 
 ### Account identity proof (kind 450 — embedded, never published)
 
@@ -684,7 +807,47 @@ creation, and engine auto-commits) come back as `SessionEffects.publish` items:
 
 Between stage and confirm the group is `EpochState::PendingPublish`; inbound messages get
 `Buffered` and replay on return to `Stable`. A crash in the window → hydrate clears the staged
-commit and emits `PendingCommitRecovered` → treat as a **mandatory resync**. The old
+commit and emits `PendingCommitRecovered` → treat as a **mandatory resync**. ~~That covers every
+staged commit.~~ **CORRECTED 2026-09-05 — it does NOT cover the removal-bearing ones, which is the
+case that matters most.** `staged_removes_member` (matching `Proposal::Remove | Proposal::SelfRemove`)
+short-circuits the whole emit block at hydrate (`cgka-engine/src/engine.rs:820-828`), deliberately:
+rolling a removal back would re-add the departed member and fork convergence. So a peer `SelfRemove`
+auto-commit killed between publish and confirm emits **nothing** — no `PendingCommitRecovered`, no
+resync signal — and a re-fetch of one's own commit comes back `Stale { OwnEcho }` from the durable
+`MessageState::Sent` row (`message_processor/store.rs:24-27`, consulted before any MLS processing at
+`ingest.rs:417-420`), so re-downloading it applies nothing.
+
+**And `publish_failed` is not an escape.** Rolling a peer `SelfRemove` auto-commit back DROPS the
+removal permanently and silently: the engine removes its in-memory
+`scheduled_self_remove_auto_commits` entry before staging, `do_publish_failed` does not re-arm it,
+and a redelivery of the proposal short-circuits to `Buffered` off its durable `Created`
+`MessageRecord` without reaching the arm that reschedules. Verified by source and by experiment at
+`e391adc`: no later `advance_convergence`, no re-ingest, no outbound send and no restart re-derives
+it — until some unrelated commit moves the epoch, after which the leaver's own client re-proposes
+(`message_processor/send.rs:718-725` gates the re-proposal on exactly that). So a receive plane
+holding an `AutoPublish` has exactly three dispositions — publish it, park it
+as a durable obligation for a foreground pass (`ReceiveAutoCommitPolicy::DeferToForeground`), or drop
+the removal.
+
+Two further consequences, both verified by experiment at `e391adc` and both invisible from every
+engine read accessor:
+
+- **A rollback does not restore the circle's sends.** `do_publish_failed` clears the staged COMMIT
+  but not the stored PROPOSAL, and `OpenMLS`'s `create_message` refuses while the proposal store is
+  non-empty. The next send fails `create_message: GroupStateError(PendingProposal)` and keeps failing
+  until some commit merges and empties the store. Rolling back trades a `PendingPublish` refusal for
+  a `PendingProposal` one.
+- **After a process restart the two layers disagree, and only the send gate can tell.** `EpochManager`
+  is in-memory (`cgka-engine/src/epoch_manager.rs` — plain `HashMap`s, `Default`), and hydrate ends by
+  calling `set_stable(group.epoch)` unconditionally (`engine.rs:882`) on a record whose epoch was
+  already projected PAST the leave. So a group carrying an unrecovered removal-bearing staged commit
+  reports `Stable` at epoch N+1 with the leaver already gone from `members`, while `OpenMLS` is still
+  at N with the commit staged. `epoch`, `members`, `group_record` and `current_safe_export_epoch` all
+  read the projection; a send is the only thing that reports the truth.
+
+Full analysis: `docs/POWER_EFFICIENCY_PLAN.md` §4 OD4-c and §5.4; the owner's decision
+(both halves) is implemented in `haven-core/src/relay/auto_commit.rs` +
+`live_sync/processor.rs`. The old
 `merge_pending_commit`/`clear_pending_commit`/staged-commit-marker machinery is deleted — the
 typed `PendingStateRef` lifecycle owns it.
 
@@ -708,7 +871,8 @@ un-poison workaround — all deleted):
   gates (the out-of-order convergence e2e is retained as the F2 gate).
 - Upstream **#633** (sticky-`Unprocessable` epoch poison) is fixed by this design; Haven's local
   `retry_failed_future_epoch_messages` workaround is deleted.
-- **#757 (OPEN)**: the buffer has **no per-group cap and no eviction API** — a malicious member
+- **#757 (OPEN — re-confirmed by `gh api` on 2026-09-05, and still open at MDK v0.9.18)**: the
+  buffer has **no per-group cap and no eviction API** — a malicious member
   can grow durable storage with future-epoch messages. Haven mitigates with intake backpressure
   (Rule 12: rate-limit, NEVER silently drop legitimate offline backlog), but an intake cap
   throttles only — it cannot bound engine storage. #757 closure is the real fix.
@@ -988,20 +1152,27 @@ When building a location sharing app with Marmot:
 
 3. **Per-Group Settings**: different privacy settings per group.
 
-### Message Format (Haven's inner kind-9)
+### Message Format (Haven's inner kind-25442)
 
 ```json
 {
-  "kind": 9,
+  "kind": 25442,
   "pubkey": "<member's identity pubkey — MUST equal the MLS sender>",
   "created_at": 1234567890,
-  "content": "{\"type\":\"location_share\",\"data\":{...}}",
-  "tags": [["t", "location"]]
+  "content": "{\"latitude\":37.7749295,\"longitude\":-122.4194155,\"geohash\":\"9q8yyk8y\",\"timestamp\":\"2026-01-01T00:00:00Z\",\"expires_at\":\"2026-01-01T00:15:00Z\"}",
+  "tags": []
 }
 ```
 
-Inner events MUST NOT carry `h` tags or group identifiers; the id must be the canonical NIP-01
-id (the engine validates both).
+`content` is `serde_json` over `LocationMessage` (`haven-core/src/location/types.rs`) — those
+five fields and no others. Device id, raw accuracy, altitude, speed and heading are `#[serde(skip)]`
+and never leave the device. `display_name` is a sixth, optional field kept only for read-tolerance:
+new clients never emit it (public kind-0 profiles replaced it), but a payload from an old client
+that still carries it must deserialize cleanly, so `deny_unknown_fields` must never be added.
+
+The `id` must be the canonical NIP-01 id over the other five members and the `pubkey` must be the
+MLS-authenticated sender; the engine validates both on ingest. Inner tags are unconstrained by the
+spec — Haven simply emits none (see "Inner application messages" above).
 
 ### Metadata Considerations
 

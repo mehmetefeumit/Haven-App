@@ -58,18 +58,120 @@ pub const RECEIVER_EXPIRATION_GRACE_SECS: u64 = 60;
 ///
 /// Value = `168 s max publish interval + 2 * 30 s network buffer = 228 s`.
 /// This is the **data-minimizing** point that still satisfies the no-gap
-/// invariant: a member re-publishes at most every `168 s`
-/// (`kLocationPublishMaxInterval`, the ceiling of the ±40 % cadence jitter),
-/// and each member's circles now publish on INDEPENDENT per-circle schedules
-/// (`map_shell.dart` / `background_location_task.dart`), so a circle's
-/// worst-case inter-publish gap stays `168 s` — decorrelating circles does
-/// not inflate it. A `228 s` TTL therefore always leaves the relay holding a
-/// non-expired event from every active publisher, with a `60 s` margin
-/// (`2 * kTtlNetworkBufferSeconds`) absorbing relay/sender clock skew and
-/// propagation. Shortened from the earlier `396 s` (which was the *ceiling*
+/// invariant, for a roster of at most `kMaxCirclesPerBurst` (11) circles —
+/// which is every roster the app admits, since `kMaxCirclesPerAccount` (10)
+/// refuses the eleventh: a
+/// member re-publishes at most every `168 s` (`kLocationPublishMaxInterval`,
+/// the ceiling of the ±40 % cadence jitter), and since the publish schedules
+/// were coalesced (`PUB-COALESCE`) ONE burst per interval publishes every
+/// eligible circle, so a circle that leads one burst and trails the next waits
+/// at most one burst spread longer (`kPublishStaggerMaxSpread`, `30 s`). The
+/// worst-case SCHEDULED gap is therefore `198 s`, and a `228 s` TTL leaves the
+/// relay holding a non-expired event from every active publisher with `30 s`
+/// left over for propagation and clock skew — one whole
+/// `kTtlNetworkBufferSeconds`, half of the `2 * 30 s` this constant is built
+/// from; the burst spread is what spends the other half. Shortened from the
+/// earlier `396 s` (which was the *ceiling*
 /// of the retired per-send jitter range, i.e. ~2× the necessary residency):
 /// halving relay-side residency of location ciphertext is a direct
 /// data-minimization win.
+///
+/// **`198 s` is the SCHEDULED gap; TWO REALIZED gaps exceed this constant, and
+/// both are accepted residuals rather than breaches.** The Android foreground
+/// service publishes on a platform delivery, which arrives a TTFF late. On API
+/// 23–30 — no delayed register, so the regime pays TWO acquisitions per
+/// registration — a `30 s` cold TTFF plus a long jittered interval pushes the
+/// realized gap to at most `248 s`, i.e. `20 s` past this `228 s`, once. That
+/// is `POWER_EFFICIENCY_PLAN.md` D3 (iii)'s ACCEPTED cold residual: it is swept
+/// and pinned by equality per API regime in
+/// `haven/test/services/background_fix_request_test.dart`, not tolerated
+/// silently, and it means a relay-side grader reading a capture from an API
+/// 23–30 handset treats a gap between `228 s` and `248 s` as that residual and
+/// only a gap above `248 s` as a finding (`docs/POWER_MEASUREMENT.md` §3.5).
+/// API 31+ stays at `198 s`. The SECOND crossing is the iOS burst head (connect,
+/// backlog wait and one-shot fix, up to `40 s`), which VARIES between bursts and
+/// so enters the realized gap as a differential on top of the burst spread:
+/// `168 + 40 + spread` reaches `235 s` at four circles and `238 s` from five up,
+/// so iOS background sharing is inside this `228 s` only up to THREE circles —
+/// an ordinary roster, and unlike the Android one it is pinned by no test. The
+/// serial pass's own span is the third realized term and does not cross on its
+/// own. Both are stated on the Dart mirror named under KEEP IN SYNC below.
+///
+/// **The bound stops at eleven circles, and the ROSTER is bounded below that,
+/// so the ladder below is unreachable rather than merely moved.** The owner
+/// bounded the account roster at `kMaxCirclesPerAccount` (10) on 2026-09-09 —
+/// refused at circle creation and at invitation accept, in
+/// `haven/lib/src/services/nostr_circle_service.dart` — precisely so that
+/// nothing can hand the burst a twelfth circle. The ladder is kept documented
+/// because the deferral code is still there and lifting the bound re-opens it
+/// exactly as written. A burst publishes at most `kMaxCirclesPerBurst` circles
+/// and defers the rest to the next tick. The slice is strict round-robin, so a
+/// circle's worst service period is `ceil(N / 11)` bursts rather than two at
+/// every roster: `N = 12..22` → TWO sampled intervals (`144 s` best, `240 s`
+/// mean, `336 s` worst, and `366 s` once the burst-position differential is
+/// added — a circle may lead one burst and trail the one two ticks later, a
+/// whole `kPublishStaggerMaxSpread` apart); `N = 23..33` → three (`216`/`360`/
+/// `504 s`); `N >= 34` → four or more, where even the BEST case (`288 s`)
+/// exceeds this `228 s` on every publish rather than on some.
+///
+/// Both halves of that ladder are pinned rather than left as prose: the
+/// round-robin period itself by `a deferred circle waits ceil(N /
+/// kMaxCirclesPerBurst) bursts` in
+/// `haven/test/providers/location_publish_scheduler_provider_test.dart`,
+/// which drives real ticks over both sides of every rung, and the seconds
+/// those periods are quoted in by `and past the cap, the deferral ladder in
+/// SECONDS` in `haven/test/services/publish_stagger_test.dart`, which reads
+/// them off the cadence constants.
+///
+/// ONE limit on that quotient, not visible from the arithmetic: the cap bounds
+/// what the scheduler HANDS OVER, not what a background pass publishes. While
+/// the iOS sink is installed, a tick arriving inside a running burst folds into
+/// it (`BackgroundBurstCoordinator._joinable`) rather than opening a socket of
+/// its own, so one pass can carry two slices. That is reachable only at
+/// `N >= 12`, already outside the roster this constant's bound covers, but it
+/// is stated rather than left to be discovered.
+///
+/// The period itself is ABSOLUTE. `_rotation` outlives
+/// `stopScheduling()`/`startScheduling()` and outlives an emission reporting
+/// nothing eligible, so neither a backgrounding nor a failed roster read
+/// re-phases whose turn it is — pinned by `a deferred circle is not deferred
+/// again by every resume`, `a transient empty roster emission does not re-phase
+/// whose turn it is` and `a roster change keeps survivors' places in the queue`
+/// in `haven/test/providers/location_publish_scheduler_provider_test.dart`.
+/// What still rewinds the queue is `build()` — a fresh container, or the
+/// invalidate in `IdentityNotifier.deleteIdentity` — and a process restart,
+/// which does not persist it; and because the roster keeps
+/// `filterPublishEligibleCircles` order (`getVisibleCircles()` orders by
+/// `updated_at DESC`) a rewind returns to the same head and re-serves the same
+/// first slice, a deterministic re-service rather than a re-phase. The tail's
+/// gap across that boundary is bounded by how often the app resumes rather than
+/// unbounded, because the deliberately uncapped one-shot burst
+/// (`locationPublisherProvider`) fires on cold start, on the motion trigger, on
+/// accept/create and on a resume more than `30 s` after the last one
+/// (`MapShell`'s resume debounce sits ABOVE its invalidate, so a glance inside
+/// that window is not a trigger).
+///
+/// TWO baselines, because they answer differently. Against an UNCAPPED
+/// coalesced burst the hole opened from the twenty-second circle
+/// (`168 + 3 * 21 = 231 s`) and the cap moves it to the twelfth. Against the
+/// ACTUAL predecessor — per-circle schedulers, where the gap was each circle's
+/// own sampled interval, `<= 168 s` at every roster, with no spread and no
+/// deferral — there was NO hole at any roster size and the full `60 s`
+/// (`2 * kTtlNetworkBufferSeconds`) of margin was intact; so this is a
+/// regression at every `N >= 12` with no upper bound, and at every `N >= 2` in
+/// the margin (`60 s` -> `30 s`). Taken deliberately (owner, 2026-09-08, option
+/// (a)) because the cap is what makes the burst span, the single shared GPS fix
+/// and `kLocationPublishOverlapGuard` hold for EVERY roster. It is structural
+/// past ~31 circles by pigeonhole — a DIFFERENT bound from the service period
+/// above, because it is about one burst's spread rather than how many bursts a
+/// circle waits. Closing both needed a roster bound or a longer retention; the
+/// owner took the ROSTER BOUND on 2026-09-09, which puts both out of reach in
+/// production without moving anything on the wire. The `N >= 12` regression is
+/// therefore latent-behind-a-bound rather than live; the `N >= 2` margin
+/// halving (`60 s` -> `30 s`) is NOT closed by it and stays as stated. See
+/// `kMaxCirclesPerBurst` and `kMaxCirclesPerAccount`
+/// (`haven/lib/src/services/publish_stagger.dart`), `SECURITY.md`'s no-gap
+/// invariant, and `INV-W-445-EXPIRATION-WINDOW`'s residual.
 ///
 /// A fixed protocol-level constant is deliberately chosen over per-circle
 /// jitter: the outer event's stable `h` tag already identifies the circle,

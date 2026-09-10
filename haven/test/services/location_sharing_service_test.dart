@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/services/circle_service.dart';
+import 'package:haven/src/services/clock_skew_detector.dart';
 import 'package:haven/src/services/location_sharing_service.dart';
 import 'package:haven/src/services/relay_service.dart';
 import '../mocks/circle_service_retention_stubs.dart';
@@ -138,9 +139,73 @@ void main() {
         );
 
         expect(mockCircleService.methodCalls, contains('encryptLocation'));
-        expect(mockRelayService.methodCalls, contains('publishEvent'));
+        expect(
+          mockRelayService.methodCalls,
+          contains('publishLocationEvent'),
+        );
         expect(mockRelayService.publishedEvents, hasLength(1));
       });
+
+      test('uses the location ladder, not the commit ladder', () async {
+        // A location that no relay took is superseded by the next tick
+        // within 168 s, so it takes ONE bounded attempt. A commit is not
+        // superseded — it keeps the 3-attempt ladder (Security Rule 13).
+        // Nothing in the types keeps the two apart: both take an event JSON
+        // and a relay list, so which method the send path picked is the
+        // only observable that distinguishes them.
+        await service.publishLocation(
+          mlsGroupId: [1, 2, 3],
+          nostrGroupId: [4, 5, 6],
+          senderPubkeyHex: 'abc123',
+          latitude: 37.7749,
+          longitude: -122.4194,
+        );
+
+        expect(mockRelayService.methodCalls, ['publishLocationEvent']);
+        expect(mockRelayService.publishLocationRelayCalls.single, [
+          'wss://relay.example.com',
+        ]);
+      });
+
+      test(
+        'a clock rejection from the location ladder still reaches the '
+        'detector',
+        () async {
+          // The one-shot ladder keeps `publish_event`'s error CONTRACT: a
+          // device-clock rejection stays a typed
+          // `RelayClockRejectionException` rather than collapsing into the
+          // generic failure, so the one publish error the user can act on
+          // survives the swap.
+          final detector = ClockSkewDetector();
+          addTearDown(detector.dispose);
+          final svc = LocationSharingService(
+            circleService: mockCircleService,
+            relayService: mockRelayService,
+            clockSkewDetector: detector,
+          );
+          mockRelayService.publishThrows = const RelayClockRejectionException(
+            'ahead',
+          );
+
+          await expectLater(
+            svc.publishLocation(
+              mlsGroupId: [1, 2, 3],
+              nostrGroupId: [4, 5, 6],
+              senderPubkeyHex: 'abc123',
+              latitude: 37.7749,
+              longitude: -122.4194,
+            ),
+            throwsA(isA<RelayClockRejectionException>()),
+          );
+
+          expect(mockRelayService.methodCalls, ['publishLocationEvent']);
+          expect(
+            detector.status.signal,
+            ClockSkewSignal.relayRejectedTimestamp,
+          );
+          expect(detector.status.complaint, DeviceClockComplaint.ahead);
+        },
+      );
 
       test(
         'forwards kLocationPublishMaxInterval + buffer as updateIntervalSecs',
@@ -169,7 +234,13 @@ void main() {
             mockCircleService.capturedUpdateIntervalSecs,
             kLocationPublishMaxInterval.inSeconds + kTtlNetworkBufferSeconds,
           );
-          expect(mockCircleService.capturedUpdateIntervalSecs, 198);
+          expect(
+            mockCircleService.capturedUpdateIntervalSecs,
+            198,
+            reason: 'deliberate tripwire paired with the derivation above — a '
+                'cadence change must be a visible edit here, never a silent '
+                'shift',
+          );
         },
       );
     });
@@ -565,8 +636,8 @@ void main() {
         );
 
         test(
-          'rolls back an auto-commit via failPendingCommit when no relay '
-          'acks',
+          'reports an unacked auto-commit via failPendingCommit and never '
+          'confirms it',
           () async {
             final mockRelay = MockRelayService(
               groupMessages: [
@@ -596,9 +667,14 @@ void main() {
               contains('{"id":"commitEvt","kind":445}'),
             );
             expect(mockCircle.confirmPendingCommitCalls, isEmpty);
-            expect(mockCircle.failPendingCommitCalls, [
-              PendingCommitToken(BigInt.from(9)),
-            ]);
+            expect(
+              mockCircle.failPendingCommitCalls,
+              [PendingCommitToken(BigInt.from(9))],
+              reason:
+                  'the token must LEAVE the ladder, never be dropped. This is '
+                  'not a rollback: Rust refuses to discard a peer eviction, so '
+                  'the removal stays owed for the next foreground redemption',
+            );
           },
         );
 
@@ -745,8 +821,8 @@ void main() {
               relayService: mockRelay,
             );
 
-            // Must not propagate: a throw mid-publish resolves to a
-            // rollback internally rather than aborting the surrounding
+            // Must not propagate: a throw mid-publish resolves to the
+            // fail rung internally rather than aborting the surrounding
             // fetch.
             await svc.fetchMemberLocations(circle: testCircle);
 
@@ -759,13 +835,14 @@ void main() {
         );
 
         test(
-          'rolls back without ever publishing when no relays are available',
+          'takes the fail rung without ever publishing when no relays are '
+          'available',
           () async {
             // The explicit no-relays branch: neither the freshly-read
             // circle (getCircle returns null — the mock's default empty
             // roster) nor the caller-held snapshot has a relay to publish
-            // to, so the commit is rolled back directly and `publishEvent`
-            // must never be reached.
+            // to, so the commit takes the fail rung directly and
+            // `publishEvent` must never be reached.
             final noRelaysCircle = TestCircleFactory.createCircle(
               displayName: 'Test',
               relays: const [],
@@ -2578,6 +2655,15 @@ class _MutableMockRelayService implements RelayService {
     failed: const [],
   );
 
+  // A receive-plane stub: nothing here publishes a location, so reaching the
+  // one-shot ladder from one of these tests is a routing bug, not a fixture
+  // gap.
+  @override
+  Future<PublishResult> publishLocationEvent({
+    required String eventJson,
+    required List<String> relays,
+  }) async => throw UnimplementedError();
+
   @override
   Future<void> publishEventFireAndForget({
     required String eventJson,
@@ -2695,6 +2781,15 @@ class _PauseRacingRelayService implements RelayService {
     failed: const [],
   );
 
+  // A receive-plane stub: nothing here publishes a location, so reaching the
+  // one-shot ladder from one of these tests is a routing bug, not a fixture
+  // gap.
+  @override
+  Future<PublishResult> publishLocationEvent({
+    required String eventJson,
+    required List<String> relays,
+  }) async => throw UnimplementedError();
+
   @override
   Future<void> publishEventFireAndForget({
     required String eventJson,
@@ -2801,6 +2896,15 @@ class _SinceCapturingRelayService implements RelayService {
     rejectedBy: const [],
     failed: const [],
   );
+
+  // A receive-plane stub: nothing here publishes a location, so reaching the
+  // one-shot ladder from one of these tests is a routing bug, not a fixture
+  // gap.
+  @override
+  Future<PublishResult> publishLocationEvent({
+    required String eventJson,
+    required List<String> relays,
+  }) async => throw UnimplementedError();
 
   @override
   Future<void> publishEventFireAndForget({

@@ -37,8 +37,8 @@ mod types;
 pub mod url_norm;
 
 pub use auto_commit::{
-    publish_then_resolve, resolve_receive_publish_work, rollback_receive_publish_work,
-    AutoCommitPublisher,
+    park_or_rollback_receive_publish_work, publish_then_resolve, resolve_receive_publish_work,
+    resolve_receive_publish_work_with_policy, AutoCommitPublisher, ReceiveAutoCommitPolicy,
 };
 pub use catchup::{CatchupOutcome, ReceiveOnlyOutcome};
 pub use clock_skew::{
@@ -49,7 +49,7 @@ pub use clock_skew::{
 pub use cursor::{
     cap_timestamp_to_now, cursor_ms_for_event, since_for_stream, SubscribePhase,
     GROUP_INITIAL_BUFFER_SECS, GROUP_RESUBSCRIBE_BUFFER_SECS, INBOX_GIFTWRAP_LOOKBACK_SECS,
-    STREAM_GROUP_445, STREAM_INBOX_1059,
+    INBOX_RESUBSCRIBE_LOOKBACK_SECS, STREAM_GROUP_445, STREAM_INBOX_1059,
 };
 pub use discovery::{discovery_relays, set_discovery_relays_for_test, PRODUCTION_DISCOVERY_RELAYS};
 pub use error::{RelayError, RelayResult};

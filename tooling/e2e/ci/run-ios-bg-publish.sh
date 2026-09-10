@@ -11,17 +11,65 @@
 # event IN-PROCESS, which runs the app's own paused branch but never the OS's
 # side of the transition or the native session handler's survival across it.
 #
+# # The leg matrix: two axes, three legs
+#
+# The lane runs as a MATRIX and this invocation is one leg of it. Two inputs say
+# which, and BOTH are mandatory here for the same reason: each is compiled into
+# the artifact as well as acted on, so an unstated one would not be neutral — it
+# would be another leg wearing this leg's name.
+#
+# HAVEN_BGP_AUTH_TIER — the CoreLocation grant:
+#
+#   when-in-use  `simctl privacy grant location`         -> whenInUse
+#   always       `simctl privacy grant location-always`  -> always
+#
+# The value decides TWO things from one source: which service is granted here,
+# and which shape the drive PINS (threaded on as
+# --dart-define=HAVEN_BGP_EXPECT_TIER). That single source is the point. The
+# drive must not branch on the tier it observes, because
+# `requestAlwaysAuthorization()` reports `.authorizedAlways` while the second
+# prompt is unanswered — a simulator that escalated the When-In-Use grant would
+# then quietly run the Always shape and pass. Pinned, the escalation is a red,
+# attributable run.
+#
+# HAVEN_LIVE_SYNC — the RECEIVE PLANE the app is built with, and therefore which
+# receive phase the drive runs (P2c, the burst, or P2d, the 90 s catch-up
+# timer). It is one `--dart-define` and one compile-time `liveSyncEnabled`
+# const, so the plane and the phase can never disagree inside the app; what CAN
+# disagree is that define and what this script demands of the log, which is what
+# the completion gate's symmetry below exists to catch.
+#
+# Three legs, not four: (when-in-use, true), (always, true), (when-in-use,
+# false). There is no (always, false) leg, and its absence is a decision rather
+# than an omission — the poll leg exists to cover the POLL RECEIVE PATH under a
+# real backgrounding, which has nothing to do with the authorization tier, and
+# an Always poll leg would buy one more ~62-minute macOS job for a second
+# reading of a tier policy the live-sync Always leg already proves.
+#
 # # What the drive proves (each phase leaves a terminal proof marker)
 #
 #   P1  After enabling background sharing through the production
-#       `BackgroundSharingNotifier.setEnabled` path, the native
-#       `HavenBackgroundSessionHandler` reports supported==true and
-#       backgroundActivitySessionHeld==true (iOS 17+ runtime), AND the
-#       position stream that flip REBUILDS — the one carrying
-#       `allowBackgroundLocationUpdates: true` — delivers a fresh fix while
-#       the app is still foregrounded. iOS only lets a background-capable
+#       `BackgroundSharingNotifier.setEnabled` path, CoreLocation reports the
+#       PINNED tier, the native `HavenBackgroundSessionHandler` reports
+#       supported==true (iOS 17+ runtime) and holds the session objects that
+#       tier calls for, AND the position stream that flip REBUILDS — the one
+#       carrying `allowsBackgroundLocationUpdates: true` — delivers a fresh
+#       fix while the app is still foregrounded, with the native `status()`
+#       read back to confirm it is running, background-capable, at the Best
+#       profile and not yet backgrounded. iOS only lets a background-capable
 #       location session start while the app is in use, so that is the only
 #       moment it can be proven.
+#
+#       The session posture is INVERTED between the two jobs, which is the
+#       tier->policy mapping the whole phase rests on: under When-In-Use a
+#       CLBackgroundActivitySession is held and the indicator is asked for
+#       (mandatory there, and the object whose absence produced the 2026-08-20
+#       field failure); under a CONFIRMED Always — confirmed by a
+#       CLServiceSessionDiagnostic, read through a bounded poll because the
+#       verdict lands after arm() returns — the .always CLServiceSession is
+#       held, the activity session is released and no indicator is asked for.
+#       Only the Always job prints ALWAYS_SESSION_OK, and only its completion
+#       gate requires it.
 #   P2a With the app OS-backgrounded, a per-circle publish tick driven
 #       through the production scheduler reaches the relay — the pipeline
 #       works from a backgrounded process, answerable within seconds.
@@ -29,6 +77,72 @@
 #       keep publishing: >= 2 further events, over a window sized to two
 #       full 72-168 s jitter intervals. P2a passing and P2b failing means
 #       the OS stopped scheduling the process, not that publishing broke.
+#
+#       P2b also polls the native session for the 100 m accuracy profile,
+#       bounded to kStationaryDwell + kStationaryConfirmMaxAge (204 s) from
+#       the backgrounding instant, and asserts it BEFORE the count. That poll
+#       is the only CI-checkable part of the phase's power claim: it reads the
+#       live `manager.desiredAccuracy`, so it says the coarse tier was really
+#       requested of CoreLocation rather than written to a Dart field, and the
+#       count beside it says publishing continued while it was. A single read
+#       would be a coin flip — with nothing delivered under the coarse tier
+#       the confirm deadline escalates back to Best every 84 s, so the coarse
+#       profile is a window, not a steady state. The bound is what makes the
+#       poll span one whole such window; see the drive target's library doc for
+#       the one outcome that retires this oracle (a simulator that never runs
+#       at 100 m at all -> move it to the host-side controller proof), and for
+#       why the answer is never a longer window.
+#   P2c With the app OS-backgrounded, a burst RECEIVES — the LIVE-SYNC legs'
+#       receive phase. A live peer publishes a kind-445 to the circle, and the
+#       burst driven afterwards decrypts it into the app's member-location
+#       cache — coordinates compared, because a cache ROW proves a row was
+#       written where the coordinates prove the ciphertext was peeled. Then,
+#       with that burst over, the engine's relay pool must hold NO subscription
+#       at all.
+#
+#       This is where the lane started compiling the receive engine IN
+#       (HAVEN_LIVE_SYNC=true): since P4 the iOS background pause branch runs
+#       every publish tick as a burst — open, ingest, publish, settle, pause —
+#       so the receive engine is not a separate axis, it is the other half of
+#       the mechanism P2a/P2b measure. Compiled out, every burst's open fails
+#       and the lane measures a degenerate one.
+#
+#       The oracle is the engine's COUNT of registered subscriptions, never
+#       `isPaused`: the core raises that flag as the first statement of its
+#       pause, before it drops a single REQ, so it reads "paused" for every
+#       state this phase exists to catch. Its control arm is a foreground read
+#       of the same counter (non-zero, taken before the backgrounding) — zero
+#       is the value the promise is KEPT by, so a counter that could only ever
+#       read zero would prove it for free.
+#
+#       What P2c does NOT prove: that no SOCKET is open between bursts. There
+#       is no in-process oracle for that, and this lane's relay journals no
+#       REQ/CLOSE frames, so there is no relay-side one either; the socket
+#       half is pinned in-process in Rust (live_sync_burst_e2e.rs, on relay
+#       health). Read a green here as "no standing REQ", nothing wider.
+#   P2d With the app OS-backgrounded, the POLL path's background CATCH-UP runs
+#       — the flag-off leg's receive phase, and the reason that leg exists
+#       (OD4-d). The rollback configuration receives through
+#       `MapShell._startIosBackgroundReceiveTimer`'s `Timer.periodic(90 s)`,
+#       whose tick reaches `CatchupService.runCatchup(isBackgroundWake: true)`;
+#       that method returns immediately in a live-sync build, so P2c's plane and
+#       this one are mutually exclusive by construction.
+#
+#       The same peer publishes the same sentinel fix, and this phase drives
+#       NOTHING afterwards: the timer is the subject, so calling anything would
+#       replace it. The oracle is the sweep's own side effect — Rust's
+#       `persist_locations` upserts a last-known-location row per decrypted
+#       location message — read back through
+#       `snapshotLastKnownForCircle`, coordinates compared, against a BASELINE
+#       taken before the peer published. Nothing else on this leg can write that
+#       row: the publish tick's burst open fails with no engine (the drive
+#       asserts that read THROWS while still foregrounded), the foreground
+#       fetch timer was cancelled at the pause, and no provider recomputes with
+#       frames off.
+#
+#       What P2d does NOT prove: anything about the burst plane, which this
+#       build does not have; and not the C3 chokepoint that must refuse a wake
+#       after consent is withdrawn — host tests own that.
 #   P3  Flipping background sharing OFF while STILL backgrounded deactivates
 #       the per-circle scheduler in-process and stops publishing on the wire
 #       (an event-id DIFF over a bounded settle window — never a bare count),
@@ -55,9 +169,10 @@
 #          xcrun simctl terminate <udid> com.apple.Preferences || true
 #          xcrun simctl launch    <udid> com.apple.Preferences
 #      The drive keeps running only because the APP has a background-execution
-#      claim: `UIBackgroundModes: location` plus the live CLLocationManager
-#      updates session the production GeolocatorLocationService creates with
-#      `allowsBackgroundLocationUpdates`. The simulator suspends a
+#      claim: `UIBackgroundModes: location` plus the live updates session on
+#      HavenLocationStreamHandler's own CLLocationManager, started with the
+#      `allowsBackgroundLocationUpdates` argument its `onListen` receives (the
+#      background-sharing toggle, verbatim). The simulator suspends a
 #      backgrounded app that lacks one, and did so in both prior runs of this
 #      lane: 32646436116 (~30 s in, the drive had faked its location service
 #      away) and 32661622879 (~36 s in — that run's sim.logarchive shows the
@@ -88,24 +203,50 @@
 #
 # `flutter test` reports success over a body that was skipped or returned
 # early, and the READY marker is printed BEFORE P2/P3 run — so a drive that
-# exited 0 is not a drive that proved anything. This script therefore
-# requires ALL FOUR terminal proofs in the preserved log, each printed only
-# after the last assertion of its own phase:
+# exited 0 is not a drive that proved anything. This script therefore requires
+# an EXACT set of terminal proofs in the preserved log, each printed only after
+# the last assertion of its own phase. Four are shared by every leg:
 #
 #   [bg-publish] SESSION_ARMED
 #   [bg-publish] BACKGROUND_PUBLISH_OK …   (prefix match; ` count=<n>` suffix)
 #   [bg-publish] NEGATIVE_SILENCE_OK
 #   [bg-publish] SESSION_DISARMED
 #
+# and each axis adds exactly one more, DEMANDED on its own leg and REFUSED on
+# the others:
+#
+#   [bg-publish] BACKGROUND_RECEIVE_OK   HAVEN_LIVE_SYNC=true  (P2c, the burst)
+#   [bg-publish] BACKGROUND_CATCHUP_OK   HAVEN_LIVE_SYNC=false (P2d, the timer)
+#   [bg-publish] ALWAYS_SESSION_OK       the always tier
+#
+# So the poll leg's gate is not "one fewer proof". It is five proofs, one of
+# which is a DIFFERENT fifth — and a log carrying the live-sync five is refused
+# there, exactly as a When-In-Use log carrying ALWAYS_SESSION_OK is. Each of the
+# three is reachable only from one compiled branch, so the wrong one in a log
+# means the value this script acted on and the value the drive was BUILT with
+# came apart, and the job is measuring another leg's subject under this leg's
+# name. The Always leg's own proof carries the same argument on the tier axis:
+# that leg exists for one shape — service session held, diagnostic confirmed, NO
+# activity session — and without its own proof it could exit 0 over a body that
+# never reached those assertions while the shared four made it look complete.
+#
 # # Scope boundary (stated so nobody over-reads a green)
 #
 # A simulator has no jetsam, no Significant-Location-Change relaunch and no
 # BGTaskScheduler, so a background-execution bug only those surface cannot
 # show up here. This lane proves that the production background stack — plist
-# mode, AppleSettings, the native session handler, the Dart publish pipeline —
-# survives a genuinely fired UIApplication background transition and keeps
-# kind-445 events reaching the relay. The physical-device checklist
-# (docs/M7_BACKGROUND_SHARING.md §6, item 0) remains the final proof.
+# mode, AppleSettings, the native session handler, the Dart publish pipeline and
+# whichever receive plane the leg was built with — survives a genuinely fired
+# UIApplication background transition and keeps kind-445 events flowing both
+# ways. The physical-device checklist (docs/M7_BACKGROUND_SHARING.md §6,
+# item 0) remains the final proof.
+#
+# It is also the ONLY place in the repo that produces a real OS backgrounding on
+# iOS: `OVERLAY_BUNDLE_ID` / com.apple.Preferences appear in no other workflow
+# or harness, and e2e-ios runs both of its variants FOREGROUNDED. That is why
+# the poll leg has to live here rather than beside it (OD4-d), and why deleting
+# a leg from this lane deletes a configuration's only real-backgrounding
+# coverage rather than a duplicate of another lane's.
 #
 # One boundary is not yet settled, and P2a/P2b exist to settle it. Apple
 # documents "the UIBackgroundModes key" as one of the features "not available
@@ -124,14 +265,14 @@
 # Same reasoning as run-b4-ios-real-gps.sh: a `simctl privacy` grant resolves
 # the bundle id against INSTALLED apps and does not survive `simctl
 # uninstall`, which the shared runner performs on entry. So this script
-# builds once, uninstalls, installs, grants When-In-Use (`location` — this
-# lane proves the production When-In-Use path; Always is B7's axis), seeds a
-# `simctl location` fix, and asks the shared runner to skip its own uninstall
-# via HAVEN_E2E_IOS_SKIP_UNINSTALL=1. Both are load-bearing, not hygiene: the
-# drive overrides NOTHING about location (B4's stance, not B7's), because the
-# production CLLocationManager session is the app's only claim to execute
-# while backgrounded. Without the grant the app sits on an unanswerable
-# prompt; without the fix locationd has nothing to deliver.
+# builds once, uninstalls, installs, grants the tier's service (see "The leg
+# matrix"), seeds a `simctl location` fix, and asks the shared runner to skip
+# its own uninstall via HAVEN_E2E_IOS_SKIP_UNINSTALL=1. Both are
+# load-bearing, not hygiene: the drive overrides NOTHING about location (B4's
+# stance, not B7's), because the production CLLocationManager session is the
+# app's only claim to execute while backgrounded. Without the grant the app
+# sits on an unanswerable prompt; without the fix locationd has nothing to
+# deliver.
 #
 # Everything else — the first-test watchdog, the narrowed retry gate, the
 # secret-leak scan — is inherited by delegating the drive to
@@ -146,16 +287,32 @@
 #                     ws://localhost:7777).
 #   HAVEN_LIVE_SYNC   'true' or 'false'. MANDATORY — declared per STEP by the
 #                     caller, exactly as run-ios-sim-scenario.sh requires
-#                     (S1 / CI_HARDENING_BACKLOG.md A7).
+#                     (S1 / CI_HARDENING_BACKLOG.md A7). It selects the receive
+#                     PLANE the app is compiled with, so it also selects which
+#                     receive phase the drive runs and which of the two plane
+#                     proofs this script demands and refuses.
+#   HAVEN_BGP_AUTH_TIER  'when-in-use' or 'always'. MANDATORY, and for the same
+#                     reason HAVEN_LIVE_SYNC is: it selects the grant AND the
+#                     shape the drive pins, so a default would let the matrix
+#                     lose a leg silently — both jobs would run the
+#                     When-In-Use assertions and the Always job would report
+#                     success for a posture it never exercised.
+#   HAVEN_BGP_DISABLE_WAIT_SECS / _DISABLE_WAIT_POLL_SECS  the per-leg DISABLE
+#                     deadlines (1440 / 1310), each derived from its own leg's
+#                     phase sum. Overriding either is a debugging affordance,
+#                     never a fix: see the derivation above for both bounds.
 #
 # Side effects:
 #   - Writes /tmp/bg-publish-ios.log (uploaded as a CI failure artifact).
 #   - Leaves the app UNINSTALLED from the simulator on completion.
 #
 # Exit status:
-#   0  the session armed, publishes continued across a real backgrounding,
-#      and the disable stopped both — all four proofs present
-#   1  the drive failed, or it exited 0 without printing all four proofs
+#   0  the session armed, publishes continued across a real backgrounding, this
+#      leg's receive plane carried a peer's location into the app (a burst that
+#      left no standing REQ, or a background catch-up sweep), and the disable
+#      stopped both — every proof this leg owes, and none it must not produce
+#   1  the drive failed, or it exited 0 without this leg's full proof set, or it
+#      printed a proof only another leg can reach
 #   2  usage / harness misconfiguration (including: this Xcode cannot grant
 #      location privacy or seed a simulated location)
 
@@ -184,15 +341,22 @@ readonly OVERLAY_BUNDLE_ID="com.apple.Preferences"
 #
 # READY_MARKER and DISABLED_MARKER feed the HANDSHAKE only and are printed
 # before the assertions that follow them, so neither can stand in for a
-# completion proof. The other four are the terminal proofs: each is printed
+# completion proof. The other seven are the terminal proofs: each is printed
 # only after the last assertion of its own phase. PUBLISH_MARKER is matched as
-# a PREFIX (the drive appends ` count=<n>`).
+# a PREFIX (the drive appends ` count=<n>`). Three are LEG-SPECIFIC and the
+# gate is symmetric about each: ALWAYS_MARKER is required by the Always leg and
+# REFUSED elsewhere; RECEIVE_MARKER (the burst) is required by the live-sync
+# legs and refused on the poll one; CATCHUP_MARKER (the 90 s receive timer) is
+# required by the poll leg and refused on the others — see the completion gate.
 readonly READY_MARKER='[bg-publish] READY_FOR_BACKGROUND'
 readonly DISABLED_MARKER='[bg-publish] BACKGROUND_SHARING_DISABLED'
 readonly ARMED_MARKER='[bg-publish] SESSION_ARMED'
 readonly PUBLISH_MARKER='[bg-publish] BACKGROUND_PUBLISH_OK'
+readonly RECEIVE_MARKER='[bg-publish] BACKGROUND_RECEIVE_OK'
+readonly CATCHUP_MARKER='[bg-publish] BACKGROUND_CATCHUP_OK'
 readonly SILENCE_MARKER='[bg-publish] NEGATIVE_SILENCE_OK'
 readonly DISARMED_MARKER='[bg-publish] SESSION_DISARMED'
+readonly ALWAYS_MARKER='[bg-publish] ALWAYS_SESSION_OK'
 
 # The shared runner's fixed log path (run-ios-sim-scenario.sh's LOG_FILE).
 # Read ONLY after the drive exits — for the completion gate and the artifact —
@@ -215,13 +379,117 @@ readonly BG_LOG="/tmp/bg-publish-ios.log"
 # Handshake bounds. READY must appear after the delegated `flutter test`'s
 # incremental build (~2-4 min; the cold build happens in THIS script, before
 # the drive) plus install/launch/attach plus the in-test setup and P1 —
-# ~10 min worst case measured against B7's phases, so 20 min is ~2x.
+# ~10 min worst case measured against B7's phases, so 20 min is ~2x. The
+# ALWAYS job adds at most its 60 s confirmed-Always poll to P1, which the 2x
+# absorbs; a poll that actually burns 60 s has failed its assertion anyway.
+# The live-sync engine this lane now compiles in (see the header) starts
+# during that same setup and adds seconds, not minutes.
 #
 # DISABLED starts at the backgrounding and is the sum of the drive phases
-# between the two: the paused-transition poll (<=180 s), P2a's window (24 s)
-# and its heartbeat drain (<=20 s), P2b's window (396 s) and its heartbeat
-# drain (<=20 s), and the P3 baseline fetch (15 s) = 655 s. 900 s clears that
-# by ~37%.
+# between the two. Every term below names the constant that ENFORCES it; the
+# two awaited ticks are the only ones whose pricing needs an argument.
+#
+#   AWAITED TICK = `kPublishLinkTimeout`, 180 s. P2a and P2c each `await`
+#           `triggerTickForTest`, which returns the scheduler's FIFO
+#           `_publishChain`, and `_dispatchTick` wraps every link in
+#           `.timeout(kPublishLinkTimeout)`. The watchdog does not cancel the
+#           burst — the burst runs on and still owns its settle, pause and
+#           close — but it DOES complete the chain link, which is the future
+#           the drive is holding, so it is the ceiling that binds here.
+#           NOT `burstBound(1) + kOptOutBurstWait` (108 s), which is what this
+#           budget used to say: `burstBound`'s own doc states that the
+#           maintenance fold and the teardown sit outside it and that "no
+#           bound on a whole burst exists", and `kOptOutBurstWait`'s states
+#           that the Rule-13 drain behind its four lifecycle ops is
+#           deliberately unpriced. Being unpriceable is a good argument for a
+#           BOUND on a wait inside the app; it is not an argument for leaving
+#           the term out of a CI wall clock, which has to elapse whether or
+#           not anyone can price what is happening in it.
+#
+#   paused-transition poll (`_pausedTransitionWindow`)            <= 180 s
+#   P2a  the PAUSE-driven publish, waited out before the anchor is
+#        taken: `MapShell._onPaused` drives a burst synchronously
+#        inside the lifecycle dispatch, before the drive's 250 ms
+#        poll has even seen the pause, so an anchor at the transition
+#        would let THAT burst satisfy P2a's collect and the tick this
+#        phase drives would go unasserted. `burstBound(1)` 50 s +
+#        `_relayObservationSlack` 15 s                             <=  65 s
+#        + heartbeat drain (`_heartbeatInterval`)                  <=  20 s
+#        + two `_anchorAfterCurrentSecond` spins                   <=   2 s
+#   P2a  the awaited tick (`kPublishLinkTimeout`)                 <= 180 s
+#        (its 133 s collect window — `kOptOutBurstWait` 68 +
+#         `burstBound(1)` 50 + `_relayObservationSlack` 15 — runs
+#         concurrently and is subsumed, and its heartbeat has drained
+#         long before the tick returns)
+#   P2b  collect window (`_postBackgroundPublishWindow` =
+#        2 x `kLocationPublishMaxInterval` + 60 s)                    396 s
+#        + heartbeat drain (`_heartbeatInterval`)                  <=  20 s
+#        + one `_anchorAfterCurrentSecond` spin                    <=   1 s
+#   P2c  the peer's publish. `publishAndAwaitOk` is wrapped in
+#        `_reissuingAcrossReconnect`, which runs `_maxReconnectAttempts`
+#        (3) re-issues PLUS a final attempt = 4, and each may spend
+#        `_awaitWritable`'s `_reconnectBudget` (1 + sum over k<3 of
+#        (2^k + 5) = 23 s) before its 5 s OK wait: 4 x 28            <= 112 s
+#        + the awaited tick that must ingest it                     <= 180 s
+#        + member-cache poll (`_peerFixWindow` 30 s + one
+#          `_statusPollInterval`) + heartbeat drain                 <=  55 s
+#        + between-bursts poll (`burstBound(1)` 50 s +
+#          `kOptOutBurstWait` 68 s + one `_statusPollInterval`)
+#          + heartbeat drain                                        <= 143 s
+#          — a CEILING on how long the read may be retried, not a
+#            window the phase spends: that poll runs
+#            `decideOnFirstAnswer`, so it ends on the engine's first
+#            ANSWER whatever the count is, and only a read that keeps
+#            THROWING (no live session) can reach the deadline. A
+#            healthy run spends ~0 here.
+#   P3   baseline fetch (`_snapshotFetchWindow`)                       15 s
+#                                                                  = 1369 s
+#
+# 1440 s clears that by ~5% on the LIVE-SYNC legs. (NOT the ~37% this comment
+# once claimed: that
+# figure priced both awaited ticks at 108 s, which is a price and not a bound,
+# and the number was safe by an accident the reasoning did not contain. Nor
+# the ~12% of the first re-derivation, which predates P2a's pause-burst wait.)
+# The `_`-prefixed terms are the drive target's own constants and live in
+# haven/integration_test/ios_bg_publish_test.dart; the rest are the app's and
+# the e2e harness's. Re-derive from the sources, never from either file's
+# current literals.
+#
+# 5% is thin, and it is deliberately not spent on a bigger number, because
+# this deadline is bounded from ABOVE as well as below and the two bounds are
+# ~100 s apart:
+#
+#   below — the 1369 s sum, so it never fires on a run the drive can finish;
+#   above — the drive's own `Timeout(40 min)`. On the measured shape that
+#           Timeout is spent ~515 s before the backgrounding (setup + P1) and
+#           ~410 s after the disable (settle + snapshot + disarm poll +
+#           teardown), leaving ~1475 s for THIS window. A deadline above that
+#           is unreachable: the drive dies first, `bgp_wait_until` returns
+#           "the drive exited" rather than a deadline, and its rc is collected
+#           below — which is the better red anyway, because the drive's
+#           Timeout names the failing test and this deadline names nothing.
+#
+# What the sum does NOT bound, said here because a 5% margin would otherwise
+# be read as one: `_publishChain` is FIFO and has no enforced DEPTH, so each
+# awaited tick is priced for ONE link, and a link already queued ahead of a
+# trigger — this lane's single circle re-arms every 72-168 s against a 180 s
+# per-link ceiling — costs another `kPublishLinkTimeout`. 1440 does not cover
+# even the first (1549 s). That is not closable by arithmetic and it does not
+# need to be: 1549 s is past the drive's own ~1475 s ceiling too, so such a
+# run ends on the Timeout that names the test.
+# Exceeding this deadline is in any case not a kill. The wrapper WARNs and
+# falls through to the DISARM wait, so Haven is not re-foregrounded until
+# DISABLE + DISARM = 1650 s — 210 s past this deadline and past the drive's
+# own ceiling — and it is the RE-FOREGROUND that would corrupt P3 (it would
+# then measure a foregrounded app, which keeps publishing on the foreground
+# path, so the in-process half or the event-id diff reds the lane, one of them
+# for the wrong stated reason). On the measured shape the drive is already
+# gone by then. Undersizing this therefore costs attribution, never
+# correctness — but it costs attribution on exactly the runs that most need
+# it, which is why the terms above are bounds and not estimates.
+# P2b's profile poll adds NOTHING to the sum: it runs while the collect above
+# it is already running, is bounded by an ABSOLUTE deadline (backgrounding +
+# 204 s) that falls inside the collect's own window, and is awaited before it.
 #
 # DISARM is NOT a "something went wrong" backstop — it is the timer that ends
 # P3, and every second of it comes from a constant. From DISABLED the app has
@@ -240,8 +508,44 @@ readonly BG_LOG="/tmp/bg-publish-ios.log"
 # re-fetch (210 + one <=5 s poll + the drive's own resume) ~20 s inside the
 # eviction bound. A run where the app was NOT suspended signals DISARMED
 # first and never reaches the deadline.
+#
+# P2c does not move either side of that, and the re-derivation above is why it
+# does not have to: P2c runs entirely BEFORE the disable, so it changes when
+# the DISABLED signal arrives (which DISABLE_WAIT_SECS above absorbs) and
+# nothing at all about the window that follows it. Both bounds are still the
+# drive's own settle window and the 228 s kind-445 expiration, unchanged. The
+# same is true of P2d on the poll leg.
+#
+# # …and the POLL leg's own DISABLE deadline
+#
+# The poll leg (HAVEN_LIVE_SYNC=false, OD4-d) runs P2d in P2c's place, and it
+# is NOT the same price, so it does not inherit the same number. Copying 1440
+# forward would put the deadline PAST that leg's drive Timeout, where it can
+# never fire and buys nothing but a misleading ceiling in this comment. Every
+# other term is unchanged, so only P2c/P2d differ:
+#
+#   P2d  the peer's publish, priced exactly as P2c's is (the same
+#        `publishAndAwaitOk` inside `_reissuingAcrossReconnect`,
+#        4 x 28 s)                                                <= 112 s
+#        + the catch-up window (`_pollPathCatchupWindow` = two
+#          90 s `_pollPathReceiveInterval` ticks + the sweep's own
+#          20 s `maxDurationSecs` + `_relayObservationSlack` 15)      215 s
+#        + the baseline store read (`_storeBaselineWindow`)            15 s
+#        + heartbeat drain (`_heartbeatInterval`)                  <=  20 s
+#                                                                  =  362 s
+#
+# There is no awaited-tick term at all: P2d drives NOTHING, because the timer
+# is its subject. So the poll leg's sum is 1369 - 490 + 362 = 1241 s, and
+# 1310 s clears it by ~5.6% — the same discipline as 1440/1369, against the
+# same upper bound one leg down: that leg's drive `Timeout(37 min)` = 2220 s,
+# spent ~425 s before the backgrounding (setup + a P1 with neither live-sync
+# term) and ~410 s after the disable, leaves ~1385 s for this window. 1310 sits
+# 75 s inside it.
 readonly READY_WAIT_SECS="${HAVEN_BGP_READY_WAIT_SECS:-1200}"
-readonly DISABLE_WAIT_SECS="${HAVEN_BGP_DISABLE_WAIT_SECS:-900}"
+# READY is a build-dominated envelope (~10 min worst case, doubled), so it is
+# leg-independent: the poll leg's cheaper P1 only widens the same margin.
+readonly DISABLE_WAIT_LIVE_SYNC_SECS="${HAVEN_BGP_DISABLE_WAIT_SECS:-1440}"
+readonly DISABLE_WAIT_POLL_SECS="${HAVEN_BGP_DISABLE_WAIT_POLL_SECS:-1310}"
 readonly DISARM_WAIT_SECS="${HAVEN_BGP_DISARM_WAIT_SECS:-210}"
 readonly MARKER_POLL_SECS="${HAVEN_BGP_MARKER_POLL_SECS:-5}"
 
@@ -259,16 +563,24 @@ readonly MARKER_POLL_SECS="${HAVEN_BGP_MARKER_POLL_SECS:-5}"
 # authorization": "Core Location does not take measures to keep apps running
 # continuously when it has nothing to deliver to them").
 #
-# 5 m is chosen from both ends: comfortably above the stream's 1 m
-# `distanceFilter` (so every step is a genuine delivery) and, because the two
-# points ALTERNATE rather than advance, total displacement never approaches
-# `kMotionTriggerDistanceMeters` (100 m). The drip therefore never becomes a
-# second publish driver, and P2 keeps measuring the per-circle scheduler.
+# The native updates session carries NO distance filter
+# (`kCLDistanceFilterNone`, in BOTH accuracy profiles — the shape iOS 16.4
+# requires of a continuously-delivering background app), so a step of any size
+# is delivered and 5 m is not chosen against a filter threshold. It is chosen
+# against the two distances that DO decide something. Because the points
+# ALTERNATE rather than advance, total displacement never approaches
+# `kMotionTriggerDistanceMeters` (100 m): the drip never becomes a second
+# publish driver, so P2 keeps measuring the per-circle scheduler, and the
+# stationary controller keeps CONFIRMING its anchor instead of escalating back
+# to Best on a phantom move — which is what lets P2b's profile poll observe the
+# 100 m tier at all. A drip that advanced would look like a walk, and the
+# session would sit at Best for the whole window.
 readonly DRIP_SECS="${HAVEN_BGP_DRIP_SECS:-10}"
 readonly DRIP_POINT_A='47.606209,-122.332069'
 readonly DRIP_POINT_B='47.606254,-122.332069'
 if ! [[ "${READY_WAIT_SECS}" =~ ^[1-9][0-9]*$ ]] \
-   || ! [[ "${DISABLE_WAIT_SECS}" =~ ^[1-9][0-9]*$ ]] \
+   || ! [[ "${DISABLE_WAIT_LIVE_SYNC_SECS}" =~ ^[1-9][0-9]*$ ]] \
+   || ! [[ "${DISABLE_WAIT_POLL_SECS}" =~ ^[1-9][0-9]*$ ]] \
    || ! [[ "${DISARM_WAIT_SECS}" =~ ^[1-9][0-9]*$ ]] \
    || ! [[ "${MARKER_POLL_SECS}" =~ ^[1-9][0-9]*$ ]] \
    || ! [[ "${DRIP_SECS}" =~ ^[1-9][0-9]*$ ]]; then
@@ -320,18 +632,112 @@ bgp_marker_present() {
   LC_ALL=C grep -aqF -- "${marker}" "${log}"
 }
 
-# bgp_missing_proofs <log> — prints the terminal proof markers this log does
-# NOT carry, one per line. Empty output means the drive reached the end of
-# every phase. A missing or empty log reports all four as absent.
+# bgp_privacy_service <tier> — the `simctl privacy` service this tier grants.
+# Non-zero on anything else, so an unrecognised tier can never fall through to
+# a grant nobody chose.
+bgp_privacy_service() {
+  case "${1:-}" in
+    when-in-use) printf 'location\n' ;;
+    always) printf 'location-always\n' ;;
+    *) return 1 ;;
+  esac
+}
+
+# bgp_expected_tier_name <tier> — the IosAuthStatus name the drive PINS, i.e.
+# the value of --dart-define=HAVEN_BGP_EXPECT_TIER. Same tri-state discipline:
+# the grant and the pin are two readings of ONE input, and neither may be
+# derived independently of the other.
+bgp_expected_tier_name() {
+  case "${1:-}" in
+    when-in-use) printf 'whenInUse\n' ;;
+    always) printf 'always\n' ;;
+    *) return 1 ;;
+  esac
+}
+
+# bgp_missing_proofs <log> <tier> <live-sync> — prints the terminal proof
+# markers this log does NOT carry, one per line. Empty output means the drive
+# reached the end of every phase its LEG has. A missing or empty log reports
+# them all as absent.
+#
+# Four proofs are shared by every leg (ARMED, PUBLISH, SILENCE, DISARMED). The
+# other two axes each add exactly one:
+#
+#   receive plane — RECEIVE_MARKER on a live-sync leg (P2c, the burst),
+#     CATCHUP_MARKER on the poll one (P2d, the 90 s receive timer). The two are
+#     exclusive by construction: each is reachable only from the compiled branch
+#     that has that plane at all.
+#   tier — ALWAYS_MARKER on the Always leg, whose whole subject is the
+#     confirmed-Always posture; the shared four would be printed by a body that
+#     never reached those assertions.
+#
+# An unrecognised tier or live-sync value reports the corresponding proof(s)
+# missing rather than falling back to the smaller gate: a caller that lost
+# either axis must not be able to buy a green with the omission.
 #
 # Always returns 0; the ANSWER is the output, so a caller in a `$( … )` under
 # `set -e` is never killed by "no markers were missing".
 bgp_missing_proofs() {
-  local log="${1:-}" marker
-  for marker in "${ARMED_MARKER}" "${PUBLISH_MARKER}" \
-                "${SILENCE_MARKER}" "${DISARMED_MARKER}"; do
+  local log="${1:-}" tier="${2:-}" live_sync="${3:-}" marker
+  for marker in "${ARMED_MARKER}" "${PUBLISH_MARKER}" "${SILENCE_MARKER}" \
+                "${DISARMED_MARKER}"; do
     bgp_marker_present "${log}" "${marker}" || printf '%s\n' "${marker}"
   done
+  if [[ "${live_sync}" != 'false' ]]; then
+    bgp_marker_present "${log}" "${RECEIVE_MARKER}" \
+      || printf '%s\n' "${RECEIVE_MARKER}"
+  fi
+  if [[ "${live_sync}" != 'true' ]]; then
+    bgp_marker_present "${log}" "${CATCHUP_MARKER}" \
+      || printf '%s\n' "${CATCHUP_MARKER}"
+  fi
+  if [[ "${tier}" != 'when-in-use' ]]; then
+    bgp_marker_present "${log}" "${ALWAYS_MARKER}" \
+      || printf '%s\n' "${ALWAYS_MARKER}"
+  fi
+  return 0
+}
+
+# bgp_unexpected_proofs <log> <tier> <live-sync> — prints any terminal proof
+# this leg must NOT have produced, one per line.
+#
+# Three cases, one per leg-specific proof, and all three catch the same class of
+# defect: a run whose two halves were derived from different values.
+#
+#   ALWAYS_MARKER in a When-In-Use log. The drive can only print it when its
+#     compiled HAVEN_BGP_EXPECT_TIER says `always`, so seeing it here means the
+#     grant this script performed and the shape the drive asserted disagree —
+#     the one mutation that leaves BOTH tier legs running the same shape while
+#     every count still looks right.
+#   RECEIVE_MARKER in a flag-OFF log, or CATCHUP_MARKER in a flag-ON one. Each
+#     phase sits behind the compile-time `liveSyncEnabled` branch that owns its
+#     plane, so the wrong marker means the `--dart-define` the drive was built
+#     with and the HAVEN_LIVE_SYNC this script acted on came apart — and the leg
+#     is measuring the other receive plane under this leg's name.
+#
+# An unrecognised live-sync value reports nothing unexpected: fail-closed there
+# is `bgp_missing_proofs`'s job (it demands BOTH plane proofs), and refusing
+# both here as well would make the diagnostic contradict itself.
+#
+# Always returns 0, for the same `set -e` reason as above.
+bgp_unexpected_proofs() {
+  local log="${1:-}" tier="${2:-}" live_sync="${3:-}"
+  # Every marker read sits in an `if` CONDITION, where `set -e` cannot see its
+  # failure: "this leg printed nothing unexpected" is the healthy answer, and a
+  # helper that killed the run on it would be unusable from the `$( … )` the
+  # gate reads it with.
+  if [[ "${tier}" == 'when-in-use' ]] \
+     && bgp_marker_present "${log}" "${ALWAYS_MARKER}"; then
+    printf '%s\n' "${ALWAYS_MARKER}"
+  fi
+  if [[ "${live_sync}" == 'false' ]] \
+     && bgp_marker_present "${log}" "${RECEIVE_MARKER}"; then
+    printf '%s\n' "${RECEIVE_MARKER}"
+  fi
+  if [[ "${live_sync}" == 'true' ]] \
+     && bgp_marker_present "${log}" "${CATCHUP_MARKER}"; then
+    printf '%s\n' "${CATCHUP_MARKER}"
+  fi
   return 0
 }
 
@@ -426,12 +832,18 @@ bgp_wait_until() {
 # catch.
 # ---------------------------------------------------------------------------
 run_self_test() {
-  local tmp fail=0
+  local tmp fail=0 checked=0
+  # How many fixtures this suite must RUN, pinned by equality (the same rule
+  # check_ios_background_publish.sh's SELF_TEST_FIXTURES enforces). A count in
+  # the summary line alone reports whatever ran: a fixture deleted with the
+  # code it covered would print a smaller number and still say "all passed".
+  local -r SELF_TEST_FIXTURES=64
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
   trap "rm -rf '${tmp}'" RETURN
 
   _check() { # _check <label> <want> <got>
+    checked=$(( checked + 1 ))
     if [[ "$2" == "$3" ]]; then
       printf '  \033[1;32mPASS\033[0m %s\n' "$1"
     else
@@ -519,50 +931,215 @@ Usage: simctl location <device> <action> [<arguments>]
     } > "${path}"
   }
 
-  # --- (C1) THE PASSING SHAPE: all four proofs present.
+  # --- (C1) THE PASSING SHAPE for the When-In-Use live-sync leg: the four
+  #     shared proofs plus the burst's.
   local clog="${tmp}/c.log" got
   _bgp_log "${clog}" "${ARMED_MARKER}" "${PUBLISH_MARKER} count=2" \
-    "${SILENCE_MARKER}" "${DISARMED_MARKER}"
-  got="$(bgp_missing_proofs "${clog}")"
-  _check "C1 all four proofs is COMPLETE" "" "${got}"
+    "${RECEIVE_MARKER}" "${SILENCE_MARKER}" "${DISARMED_MARKER}"
+  got="$(bgp_missing_proofs "${clog}" 'when-in-use' 'true')"
+  _check "C1 the four shared proofs + RECEIVE is COMPLETE (wiu, live-sync)" \
+    "" "${got}"
 
-  # --- (C2..C5) Each proof individually missing must be named. The READY
+  # --- (C2..C5, C7) Each proof individually missing must be named. The READY
   #     marker is present in every fixture, which is the A3b point: it is
   #     printed before P2/P3 run, so it must never satisfy the gate.
-  _bgp_log "${clog}" "${PUBLISH_MARKER} count=2" "${SILENCE_MARKER}" \
-    "${DISARMED_MARKER}"
-  got="$(bgp_missing_proofs "${clog}")"
+  _bgp_log "${clog}" "${PUBLISH_MARKER} count=2" "${RECEIVE_MARKER}" \
+    "${SILENCE_MARKER}" "${DISARMED_MARKER}"
+  got="$(bgp_missing_proofs "${clog}" 'when-in-use' 'true')"
   _check "C2 a missing SESSION_ARMED is REFUSED" "${ARMED_MARKER}" "${got}"
 
-  _bgp_log "${clog}" "${ARMED_MARKER}" "${SILENCE_MARKER}" "${DISARMED_MARKER}"
-  got="$(bgp_missing_proofs "${clog}")"
+  _bgp_log "${clog}" "${ARMED_MARKER}" "${RECEIVE_MARKER}" \
+    "${SILENCE_MARKER}" "${DISARMED_MARKER}"
+  got="$(bgp_missing_proofs "${clog}" 'when-in-use' 'true')"
   _check "C3 a missing BACKGROUND_PUBLISH_OK is REFUSED" \
     "${PUBLISH_MARKER}" "${got}"
 
   _bgp_log "${clog}" "${ARMED_MARKER}" "${PUBLISH_MARKER} count=2" \
-    "${DISARMED_MARKER}"
-  got="$(bgp_missing_proofs "${clog}")"
+    "${RECEIVE_MARKER}" "${DISARMED_MARKER}"
+  got="$(bgp_missing_proofs "${clog}" 'when-in-use' 'true')"
   _check "C4 a missing NEGATIVE_SILENCE_OK is REFUSED" \
     "${SILENCE_MARKER}" "${got}"
 
   _bgp_log "${clog}" "${ARMED_MARKER}" "${PUBLISH_MARKER} count=2" \
-    "${SILENCE_MARKER}"
-  got="$(bgp_missing_proofs "${clog}")"
+    "${RECEIVE_MARKER}" "${SILENCE_MARKER}"
+  got="$(bgp_missing_proofs "${clog}" 'when-in-use' 'true')"
   _check "C5 a missing SESSION_DISARMED is REFUSED" \
     "${DISARMED_MARKER}" "${got}"
 
-  # --- (C6) An absent or empty log reports all four proofs missing — the
-  #     `cp` that preserves the run is `|| true`d by design, so "no log" is a
-  #     reachable state and must fail closed.
-  got="$(bgp_missing_proofs "${tmp}/absent.log" | tr '\n' ';')"
-  _check "C6 a MISSING log reports all four proofs absent" \
-    "${ARMED_MARKER};${PUBLISH_MARKER};${SILENCE_MARKER};${DISARMED_MARKER};" \
+  # --- (C7) P2c's own proof, missing. The receive half is the one phase whose
+  #     absence is invisible in the other four: a drive that published for the
+  #     whole window, went silent on the disable and disarmed prints every one
+  #     of them without ever asking whether a burst RECEIVED anything or
+  #     whether it left a standing REQ behind — which is the half of the
+  #     background promise that has no wire oracle in this lane.
+  _bgp_log "${clog}" "${ARMED_MARKER}" "${PUBLISH_MARKER} count=2" \
+    "${SILENCE_MARKER}" "${DISARMED_MARKER}"
+  got="$(bgp_missing_proofs "${clog}" 'when-in-use' 'true')"
+  _check "C7 a missing BACKGROUND_RECEIVE_OK is REFUSED" \
+    "${RECEIVE_MARKER}" "${got}"
+
+  # --- (C6) An absent or empty log reports every proof of the leg missing —
+  #     the `cp` that preserves the run is `|| true`d by design, so "no log" is
+  #     a reachable state and must fail closed.
+  got="$(bgp_missing_proofs "${tmp}/absent.log" 'when-in-use' 'true' \
+          | tr '\n' ';')"
+  _check "C6 a MISSING log reports every proof of the leg absent" \
+    "${ARMED_MARKER};${PUBLISH_MARKER};${SILENCE_MARKER};${DISARMED_MARKER};${RECEIVE_MARKER};" \
     "${got}"
   : > "${tmp}/empty.log"
-  got="$(bgp_missing_proofs "${tmp}/empty.log" | tr '\n' ';')"
-  _check "C6b an EMPTY log reports all four proofs absent" \
-    "${ARMED_MARKER};${PUBLISH_MARKER};${SILENCE_MARKER};${DISARMED_MARKER};" \
+  got="$(bgp_missing_proofs "${tmp}/empty.log" 'when-in-use' 'true' \
+          | tr '\n' ';')"
+  _check "C6b an EMPTY log reports every proof of the leg absent" \
+    "${ARMED_MARKER};${PUBLISH_MARKER};${SILENCE_MARKER};${DISARMED_MARKER};${RECEIVE_MARKER};" \
     "${got}"
+
+  # --- (A1) THE PASSING SHAPE for the ALWAYS live-sync leg: six proofs.
+  _bgp_log "${clog}" "${ARMED_MARKER}" "${PUBLISH_MARKER} count=2" \
+    "${RECEIVE_MARKER}" "${SILENCE_MARKER}" "${DISARMED_MARKER}" \
+    "${ALWAYS_MARKER}"
+  got="$(bgp_missing_proofs "${clog}" 'always' 'true')"
+  _check "A1 all six proofs is COMPLETE (always, live-sync)" "" "${got}"
+
+  # --- (A2) The ALWAYS job's own proof, missing. This is the fixture the
+  #     whole matrix rests on: the five When-In-Use proofs are printed by a
+  #     drive that never reached the confirmed-Always assertions, so without
+  #     this the Always job could go green having exercised nothing that
+  #     distinguishes it from the other one.
+  _bgp_log "${clog}" "${ARMED_MARKER}" "${PUBLISH_MARKER} count=2" \
+    "${RECEIVE_MARKER}" "${SILENCE_MARKER}" "${DISARMED_MARKER}"
+  got="$(bgp_missing_proofs "${clog}" 'always' 'true')"
+  _check "A2 a missing ALWAYS_SESSION_OK is REFUSED under always" \
+    "${ALWAYS_MARKER}" "${got}"
+
+  # --- (A3) …and NOT required under when-in-use. The inverse mistake — one
+  #     gate demanding all six everywhere — would red the When-In-Use job for
+  #     behaving exactly as its tier requires.
+  got="$(bgp_missing_proofs "${clog}" 'when-in-use' 'true')"
+  _check "A3 ALWAYS_SESSION_OK is NOT required under when-in-use" "" "${got}"
+
+  # --- (A4) An UNRECOGNISED tier fails CLOSED: the tier's proof reported
+  #     missing, never a quiet fall-back to the smaller gate. A caller that
+  #     lost the tier must not be able to buy a green with the omission.
+  got="$(bgp_missing_proofs "${clog}" '' 'true' | tr '\n' ';')"
+  _check "A4 an unrecognised tier demands the ALWAYS proof too" \
+    "${ALWAYS_MARKER};" "${got}"
+
+  # --- (PF1) THE PASSING SHAPE for the POLL leg (OD4-d): the same four shared
+  #     proofs, with the 90 s receive timer's in place of the burst's. The
+  #     receive plane a build HAS is what decides which one, so this is not a
+  #     smaller gate — it is a different fifth proof.
+  _bgp_log "${clog}" "${ARMED_MARKER}" "${PUBLISH_MARKER} count=2" \
+    "${CATCHUP_MARKER}" "${SILENCE_MARKER}" "${DISARMED_MARKER}"
+  got="$(bgp_missing_proofs "${clog}" 'when-in-use' 'false')"
+  _check "PF1 the four shared proofs + CATCHUP is COMPLETE (wiu, poll)" \
+    "" "${got}"
+
+  # --- (PF2) …and its own proof missing is REFUSED. Without this the poll leg
+  #     could exit 0 over a body that published for the whole window and never
+  #     asked whether the background receive timer fired at all — which is the
+  #     only reason the leg exists.
+  _bgp_log "${clog}" "${ARMED_MARKER}" "${PUBLISH_MARKER} count=2" \
+    "${SILENCE_MARKER}" "${DISARMED_MARKER}"
+  got="$(bgp_missing_proofs "${clog}" 'when-in-use' 'false')"
+  _check "PF2 a missing BACKGROUND_CATCHUP_OK is REFUSED under flag-off" \
+    "${CATCHUP_MARKER}" "${got}"
+
+  # --- (PF3) The LEG-IDENTITY fixture, and the one no count can see: the
+  #     live-sync leg's own passing log, read as the poll leg. Every shared
+  #     proof is present and the receive half is proved for the OTHER plane, so
+  #     a gate that only counted five would call this complete.
+  _bgp_log "${clog}" "${ARMED_MARKER}" "${PUBLISH_MARKER} count=2" \
+    "${RECEIVE_MARKER}" "${SILENCE_MARKER}" "${DISARMED_MARKER}"
+  got="$(bgp_missing_proofs "${clog}" 'when-in-use' 'false')"
+  _check "PF3 the burst's proof does NOT satisfy the poll leg" \
+    "${CATCHUP_MARKER}" "${got}"
+
+  # --- (PF4) …and the mirror: the poll leg's passing log read as a live-sync
+  #     leg must report the burst's proof missing.
+  _bgp_log "${clog}" "${ARMED_MARKER}" "${PUBLISH_MARKER} count=2" \
+    "${CATCHUP_MARKER}" "${SILENCE_MARKER}" "${DISARMED_MARKER}"
+  got="$(bgp_missing_proofs "${clog}" 'when-in-use' 'true')"
+  _check "PF4 the timer's proof does NOT satisfy a live-sync leg" \
+    "${RECEIVE_MARKER}" "${got}"
+
+  # --- (PF5) An UNRECOGNISED live-sync value fails CLOSED on BOTH planes, for
+  #     the same reason A4 does on the tier: a caller that lost the axis must
+  #     not be handed the smaller of the two gates. The fixture carries the four
+  #     shared proofs and NEITHER plane's, so the answer names both.
+  _bgp_log "${clog}" "${ARMED_MARKER}" "${PUBLISH_MARKER} count=2" \
+    "${SILENCE_MARKER}" "${DISARMED_MARKER}"
+  got="$(bgp_missing_proofs "${clog}" 'when-in-use' '' | tr '\n' ';')"
+  _check "PF5 an unrecognised live-sync value demands BOTH plane proofs" \
+    "${RECEIVE_MARKER};${CATCHUP_MARKER};" "${got}"
+
+  # --- (U1) The SYMMETRIC half. ALWAYS_SESSION_OK is only reachable when the
+  #     compiled HAVEN_BGP_EXPECT_TIER says `always`, so finding it in a
+  #     When-In-Use run means the grant this script performed and the shape the
+  #     drive asserted were derived from different values — and BOTH jobs would
+  #     then measure one posture while every count still looked right. No
+  #     count-based fixture can see that.
+  _bgp_log "${clog}" "${ARMED_MARKER}" "${PUBLISH_MARKER} count=2" \
+    "${RECEIVE_MARKER}" "${SILENCE_MARKER}" "${DISARMED_MARKER}" \
+    "${ALWAYS_MARKER}"
+  got="$(bgp_unexpected_proofs "${clog}" 'when-in-use' 'true')"
+  _check "U1 ALWAYS_SESSION_OK in a when-in-use log is REFUSED" \
+    "${ALWAYS_MARKER}" "${got}"
+
+  # --- (U2) Non-vacuity for U1, both directions: the same log is legitimate
+  #     under `always`, and a when-in-use log without the marker is clean. A
+  #     helper that always printed would red every run.
+  got="$(bgp_unexpected_proofs "${clog}" 'always' 'true')"
+  _check "U2 the same log is legitimate under always" "" "${got}"
+  _bgp_log "${clog}" "${ARMED_MARKER}" "${PUBLISH_MARKER} count=2" \
+    "${RECEIVE_MARKER}" "${SILENCE_MARKER}" "${DISARMED_MARKER}"
+  got="$(bgp_unexpected_proofs "${clog}" 'when-in-use' 'true')"
+  _check "U2b a clean when-in-use log reports nothing unexpected" "" "${got}"
+
+  # --- (U3) The receive-plane half of the same symmetry, and the mutation it
+  #     catches is the one PF3/PF4 cannot: a leg whose `--dart-define` and whose
+  #     HAVEN_LIVE_SYNC came from different values prints the OTHER plane's
+  #     proof, so demanding this leg's is not enough — the wrong one has to be
+  #     refused as well, or a log carrying BOTH would pass on either leg.
+  _bgp_log "${clog}" "${ARMED_MARKER}" "${PUBLISH_MARKER} count=2" \
+    "${RECEIVE_MARKER}" "${SILENCE_MARKER}" "${DISARMED_MARKER}"
+  got="$(bgp_unexpected_proofs "${clog}" 'when-in-use' 'false')"
+  _check "U3 BACKGROUND_RECEIVE_OK in a flag-off log is REFUSED" \
+    "${RECEIVE_MARKER}" "${got}"
+  _bgp_log "${clog}" "${ARMED_MARKER}" "${PUBLISH_MARKER} count=2" \
+    "${CATCHUP_MARKER}" "${SILENCE_MARKER}" "${DISARMED_MARKER}"
+  got="$(bgp_unexpected_proofs "${clog}" 'when-in-use' 'true')"
+  _check "U3b BACKGROUND_CATCHUP_OK in a flag-on log is REFUSED" \
+    "${CATCHUP_MARKER}" "${got}"
+
+  # --- (U4) Non-vacuity for U3, both directions: each plane's proof is
+  #     legitimate on its OWN leg. A helper that refused unconditionally would
+  #     red every run of both.
+  got="$(bgp_unexpected_proofs "${clog}" 'when-in-use' 'false')"
+  _check "U4 the timer's proof is legitimate on the poll leg" "" "${got}"
+  _bgp_log "${clog}" "${ARMED_MARKER}" "${PUBLISH_MARKER} count=2" \
+    "${RECEIVE_MARKER}" "${SILENCE_MARKER}" "${DISARMED_MARKER}"
+  got="$(bgp_unexpected_proofs "${clog}" 'when-in-use' 'true')"
+  _check "U4b the burst's proof is legitimate on a live-sync leg" "" "${got}"
+
+  # --- (T1/T2) The tier derivation. One input decides the grant AND the shape
+  #     the drive pins; deriving them separately is how the two come apart, so
+  #     both are pinned here and an unrecognised tier must be REFUSED rather
+  #     than defaulted — a default would silently run the matrix's Always leg
+  #     as a second When-In-Use job.
+  got="$(bgp_privacy_service 'when-in-use')"
+  _check "T1 when-in-use grants the location service" 'location' "${got}"
+  got="$(bgp_privacy_service 'always')"
+  _check "T1b always grants the location-always service" \
+    'location-always' "${got}"
+  rc=0; bgp_privacy_service 'sometimes' >/dev/null || rc=$?
+  _check "T1c an unknown tier grants NOTHING" 1 "${rc}"
+
+  got="$(bgp_expected_tier_name 'when-in-use')"
+  _check "T2 when-in-use pins the whenInUse status" 'whenInUse' "${got}"
+  got="$(bgp_expected_tier_name 'always')"
+  _check "T2b always pins the always status" 'always' "${got}"
+  rc=0; bgp_expected_tier_name 'sometimes' >/dev/null || rc=$?
+  _check "T2c an unknown tier pins NOTHING" 1 "${rc}"
 
   # --- (W1) A marker already present returns immediately.
   local wlog="${tmp}/w.log"
@@ -693,7 +1270,7 @@ Usage: simctl location <device> <action> [<arguments>]
   # --- (N1) The signal's NAME is one literal shared with the Dart drive. The
   #     two halves cannot agree by construction — Dart writes the file, this
   #     script finds it — so a rename on one side costs a full READY_WAIT_SECS
-  #     wait and a misleading diagnostic. Unlike the four proof markers, which
+  #     wait and a misleading diagnostic. Unlike the five proof markers, which
   #     the completion gate would catch, nothing else compares these.
   #     Fails CLOSED on an unreadable drive file (empty answer, mismatch
   #     reported) rather than letting `set -e` kill the run from inside the
@@ -708,7 +1285,7 @@ Usage: simctl location <device> <action> [<arguments>]
     "${SIGNAL_NAME}" "${dart_const}"
 
   # --- (N2) The DISABLED marker literal is shared with the Dart drive, and
-  #     nothing else compares them. The four proof markers are cross-checked
+  #     nothing else compares them. The five proof markers are cross-checked
   #     by the completion gate; this one is not, and a drift is SILENT and
   #     dangerous rather than merely slow: the host would stop timing P3's
   #     settle window from the disable and re-foreground only on the DISABLE
@@ -752,7 +1329,7 @@ Usage: simctl location <device> <action> [<arguments>]
   body="$(sed -n '/^# --- Prepare the simulator/,/^# --- Drive/p' \
             "${BASH_SOURCE[0]}" | grep -v '^[[:space:]]*#')"
   rc=0
-  grep -qF 'if ! xcrun simctl privacy "${SIM_UDID}" grant location "${BUNDLE_ID}"' \
+  grep -qF 'if ! xcrun simctl privacy "${SIM_UDID}" grant "${PRIVACY_SERVICE}" "${BUNDLE_ID}"' \
     <<<"${body}" || rc=1
   _check "H2 the privacy grant is fail-closed" 0 "${rc}"
 
@@ -763,7 +1340,12 @@ Usage: simctl location <device> <action> [<arguments>]
             | grep -v '^[[:space:]]*#')"
   rc=0
   grep -qF 'HAVEN_E2E_IOS_SKIP_UNINSTALL=1' <<<"${body}" || rc=1
-  _check "H3 the delegate skips its own uninstall" 0 "${rc}"
+  # …and is told which tier it is compiling for. Without the define the drive
+  # fails closed (it has no default), so this only turns a 45-minute macOS red
+  # into a two-second one — but that is the difference between a lane you can
+  # fix and a lane people re-run.
+  grep -qF 'HAVEN_BGP_EXPECT_TIER="${EXPECT_TIER}"' <<<"${body}" || rc=1
+  _check "H3 the delegate skips its own uninstall and gets the tier" 0 "${rc}"
 
   # --- (H4) STRUCTURAL: the live handshake must never be pointed back at
   #     SHARED_LOG. When a marker reaches that log is the test reporter's
@@ -844,10 +1426,10 @@ Usage: simctl location <device> <action> [<arguments>]
   #     before the drive and is stopped on exit. CoreLocation suspends a
   #     backgrounded app it has nothing to deliver to (CI run 32646436116),
   #     and a suspended app publishes nothing — so a drip that was deleted,
-  #     never started, or left re-setting ONE coordinate (which the 1 m
-  #     `distanceFilter` swallows, delivering nothing) reds the lane from the
-  #     app's side, blaming the publish pipeline. Only the value comparison
-  #     below can see the identical-points mutation.
+  #     never started, or left re-setting ONE coordinate (a static fix
+  #     locationd has no reason to re-deliver) reds the lane from the app's
+  #     side, blaming the publish pipeline. Only the value comparison below can
+  #     see the identical-points mutation.
   body="$(sed -n '/^bgp_location_drip() {/,/^}/p' "${BASH_SOURCE[0]}" \
             | grep -v '^[[:space:]]*#')"
   rc=0
@@ -867,23 +1449,127 @@ Usage: simctl location <device> <action> [<arguments>]
   _check "H6 the location drip moves, starts before the drive and is reaped" \
     0 "${rc}"
 
+  # --- (H7) STRUCTURAL: ONE input decides the grant AND the compiled shape.
+  #     The grant and the pin are the two halves the matrix rests on, and the
+  #     failure they admit is silent: derive them separately, or default the
+  #     tier, and the Always job runs the When-In-Use shape while every marker
+  #     count and every behavioural fixture above stays green. U1 catches the
+  #     mismatch only once a run has produced a log; this catches the shape
+  #     that produces it. Scoped to the real run so the fixture's own needles
+  #     cannot satisfy it.
+  body="$(sed -n '/^# Real run$/,$p' "${BASH_SOURCE[0]}" \
+            | grep -v '^[[:space:]]*#')"
+  rc=0
+  [[ -n "${body}" ]] || rc=1
+  grep -qF 'HAVEN_BGP_AUTH_TIER}" =~ ^(when-in-use|always)$' <<<"${body}" || rc=1
+  grep -qF 'PRIVACY_SERVICE="$(bgp_privacy_service "${AUTH_TIER}")"' \
+    <<<"${body}" || rc=1
+  grep -qF 'EXPECT_TIER="$(bgp_expected_tier_name "${AUTH_TIER}")"' \
+    <<<"${body}" || rc=1
+  grep -qF -- '--dart-define=HAVEN_BGP_EXPECT_TIER="${EXPECT_TIER}"' \
+    <<<"${body}" || rc=1
+  _check "H7 the grant and the compiled tier come from ONE validated input" \
+    0 "${rc}"
+
+  # --- (N3/N4) The Always job's marker and the tier define's NAME are shared
+  #     with the Dart drive. The completion gate would eventually catch a
+  #     renamed marker — as a 45-minute macOS red reporting an absence — and
+  #     nothing at all compares the define name, whose drift shows up as the
+  #     drive throwing on a value it never received. Both are two-second
+  #     checks here. Same fail-closed sed as N1/N2: an unreadable drive file
+  #     yields an empty answer and a reported mismatch.
+  local dart_always dart_define_name
+  dart_always="$(sed -n \
+    's/^const String kAlwaysSessionMarker = .\(.*\).;$/\1/p' \
+    "${SCRIPT_DIR}/../../../haven/integration_test/ios_bg_publish_test.dart" \
+    2>/dev/null || true)"
+  _check "N3 the Dart always-session marker matches ALWAYS_MARKER" \
+    "${ALWAYS_MARKER}" "${dart_always}"
+  dart_define_name="$(sed -n \
+    's/^const String kExpectedTierDefine = .\(.*\).;$/\1/p' \
+    "${SCRIPT_DIR}/../../../haven/integration_test/ios_bg_publish_test.dart" \
+    2>/dev/null || true)"
+  _check "N4 the Dart tier-define name matches the one threaded here" \
+    'HAVEN_BGP_EXPECT_TIER' "${dart_define_name}"
+
+  # --- (N5) P2c's marker, for the same two-second reason as N3. C7 proves the
+  #     gate DEMANDS it; this proves the literal it demands is still the one the
+  #     drive prints, so a rename costs a failing fixture here instead of a
+  #     45-minute macOS red reporting a phase that ran perfectly well.
+  local dart_receive
+  dart_receive="$(sed -n \
+    's/^const String kBackgroundReceiveMarker = .\(.*\).;$/\1/p' \
+    "${SCRIPT_DIR}/../../../haven/integration_test/ios_bg_publish_test.dart" \
+    2>/dev/null || true)"
+  _check "N5 the Dart background-receive marker matches RECEIVE_MARKER" \
+    "${RECEIVE_MARKER}" "${dart_receive}"
+
+  # --- (N6) P2d's marker, same argument as N5 one leg over. PF2 proves the
+  #     poll leg's gate DEMANDS it; this proves the literal it demands is the
+  #     one the drive's flag-off branch prints.
+  local dart_catchup
+  dart_catchup="$(sed -n \
+    's/^const String kBackgroundCatchupMarker = .\(.*\).;$/\1/p' \
+    "${SCRIPT_DIR}/../../../haven/integration_test/ios_bg_publish_test.dart" \
+    2>/dev/null || true)"
+  _check "N6 the Dart background-catchup marker matches CATCHUP_MARKER" \
+    "${CATCHUP_MARKER}" "${dart_catchup}"
+
+  # --- (H8) STRUCTURAL: the DISABLE deadline is SELECTED from LIVE_SYNC, and
+  #     the two legs' values are different. Both halves matter. A run that
+  #     always took the live-sync value would put the deadline past the poll
+  #     leg's own drive Timeout, where it can never fire — so the WARN that
+  #     names "P2 never finished" would be replaced by an anonymous drive
+  #     Timeout, on exactly the runs that need the attribution. And two
+  #     constants that had drifted back to the same number would make the
+  #     selection a no-op while still reading as a per-leg one. Neither is
+  #     visible to any behavioural fixture: this deadline only fires on a run
+  #     that is already failing. Scoped to the real run so this fixture's own
+  #     needles cannot satisfy it.
+  body="$(sed -n '/^# Real run$/,$p' "${BASH_SOURCE[0]}" \
+            | grep -v '^[[:space:]]*#')"
+  rc=0
+  [[ -n "${body}" ]] || rc=1
+  grep -qF 'DISABLE_WAIT_SECS="${DISABLE_WAIT_LIVE_SYNC_SECS}"' <<<"${body}" \
+    || rc=1
+  grep -qF 'DISABLE_WAIT_SECS="${DISABLE_WAIT_POLL_SECS}"' <<<"${body}" || rc=1
+  grep -qF "LIVE_SYNC}\" == 'true'" <<<"${body}" || rc=1
+  [[ "${DISABLE_WAIT_LIVE_SYNC_SECS}" != "${DISABLE_WAIT_POLL_SECS}" ]] || rc=1
+  _check "H8 the DISABLE deadline is per-leg and selected from LIVE_SYNC" \
+    0 "${rc}"
+
+  if (( checked != SELF_TEST_FIXTURES )); then
+    echo "SELF-TEST FAIL: ran ${checked} fixture(s), expected ${SELF_TEST_FIXTURES}" >&2
+    fail=1
+  fi
   if (( fail != 0 )); then
     echo "run-ios-bg-publish.sh --self-test: FAILED" >&2
     return 1
   fi
-  echo "run-ios-bg-publish.sh --self-test: all 35 fixtures passed (the" \
+  echo "run-ios-bg-publish.sh --self-test: all ${checked} fixtures passed (the" \
        "simctl probes report supported/unsupported/unparseable distinctly;" \
        "the marker parser is literal, prefix-tolerant and fails closed on" \
-       "missing logs; the completion gate demands all four terminal proofs" \
-       "and never accepts READY in their place; the marker wait is bounded" \
+       "missing logs; the completion gate demands the four shared terminal" \
+       "proofs plus the ONE its leg's receive plane owns — the burst's under" \
+       "HAVEN_LIVE_SYNC=true, the 90 s catch-up timer's under false — refuses" \
+       "the other plane's in both directions, never accepts READY in their" \
+       "place, demands a further proof under the always tier, refuses that one" \
+       "under when-in-use, and fails closed on a tier or a live-sync value it" \
+       "does not recognise; the tier derivation maps one" \
+       "input to both the grant and the compiled pin and refuses anything" \
+       "else; the marker wait is bounded" \
        "and distinguishes a dead drive from a slow one, the re-check after" \
        "it included; the signal sweep survives the container rotation the" \
        "drive's own install causes, stays marker-specific and clears every" \
        "container; the app-data root is derived AND validated; the signal" \
-       "name and the disable marker still match the Dart drive's; and the" \
+       "name, the disable marker, the always marker, the receive marker, the" \
+       "catch-up marker and" \
+       "the tier-define name still match the Dart drive's; and the" \
        "background step and its call, the per-wait markers, the fail-closed" \
        "grant, the uninstall" \
-       "skip and the moving location drip are structurally pinned)."
+       "skip, the tier threaded to the delegate, the single validated tier" \
+       "input, the per-leg DISABLE deadline and the moving location drip are" \
+       "structurally pinned)."
   return 0
 }
 
@@ -918,6 +1604,41 @@ if [[ ! "${HAVEN_LIVE_SYNC}" =~ ^(true|false)$ ]]; then
 fi
 readonly LIVE_SYNC="${HAVEN_LIVE_SYNC}"
 
+# The DISABLE deadline is the one wait whose terms differ between the receive
+# planes, because P2c and P2d are not the same phase (see the derivation above).
+# Selected here rather than defaulted, so the poll leg cannot silently inherit a
+# ceiling its own drive Timeout sits below.
+if [[ "${LIVE_SYNC}" == 'true' ]]; then
+  DISABLE_WAIT_SECS="${DISABLE_WAIT_LIVE_SYNC_SECS}"
+else
+  DISABLE_WAIT_SECS="${DISABLE_WAIT_POLL_SECS}"
+fi
+readonly DISABLE_WAIT_SECS
+
+# The tier axis, declared per JOB by the matrix and mandatory for the same
+# reason HAVEN_LIVE_SYNC is: it is compiled into the artifact (as
+# HAVEN_BGP_EXPECT_TIER) as well as acted on here, so an unstated value would
+# not be "neutral" — it would be a second When-In-Use job wearing the Always
+# job's name.
+if [[ -z "${HAVEN_BGP_AUTH_TIER:-}" ]]; then
+  echo "ERROR: HAVEN_BGP_AUTH_TIER is not set. This script grants a" >&2
+  echo "       CoreLocation tier and compiles the shape the drive pins, so" >&2
+  echo "       the calling step must state 'when-in-use' or 'always'." >&2
+  exit 2
+fi
+if [[ ! "${HAVEN_BGP_AUTH_TIER}" =~ ^(when-in-use|always)$ ]]; then
+  echo "ERROR: HAVEN_BGP_AUTH_TIER must be exactly 'when-in-use' or 'always'" >&2
+  echo "       (got '${HAVEN_BGP_AUTH_TIER}')." >&2
+  exit 2
+fi
+readonly AUTH_TIER="${HAVEN_BGP_AUTH_TIER}"
+# Both derived from that ONE value, through the two pure helpers, so the
+# service granted below and the tier the drive pins can never disagree.
+PRIVACY_SERVICE="$(bgp_privacy_service "${AUTH_TIER}")"
+readonly PRIVACY_SERVICE
+EXPECT_TIER="$(bgp_expected_tier_name "${AUTH_TIER}")"
+readonly EXPECT_TIER
+
 readonly REPO_ROOT="${SCRIPT_DIR}/../../.."
 readonly HAVEN_DIR="${REPO_ROOT}/haven"
 readonly SIM_RUNNER="${SCRIPT_DIR}/run-ios-sim-scenario.sh"
@@ -927,7 +1648,9 @@ readonly SIM_RUNNER="${SCRIPT_DIR}/run-ios-sim-scenario.sh"
 [[ -f "${SIM_RUNNER}" ]] \
   || { echo "ERROR: shared runner not found: ${SIM_RUNNER}" >&2; exit 2; }
 
-echo "iOS bg-publish lane — udid=${SIM_UDID} relay=${RELAY_URL} live_sync=${LIVE_SYNC}"
+echo "iOS bg-publish lane — udid=${SIM_UDID} relay=${RELAY_URL}" \
+     "live_sync=${LIVE_SYNC} tier=${AUTH_TIER} (grant=${PRIVACY_SERVICE}," \
+     "pinned=${EXPECT_TIER})"
 
 # --- Preflight: can THIS Xcode grant location privacy and seed a fix? -------
 PRIVACY_USAGE="$(xcrun simctl help privacy 2>&1 || true)"
@@ -941,7 +1664,7 @@ case "${PRIV_RC}" in
     ;;
   1)
     echo "ERROR: this runner's 'xcrun simctl privacy' does NOT list the" >&2
-    echo "       'location' service, so When-In-Use authorization cannot be" >&2
+    echo "       'location' service, so no CoreLocation authorization can be" >&2
     echo "       granted and the app would sit on an unanswerable system" >&2
     echo "       prompt. Raise the runner image / Xcode version." >&2
     printf '%s\n' "${PRIVACY_USAGE}" | sed 's/^/       /' >&2
@@ -998,7 +1721,8 @@ flutter build ios \
   --debug \
   --target "${SCENARIO_FILE}" \
   --dart-define=HAVEN_E2E_RELAY="${RELAY_URL}" \
-  --dart-define=HAVEN_LIVE_SYNC="${LIVE_SYNC}"
+  --dart-define=HAVEN_LIVE_SYNC="${LIVE_SYNC}" \
+  --dart-define=HAVEN_BGP_EXPECT_TIER="${EXPECT_TIER}"
 
 APP_PATH=""
 for candidate in build/ios/iphonesimulator/*.app; do
@@ -1027,20 +1751,21 @@ if ! xcrun simctl install "${SIM_UDID}" "${APP_PATH}"; then
   exit 2
 fi
 
-# When-In-Use, deliberately NOT location-always: this lane proves the
-# production When-In-Use background-continuation path (the tier most users
-# hold); the Always axis is B7's lane. A refused grant must be FATAL —
-# `|| true` here would be another instance of the repo's recurring "guard
-# passes vacuously" failure, presenting at runtime as an app hanging on a
-# system prompt nobody can answer.
-if ! xcrun simctl privacy "${SIM_UDID}" grant location "${BUNDLE_ID}"; then
-  echo "ERROR: 'xcrun simctl privacy ${SIM_UDID} grant location ${BUNDLE_ID}'" >&2
-  echo "       failed. Authorization was never granted; the likeliest cause" >&2
-  echo "       is the install above not having landed — the grant resolves" >&2
-  echo "       the bundle id against INSTALLED apps." >&2
+# The tier's own service, derived from HAVEN_BGP_AUTH_TIER by
+# bgp_privacy_service — `location` for the When-In-Use job (the tier most
+# users hold) and `location-always` for the Always one, whose subject is the
+# confirmed-Always posture that removes the blue bar. A refused grant must be
+# FATAL — `|| true` here would be another instance of the repo's recurring
+# "guard passes vacuously" failure, presenting at runtime as an app hanging on
+# a system prompt nobody can answer.
+if ! xcrun simctl privacy "${SIM_UDID}" grant "${PRIVACY_SERVICE}" "${BUNDLE_ID}"; then
+  echo "ERROR: 'xcrun simctl privacy ${SIM_UDID} grant ${PRIVACY_SERVICE}" >&2
+  echo "       ${BUNDLE_ID}' failed. Authorization was never granted; the" >&2
+  echo "       likeliest cause is the install above not having landed — the" >&2
+  echo "       grant resolves the bundle id against INSTALLED apps." >&2
   exit 2
 fi
-echo "bg-publish — granted When-In-Use location to ${BUNDLE_ID}"
+echo "bg-publish — granted ${PRIVACY_SERVICE} to ${BUNDLE_ID}"
 
 # The fix the app will actually publish: the drive runs the production
 # location service, so a fixless locationd means no publishes and a red P2.
@@ -1158,6 +1883,7 @@ echo "bg-publish — simulated-location drip every ${DRIP_SECS}s (two fixes ~5m"
 HAVEN_LIVE_SYNC="${LIVE_SYNC}" \
 HAVEN_E2E_RELAY="${RELAY_URL}" \
 HAVEN_E2E_IOS_SKIP_UNINSTALL=1 \
+HAVEN_BGP_EXPECT_TIER="${EXPECT_TIER}" \
   bash "${SIM_RUNNER}" "${SCENARIO_FILE}" "${SIM_UDID}" &
 DRIVE_PID=$!
 readonly DRIVE_PID
@@ -1301,11 +2027,15 @@ fi
 # `flutter test` reports success over a body that was skipped
 # (`skip: true`, `markTestSkipped`) or returned early, and the READY marker
 # cannot see it: it is printed before P2/P3 run. Each proof below is printed
-# only after the last assertion of its own phase.
-MISSING_PROOFS="$(bgp_missing_proofs "${BG_LOG}")"
+# only after the last assertion of its own phase, and the set demanded is this
+# LEG's: four shared, one for the receive plane this build has, and one more
+# under the Always tier that the When-In-Use legs must not produce.
+MISSING_PROOFS="$(bgp_missing_proofs "${BG_LOG}" "${AUTH_TIER}" \
+                    "${LIVE_SYNC}")"
 readonly MISSING_PROOFS
 if [[ -n "${MISSING_PROOFS}" ]]; then
-  echo "ERROR: the drive exited 0 WITHOUT printing its terminal proof(s):" >&2
+  echo "ERROR: the drive exited 0 WITHOUT printing its terminal proof(s)" >&2
+  echo "       for the ${AUTH_TIER} tier at live_sync=${LIVE_SYNC}:" >&2
   printf '%s\n' "${MISSING_PROOFS}" | sed 's/^/         missing: /' >&2
   echo "       This is NOT an assertion failure — a failed expect() makes" >&2
   echo "       the drive exit non-zero and is reported above with its own" >&2
@@ -1318,11 +2048,54 @@ if [[ -n "${MISSING_PROOFS}" ]]; then
   exit 1
 fi
 
+# The symmetric half: a proof this LEG must NOT have produced. Each of the three
+# is reachable only from one compiled branch — ALWAYS_MARKER when
+# HAVEN_BGP_EXPECT_TIER says `always`, RECEIVE_MARKER when the receive engine is
+# compiled in, CATCHUP_MARKER when it is not — so finding the wrong one means
+# what this script acted on and what the drive was BUILT with came from
+# different values, and the job is measuring something other than its name.
+UNEXPECTED_PROOFS="$(bgp_unexpected_proofs "${BG_LOG}" "${AUTH_TIER}" \
+                       "${LIVE_SYNC}")"
+readonly UNEXPECTED_PROOFS
+if [[ -n "${UNEXPECTED_PROOFS}" ]]; then
+  echo "ERROR: the ${AUTH_TIER}/live_sync=${LIVE_SYNC} run printed a proof" >&2
+  echo "       only another leg's run can reach:" >&2
+  printf '%s\n' "${UNEXPECTED_PROOFS}" | sed 's/^/         unexpected: /' >&2
+  echo "       The grant this script performed (${PRIVACY_SERVICE}), the tier" >&2
+  echo "       compiled into the drive (${EXPECT_TIER}) and the receive path" >&2
+  echo "       it was built with (HAVEN_LIVE_SYNC=${LIVE_SYNC}) do not all" >&2
+  echo "       describe one leg, so this job is not measuring the shape its" >&2
+  echo "       name claims. The tier pair is derived from HAVEN_BGP_AUTH_TIER" >&2
+  echo "       by bgp_privacy_service and bgp_expected_tier_name; the receive" >&2
+  echo "       path is one --dart-define threaded from HAVEN_LIVE_SYNC. Fix" >&2
+  echo "       the wiring, never the gate. Log: ${BG_LOG}." >&2
+  exit 1
+fi
+
 # Leave the simulator clean for whatever step runs next.
 xcrun simctl uninstall "${SIM_UDID}" "${BUNDLE_ID}" >/dev/null 2>&1 || true
 
 echo ""
-echo "bg-publish — PASSED: the native CoreLocation background session armed on"
-echo "     enable, kind-445 publishes kept reaching the relay across a REAL"
-echo "     OS background transition, and disabling background sharing while"
-echo "     still backgrounded stopped publishing and disarmed the session."
+echo "bg-publish — PASSED (${AUTH_TIER}, live_sync=${LIVE_SYNC}):"
+echo "     CoreLocation reported the pinned tier, the native session handler"
+echo "     took that tier's posture, the backgrounded session ran at the 100 m"
+echo "     accuracy profile, kind-445 publishes kept reaching the relay across"
+echo "     a REAL OS background transition, and disabling background sharing"
+echo "     while still backgrounded stopped publishing and disarmed the"
+if [[ "${LIVE_SYNC}" == 'true' ]]; then
+  echo "     session. The receive half: a burst decrypted a peer's location"
+  echo "     and then held no standing subscription."
+  echo "     NOT proven here: that no SOCKET is open between bursts (no oracle"
+  echo "     exists for it in this lane — the Rust in-process tests own it),"
+else
+  echo "     session. The receive half, on the POLL path this leg exists for"
+  echo "     (OD4-d): the 90 s background receive timer ran a catch-up sweep"
+  echo "     from the backgrounded process and landed a peer's location in the"
+  echo "     persisted last-known store."
+  echo "     NOT proven here: anything about the burst plane, which this build"
+  echo "     does not have; and not the C3 chokepoint that refuses a wake after"
+  echo "     consent is withdrawn — host tests own that,"
+fi
+echo "     and, not provable on a simulator at all, that the shape survives"
+echo "     hours of stationary wall clock on a device (M7 §6 item 0a,"
+echo "     DEFERRED for want of hardware — still owed)."

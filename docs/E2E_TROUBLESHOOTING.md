@@ -7,17 +7,35 @@ unhealthy emulator/simulator routinely masquerades as a functional failure.**
 
 ## The lanes
 
+These are the lanes this guide has failure modes for — the core-flow pair plus
+the two that share their harness. They are **not** the full E2E fleet: the
+scenario lanes (`e2e-ios-background-publish`, `e2e-fgs-publish`, `e2e-profile`,
+`e2e-relay-customization`, `e2e-clock-skew`, `e2e-kp-rotation`,
+`e2e-network-reconnect`, the real-GPS and auth-tier lanes) are inventoried in
+CLAUDE.md's "CI Pipeline" section and each carries its own header. A symptom
+below is worth reading against any of them; a lane-specific oracle is not.
+
 | Workflow | What it runs | How | Relay |
 |---|---|---|---|
 | `e2e-android.yml` | `e2e_combined.dart` (real Alice UI + synthetic Bob/Carol/Dave FFI peers) | `flutter drive` on an AVD | strfry container, `ws://10.0.2.2:7777` |
 | `e2e-ios.yml` | `e2e_combined.dart` + `ios_bg_mirror_test.dart` | `flutter test -d <udid>` on a booted simulator | host-native relay, `ws://localhost:7777` |
 | `e2e-background-catchup.yml` | M7 background catch-up runtime proof (4 phases + a guest reboot) | `run-m7-background-catchup.sh` under `reactivecircus/android-emulator-runner` | strfry container, `ws://10.0.2.2:7777` |
-| `e2e-live-sync.yml` | The SAME two lanes, flag-ON (`HAVEN_LIVE_SYNC=true`) | `workflow_dispatch` only | — |
+| `e2e-live-sync.yml` | The SAME two lanes, flag-ON (`HAVEN_LIVE_SYNC=true`) — a manual re-run of what `ci.yml` already gates on | `workflow_dispatch` only | — |
 
 `e2e-android.yml` / `e2e-ios.yml` take a `live_sync` boolean input (default
-**false**). The required PR gate (`ci.yml`) runs them on the **poll path**
-(flag-off); the flag-on live path runs on-demand via `e2e-live-sync.yml` until
-it is proven green (prove-then-gate — see failure mode 3).
+**false**) and always pass `--dart-define=HAVEN_LIVE_SYNC=<input>`, so a lane
+forces its receive path rather than inheriting the compiled-in default.
+
+`ci.yml` runs **both paths on every commit**: `e2e-android` / `e2e-ios` on the
+poll path (flag-off) and `e2e-android-live-sync` / `e2e-ios-live-sync` on the
+live path (flag-on). All four gate. `e2e-live-sync.yml` is retained only as a
+convenience for re-running the flag-on pair on a branch without the full fleet;
+it calls the same reusable lanes, so it cannot drift from the gate.
+
+Note which way round the two paths sit today: `liveSyncEnabled` defaults to
+**true** (M11 Phase B), so the LIVE path is what production ships. The flag-off
+lane is not the default path — it keeps the retained poller, the documented
+rollback path, proven for as long as it stays in the tree.
 
 ## Diagnose first (the rule)
 
@@ -118,15 +136,25 @@ RAM or reduce concurrent memory pressure.
 
 ## Failure mode 3 — hang / timeout (exit 124) on the flag-on live path
 
-The M11 live-sync path (`HAVEN_LIVE_SYNC=true`) is **not yet validated
-end-to-end**. Running the poll-path `FE-1`/`FE-2` scenarios flag-ON can hang past
-the inner self-timeout and get killed by the outer step timeout (exit 124).
+**Symptom.** A flag-on lane (`HAVEN_LIVE_SYNC=true`) hangs past the inner
+self-timeout and is killed by the outer step timeout (exit 124).
 
-**Design response — prove-then-gate.** Flag-ON runs only in the on-demand
-`e2e-live-sync.yml`; the required PR gate stays on the poll path. The M11 flag-on
-scenarios in `e2e_combined.dart` self-skip when `!liveSyncEnabled`. Promote
-flag-ON into `ci.yml` (`with: live_sync: true`) only once the on-demand lane is
-reliably green.
+**Status — prove-then-gate is DONE.** This is the failure that rollout existed
+to contain, and the flag-on lanes have since been promoted into `ci.yml`, where
+they gate every commit beside the poll-path lanes. A 124 here is a regression to
+diagnose, not an expected property of an unproven path.
+
+It is also not an under-budgeting artefact. Every timeout in both lanes is
+already a `inputs.live_sync && <flag-on> || <flag-off>` ternary — job, step,
+outer deadline and inner drive timeout all widen on the flag-on path, because
+the live-sync scenarios run on top of the core flow. (The two platforms pick
+different values; read them off the lane rather than assuming Android's.) So a
+124 means the live path genuinely stopped making progress — work it like any
+other lane, starting from "Diagnose first" above.
+
+One asymmetry to keep in mind while reading logs: the M11 scenarios in
+`e2e_combined.dart` self-skip when `!liveSyncEnabled`, so a poll-path lane that
+is silent where you expected live-sync coverage has skipped, not passed.
 
 ## Failure mode 4 — WorkManager job never appears while the device is ONLINE
 
@@ -410,10 +438,57 @@ remaining member auto-commits the proposal — a real concurrent-commit fork, ju
 as in production when someone leaves a 3+-person circle. The engine resolves it
 (deterministic `CommitOrderingKey` branch selection; the loser rolls back and
 adopts the winner), but resolution needs all peers to keep ingesting after the
-loser's commit lands. Poll to the convergence predicate itself (leaver gone from
-BOTH peers **and** equal epochs), re-snapshotting the shared inbox each round;
-polling each peer to its own state and then sampling epoch equality once can
-observe a mid-convergence instant and fail spuriously.
+loser's commit lands. Poll to the convergence predicate itself, re-snapshotting
+the shared inbox each round; polling each peer to its own state and then
+sampling once can observe a mid-convergence instant and fail spuriously.
+
+**What that predicate must NOT be: "leaver gone from both + equal epochs".** A
+fork satisfies both terms. Both branches remove the leaver, and both advance by
+exactly one epoch, so the two peers sit on epoch N+1 with identical member
+sets and *different group states*. Equal epochs implied one branch only under
+the pre-migration single-committer election, where a single SelfRemove commit
+ever existed; DM-4b deleted that election and invalidated the reasoning without
+touching the code that relied on it.
+
+The discriminating predicate is a **current-epoch cross-decrypt**: have one peer
+publish a location minted at its current epoch and require the other to decrypt
+*those exact coordinates* in the same round. Two branches derive different epoch
+secrets, hence different `marmot/group-event` exporter secrets, so a successful
+decrypt means the reader holds the publisher's current-epoch secret — one shared
+branch. Match on the coordinates, never on "a decrypt succeeded": the engine's
+epoch lookback (5 past epochs) happily decrypts a location minted at a SHARED
+PAST epoch on either branch. `_reconcileHandoff` in `e2e_combined.dart`
+implements this, and `scripts/ci/check_e2e_handoff_convergence_oracle.sh` pins
+it.
+
+## Failure mode 9b — Phase 5 passes, then Phase 6 times out on the non-admin leave
+
+**Symptom.** The handoff phase reports `handoff converged … epoch=5 on both
+peers` and Phase 5's epoch-delta assertions pass, but the next phase hangs:
+`post-leave drain groupUpdates=0 members=2 stillHasLeaver=true`, repeated until
+the 60s budget expires. Every drain re-processes the same event set, and the
+leaver's `SelfRemove` shows `0 result(s), 0 auto-commit(s)` while burning real
+crypto time each round (the convergence re-tick loop).
+
+**Cause.** Phase 5 let a fork through — see the predicate discussion above. The
+leaver then mints its `SelfRemove` on its own orphan branch, which the remaining
+peer's engine cannot apply at any epoch, so no eviction commit is ever staged.
+The giveaway in logcat is two `published + confirmed receive-side auto-commit`
+lines with *different* event ids (one per remaining peer), followed by a
+`Wrong Epoch: message.epoch() N != N+1` when each peer meets the other's commit.
+
+CI run 32688074045 is the worked example. The fork was routine and would have
+resolved on the next drain, but the only step that performed that drain was a
+`try`/`catch`-swallowed "non-gating" location probe; its publish was lost when
+the harness relay socket dropped (strfry `[1] Disconnect`, proxy
+`c0 c2r: read failed`), the exception was ignored by design, and the fork
+survived into Phase 6.
+
+**Fix / check.** Two rules, both now enforced. The convergence gate must include
+the cross-decrypt term (guard above). And any step a convergence gate depends on
+must be *inside* the poll and feed the predicate — a probe whose failure is
+logged and ignored is load-bearing exactly when it silently stops running.
+Transport loss is then a retried round with a fresh event id, not a false pass.
 
 ## Failure mode 10 — the job dies with "the hosted runner lost communication with the server"
 
@@ -454,16 +529,18 @@ out of scope for GitHub-hosted runners.
 
 | Flag | Meaning | Default |
 |---|---|---|
-| `HAVEN_LIVE_SYNC` | M11 persistent live-sync engine (vs the retained poller) | `false` |
+| `HAVEN_LIVE_SYNC` | M11 persistent live-sync engine (vs the retained poller) | `true` (LIVE since M11 Phase B); every e2e lane forces it explicitly |
 | `HAVEN_E2E_NO_BACKGROUND` | skip M7 FGS/background init (single-engine for `flutter drive`) | `false` (prod), `true` on e2e_combined only |
 | `backgroundCatchupEnabled` | M7-E background catch-up (Dart const) | `true` (LIVE) |
-| `enablePeriodicSelfUpdate` | M5 hourly self-update | `false` |
+| ~~`enablePeriodicSelfUpdate`~~ | M5 hourly self-update | **REMOVED (Unit E)** — the flag and `self_update_provider.dart` are deleted; nothing re-keys on a timer |
 
 ## Pointers
 
 - Migration state: memory `project_wn_relay_epoch_migration_plan`,
   `docs/M11_ROLLOUT.md`, `docs/M7_BACKGROUND_SHARING.md`.
 - REV-1 (distributed SelfRemove fork): `docs/M11_ROLLOUT.md`.
-- The `check_m7_native_wake_guards.sh` guard pins the M7-E released state
-  (including `HAVEN_LIVE_SYNC` `defaultValue: false`); the Phase-B flip must
-  update guard check 14b in lockstep.
+- The `check_m7_native_wake_guards.sh` guard pins the M7-E released state; its
+  check 14b pins `liveSyncEnabled`'s `defaultValue: true` (M11 Phase B shipped
+  the engine ON), so a silent re-inert to `false` turns it red. An intentional
+  live-sync rollback (M11 plan §8) reverts 14b together with the default it
+  pins — it correctly fails first.

@@ -208,6 +208,14 @@ class AppLocalizationsPt extends AppLocalizations {
   String get settingsLocationTitle => 'Localização';
 
   @override
+  String get settingsLocationSubtitleOn =>
+      'Compartilhamento em segundo plano ativado';
+
+  @override
+  String get settingsLocationSubtitleOff =>
+      'Somente enquanto o Haven está aberto';
+
+  @override
   String get settingsMapStyleTitle => 'Estilo do mapa';
 
   @override
@@ -381,7 +389,7 @@ class AppLocalizationsPt extends AppLocalizations {
 
   @override
   String get locationSettingsIntro =>
-      'O Haven compartilha sua localização com seus círculos sempre que o app está aberto. Ative esta opção e seus círculos continuam vendo a localização enquanto o Haven está em segundo plano. Se o sistema fechar o Haven, o compartilhamento é interrompido — quando o sistema acorda o Haven em segundo plano, ele apenas busca a localização dos seus círculos, nunca envia a sua. No Android, o compartilhamento continua mesmo quando você desliza o Haven para fora da lista de apps recentes e volta a funcionar sozinho depois que o telefone é reiniciado; no iPhone, o compartilhamento continua interrompido até você abrir o Haven.';
+      'O Haven compartilha sua localização com seus círculos sempre que o app está aberto. Ative esta opção e seus círculos continuam vendo a localização enquanto o Haven está em segundo plano. Se o sistema fechar o Haven, seu próprio compartilhamento é interrompido — o Haven ainda pode acordar para buscar a localização dos seus círculos, mas nunca para enviar a sua. No Android, o compartilhamento continua mesmo quando você desliza o Haven para fora da lista de apps recentes e volta a funcionar sozinho depois que o telefone é reiniciado. No iPhone, o compartilhamento continua interrompido até você abrir o Haven.';
 
   @override
   String get locationSettingsToggleTitle => 'Compartilhar em segundo plano';
@@ -392,7 +400,7 @@ class AppLocalizationsPt extends AppLocalizations {
 
   @override
   String get locationSettingsIosLimitedNote =>
-      'O compartilhamento continua funcionando em segundo plano com sua permissão atual. Escolha \"Sempre\" para o Haven nos Ajustes para que ele também possa recuperar as localizações dos seus círculos depois que o iOS fechar o app. Seu próprio compartilhamento é retomado quando você reabre o Haven.';
+      'O compartilhamento continua funcionando em segundo plano com sua permissão atual, e enquanto isso o iOS mostra a própria barra azul de localização no topo da tela. Escolha \"Sempre\" para o Haven nos Ajustes para que ele também possa recuperar as localizações dos seus círculos depois que o iOS fechar o app. Com \"Sempre\", o iOS pode mostrar a seta de localização na barra de status em vez dessa barra azul. Seu próprio compartilhamento é retomado quando você reabre o Haven.';
 
   @override
   String get locationSettingsAndroidHeader =>
@@ -412,7 +420,48 @@ class AppLocalizationsPt extends AppLocalizations {
 
   @override
   String get locationSettingsIosGuidance =>
-      'Enquanto o compartilhamento em segundo plano está ativado, o Haven mantém uma sessão de localização contínua e o iOS mostra um indicador azul na barra de status. Conceder \"Sempre\" também permite que o Haven recupere as atualizações dos seus círculos depois que o iOS fechar o app.';
+      'Enquanto o compartilhamento em segundo plano está ativado, o Haven mantém uma sessão de localização para que seus círculos continuem vendo você.';
+
+  @override
+  String get locationSettingsIosIndicatorArrow =>
+      'O iOS mostra a própria seta de localização na barra de status enquanto o Haven usa sua localização e, depois disso, mantém essa mesma seta ao lado do Haven em Serviços de Localização por um tempo.';
+
+  @override
+  String get locationSettingsIosIndicatorBar =>
+      'Com sua permissão \"Sempre\", o iOS mostra a própria barra azul de localização no topo da tela enquanto o Haven usa sua localização.';
+
+  @override
+  String get locationDisclosureTitle => 'Compartilhar sua localização';
+
+  @override
+  String get locationDisclosureWhy =>
+      'O Haven mostra sua localização em tempo real para as pessoas dos círculos que você escolher e mostra a localização delas para você no mapa. Para isso, o Haven precisa de permissão para usar a localização precisa do seu dispositivo.';
+
+  @override
+  String get locationDisclosureHow =>
+      'Sua localização é criptografada de ponta a ponta no seu dispositivo, então só os membros dos círculos que você escolher conseguem lê-la — o Haven, não. O Haven não tem servidores próprios: suas atualizações criptografadas passam por relays independentes mantidos por outras pessoas. Esses relays veem seu endereço de rede, mas nunca onde você está. Para desenhar o mapa, o Haven pede ao Stadia Maps as áreas ao redor de você e do seu círculo, então o Stadia Maps fica sabendo mais ou menos onde é isso, mas nunca seu nome, sua chave ou quem está nos seus círculos. O Stadia Maps afirma que não vende nem troca informações pessoais, que não instala cookies no seu dispositivo e que guarda os registros do servidor por cerca de duas semanas — é a política dele, que o Haven não tem como fazer cumprir.';
+
+  @override
+  String get locationDisclosureSharing =>
+      'Enquanto o Haven está aberto e você faz parte de um círculo, sua localização é enviada automaticamente a cada poucos minutos. Não há como pausar. Para parar de compartilhar com um círculo, saia dele.';
+
+  @override
+  String get locationDisclosureBackgroundAndroid =>
+      'Este app usa dados de localização para permitir o compartilhamento com seus círculos mesmo quando o app está fechado ou não está em uso.';
+
+  @override
+  String get locationDisclosureBackgroundIos =>
+      'Este app usa dados de localização para permitir o compartilhamento com seus círculos mesmo quando o Haven está em segundo plano e você não está usando o app. Se o iOS fechar o Haven, o compartilhamento é interrompido até você abrir o app de novo — o Haven ainda pode acordar para buscar a localização dos seus círculos, mas nunca para enviar a sua.';
+
+  @override
+  String get locationDisclosureManage =>
+      'Você pode desativar o compartilhamento em segundo plano a qualquer momento em Configurações → Localização.';
+
+  @override
+  String get locationDisclosureAgree => 'Concordo';
+
+  @override
+  String get locationDisclosureNotNow => 'Agora não';
 
   @override
   String get fgsNotificationSharing =>
@@ -719,6 +768,15 @@ class AppLocalizationsPt extends AppLocalizations {
       'Falha ao criar o círculo. Tente de novo.';
 
   @override
+  String nameCircleRosterFullError(int limit) {
+    final intl.NumberFormat limitNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String limitString = limitNumberFormat.format(limit);
+
+    return 'Você pode fazer parte de no máximo $limitString círculos ao mesmo tempo. Saia de um círculo para abrir espaço para um novo.';
+  }
+
+  @override
   String addMemberTitle(String circleName) {
     return 'Adicionar a $circleName';
   }
@@ -1017,6 +1075,15 @@ class AppLocalizationsPt extends AppLocalizations {
   @override
   String get invitationAcceptError =>
       'Falha ao aceitar o convite. Tente de novo.';
+
+  @override
+  String invitationRosterFullError(int limit) {
+    final intl.NumberFormat limitNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String limitString = limitNumberFormat.format(limit);
+
+    return 'Você pode fazer parte de no máximo $limitString círculos ao mesmo tempo. Saia de um círculo e depois aceite este convite.';
+  }
 
   @override
   String get invitationDeclineError =>

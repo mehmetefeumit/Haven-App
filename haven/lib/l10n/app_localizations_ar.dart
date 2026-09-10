@@ -210,6 +210,12 @@ class AppLocalizationsAr extends AppLocalizations {
   String get settingsLocationTitle => 'الموقع';
 
   @override
+  String get settingsLocationSubtitleOn => 'المشاركة في الخلفية مفعّلة';
+
+  @override
+  String get settingsLocationSubtitleOff => 'فقط ما دام Haven مفتوحًا';
+
+  @override
   String get settingsMapStyleTitle => 'نمط الخريطة';
 
   @override
@@ -386,7 +392,7 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get locationSettingsIntro =>
-      'يشارك Haven موقعك مع دوائرك كلما كان التطبيق مفتوحًا. وإن فعّلت هذا الخيار، ظلّت دوائرك ترى موقعك بينما يعمل Haven في الخلفية. أما إذا أغلق النظام Haven، فتتوقف المشاركة؛ فعمليات إيقاظ التطبيق في الخلفية تجلب مواقع دوائرك فقط، وهي لا تُرسل موقعك أنت أبدًا. وعلى Android، تستمر المشاركة حتى بعد إزاحة Haven من مبدّل التطبيقات، وتعود من تلقاء نفسها بعد إعادة تشغيل الجهاز. أما على iPhone فتبقى متوقفة إلى أن تفتح Haven.';
+      'يشارك Haven موقعك مع دوائرك كلما كان التطبيق مفتوحًا. وإن فعّلت هذا الخيار، ظلّت دوائرك ترى موقعك بينما يعمل Haven في الخلفية. وإذا أغلق النظام Haven، توقّفت مشاركتك أنت: قد يستيقظ Haven لجلب مواقع دوائرك، لكنه لا يستيقظ أبدًا لإرسال موقعك. وعلى Android، تستمر المشاركة حتى بعد إزاحة Haven من مبدّل التطبيقات، وتعود من تلقاء نفسها بعد إعادة تشغيل الجهاز. أما على iPhone فتبقى المشاركة متوقفة إلى أن تفتح Haven.';
 
   @override
   String get locationSettingsToggleTitle => 'المشاركة في الخلفية';
@@ -397,7 +403,7 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get locationSettingsIosLimitedNote =>
-      'تظل المشاركة تعمل في الخلفية بإذنك الحالي. اختر «دائمًا» لتطبيق Haven في الإعدادات ليتمكّن أيضًا من تدارك ما فاته من مواقع دوائرك بعد أن يُغلق iOS التطبيق. أما مشاركة موقعك أنت فتُستأنف عندما تفتح Haven من جديد.';
+      'تظل المشاركة تعمل في الخلفية بإذنك الحالي، ويعرض iOS خلال ذلك شريط الموقع الأزرق في أعلى الشاشة. اختر «دائمًا» لتطبيق Haven في الإعدادات ليتمكّن أيضًا من تدارك ما فاته من مواقع دوائرك بعد أن يُغلق iOS التطبيق. ومع «دائمًا»، قد يعرض iOS سهم الموقع في شريط الحالة بدلًا من ذلك الشريط. أما مشاركة موقعك أنت فتُستأنف عندما تفتح Haven من جديد.';
 
   @override
   String get locationSettingsAndroidHeader => 'إعدادات النظام للموثوقية';
@@ -416,7 +422,48 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get locationSettingsIosGuidance =>
-      'ما دامت المشاركة في الخلفية مفعّلة، يحتفظ Haven بجلسة موقع متواصلة ويُظهر iOS مؤشرًا أزرق في شريط الحالة. ومنح إذن «دائمًا» يتيح لتطبيق Haven إضافةً إلى ذلك تدارك ما فاته من تحديثات دوائرك بعد أن يُغلق iOS التطبيق.';
+      'ما دامت المشاركة في الخلفية مفعّلة، يحتفظ Haven بجلسة موقع كي تظل دوائرك تراك.';
+
+  @override
+  String get locationSettingsIosIndicatorArrow =>
+      'يعرض iOS سهم الموقع الخاص به في شريط الحالة أثناء استخدام Haven لموقعك، ويُبقي السهم نفسه بجوار Haven في «خدمات الموقع» مدةً بعد ذلك.';
+
+  @override
+  String get locationSettingsIosIndicatorBar =>
+      'بإذن «دائمًا» الذي منحته، يعرض iOS شريط الموقع الأزرق الخاص به في أعلى الشاشة أثناء استخدام Haven لموقعك.';
+
+  @override
+  String get locationDisclosureTitle => 'مشاركة موقعك';
+
+  @override
+  String get locationDisclosureWhy =>
+      'يعرض Haven موقعك المباشر لأفراد الدوائر التي تختارها، ويعرض لك مواقعهم على الخريطة. ولهذا يحتاج Haven إلى إذن لاستخدام الموقع الدقيق لجهازك.';
+
+  @override
+  String get locationDisclosureHow =>
+      'موقعك مشفَّر تشفيرًا تامًّا بين الطرفين على جهازك، فلا يستطيع قراءته سوى أعضاء الدوائر التي تختارها، لا Haven. ولا يشغّل Haven خوادم خاصة به: تمر تحديثاتك المشفَّرة عبر مُرحِّلات مستقلة يديرها أشخاص آخرون، وهي ترى عنوانك على الشبكة لكنها لا ترى أبدًا أين أنت. ولرسم الخريطة يطلب Haven من Stadia Maps المناطق المحيطة بك وبدائرتك، فتعرف Stadia Maps تقريبًا أين تقع تلك المناطق، لكنها لا تعرف اسمك ولا مفتاحك ولا مَن في دوائرك. وتقول Stadia Maps إنها لا تبيع المعلومات الشخصية ولا تتاجر بها، ولا تضع أي ملفات تعريف ارتباط على جهازك، وتحتفظ بسجلات خوادمها نحو أسبوعين — وهذه سياستها هي، ولا يستطيع Haven فرضها.';
+
+  @override
+  String get locationDisclosureSharing =>
+      'ما دام Haven مفتوحًا وأنت في دائرة، يُرسَل موقعك تلقائيًا كل بضع دقائق. ولا يوجد إيقاف مؤقت. وللتوقف عن المشاركة مع دائرة، غادرها.';
+
+  @override
+  String get locationDisclosureBackgroundAndroid =>
+      'يستخدم هذا التطبيق بيانات الموقع لتمكين المشاركة مع دوائرك حتى عندما يكون التطبيق مغلقًا أو غير قيد الاستخدام.';
+
+  @override
+  String get locationDisclosureBackgroundIos =>
+      'يستخدم هذا التطبيق بيانات الموقع لتمكين المشاركة مع دوائرك حتى عندما يعمل Haven في الخلفية ولا تستخدمه أنت. وإذا أغلق iOS تطبيق Haven، توقّفت مشاركتك إلى أن تفتحه من جديد: قد يستيقظ Haven لجلب مواقع دوائرك، لكنه لا يستيقظ أبدًا لإرسال موقعك.';
+
+  @override
+  String get locationDisclosureManage =>
+      'يمكنك إيقاف المشاركة في الخلفية في أي وقت من الإعدادات ← الموقع.';
+
+  @override
+  String get locationDisclosureAgree => 'أوافق';
+
+  @override
+  String get locationDisclosureNotNow => 'ليس الآن';
 
   @override
   String get fgsNotificationSharing => 'يُرسل Haven معلومات الموقع ويستقبلها';
@@ -726,6 +773,15 @@ class AppLocalizationsAr extends AppLocalizations {
       'تعذّر إنشاء الدائرة. يُرجى إعادة المحاولة.';
 
   @override
+  String nameCircleRosterFullError(int limit) {
+    final intl.NumberFormat limitNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String limitString = limitNumberFormat.format(limit);
+
+    return 'الحدّ الأقصى لعدد دوائرك في وقت واحد هو $limitString. ويجب مغادرة إحدى دوائرك لإفساح المجال لدائرة جديدة.';
+  }
+
+  @override
   String addMemberTitle(String circleName) {
     return 'إضافة إلى $circleName';
   }
@@ -1030,6 +1086,15 @@ class AppLocalizationsAr extends AppLocalizations {
   @override
   String get invitationAcceptError =>
       'تعذّر قبول الدعوة. يُرجى إعادة المحاولة.';
+
+  @override
+  String invitationRosterFullError(int limit) {
+    final intl.NumberFormat limitNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String limitString = limitNumberFormat.format(limit);
+
+    return 'الحدّ الأقصى لعدد دوائرك في وقت واحد هو $limitString. وتبقى هذه الدعوة في انتظارك، فيمكنك قبولها بعد مغادرة إحدى دوائرك.';
+  }
 
   @override
   String get invitationDeclineError =>

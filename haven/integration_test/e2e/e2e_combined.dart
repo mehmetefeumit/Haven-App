@@ -294,9 +294,11 @@ const Duration _riverpodPollerReadTimeout = Duration(seconds: 10);
 /// publish to ONE circle, where `PublishStagger` inserts no gap at all (the
 /// first publish of a burst is never delayed). A burst that spans several
 /// circles is a different shape: every publish after the first waits a CSPRNG
-/// gap of `[kPublishStaggerMinGap, kPublishStaggerMaxGap]` = 2–9 s, on purpose
-/// — a gap under one second cannot move a whole-second `created_at`, which is
-/// the entire decorrelation property. A two-circle burst can therefore take 9 s
+/// gap of `[kPublishStaggerMinGap, PublishStagger.maxGapFor(n)]`, on purpose —
+/// a gap under one second cannot move a whole-second `created_at`, which is the
+/// entire decorrelation property. The ceiling is priced per burst, so 2–9 s is
+/// the TWO-circle range this test exercises, not a burst-wide constant; at
+/// [kMaxCirclesPerBurst] it is 2–3 s. A two-circle burst can therefore take 9 s
 /// of pure waiting before either relay round-trip has even started, and reusing
 /// the 10 s bound would turn the privacy control itself into a flake.
 ///

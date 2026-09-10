@@ -7478,6 +7478,13 @@ pub enum SubscriptionHealthActionFfi {
     /// circles are simply idle — a consumer that folded it into `Resubscribed`
     /// would show a normal quiet device as repeatedly losing its relays.
     TargetedReanchor,
+    /// The session is PAUSED between background bursts: it holds no standing
+    /// REQ and no socket, so there was nothing for this tick to heal.
+    ///
+    /// Proof of nothing, like [`Self::EngineOff`]: a consumer must not read it
+    /// as "the receive plane is whole". The next burst re-issues every REQ at
+    /// its persisted cursor, which is what a healer would have done anyway.
+    Paused,
 }
 
 impl From<haven_core::relay::live_sync::HealthAction> for SubscriptionHealthActionFfi {
@@ -7488,6 +7495,7 @@ impl From<haven_core::relay::live_sync::HealthAction> for SubscriptionHealthActi
             A::Healthy => Self::Healthy,
             A::Resubscribed => Self::Resubscribed,
             A::TargetedReanchor => Self::TargetedReanchor,
+            A::Paused => Self::Paused,
         }
     }
 }
@@ -7584,6 +7592,44 @@ impl RelayManagerFfi {
         let result = self
             .inner
             .publish_event(&event, &relays)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(PublishResultFfi::from(result))
+    }
+
+    /// Publishes a kind-445 LOCATION event: one bounded fan-out, no retry.
+    ///
+    /// The location plane's publish, and the only one that may take it. One
+    /// connect and one 5 s per-relay window — 10 s worst case against the
+    /// ~49 s [`RelayManagerFfi::publish_event`] ladder — succeeding as soon as
+    /// one relay returns `OK`. A location that misses is superseded by the next
+    /// tick; a commit is not, so commits, welcomes, proposals, key packages,
+    /// relay lists and profiles keep `publish_event` (Security Rule 13). Never
+    /// call this for anything whose outcome resolves a `PendingStateRef`.
+    ///
+    /// # Arguments
+    ///
+    /// * `event_json` - JSON-serialized signed kind-445 event
+    /// * `relays` - List of relay URLs (must be wss://)
+    ///
+    /// # Errors
+    ///
+    /// The error string keeps `RelayError`'s `Display`, so the
+    /// `haven.clock.device_clock_rejected:` token a fast device clock produces
+    /// still reaches `nostr_relay_service.dart` and still becomes a
+    /// `RelayClockRejectionException` — the one publish failure the user can
+    /// act on. No relay prose and no key material is ever in it (Rule 8).
+    pub async fn publish_location_event(
+        &self,
+        event_json: String,
+        relays: Vec<String>,
+    ) -> Result<PublishResultFfi, String> {
+        let event: nostr::Event =
+            serde_json::from_str(&event_json).map_err(|e| format!("Invalid event JSON: {e}"))?;
+
+        let result = self
+            .inner
+            .publish_location_event(&event, &relays)
             .await
             .map_err(|e| e.to_string())?;
         Ok(PublishResultFfi::from(result))
@@ -10898,6 +10944,14 @@ pub enum FfiSyncStatusReason {
     SessionStopped,
     /// The session resumed from background.
     BackgroundResumed,
+    /// The session is paused between background bursts: no standing REQ, no
+    /// socket.
+    ///
+    /// A STATE, never a fault. A consumer must not stamp a "disconnected since"
+    /// from it: a burst interval can be as long as the receive-silence
+    /// threshold, so a health model fed this as an outage would confirm a relay
+    /// fault on a deliberate pause.
+    Paused,
 }
 
 const fn sync_reason_to_ffi(reason: CoreSyncStatusReason) -> FfiSyncStatusReason {
@@ -10912,6 +10966,39 @@ const fn sync_reason_to_ffi(reason: CoreSyncStatusReason) -> FfiSyncStatusReason
         CoreSyncStatusReason::SessionStarted => FfiSyncStatusReason::SessionStarted,
         CoreSyncStatusReason::SessionStopped => FfiSyncStatusReason::SessionStopped,
         CoreSyncStatusReason::BackgroundResumed => FfiSyncStatusReason::BackgroundResumed,
+        CoreSyncStatusReason::Paused => FfiSyncStatusReason::Paused,
+    }
+}
+
+/// Whether a background burst's backlog wait saw every endpoint it opened
+/// finish its stored replay (FFI mirror of
+/// [`haven_core::relay::live_sync::BacklogOutcome`]).
+///
+/// Fieldless — no relay url, sub-id, or group id — so it is leak-free by
+/// construction (Security Rule 4/6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BacklogOutcomeFfi {
+    /// Every `(relay, subscription)` endpoint this burst issued answered with an
+    /// `EOSE` or a `CLOSED`. Because the ingest worker is serial, that means
+    /// every stored event those relays sent has been ingested and converged —
+    /// so the location the burst is about to encrypt goes out at the epoch a
+    /// peer commit just moved it to.
+    Settled,
+    /// The wait's budget elapsed with at least one endpoint still silent. The
+    /// burst proceeds anyway, exactly as the foreground does with a slow REQ, so
+    /// the location may be encrypted one epoch behind — peers decrypt that from
+    /// past-epoch keys and the next burst converges it. Reported so a caller can
+    /// count it; it is not a failure.
+    TimedOut,
+}
+
+impl From<haven_core::relay::live_sync::BacklogOutcome> for BacklogOutcomeFfi {
+    fn from(o: haven_core::relay::live_sync::BacklogOutcome) -> Self {
+        use haven_core::relay::live_sync::BacklogOutcome as O;
+        match o {
+            O::Settled => Self::Settled,
+            O::TimedOut => Self::TimedOut,
+        }
     }
 }
 
@@ -10925,7 +11012,9 @@ pub enum FfiRelayEventKind {
     GroupUpdate,
     /// A raw gift-wrapped invitation (`kind:1059`); the consumer unwraps it.
     Welcome,
-    /// A non-content status/lifecycle signal.
+    /// A non-content status/lifecycle signal. Carries either a
+    /// [`FfiSyncStatusReason`] or — for the one terminal per-circle verdict —
+    /// [`FfiRelayEvent::unrecoverable_nostr_group_id`]. Never both.
     Status,
 }
 
@@ -10957,8 +11046,33 @@ pub struct FfiRelayEvent {
     /// advanced in haven-core now, from the inbox REQ's own local open time
     /// (`haven_core::relay::live_sync::anchor::InboxAnchor`).
     pub gift_wrap_json: Option<String>,
-    /// Closed status reason (Status).
+    /// Closed status reason (Status). `None` on the one Status event that
+    /// carries [`Self::unrecoverable_nostr_group_id`] instead.
     pub status_reason: Option<FfiSyncStatusReason>,
+    /// The pseudonymous `nostr_group_id` of a circle that CANNOT RECOVER on its
+    /// own and has to be re-created (Status).
+    ///
+    /// A TERMINAL, per-circle verdict, and the only thing on this stream a
+    /// consumer may act on destructively. It means this device holds group state
+    /// no code path will move again: waiting cannot help and neither can a
+    /// retry, so a "reconnecting" banner is the wrong response and a re-invite
+    /// is the right one.
+    ///
+    /// Deliberately NOT a [`FfiSyncStatusReason`]. Every reason in that enum is
+    /// self-clearing and names no circle — a relay outage, a pause, one message
+    /// that would not apply, an offline backlog convergence will drain — and
+    /// spelling a terminal per-circle verdict the same way is how a user gets
+    /// told to re-create a working circle. `status_reason` is `None` whenever
+    /// this is `Some`, so the two can never be read as one event.
+    ///
+    /// It REPEATS — on every foreground re-anchor that finds either an
+    /// unpublishable deferral or a group the engine declared unrecoverable; the
+    /// engine itself announces its verdict only once per session, so that sweep
+    /// is what repeats it. No event ever clears it. Do NOT act on the first: a
+    /// parked deferral a peer already healed is reported once, and only that
+    /// circle's next successful send discharges it, so a SECOND verdict from a
+    /// LATER re-anchor is the proof that the circle is genuinely wedged.
+    pub unrecoverable_nostr_group_id: Option<Vec<u8>>,
 }
 
 impl std::fmt::Debug for FfiRelayEvent {
@@ -10974,6 +11088,10 @@ impl std::fmt::Debug for FfiRelayEvent {
             .field("has_evolution_event", &self.evolution_event_json.is_some())
             .field("has_gift_wrap", &self.gift_wrap_json.is_some())
             .field("status_reason", &self.status_reason)
+            .field(
+                "has_unrecoverable_circle",
+                &self.unrecoverable_nostr_group_id.is_some(),
+            )
             .finish()
     }
 }
@@ -10988,6 +11106,7 @@ fn live_event_to_ffi(event: CoreLiveSyncEvent) -> FfiRelayEvent {
         evolution_event_json: None,
         gift_wrap_json: None,
         status_reason: None,
+        unrecoverable_nostr_group_id: None,
     };
     match event {
         CoreLiveSyncEvent::Location {
@@ -11013,6 +11132,13 @@ fn live_event_to_ffi(event: CoreLiveSyncEvent) -> FfiRelayEvent {
         CoreLiveSyncEvent::Welcome { gift_wrap_json } => {
             out.kind = FfiRelayEventKind::Welcome;
             out.gift_wrap_json = Some(gift_wrap_json);
+        }
+        // Rides the Status kind, but NOT as a `FfiSyncStatusReason`: it is the
+        // one terminal per-circle verdict, and every reason in that enum is a
+        // self-clearing signal that names no circle.
+        CoreLiveSyncEvent::GroupUnrecoverable { nostr_group_id } => {
+            out.kind = FfiRelayEventKind::Status;
+            out.unrecoverable_nostr_group_id = Some(nostr_group_id);
         }
         CoreLiveSyncEvent::Status { reason } => {
             out.kind = FfiRelayEventKind::Status;
@@ -11180,6 +11306,15 @@ impl LiveSyncFfi {
 
     /// Re-anchors the session after a background period / reconnect.
     ///
+    /// The FOREGROUND entry point: app-resume and the subscription-health
+    /// tick's whole-session repair. It always carries the inbox REQ, so an
+    /// app that is simply open can always receive an invitation.
+    ///
+    /// A background burst must use [`Self::open_background_burst`] instead —
+    /// the two are separate in the core precisely because only the burst may
+    /// consume a position in the inbox fold, and Rust cannot tell the callers
+    /// apart through one entry point.
+    ///
     /// # Errors
     ///
     /// Returns an error if there is no active session, the lock is poisoned, or
@@ -11197,6 +11332,98 @@ impl LiveSyncFfi {
                 .map_err(|e| e.to_string()),
             None => Err("no active live-sync session".to_string()),
         }
+    }
+
+    /// Opens ONE background burst: the same re-anchor as
+    /// [`Self::resume_after_background`], plus the inbox fold — the inbox REQ
+    /// rides only every `INBOX_BURSTS_PER_REQ`-th burst, and this call advances
+    /// the counter that decides it.
+    ///
+    /// The BACKGROUND entry point, and the only one the burst coordinator may
+    /// use. Calling `resume_after_background` for a burst instead would leave
+    /// the fold permanently un-applied — every burst would re-request the
+    /// bounded inbox window, which is the metadata cost the fold exists to cut.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if there is no active session, the lock is poisoned, or
+    /// a re-subscription fails.
+    pub async fn open_background_burst(&self) -> Result<(), String> {
+        let Some(core) = live_session_core()? else {
+            return Err("no active live-sync session".to_string());
+        };
+        core.open_background_burst()
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    /// Closes whatever is open: drops every standing REQ and disconnects the
+    /// engine's sockets, leaving the session alive and re-openable.
+    ///
+    /// Usually that is a burst's own REQs, but not necessarily — a background
+    /// pause that drove no burst tears the FOREGROUND session's down through
+    /// this same call, which is what makes "no socket while backgrounded" true
+    /// of the gap before the first burst too.
+    ///
+    /// Call it from a `finally`, and only after [`Self::settle_before_pause`] —
+    /// the pause itself waits for the in-flight publish gauge, but settling
+    /// first is what gives a commit the socket time its convergence traffic
+    /// needs (Security Rule 13).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the session slot is empty, the lock is poisoned, or
+    /// the core refused because it is already shutting down — its ONLY error
+    /// path, and a pre-flight one: it runs before the first `unsubscribe`, so
+    /// an error means nothing was torn down, never that something was torn
+    /// halfway. None of the three leaves a RUNNING session behind either:
+    /// [`Self::is_running`] is `!shutdown && !wedged`, and it answers `false`
+    /// for an absent slot, an unreadable one and a shutting-down core alike.
+    /// Past that pre-flight check the pause is best-effort and reports `Ok`.
+    pub async fn pause_subscriptions(&self) -> Result<(), String> {
+        let Some(core) = live_session_core()? else {
+            return Err("no active live-sync session".to_string());
+        };
+        core.pause_subscriptions().await.map_err(|e| e.to_string())
+    }
+
+    /// Waits for every endpoint this burst opened to finish its stored replay,
+    /// so a peer commit that landed while paused is applied BEFORE the burst
+    /// encrypts its location.
+    ///
+    /// The core call is infallible — a slow relay yields
+    /// [`BacklogOutcomeFfi::TimedOut`] and the burst publishes anyway — so the
+    /// `Result` here is purely the session gate.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if there is no active session or the lock is poisoned.
+    pub async fn wait_backlog_settled(&self) -> Result<BacklogOutcomeFfi, String> {
+        let Some(core) = live_session_core()? else {
+            return Err("no active live-sync session".to_string());
+        };
+        Ok(core.wait_backlog_settled().await.into())
+    }
+
+    /// Holds the sockets open until the engine's commit traffic has quiesced,
+    /// so the pause that follows cannot cut a commit between SEND and OK
+    /// (Security Rule 13).
+    ///
+    /// The window spans everything since the last re-anchor: a burst's own
+    /// traffic after a burst, and the foreground session's on a teardown no
+    /// burst preceded. Either way it returns immediately when nothing has
+    /// committed inside it — the common case costs nothing. The core call is
+    /// infallible; the `Result` is the session gate.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if there is no active session or the lock is poisoned.
+    pub async fn settle_before_pause(&self) -> Result<(), String> {
+        let Some(core) = live_session_core()? else {
+            return Err("no active live-sync session".to_string());
+        };
+        core.settle_before_pause().await;
+        Ok(())
     }
 
     /// Subscribes the running session to ONE additional circle (delta only), at
@@ -11251,6 +11478,71 @@ impl LiveSyncFfi {
             .ok()
             .and_then(|g| g.as_ref().map(|c| c.is_running()))
             .unwrap_or(false)
+    }
+
+    /// Whether the session is PAUSED between background bursts.
+    ///
+    /// Orthogonal to [`Self::is_running`], which stays `true` across a pause:
+    /// the session is alive, it simply holds no REQ and no socket. A caller
+    /// deciding whether to re-anchor must read THIS — a paused engine has no
+    /// subscription to repair, and re-anchoring one would silently re-open
+    /// standing REQs in the background.
+    #[frb(sync)]
+    #[must_use]
+    pub fn is_paused(&self) -> bool {
+        SESSION
+            .read()
+            .ok()
+            .and_then(|g| g.as_ref().map(|c| c.is_paused()))
+            .unwrap_or(false)
+    }
+
+    /// How many long-lived subscriptions the engine pool holds right now,
+    /// across every relay.
+    ///
+    /// The DIRECT read of the background-burst promise "no standing REQ between
+    /// publish ticks". [`Self::is_paused`] cannot stand in for it: the core sets
+    /// that flag as the FIRST statement of its pause — before `unsubscribe_all`,
+    /// before the drain marker, before the uncapped Rule-13 publish gauge and
+    /// before `disconnect()` — so it reports that the pause was ENTERED, not
+    /// that the REQs and the sockets are gone. An oracle built on the flag
+    /// asserts an intent; this one asserts the state.
+    ///
+    /// Presence-only: a COUNT. Never a subscription id, a relay url or a group
+    /// id (Security Rules 4 and 6). Test and diagnostic surface — no
+    /// user-facing path reads it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if there is no active session or the lock is poisoned,
+    /// so a caller can never read "no session" as "no standing REQ".
+    pub async fn pool_subscription_count(&self) -> Result<u32, String> {
+        let Some(core) = live_session_core()? else {
+            return Err("no active live-sync session".to_string());
+        };
+        Ok(u32::try_from(core.pool_subscription_count().await).unwrap_or(u32::MAX))
+    }
+
+    /// How many publishes this session has between SEND and OK right now.
+    ///
+    /// The other half of the same promise: presence on a relay is permitted
+    /// exactly while a publish is outstanding, so a burst that is quiet on both
+    /// counters is holding nothing. It is also the Rule-13 gauge
+    /// [`Self::pause_subscriptions`] blocks on, so a test can observe the state
+    /// the rule forbids cutting — "a commit is on the wire" — instead of
+    /// inferring it from a duration.
+    ///
+    /// Presence-only: a COUNT. Never an event id, a relay url or a group id.
+    /// Test and diagnostic surface.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if there is no active session or the lock is poisoned.
+    pub async fn in_flight_publishes(&self) -> Result<u32, String> {
+        let Some(core) = live_session_core()? else {
+            return Err("no active live-sync session".to_string());
+        };
+        Ok(u32::try_from(core.in_flight_publishes()).unwrap_or(u32::MAX))
     }
 
     /// Streams decrypted live events to Dart for the lifetime of the session.
@@ -11491,8 +11783,8 @@ pub async fn force_release_live_session() -> Result<ForceReleaseOutcomeFfi, Stri
 #[cfg(test)]
 mod live_sync_ffi_tests {
     use super::{
-        live_event_to_ffi, sync_reason_to_ffi, FfiRelayEventKind, FfiSyncStatusReason,
-        SubscriptionHealthActionFfi, SubscriptionHealthOutcomeFfi,
+        live_event_to_ffi, sync_reason_to_ffi, BacklogOutcomeFfi, FfiRelayEventKind,
+        FfiSyncStatusReason, SubscriptionHealthActionFfi, SubscriptionHealthOutcomeFfi,
     };
     use haven_core::relay::live_sync::{LiveSyncEvent as Ev, SyncStatusReason as R};
 
@@ -11535,6 +11827,73 @@ mod live_sync_ffi_tests {
             s.status_reason,
             Some(FfiSyncStatusReason::BackgroundResumed)
         );
+    }
+
+    /// The terminal per-circle verdict crosses the FFI on its OWN field, carrying
+    /// the pseudonymous `nostr_group_id` and nothing else — never as a
+    /// [`FfiSyncStatusReason`], which is what it used to flatten into and which
+    /// names no circle and clears by itself.
+    #[test]
+    fn maps_group_unrecoverable_with_the_circle_and_no_status_reason() {
+        let u = live_event_to_ffi(Ev::GroupUnrecoverable {
+            nostr_group_id: vec![7, 7, 7],
+        });
+        assert_eq!(u.kind, FfiRelayEventKind::Status);
+        assert_eq!(u.unrecoverable_nostr_group_id, Some(vec![7, 7, 7]));
+        assert!(
+            u.status_reason.is_none(),
+            "a terminal circle verdict must not also arrive as a self-clearing status"
+        );
+        assert!(
+            u.content.is_none()
+                && u.sender_pubkey.is_none()
+                && u.nostr_group_id.is_none()
+                && u.evolution_event_json.is_none()
+                && u.gift_wrap_json.is_none()
+                && u.event_created_at_secs.is_none(),
+            "the verdict carries the circle id and nothing else"
+        );
+    }
+
+    /// Every OTHER status event leaves the terminal field empty, so a consumer
+    /// keying on it can never mistake a self-clearing signal for the verdict.
+    #[test]
+    fn no_ordinary_status_reason_sets_the_unrecoverable_circle() {
+        for reason in [
+            R::Connecting,
+            R::Connected,
+            R::Reconnecting,
+            R::Disconnected,
+            R::Unprocessable,
+            R::InboxError,
+            R::RelayError,
+            R::SessionStarted,
+            R::SessionStopped,
+            R::BackgroundResumed,
+            R::Paused,
+        ] {
+            let f = live_event_to_ffi(Ev::Status { reason });
+            assert!(
+                f.unrecoverable_nostr_group_id.is_none(),
+                "{reason:?} must not present as the terminal circle verdict"
+            );
+            assert!(f.status_reason.is_some(), "{reason:?} lost its reason");
+        }
+    }
+
+    /// The real MLS group id never crosses this boundary, and the terminal
+    /// verdict's own `Debug` must not print the pseudonymous one either.
+    #[test]
+    fn group_unrecoverable_debug_is_presence_only() {
+        let u = live_event_to_ffi(Ev::GroupUnrecoverable {
+            nostr_group_id: vec![0xAB, 0xCD],
+        });
+        let dbg = format!("{u:?}");
+        assert!(
+            !dbg.contains("abcd") && !dbg.contains("ABCD") && !dbg.contains("171"),
+            "leaked group id: {dbg}"
+        );
+        assert!(dbg.contains("has_unrecoverable_circle: true"), "{dbg}");
     }
 
     #[test]
@@ -11661,9 +12020,38 @@ mod live_sync_ffi_tests {
                 A::TargetedReanchor,
                 SubscriptionHealthActionFfi::TargetedReanchor,
             ),
+            (A::Paused, SubscriptionHealthActionFfi::Paused),
         ] {
             assert_eq!(SubscriptionHealthActionFfi::from(core), ffi);
         }
+    }
+
+    #[test]
+    fn paused_is_never_folded_onto_a_repair_verdict() {
+        // A paused tick short-circuited before the connectivity probe, so it
+        // inspected nothing. Mapping it onto any of the three actions that DO
+        // prove the receive plane whole would let every background pause clear
+        // a real lost-subscription verdict on the Dart side.
+        use haven_core::relay::live_sync::HealthAction as A;
+        let paused = SubscriptionHealthActionFfi::from(A::Paused);
+        for proof in [A::Healthy, A::Resubscribed, A::TargetedReanchor] {
+            assert_ne!(paused, SubscriptionHealthActionFfi::from(proof));
+        }
+    }
+
+    #[test]
+    fn backlog_outcome_maps_every_core_variant() {
+        use haven_core::relay::live_sync::BacklogOutcome as O;
+        assert_eq!(
+            BacklogOutcomeFfi::from(O::Settled),
+            BacklogOutcomeFfi::Settled
+        );
+        assert_eq!(
+            BacklogOutcomeFfi::from(O::TimedOut),
+            BacklogOutcomeFfi::TimedOut,
+            "a timed-out wait must never cross as Settled — the caller would \
+             encrypt at an epoch a peer commit may already have moved"
+        );
     }
 
     #[test]
@@ -11680,9 +12068,18 @@ mod live_sync_ffi_tests {
             (R::SessionStarted, FfiSyncStatusReason::SessionStarted),
             (R::SessionStopped, FfiSyncStatusReason::SessionStopped),
             (R::BackgroundResumed, FfiSyncStatusReason::BackgroundResumed),
+            (R::Paused, FfiSyncStatusReason::Paused),
         ] {
             assert_eq!(sync_reason_to_ffi(core), ffi);
         }
+        // A pause is a STATE the app chose, never a fault. Crossing it as
+        // `Disconnected` would have the health model date an outage from it and
+        // — a burst interval can be as long as the receive-silence threshold —
+        // confirm a relay outage on a healthy background pause.
+        assert_ne!(
+            sync_reason_to_ffi(R::Paused),
+            FfiSyncStatusReason::Disconnected
+        );
     }
 }
 
@@ -11866,13 +12263,18 @@ mod maintenance_real_ffi_tests {
 
     /// Fetches every event of `kind` authored by `author` from a single relay,
     /// via a bare publisher client (mirrors the mirror test's `fetch_by_kind`).
+    ///
+    /// Its own throwaway client, never the publish pool — so the bare
+    /// `add_relay` below (which would OR `PING` back onto a pooled relay) is
+    /// harmless here and carries the marker `check_engine_client_options.sh`
+    /// allowlists it by.
     pub(super) async fn fetch_by_kind(
         author: nostr::PublicKey,
         kind: Kind,
         relay: &str,
     ) -> Vec<nostr::Event> {
         let client = nostr_sdk::Client::builder().build();
-        client.add_relay(relay).await.expect("add relay");
+        client.add_relay(relay).await.expect("add relay"); // e2e helper
         client.connect().await;
         let filter = nostr::Filter::new().kind(kind).author(author).limit(64);
         let events = client

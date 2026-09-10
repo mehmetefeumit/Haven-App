@@ -108,6 +108,8 @@ SubscriptionHealthAction mapSubscriptionHealthAction(
       return SubscriptionHealthAction.resubscribed;
     case SubscriptionHealthActionFfi.targetedReanchor:
       return SubscriptionHealthAction.targetedReanchor;
+    case SubscriptionHealthActionFfi.paused:
+      return SubscriptionHealthAction.paused;
   }
 }
 
@@ -564,6 +566,40 @@ class NostrRelayService implements RelayService {
       }
       debugPrint('Failed to publish event: ${e.runtimeType}');
       throw const RelayServiceException('Failed to publish event');
+    }
+  }
+
+  @override
+  Future<PublishResult> publishLocationEvent({
+    required String eventJson,
+    required List<String> relays,
+  }) async {
+    final manager = await _ensureInitialized();
+
+    try {
+      final ffiResult = await manager.publishLocationEvent(
+        eventJson: eventJson,
+        relays: relays,
+      );
+
+      return _convertPublishResult(ffiResult);
+    } on Object catch (e) {
+      // Same mapping as [publishEvent], deliberately: the one-shot ladder
+      // shortens the ATTEMPT budget, never the error contract. Collapsing a
+      // device-clock rejection into the generic failure here would make a
+      // fast clock a silent outage on the location plane alone — the one
+      // plane the user watches — and no relay prose is logged or rethrown
+      // either way (Security Rule 8).
+      final complaintToken = _deviceClockComplaintToken(e);
+      if (complaintToken != null) {
+        debugPrint(
+          'Location publish rejected on timestamp grounds (device clock '
+          '$complaintToken)',
+        );
+        throw RelayClockRejectionException(complaintToken);
+      }
+      debugPrint('Failed to publish location event: ${e.runtimeType}');
+      throw const RelayServiceException('Failed to publish location event');
     }
   }
 

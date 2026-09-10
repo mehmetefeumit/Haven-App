@@ -55,8 +55,14 @@
     {
       "id": "RC1",
       "source": "haven-core/SECURITY.md#relay-observable-metadata-and-correlation-accepted",
-      "summary": "One persistent client per relay: a relay serving BOTH the gift-wrap inbox (kind 1059 by #p = user pubkey) and group messages (kind 445 by #h = nostr_group_id) over the same connection can correlate the real identity pubkey with circle membership by connection continuity. Since M11 that connection is STANDING while the app runs, so the correlation is continuous rather than bursty. Not protocol-forced: the kind-10050 inbox list and the group's 0x8004 relay set are independent, and seeding them disjointly — as the profile pool already is — would remove the single-socket join. Declined because it doubles connection count and because P6 (no Tor/proxy) leaves IP-level joining intact; recorded so the trade-off stays re-decidable.",
+      "summary": "NOT one connection per relay: Haven opens at least TWO long-lived nostr-sdk Clients per process — the live-sync engine's receive client (build_engine_client, haven-core/src/relay/live_sync/session.rs:92) and the publish client (RelayManager::new, haven-core/src/relay/manager.rs:412) — plus one more for every isolate that builds its own RelayManager, which the Android background-sharing foreground service does. A shared relay therefore sees two or three connections from the same address, not one, and can join them by source address without any protocol help. A relay serving BOTH the gift-wrap inbox (kind 1059 by #p = user pubkey) and group messages (kind 445 by #h = nostr_group_id) over the same connection can correlate the real identity pubkey with circle membership by connection continuity. Since M11 the receive connection is STANDING while the app is FOREGROUNDED, on both platforms, so the correlation is continuous rather than bursty for as long as that socket is held. Since P4 it is no longer standing while backgrounded on iOS either: with background sharing on the engine is PAUSED between publishes and both filters ride one bounded burst per publish tick, so for a CIRCLE relay the join is per-burst rather than continuous. Per-burst is NOT per-publish, though since PUB-COALESCE it is close to it: a burst re-anchors every circle's #h REQ, connects the whole relay union AND publishes every publish-eligible circle, so a circle relay sees a REQ/CLOSE pair on every burst and this device's kind-445 for its own circle on essentially every burst too. The join stays wider than the send in three cases only — a burst whose publish window refuses publishes nothing at all; a subscribed circle that is not publish-eligible (isLegacyOrphaned, or engine-flagged Unrecoverable) is re-anchored on every burst and never published to; a send that fails, is deferred by the engine, or is the tail of a roster past kMaxCirclesPerBurst. What coalescing ADDS to this deviation is a duration: the union connection is held across the whole staggered publish pass, so its connect-to-disconnect span grows with the number of eligible circles and hands EVERY relay in the union — one carrying a single circle, or an inbox relay carrying none — an estimator of that count, which the per-circle schedules leaked only as a rate and only to relays that already read the circle set off the multiplexed #h filter (PUB-COALESCE). That NARROWS the deviation for circle relays without strictly narrowing it: an inbox-ONLY relay (kind-10050 inbox, none of this account's circles — an independent set) carries no kind-445 to correlate with, and where it used to see one continuous socket it now sees a REQ/CLOSE pair every 72-168 s (the 120 s nominal cadence, jittered ±40 %), which is itself the inference \"this pubkey is background-sharing right now\". The lever is INBOX_BURSTS_PER_REQ (OD4-b, accepted, blocked on a separate defect and not yet raised); at the shipped value that inference is a named, disclosed residual, not a mitigated one. The residuals P4 carries are enumerated in SECURITY.md under \"iOS background sharing: presence only at publish instants (P4)\". On Android it no longer outlives the foreground: since P1 the pause path stops the engine in BOTH toggle states (with sharing ON it stops first to hand the MLS session to the foreground service; with sharing OFF `_stopLiveSyncBounded()` stops it and deliberately does not release the guard, since no isolate reclaims it), and the resume heal restarts it. Not protocol-forced: the kind-10050 inbox list and the group's 0x8004 relay set are independent, and seeding them disjointly — as the profile pool already is — would remove the single-socket join. Declined because it doubles connection count and because P6 (no Tor/proxy) leaves IP-level joining intact; recorded so the trade-off stays re-decidable.",
       "forbidden_claim": "Copy must not claim relays cannot link your identity to your circle membership, and must not present the ephemeral per-message kind-445 author keys as making you unlinkable at the relay."
+    },
+    {
+      "id": "PUB-COALESCE",
+      "source": "haven-core/SECURITY.md#coalesced-multi-circle-publish-bursts-pub-coalesce",
+      "summary": "Per-circle publish schedules are replaced by ONE coalesced burst per jittered interval that publishes every publish-eligible circle, so radio wakes fall from about N x 30/h to about 30/h. Shared-relay decorrelation was never effective while the multiplexed #h subscription and the single publish socket exist — a shared relay reads the circle set straight off the filter — so what is given up is only weak protection against colluding relays that ignore IP. THREE costs are accepted. (1) RECORDED: with one shared tick sequence, circles held on DISJOINT relay sets emit identical inter-burst intervals, so anyone holding two of your circles' relay archives — each relay carrying only ONE of those circles — can tell the two circles belong to the same phone. (2) The circle COUNT becomes a single-relay observable, and WHICH SOCKET carries it splits by plane. The burst holds its connection across the whole staggered publish pass, so the span grows with the number of eligible circles. Backgrounded on iOS that connection is the engine socket over the entire relay union (every circle's relays and the inbox relays), measurable server-side by any relay in that union — one carrying only one of your circles, and an inbox-only relay carrying none. On the ANDROID FOREGROUND SERVICE there is no engine socket at all, so the publish pool IS the carrier: RelayManager::shutdown is a COLLECTIVE client.disconnect(), and the service calls it at step 9b of every delivery cycle and again in onDestroy, so a relay carrying exactly one circle in a pass sees connect-at-its-own-publish through disconnect-at-teardown — a tail that grows with the circles published AFTER it and, over the CSPRNG burst permutation, converges to the whole pass length. In the FOREGROUND there is no collective disconnect: publish_relay_options() is ping(false).reconnect(false).sleep_when_idle(true).idle_timeout(10 s), polled once a minute from inside the connection task, so each relay's socket sleeps independently in (60 s, 70 s] after that relay's own last send and measures only its own span. The old scheme leaked N only as a RATE, and only to shared relays that already read it off the multiplexed filter; the new one leaks it as a DURATION, to relays that previously could not know it at all. kMaxCirclesPerAccount (10) bounds the roster and therefore the estimator, one circle under the kMaxCirclesPerBurst (11) at which the per-gap ceiling saturates. (3) N ALSO LEAKS THROUGH THE SIGNED TIMESTAMPS, and that carrier persists. PublishStagger.maxGapFor is deterministic and INJECTIVE over n = 5..10, the whole range kMaxCirclesPerAccount admits (only 2, 3 and 4 collapse, all three at the 9 s ceiling), and the expected whole-burst span rises monotonically with it: about 5.5 s at two circles, 11 at three, 16.5 at four, up to 24 s at ten. An observer holding kind-445 archives of two of your circles — exactly the adversary cost (1) hands the LINK to — reads one whole-second delta per burst; over a handful of bursts the largest delta estimates the burst span (monotone in n) and the lowest cluster's upper edge estimates the per-gap ceiling. That ceiling does NOT invert to a single n: created_at is whole seconds and the millisecond injectivity does not survive the quantization, so the observable alphabet resolves the roster exactly at five and six circles, to a PAIR at seven/eight and nine/ten (which share {2..5} and {2,3,4}), and to the TRIPLE two/three/four below that (which share {2..9}). Separating a pair needs the span term or the delta FREQUENCIES rather than the ceiling, i.e. more bursts - a cost in samples and not a bound, so the count still leaks, one bit coarser on those two pairs. A relay carrying several of your circles reads adjacent pairs directly and converges faster. It is worse than cost (2)'s duration in three ways: it needs no socket observation at all (a passive archive scraper suffices), connection noise does not defeat it, and it PERSISTS, because the delta is inside the SIGNED event and therefore in every archive of it. It compounds with cost (1) — link, then count. kMaxCirclesPerAccount bounds the estimate at ten, which is a ceiling on the estimate and not a mitigation. The CSPRNG stagger is retained with its constants unmoved, and its claim is NARROWED TWICE. It is not 'the archive-adversary defence', because after coalescing the archive reader gets the link anyway from the shared inter-burst interval sequence. And what it buys is ROSTER-SCOPED rather than a flat eight values: maxGapFor prices every gap at the burst's OWN size, so the observable whole-second delta alphabet thins monotonically — {2..9} (eight values) up to four circles, {2..6} at six, {2..5} at eight, and {2,3,4} at kMaxCirclesPerAccount (10), the largest burst a bounded roster can produce; maxGapFor keeps answering one circle further, where the alphabet is {2,3}, and no observer reaches that while the bound holds. Coalescing caused the thinning: pre-P5 every gap was priced at the default totalPublishes = 2, so the alphabet was always eight — and the eight-value proof cited on INV-R-PER-CIRCLE-PUBLISH-DECORRELATED draws at that same default, so it pins only the n = 2 case. At small rosters the downgrade in KIND is real: a byte-identical created_at is a zero-cost equality join over a whole-network index (created_at_A == created_at_B, decisive on one burst), while eight admissible offsets force a windowed correlation that needs a targeted hypothesis about which two circles share a device. AT THE ROSTER BOUND IT BARELY IS: a three-element alphabet is three shifted equality joins over that same whole-network index, still un-targeted mass linkage, so what survives at ten circles is a constant factor rather than a change in kind. Owner decision OD3, accepted 2026-08-29; the eleven-circle burst cap and its own residual are owner decision 2026-09-08 option (a), and the TEN-circle account roster bound that puts the cap's deferral branch out of production reach is owner decision 2026-09-09 — both recorded on INV-W-445-EXPIRATION-WINDOW.",
+      "forbidden_claim": "Copy must not present per-circle timing as preventing a relay from linking your circles, must not limit that linkage to relays that carry SEVERAL of your circles (a relay holding one of them, plus an archive of another, is enough), and must not present the stagger as buying more than the NUMBER of distinct whole-second timestamps it produces — a number that is roster-dependent and falls to three at kMaxCirclesPerAccount — and in particular not as 'the archive-adversary defence', which it stopped being when the schedules were coalesced. Copy must equally not claim that a relay learns nothing about how many circles you are in, and must not scope that leak to a single carrier. There are three: the burst's connect-to-disconnect span at any relay that sees a burst (an inbox-only relay included); the same span on the PUBLISH POOL wherever that pool is COLLECTIVELY disconnected at teardown (the iOS-background burst and the Android foreground service); and the SIGNED kind-445 created_at deltas themselves, whose per-gap ceiling resolves the circle count exactly at five and six circles and to a PAIR or a TRIPLE otherwise - one bit coarser on those, never absent - and which persist in any archive of the events."
     },
     {
       "id": "R10",
@@ -102,13 +108,23 @@
     }
   ],
   "non_claim_arb_keys": {
-    "relaySettingsKeyPackageSubtitle": {
-      "reason": "Section subtitle naming where KeyPackage relays live. Correct only by omission: the profile plane moved to the separate local-only Profile list, so this line must stay silent about the public profile.",
+    "avatarPickerPhotoRemoved": {
+      "reason": "Snackbar confirming the local removal action. Honest only because the confirmation dialog (photoHeaderRemoveBody) precedes it and states that the hosted image survives; on its own it must never read as a deletion promise. Its @description does not yet record this constraint.",
       "forbidden_additions": [
-        "public profile",
-        "your profile is published",
-        "name and photo"
+        "deleted",
+        "permanently",
+        "from the server",
+        "erased"
       ]
+    },
+    "locationDisclosureAgree": {
+      "reason": "Affirmative button label of the consent dialog. Records consent; asserts nothing about behaviour."
+    },
+    "locationDisclosureNotNow": {
+      "reason": "Dismissal button label of the consent dialog. Declines consent; asserts nothing about behaviour."
+    },
+    "locationDisclosureTitle": {
+      "reason": "Dialog heading ('Sharing your location'). Names the subject; every checkable claim lives in the why/how/sharing/background/manage paragraphs below it."
     },
     "locationSettingsToggleSubtitle": {
       "reason": "Toggle subtitle. Correct only by omission: it must describe the background scope without claiming sharing survives the system closing Haven, and is deliberately silent on the Android reboot/swipe-out asymmetry, which locationSettingsIntro states in full.",
@@ -118,13 +134,12 @@
         "even when closed"
       ]
     },
-    "avatarPickerPhotoRemoved": {
-      "reason": "Snackbar confirming the local removal action. Honest only because the confirmation dialog (photoHeaderRemoveBody) precedes it and states that the hosted image survives; on its own it must never read as a deletion promise. Its @description does not yet record this constraint.",
+    "relaySettingsKeyPackageSubtitle": {
+      "reason": "Section subtitle naming where KeyPackage relays live. Correct only by omission: the profile plane moved to the separate local-only Profile list, so this line must stay silent about the public profile.",
       "forbidden_additions": [
-        "deleted",
-        "permanently",
-        "from the server",
-        "erased"
+        "public profile",
+        "your profile is published",
+        "name and photo"
       ]
     }
   },
@@ -134,17 +149,14 @@
       "title": "Location leaves the device only as MLS ciphertext",
       "statement": "Every coordinate that crosses the network boundary does so inside an MLS application message sealed by the group's exporter-derived key and framed as a kind-445 event; adding any publish path that writes a coordinate (or a geohash derived from one) into event content, a tag, or an HTTP body falsifies this.",
       "status": "enforced",
-      "assertion_arb_keys": [],
+      "assertion_arb_keys": [
+        "locationDisclosureHow"
+      ],
       "disclosure_arb_keys": [],
       "non_arb_claims": [
         {
           "carrier": "ios_infoplist",
           "id": "NSLocationWhenInUseUsageDescription",
-          "kind": "assertion"
-        },
-        {
-          "carrier": "dart_source",
-          "id": "LocationDisclosureStrings.how",
           "kind": "assertion"
         },
         {
@@ -207,14 +219,10 @@
       "statement": "The serialized LocationMessage contains no device_id, altitude, speed, heading or raw_accuracy field even when those fields are populated in memory, and coordinates are full precision with no obfuscation tier to select; removing a serde(skip) or reintroducing a coarsening mode falsifies this.",
       "status": "enforced",
       "assertion_arb_keys": [],
-      "disclosure_arb_keys": [],
-      "non_arb_claims": [
-        {
-          "carrier": "dart_source",
-          "id": "LocationDisclosureStrings.why",
-          "kind": "disclosure"
-        }
+      "disclosure_arb_keys": [
+        "locationDisclosureWhy"
       ],
+      "non_arb_claims": [],
       "event_kinds": [
         {
           "kind": 25442,
@@ -387,15 +395,10 @@
       "residual": "No test asserts the ABSENCE of a foreground pause control. The disclosure gate tests prove publishing is refused before consent, and check_ios_background_publish.sh pins that the pause decision routes through shouldKeepPublishingWhilePaused, but nothing fails if a pause affordance is added — the copy would silently become false in the reassuring direction.",
       "assertion_arb_keys": [],
       "disclosure_arb_keys": [
-        "leaveCircleDialogBody"
+        "leaveCircleDialogBody",
+        "locationDisclosureSharing"
       ],
-      "non_arb_claims": [
-        {
-          "carrier": "dart_source",
-          "id": "LocationDisclosureStrings.sharing",
-          "kind": "disclosure"
-        }
-      ],
+      "non_arb_claims": [],
       "symbols": [
         {
           "file": "haven/lib/src/pages/map_shell.dart",
@@ -415,40 +418,15 @@
     {
       "id": "INV-L-BACKGROUND-DISCLOSURE-GATE",
       "title": "No background cycle collects or publishes location before both disclosures are accepted",
-      "statement": "background_location_task.dart consults backgroundPublishDisclosureAccepted as a refusal branch that precedes both getCurrentLocation() and encryptLocation(), and reads both the foreground and background disclosure keys; moving the gate below the GPS read, or deleting the call site while leaving the declaration, falsifies this.",
+      "statement": "background_location_task.dart consults backgroundPublishDisclosureAccepted as a refusal branch that precedes getCurrentLocation(), encryptLocation() and the background stream registration (_ensureRegistration, which is the only site that asks the plugin for a position stream in this isolate), and reads both the foreground and background disclosure keys; moving the gate below the GPS read or below the registration — a platform location request is collection for as long as it lives, not a one-off — or deleting the call site while leaving the declaration, falsifies this.",
       "status": "enforced",
-      "assertion_arb_keys": [],
-      "disclosure_arb_keys": [],
-      "non_arb_claims": [
-        {
-          "carrier": "dart_source",
-          "id": "LocationDisclosureStrings.manage",
-          "kind": "assertion"
-        },
-        {
-          "carrier": "dart_source",
-          "id": "LocationDisclosureStrings.backgroundAndroid",
-          "kind": "disclosure"
-        },
-        {
-          "carrier": "play_disclosure",
-          "id": "LocationDisclosureStrings.title",
-          "kind": "none",
-          "reason": "Dialog heading ('Sharing your location'). Names the subject; every checkable claim lives in the why/how/sharing/background/manage fields below it."
-        },
-        {
-          "carrier": "play_disclosure",
-          "id": "LocationDisclosureStrings.agree",
-          "kind": "none",
-          "reason": "Affirmative button label. Records consent; asserts nothing about behaviour."
-        },
-        {
-          "carrier": "play_disclosure",
-          "id": "LocationDisclosureStrings.notNow",
-          "kind": "none",
-          "reason": "Dismissal button label. Declines consent; asserts nothing about behaviour."
-        }
+      "assertion_arb_keys": [
+        "locationDisclosureManage"
       ],
+      "disclosure_arb_keys": [
+        "locationDisclosureBackgroundAndroid"
+      ],
+      "non_arb_claims": [],
       "symbols": [
         {
           "file": "haven/lib/src/services/background_location_task.dart",
@@ -471,18 +449,24 @@
         {
           "file": "haven/test/services/background_location_disclosure_gate_test.dart",
           "name": "permits publishing only when BOTH disclosures are accepted"
+        },
+        {
+          "file": "haven/test/services/background_location_disclosure_gate_test.dart",
+          "name": "the gate precedes the stream registration as well as the one-shot"
         }
       ],
-      "guards": []
+      "guards": [
+        "scripts/ci/check_android_location_power.sh"
+      ]
     },
     {
       "id": "INV-L-IOS-WAKES-RECEIVE-ONLY",
       "title": "Every iOS background wake path is receive-only",
-      "statement": "Once iOS terminates Haven, no wake path (SLC relaunch, BGAppRefreshTask, catch-up sweep) contains a publish call site, so the user's own sharing does not resume until they reopen the app; adding a publish to catchup_service.dart, ios_background_catchup.dart or HavenSLCHandler.swift — or shipping copy that mentions the app not running without saying what stops — falsifies this.",
+      "statement": "Once iOS terminates Haven, no wake path (SLC relaunch, BGAppRefreshTask, catch-up sweep) contains a publish call site, and a process relaunched INTO the background cannot start one either: the native updates owner refuses a background-capable start while applicationState == .background, and getCurrentLocation's cold-cache shortcut reads that same native lifecycle fail-closed (an unreadable status counts as backgrounded) and then REFUSES rather than continuing: the backgrounded branch serves the native owner's last Best fix or throws, so it never reaches the plugin one-shot, including in the state a post-termination relaunch is actually in — both caches empty — which is where a fall-through would have run it. The user's own sharing does not resume until they reopen the app. Adding a publish to catchup_service.dart, ios_background_catchup.dart or HavenSLCHandler.swift, removing the onListen refusal, keying the shortcut back off the in-process foreground hint, letting the backgrounded branch fall through to (or itself call) the one-shot, or shipping copy that mentions the app not running without saying what stops — each falsifies this.",
       "status": "enforced",
       "assertion_arb_keys": [
-        "locationSettingsIosLimitedNote",
-        "locationSettingsIosGuidance"
+        "locationDisclosureBackgroundIos",
+        "locationSettingsIosLimitedNote"
       ],
       "disclosure_arb_keys": [
         "locationSettingsIntro"
@@ -492,15 +476,11 @@
           "carrier": "ios_infoplist",
           "id": "NSLocationAlwaysAndWhenInUseUsageDescription",
           "kind": "assertion"
-        },
-        {
-          "carrier": "dart_source",
-          "id": "LocationDisclosureStrings.backgroundIos",
-          "kind": "assertion"
         }
       ],
       "doc_anchors": [
-        "haven-core/SECURITY.md#scheduled-background-wakes-m7"
+        "haven-core/SECURITY.md#scheduled-background-wakes-m7",
+        "docs/POWER_EFFICIENCY_PLAN.md#d1--ios-haven-owned-native-location-manager-with-two-live-accuracy-profiles"
       ],
       "symbols": [
         {
@@ -509,7 +489,15 @@
         },
         {
           "file": "haven/lib/src/widgets/location/location_disclosure_dialog.dart",
-          "symbol": "backgroundIos"
+          "symbol": "locationDisclosureBackgroundIos"
+        },
+        {
+          "file": "haven/ios/Runner/HavenLocationStreamHandler.swift",
+          "symbol": "onListen"
+        },
+        {
+          "file": "haven/lib/src/services/geolocator_location_service.dart",
+          "symbol": "_iosSource"
         }
       ],
       "tests": [
@@ -532,11 +520,310 @@
         {
           "file": "haven/test/lints/background_claim_accuracy_test.dart",
           "name": "the parser actually found the usage descriptions (anti-vacuity)"
+        },
+        {
+          "file": "haven/test/services/ios_location_source_test.dart",
+          "name": "a background_start_refused error pushed through the sink surfaces as a stream error"
+        },
+        {
+          "file": "haven/test/services/geolocator_location_service_test.dart",
+          "name": "a backgrounded cold cache never starts the one-shot, even when the lifecycle hint says foreground"
+        },
+        {
+          "file": "haven/test/services/geolocator_location_service_test.dart",
+          "name": "backgrounded on iOS with no last-known fix: refuses instead of falling through to the one-shot"
+        },
+        {
+          "file": "haven/test/l10n/location_settings_copy_accuracy_test.dart",
+          "name": "the While-In-Use note keeps the termination claim"
+        },
+        {
+          "file": "haven/test/lints/background_claim_accuracy_test.dart",
+          "name": "the consent dialog and the settings intro each carry the whole receive-only claim"
+        },
+        {
+          "file": "haven/test/lints/background_claim_accuracy_test.dart",
+          "name": "the consent dialog and the settings intro state the SAME receive-only claim"
         }
       ],
       "guards": [
         "scripts/ci/check_m7_native_wake_guards.sh",
         "scripts/ci/check_ios_background_publish.sh"
+      ]
+    },
+    {
+      "id": "INV-L-IOS-INDICATOR-HONEST",
+      "title": "The iOS indicator the copy names is the one the OS will actually show",
+      "statement": "Under a POSITIVELY confirmed Always (iOS 18+, a CLServiceSessionDiagnostic with alwaysAuthorizationDenied, authorizationRequestInProgress and insufficientlyInUse all false) HavenLocationStreamHandler leaves showsBackgroundLocationIndicator false and HavenBackgroundSessionHandler.arm() holds no CLBackgroundActivitySession, so the OS status-bar arrow is the whole signal; under When-In-Use, a provisional Always and every iOS 17 Always the activity session IS held and the blue location bar IS shown. The settings card's indicator sentence is chosen from that same alwaysConfirmed predicate over the session handler's own status channel — never from authorizationStatus, never from backgroundActivitySessionHeld (false for the whole iOS 15/16 cohort, who see the bar) — and only while the handler reports itself ARMED, because disarm() clears alwaysConfirmed unconditionally and its false is then a teardown residue rather than a reading of the tier; with no reading the page renders no card at all rather than naming an indicator. The card renders only under IosAuthStatus.always. Gating the activity session on .authorizedWhenInUse alone (so a provisional Always falls through to the arrow posture), hardcoding the indicator flag, selecting the sentence from any other value, or letting the base sentence name an indicator, each falsifies this.",
+      "status": "enforced",
+      "assertion_arb_keys": [
+        "locationSettingsIosGuidance",
+        "locationSettingsIosIndicatorArrow",
+        "locationSettingsIosIndicatorBar",
+        "locationSettingsIosLimitedNote"
+      ],
+      "disclosure_arb_keys": [],
+      "non_arb_claims": [],
+      "doc_anchors": [
+        "docs/POWER_EFFICIENCY_PLAN.md#d2--ios-indicatorsession-policy-by-tier"
+      ],
+      "symbols": [
+        {
+          "file": "haven/ios/Runner/HavenBackgroundSessionHandler.swift",
+          "symbol": "alwaysConfirmed"
+        },
+        {
+          "file": "haven/ios/Runner/HavenBackgroundSessionHandler.swift",
+          "symbol": "armed"
+        },
+        {
+          "file": "haven/ios/Runner/HavenBackgroundSessionHandler.swift",
+          "symbol": "arm"
+        },
+        {
+          "file": "haven/ios/Runner/HavenLocationStreamHandler.swift",
+          "symbol": "applyIndicatorPolicy"
+        },
+        {
+          "file": "haven/lib/src/providers/service_providers.dart",
+          "symbol": "iosIndicatorSentenceProvider"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven/test/lints/ios_indicator_copy_accuracy_test.dart",
+          "name": "the handler still releases the activity session on a CONFIRMED Always"
+        },
+        {
+          "file": "haven/test/lints/ios_indicator_copy_accuracy_test.dart",
+          "name": "the OS indicator is still asked for from the same predicate"
+        },
+        {
+          "file": "haven/test/lints/ios_indicator_copy_accuracy_test.dart",
+          "name": "Dart selects the sentence on alwaysConfirmed, never on the held session"
+        },
+        {
+          "file": "haven/test/lints/ios_indicator_copy_accuracy_test.dart",
+          "name": "the handler still records whether it is armed at all"
+        },
+        {
+          "file": "haven/test/lints/ios_indicator_copy_accuracy_test.dart",
+          "name": "Dart declines to name an indicator while the handler is not armed"
+        },
+        {
+          "file": "haven/test/lints/ios_indicator_copy_accuracy_test.dart",
+          "name": "the base sentence names no indicator"
+        },
+        {
+          "file": "haven/test/lints/ios_indicator_copy_accuracy_test.dart",
+          "name": "the arrow sentence names the arrow and the status bar, never the blue bar"
+        },
+        {
+          "file": "haven/test/l10n/location_settings_copy_accuracy_test.dart",
+          "name": "the base sentence names no indicator, and is not the old one"
+        },
+        {
+          "file": "haven/test/pages/settings/location_settings_page_test.dart",
+          "name": "a confirmed Always with no session held means the arrow"
+        },
+        {
+          "file": "haven/test/pages/settings/location_settings_page_test.dart",
+          "name": "a provisional Always keeps the bar, tier notwithstanding"
+        },
+        {
+          "file": "haven/test/pages/settings/location_settings_page_test.dart",
+          "name": "an OS too old to hold a session still means the blue bar"
+        },
+        {
+          "file": "haven/test/pages/settings/location_settings_page_test.dart",
+          "name": "21. no guidance card under any tier that is not Always, however the session handler answers"
+        },
+        {
+          "file": "haven/test/pages/settings/location_settings_page_test.dart",
+          "name": "23. the card reads base, then the indicator sentence, in one paragraph"
+        },
+        {
+          "file": "haven/test/pages/settings/location_settings_page_test.dart",
+          "name": "26. background sharing OFF renders no card: a disarmed handler has measured nothing"
+        },
+        {
+          "file": "haven/test/pages/settings/location_settings_page_test.dart",
+          "name": "27. turning sharing OFF withdraws the card in the same visit"
+        },
+        {
+          "file": "haven/test/pages/settings/location_settings_page_test.dart",
+          "name": "a disarmed handler yields no sentence at all"
+        }
+      ],
+      "guards": [
+        "scripts/ci/check_ios_background_publish.sh"
+      ]
+    },
+    {
+      "id": "INV-L-IOS-PUBLISH-INPUT-BEST-PROFILE-ONLY",
+      "title": "Only Best-profile iOS fixes ever become a published coordinate",
+      "statement": "On iOS the session runs at one of exactly two accuracy tiers, and only a fix delivered under the Best profile — desiredAccuracy == kCLLocationAccuracyBest AND computed after the switch to it (the bestSince comparison) — is emitted to Dart, cached as the publish input, or returned as last-known. A kCLLocationAccuracyHundredMeters fix serves the stationary/movement detector and the freshness bound and nothing else; it never reaches a subscriber, the motion trigger or the relay. A live session holds that fix THREE times — the native lastBestFix, the location service's _lastStreamPosition, and the profile controller's anchor — and all three clear together, on stream cancel, on a toggle-off pause, on logout and on an observed access loss, so no full-precision coordinate outlives the session in any of them. The last-known read is age-bounded by the same freshness rule as the cache read, so the fix one rejects as stale is not served by the other. Emitting or caching a 100 m-tier fix, dropping the bestSince comparison, adding a third accuracy value, serving the native cache unbounded, or clearing fewer than all three copies, each falsifies this. That freshness rule is itself bounded in TIME. A coarse-tier confirmation may extend how long the Best anchor is served past its own timestamp, but never beyond kStationaryAnchorMaxAge (5 min), enforced in two places: IosProfileController escalates to Best at that age however many coarse fixes have confirmed the anchor, and _streamFixIsFresh refuses to serve a fix older than it whatever the confirmation says. A published location carries the instant of the PUBLISH and never the fix time, so without that cap a stationary backgrounded device would re-publish one anchor indefinitely and a peer would read \"just now\" for a coordinate hours old and up to 200 m wrong. Removing either half of the cap, or measuring it from the confirmation rather than from the anchor's own timestamp, falsifies this too.",
+      "status": "enforced",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [],
+      "non_arb_claims": [],
+      "doc_anchors": [
+        "docs/POWER_EFFICIENCY_PLAN.md#d1--ios-haven-owned-native-location-manager-with-two-live-accuracy-profiles"
+      ],
+      "symbols": [
+        {
+          "file": "haven/lib/src/services/ios_location_source.dart",
+          "symbol": "IosLocationSource"
+        },
+        {
+          "file": "haven/ios/Runner/HavenLocationStreamHandler.swift",
+          "symbol": "lastBestFix"
+        },
+        {
+          "file": "haven/ios/Runner/HavenLocationStreamHandler.swift",
+          "symbol": "bestSince"
+        },
+        {
+          "file": "haven/lib/src/services/ios_location_source.dart",
+          "symbol": "forgetAnchor"
+        },
+        {
+          "file": "haven/lib/src/constants/location.dart",
+          "symbol": "kStationaryAnchorMaxAge"
+        },
+        {
+          "file": "haven/lib/src/services/geolocator_location_service.dart",
+          "symbol": "_streamFixIsFresh"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven/test/services/ios_location_source_test.dart",
+          "name": "only Best-profile fixes are emitted"
+        },
+        {
+          "file": "haven/test/services/ios_location_source_test.dart",
+          "name": "a 100 m-tier fix that moves the device still reaches no subscriber"
+        },
+        {
+          "file": "haven/test/services/ios_location_source_test.dart",
+          "name": "the anchor is only ever a Best-profile fix"
+        },
+        {
+          "file": "haven/test/services/ios_location_source_test.dart",
+          "name": "a fix stamped before the switch to Best is not the anchor"
+        },
+        {
+          "file": "haven/test/services/geolocator_location_service_test.dart",
+          "name": "a HundredMeters fix reaches neither the stream nor the publish input"
+        },
+        {
+          "file": "haven/test/services/geolocator_location_service_test.dart",
+          "name": "clearCachedPosition clears the native last-Best fix too"
+        },
+        {
+          "file": "haven/test/services/geolocator_location_service_test.dart",
+          "name": "an observed access loss clears the native last-Best fix too"
+        },
+        {
+          "file": "haven/test/services/ios_location_source_test.dart",
+          "name": "forgetAnchor drops the anchor and restarts the dwell at Best"
+        },
+        {
+          "file": "haven/test/services/ios_location_source_test.dart",
+          "name": "clearing the last Best fix drops the anchor too"
+        },
+        {
+          "file": "haven/test/services/geolocator_location_service_test.dart",
+          "name": "a stale native last-Best fix is not served as last-known"
+        },
+        {
+          "file": "haven/test/services/geolocator_location_service_test.dart",
+          "name": "a CONFIRMED native last-Best fix is served past its own age"
+        },
+        {
+          "file": "haven/test/services/ios_location_source_test.dart",
+          "name": "a confirmation chain cannot hold the anchor past kStationaryAnchorMaxAge"
+        },
+        {
+          "file": "haven/test/services/ios_location_source_test.dart",
+          "name": "the anchor cap becomes the earlier deadline as it approaches"
+        },
+        {
+          "file": "haven/test/services/ios_location_source_test.dart",
+          "name": "a cap escalation keeps the dwell, so one Best fix returns the session to the coarse tier"
+        },
+        {
+          "file": "haven/test/services/ios_location_source_test.dart",
+          "name": "the anchor cap escalates a session confirmations would otherwise hold coarse for ever"
+        },
+        {
+          "file": "haven/test/services/ios_location_source_test.dart",
+          "name": "no admissible confirming fix can vouch for a 200 m displacement"
+        },
+        {
+          "file": "haven/test/services/ios_location_source_test.dart",
+          "name": "a coarse fix biased inside its own error radius pins the anchor only until the cap, and the fix that forces finds the move"
+        },
+        {
+          "file": "haven/test/services/geolocator_location_service_test.dart",
+          "name": "no confirmation chain serves a fix older than kStationaryAnchorMaxAge"
+        },
+        {
+          "file": "haven/test/services/geolocator_location_service_test.dart",
+          "name": "a confirmed fix just inside kStationaryAnchorMaxAge is still served"
+        },
+        {
+          "file": "haven/test/services/geolocator_location_service_test.dart",
+          "name": "the cap reaches the native last-Best read too"
+        }
+      ],
+      "guards": [
+        "scripts/ci/check_ios_background_publish.sh"
+      ]
+    },
+    {
+      "id": "INV-L-ANDROID-BACKGROUND-SINGLE-GNSS-REQUEST",
+      "title": "Backgrounded with sharing on, Android holds exactly one location request",
+      "statement": "While the app is backgrounded with sharing ON there is exactly ONE platform location request — the foreground service's — issued only after the UI isolate released its own, with an interval of at least kMinFixRequestInterval (31 s) and, for a circle just published, at least kLocationPublishMinInterval − kBackgroundFixLeadTime (62 s); the service publishes on that request's deliveries and never sooner on displacement, since it has no motion awareness at all. Adding a second live registration (a third getLocationStream caller, or one the UI keeps while paused), lowering the interval below the platform floor, or publishing on a distance trigger falsifies this.",
+      "status": "enforced",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [],
+      "non_arb_claims": [],
+      "symbols": [
+        {
+          "file": "haven/lib/src/services/background_fix_request.dart",
+          "symbol": "nextFixRequestInterval"
+        },
+        {
+          "file": "haven/lib/src/services/geolocator_location_service.dart",
+          "symbol": "BackgroundServiceStreamProfile"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven/test/services/background_location_task_delivery_cycle_test.dart",
+          "name": "the registration is re-issued to the earliest pre-sampled due BEFORE the first publish"
+        },
+        {
+          "file": "haven/test/services/background_location_task_delivery_cycle_test.dart",
+          "name": "a delivery that finds a circle due within the horizon publishes only that circle"
+        },
+        {
+          "file": "haven/test/services/background_location_task_delivery_cycle_test.dart",
+          "name": "a large displacement between two deliveries publishes nothing early"
+        },
+        {
+          "file": "haven/test/services/background_location_task_delivery_cycle_test.dart",
+          "name": "the foreground taking ownership cancels the registration and empties the schedule"
+        },
+        {
+          "file": "haven/test/services/background_fix_request_test.dart",
+          "name": "never requests an interval at or below MIN_REQUEST_DELAY_MS (30 s) — the floor is kMinFixRequestInterval"
+        }
+      ],
+      "guards": [
+        "scripts/ci/check_android_location_power.sh"
       ]
     },
     {
@@ -548,14 +835,10 @@
       "disclosure_arb_keys": [
         "fgsChannelDescription",
         "fgsNotificationSharing",
+        "locationDisclosureBackgroundAndroid",
         "locationSettingsIntro"
       ],
       "non_arb_claims": [
-        {
-          "carrier": "dart_source",
-          "id": "LocationDisclosureStrings.backgroundAndroid",
-          "kind": "disclosure"
-        },
         {
           "carrier": "dart_source",
           "id": "haven/lib/src/services/background_location_manager.dart:notificationText",
@@ -585,19 +868,14 @@
       "residual": "Nothing pins the ABSENCE of android:stopWithTask. check_m7_native_wake_guards.sh covers RebootReceiver/RestartReceiver/autoRunOnBoot but not this attribute, and the e2e-fgs-publish (b1) lane exercises a BACKGROUNDED app, not a swiped-out one — its go_cold helper kills the process outright. The claim is true in the tree and unproven by CI.",
       "assertion_arb_keys": [],
       "disclosure_arb_keys": [
+        "locationDisclosureBackgroundAndroid",
         "locationSettingsIntro"
       ],
-      "non_arb_claims": [
-        {
-          "carrier": "dart_source",
-          "id": "LocationDisclosureStrings.backgroundAndroid",
-          "kind": "disclosure"
-        }
-      ],
+      "non_arb_claims": [],
       "symbols": [
         {
           "file": "haven/lib/src/widgets/location/location_disclosure_dialog.dart",
-          "symbol": "backgroundAndroid"
+          "symbol": "locationDisclosureBackgroundAndroid"
         }
       ],
       "tests": [],
@@ -731,6 +1009,148 @@
       "guards": [
         "scripts/ci/check_clock_skew_policy_parity.sh"
       ]
+    },
+    {
+      "id": "INV-L-WEDGED-CIRCLE-IS-DETECTED-AND-NAMED",
+      "title": "A circle that can no longer send is detected and named as that circle, and no background burst creates one",
+      "statement": "Two halves, each falsifiable on its own. (a) A BACKGROUND burst never publishes a removal-bearing auto-commit — a departing peer's eviction, the only commit a receive path stages: under `ReceiveAutoCommitPolicy::DeferToForeground` the commit is parked as a durable per-circle row (`deferred_removal_commits`, written BEFORE the in-memory park) and is neither published nor rolled back, so no burst opens a publish-before-apply window the OS may end mid-flight; the FOREGROUND pass that redeems it keeps the obligation owed and retries when no relay acks, because a rollback is a permanent, silent drop of the removal at the pinned MDK rev and would leave the departed peer deriving the circle's keys. No plane anywhere rolls one back and no plane publishes one without first recording the obligation: the fail rung (`CircleManager::publish_failed`) keeps a removal-bearing commit staged and owed for every caller, in Rust and across the FFI, and every plane records the obligation write-ahead (`CircleManager::owe_removal_publish`). (b) A circle that can no longer send — the engine's terminal `Unrecoverable` verdict, or a parked eviction whose session died — is reported as its OWN per-circle `LiveSyncEvent::GroupUnrecoverable` naming the pseudonymous `nostr_group_id` and never the MLS group id, crossing the FFI as the additive nullable `unrecoverableNostrGroupId`. Publishing a removal-bearing auto-commit from a burst, rolling a parked one back, rolling one back from ANY plane, publishing one without first recording the obligation, redeeming one anywhere but a foreground open, flattening the verdict back into the per-event, self-clearing `SyncStatusReason::Unprocessable` (which names no circle), or putting the real MLS group id on the event falsifies this.",
+      "status": "enforced",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [],
+      "non_arb_claims": [],
+      "doc_anchors": [
+        "haven-core/SECURITY.md#ios-background-sharing-presence-only-at-publish-instants-p4",
+        "docs/BACKGROUND_SHARING_FAILURE_ANALYSIS.md#c5--non-stable-epoch-state-or-a-hydration-quarantined-group"
+      ],
+      "event_kinds": [
+        {
+          "kind": 445,
+          "token": "out_of_tree:transport-nostr-peeler",
+          "note": "The eviction auto-commit is a kind-445 control message (h tag, no expiration), built by the rev-pinned peeler. This invariant is about WHEN it is put on the wire: never from a background burst, always from a foreground pass, and never abandoned. A parked commit is a 445 this device owes and has not sent."
+        }
+      ],
+      "symbols": [
+        {
+          "file": "haven-core/src/relay/auto_commit.rs",
+          "symbol": "ReceiveAutoCommitPolicy"
+        },
+        {
+          "file": "haven-core/src/relay/live_sync/session.rs",
+          "symbol": "set_background_burst"
+        },
+        {
+          "file": "haven-core/src/circle/manager.rs",
+          "symbol": "defer_removal_commit"
+        },
+        {
+          "file": "haven-core/src/circle/manager.rs",
+          "symbol": "orphaned_removal_deferrals"
+        },
+        {
+          "file": "haven-core/src/circle/storage.rs",
+          "symbol": "put_deferred_removal_commit"
+        },
+        {
+          "file": "haven-core/src/relay/live_sync/processor.rs",
+          "symbol": "report_unrecoverable_circles"
+        },
+        {
+          "file": "haven-core/src/relay/live_sync/event.rs",
+          "symbol": "GroupUnrecoverable"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "symbol": "unrecoverable_nostr_group_id"
+        },
+        {
+          "file": "haven-core/src/circle/manager.rs",
+          "symbol": "owe_removal_publish"
+        },
+        {
+          "file": "haven-core/src/relay/auto_commit.rs",
+          "symbol": "park_or_rollback_receive_publish_work"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/tests/od4c_removal_deferral_e2e.rs",
+          "name": "a_background_burst_does_not_publish_a_removal_bearing_auto_commit"
+        },
+        {
+          "file": "haven-core/tests/od4c_removal_deferral_e2e.rs",
+          "name": "a_deferred_removal_is_published_by_the_next_foreground_pass"
+        },
+        {
+          "file": "haven-core/tests/od4c_removal_deferral_e2e.rs",
+          "name": "no_disposition_here_ever_drops_the_removal"
+        },
+        {
+          "file": "haven-core/tests/od4c_removal_deferral_e2e.rs",
+          "name": "a_deferral_that_outlived_its_session_reports_the_circle_unrecoverable"
+        },
+        {
+          "file": "haven-core/tests/od4c_removal_deferral_e2e.rs",
+          "name": "the_verdict_carries_the_nostr_group_id_and_never_the_mls_group_id"
+        },
+        {
+          "file": "haven-core/tests/od4c_removal_deferral_e2e.rs",
+          "name": "a_deferral_a_peer_healed_after_a_restart_is_not_reported"
+        },
+        {
+          "file": "haven-core/tests/od4c_removal_deferral_e2e.rs",
+          "name": "a_circle_awaiting_its_own_ack_is_not_reported_unrecoverable"
+        },
+        {
+          "file": "haven-core/tests/od4c_removal_deferral_e2e.rs",
+          "name": "an_unprocessable_event_reports_no_circle_unrecoverable"
+        },
+        {
+          "file": "haven-core/tests/live_sync_burst_e2e.rs",
+          "name": "a_self_remove_auto_commit_is_deferred_by_the_burst_and_published_by_the_foreground"
+        },
+        {
+          "file": "haven-core/tests/security_rule_gates.rs",
+          "name": "od4c_a_background_burst_cannot_publish_a_removal_bearing_auto_commit"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "name": "maps_group_unrecoverable_with_the_circle_and_no_status_reason"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "name": "no_ordinary_status_reason_sets_the_unrecoverable_circle"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "name": "group_unrecoverable_debug_is_presence_only"
+        },
+        {
+          "file": "haven-core/tests/od4c_removal_deferral_e2e.rs",
+          "name": "the_ffi_fail_rung_keeps_a_removal_owed_instead_of_rolling_it_back"
+        },
+        {
+          "file": "haven-core/tests/od4c_removal_deferral_e2e.rs",
+          "name": "a_plane_killed_mid_publish_leaves_a_detectable_wedge"
+        },
+        {
+          "file": "haven-core/tests/od4c_removal_deferral_e2e.rs",
+          "name": "a_publishing_plane_records_its_obligation_before_it_publishes"
+        },
+        {
+          "file": "haven-core/tests/od4c_removal_deferral_e2e.rs",
+          "name": "the_deferred_send_plane_owes_its_eviction_before_it_crosses_the_ffi"
+        },
+        {
+          "file": "haven-core/tests/od4c_removal_deferral_e2e.rs",
+          "name": "a_background_burst_never_publishes_an_obligation_already_owed"
+        },
+        {
+          "file": "haven-core/tests/security_rule_gates.rs",
+          "name": "od4c_no_plane_can_roll_back_or_hide_a_removal_bearing_auto_commit"
+        }
+      ],
+      "guards": [],
+      "residual": "The verdict is now CONSUMED, and what is left is narrower than the statement rather than absent from it. `LiveEventRouter._handleStatus` reads `unrecoverableNostrGroupId` BEFORE its null-reason early return, resolves the circle and marks it blocked (`markCircleBlocked`), which is what disables that circle's send and mutate affordances and raises the circle-details blocked banner; the banner names the circle and offers a re-create that opens the create flow with this circle's display name pre-filled and touches the broken group not at all, so the cached roster and last-known locations stay readable beneath it. NO ARB KEY WAS ADDED: the affordance reuses `legacyCircleRecreateCta`, already present in all thirteen locales, because a template key missing from a shipped locale is a RED gate here (`l10n.yaml`'s `untranslated-messages-file` plus step 1 of `check_l10n_parity.sh`), so an English-only string could not have landed at all. This entry still declares no `assertion_arb_keys`, and that is deliberate rather than leftover: its promise is that the wedge is DETECTED and NAMED per circle, not any particular sentence of copy, and the strings the banner renders are the pre-existing blocked-circle copy rather than new claims of this invariant. WHAT THE CONSUMER COSTS, and it is user-visible. The mark needs TWO observations of the same circle in DIFFERENT re-anchor generations — counted off the `SyncStatusReason::BackgroundResumed` marker on the same ordered stream, never off a clock, so there is no timer and no wall-clock assumption — because ONE verdict has a documented false positive: the report sweep runs immediately after a re-anchor subscribes and can race a remaining peer's healing commit, and telling a user to rebuild a circle that works costs them the whole roster's invitations. So the banner appears on the SECOND foreground open, not the first. That is the same horizon as the repair itself — a foreground open is also the only place a parked eviction is published — so the delay costs no recovery, only the announcement. Three limits of the detection itself, all argued at `report_unrecoverable_circles`: a circle a remaining peer ALREADY HEALED can be reported once, because at MDK `e391adc` no read accessor reveals a staged commit and the row is discharged only by the next successful publish (`discharge_removal_deferral_after_send`); a device wedged by a session that PREDATES this code carries no durable row and is undetectable by construction; and the verdict is evaluated only on a foreground re-anchor, never at `start`, which cannot tell a foreground launch from a background wake that cold-launched the process. Half (a)'s SUPPRESSION is scoped to the live-sync burst plane, but its two supporting guarantees are now tree-wide: no plane rolls a removal-bearing auto-commit back (the decision lives at `CircleManager::publish_failed`, the one rung the four planes share, so it binds the two that resolve the commit from Dart too), and every plane records the obligation BEFORE it opens the publish-before-apply window (`CircleManager::owe_removal_publish`), so a wake window the OS ends mid-publish leaves a durable row the next foreground live-sync open reports — on that plane; see the poll-configuration paragraph at the end of this residual for the build where no such open exists. The Android background catch-up sweep still PUBLISHES rather than parking, and that reason is now recorded at the call site and asserted by tests: a park needs somewhere to be redeemed and a `PendingStateRef` is valid only inside the session that staged it, so a sweep driven from a background isolate could never publish what it parked. What remains open is redemption ACROSS a session: an obligation the foreground service or the WorkManager catch-up worker records is reported but not redeemable, because at MDK `e391adc` nothing can re-derive a staged eviction from group state. Such a wedge is therefore LOUD AND TERMINAL — named to the user, repaired only by re-creating the circle — which is strictly better than the silent permanent drop it replaced, and is not a heal. And half (a)'s own cost is disclosed to nobody, because a LIVE parked eviction is deliberately not reported (only an orphaned one is): while it stands, that circle's `encrypt_location` fails the engine's \"send requires Stable\" gate until the next foreground re-anchor, which on a rarely-foregrounded device is a real per-circle gap in that circle's sharing. FINALLY, BOTH HALVES ARE LIVE-SYNC-SHAPED, and the retained poll rollback path (`HAVEN_LIVE_SYNC=false`) reaches NEITHER: `redeem_removal_deferrals` and `report_unrecoverable_circles` are invoked from one place only in production code (their own unit tests aside), a FOREGROUND burst open in `relay/live_sync/session.rs`, and a flag-off build starts no session at all. An unacked publish on that plane therefore records an obligation nothing will ever redeem, and the circle it wedges gets no per-circle `GroupUnrecoverable` verdict, so the blocked banner never names it. This is NOT a weakening of either half: the obligation is still written ahead of the window and still never rolled back, the pre-deferral behaviour dropped the removal outright, the flag-independent sharing-health banner still reports the silence, and a circle whose own decrypt returns `Unrecoverable` is still marked blocked through `_convertLocationEventResult` on either plane. What is absent on the poll plane is the parked-obligation half of the naming, and it is recorded as an open owner question (`docs/POWER_EFFICIENCY_PLAN.md` §9.9) rather than fixed here, because the three answers — redeem on the poll plane, name it there another way, or accept it — are a product decision."
     },
     {
       "id": "INV-E-PER-CIRCLE-ISOLATION",
@@ -1145,12 +1565,12 @@
       "guards": [
         "tooling/e2e/ci/check-wire-journal.sh#workflow=e2e-android.yml"
       ],
-      "residual": "Bounded to the traffic THIS device authors, which is all it can bound. In a circle created by a client that declared no 0x8005 component, another member's own location 445s still carry no expiration: they may be retained indefinitely AND, to any relay watching the circle's public #h, they are indistinguishable from membership changes — so in such a mixed circle the un-stamped class contains another member's LOCATION UPDATES, not only control messages. The un-stamped class is every group-control message, not membership alone — an admin handoff and a relay-set change are UpdateAppComponents commits and are un-stamped too, which is what `expiration_separates_location_from_control_and_no_other_tag_appears` actually publishes. The Privacy-page sentence that stated this discriminator (scoped to the messages this device sends) was removed with the page on 2026-08-29; SECURITY.md's discriminator bullet is now its only statement. Haven still cannot repair the group itself: writing the component is admin-gated upstream (require_admin on the UpdateAppComponents path) and a joiner is not an admin, and doing it inside the join path would stage an epoch-advancing commit whose non-publication pins the group in PendingPublish and buffers every inbound message forever, which is a worse loss than the leak. The residue is disclosed nowhere: nothing in the app tells the user that in such a circle another member's location 445s may sit on a relay indefinitely and read as group control — and since the owner removed the in-app explanation layer on 2026-08-29 there is no surface left to disclose it on, so it is recorded in SECURITY.md rather than held open as a copy decision. SECOND: the bound MASKS the group-level declaration, and it masks it in three pre-existing proofs, not one. `encrypt_location_attaches_group_retention_expiration` and `decrypt_location_drops_expired_event` (src/circle/manager.rs) and the E2E wire oracle (tooling/e2e/wire_allowlist.json, kind 445 `required: [h, expiration]`) all now pass with create_group's 0x8005 declaration removed, because the bound supplies the tag they look for; `live_sync_cursor_replay_e2e.rs`'s expiration precondition is masked the same way. NOTHING AT THE WIRE LEVEL still proves Haven declares 0x8005 to its peers, and the component is the only thing governing every OTHER member's client. Held at host level instead, by `a_locally_created_circle_declares_havens_retention_window_to_every_member` (both parties read the window back out of group state) and `a_shorter_group_policy_reaches_the_wire_as_declared` (a foreign circle's narrower window reaches the wire as declared, which the bound could not fake). Closing it on the wire needs an allow-list entry that asserts the delta VALUE against the circle's declared window rather than the tag's presence — owned by the E2E lane, not by this crate. THIRD: the bound honours an arbitrarily short declared window, so a circle whose creator declares e.g. 1 s has every Haven member's location dropped by a NIP-40-honouring relay almost immediately. Deliberately not floored — a floor would ask relays to hold location ciphertext LONGER than the circle declared, and would not restore visibility, since the same component governs every other member's client. SECURITY.md's no-gap invariant is scoped to circles Haven created for exactly this reason. That window is no longer undisclosed: the circle-details subtitle reports the EFFECTIVE window for the messages this device sends into that circle — in seconds when it is under a minute, so a narrow foreign window reads as alarming rather than being rounded away — held by INV-U-CIRCLE-EXPIRY-SHOWN-IS-EXPIRY-SENT. What the sheet does not say is WHY it is short: it reports the number, not that another client chose it."
+      "residual": "Bounded to the traffic THIS device authors, which is all it can bound. In a circle created by a client that declared no 0x8005 component, another member's own location 445s still carry no expiration: they may be retained indefinitely AND, to any relay watching the circle's public #h, they are indistinguishable from membership changes — so in such a mixed circle the un-stamped class contains another member's LOCATION UPDATES, not only control messages. The un-stamped class is every group-control message, not membership alone — an admin handoff and a relay-set change are UpdateAppComponents commits and are un-stamped too, which is what `expiration_separates_location_from_control_and_no_other_tag_appears` actually publishes. The Privacy-page sentence that stated this discriminator (scoped to the messages this device sends) was removed with the page on 2026-08-29; SECURITY.md's discriminator bullet is now its only statement. Haven still cannot repair the group itself: writing the component is admin-gated upstream (require_admin on the UpdateAppComponents path) and a joiner is not an admin, and doing it inside the join path would stage an epoch-advancing commit whose non-publication pins the group in PendingPublish and buffers every inbound message forever, which is a worse loss than the leak. The residue is disclosed nowhere: nothing in the app tells the user that in such a circle another member's location 445s may sit on a relay indefinitely and read as group control — and since the owner removed the in-app explanation layer on 2026-08-29 there is no surface left to disclose it on, so it is recorded in SECURITY.md rather than held open as a copy decision. SECOND: the bound MASKS the group-level declaration, and it masks it in three pre-existing proofs, not one. `encrypt_location_attaches_group_retention_expiration` and `decrypt_location_drops_expired_event` (src/circle/manager.rs) and the E2E wire oracle (tooling/e2e/wire_allowlist.json, kind 445 `required: [h, expiration]`) all now pass with create_group's 0x8005 declaration removed, because the bound supplies the tag they look for; `live_sync_cursor_replay_e2e.rs`'s expiration precondition is masked the same way. NOTHING AT THE WIRE LEVEL still proves Haven declares 0x8005 to its peers, and the component is the only thing governing every OTHER member's client. Held at host level instead, by `a_locally_created_circle_declares_havens_retention_window_to_every_member` (both parties read the window back out of group state) and `a_shorter_group_policy_reaches_the_wire_as_declared` (a foreign circle's narrower window reaches the wire as declared, which the bound could not fake). Closing it on the wire needs an allow-list entry that asserts the delta VALUE against the circle's declared window rather than the tag's presence — owned by the E2E lane, not by this crate. THIRD: the bound honours an arbitrarily short declared window, so a circle whose creator declares e.g. 1 s has every Haven member's location dropped by a NIP-40-honouring relay almost immediately. Deliberately not floored — a floor would ask relays to hold location ciphertext LONGER than the circle declared, and would not restore visibility, since the same component governs every other member's client. SECURITY.md's no-gap invariant is scoped to circles Haven created for exactly this reason — and, since PUB-COALESCE, to rosters of at most kMaxCirclesPerBurst circles as well — which is every roster the app admits, because kMaxCirclesPerAccount (10) refuses the eleventh (INV-W-445-EXPIRATION-WINDOW). That window is no longer undisclosed: the circle-details subtitle reports the EFFECTIVE window for the messages this device sends into that circle — in seconds when it is under a minute, so a narrow foreign window reads as alarming rather than being rounded away — held by INV-U-CIRCLE-EXPIRY-SHOWN-IS-EXPIRY-SENT. What the sheet does not say is WHY it is short: it reports the number, not that another client chose it."
     },
     {
       "id": "INV-W-445-EXPIRATION-WINDOW",
-      "title": "The relay-residency window Haven asks for is the CEILING the copy states, and the smallest the no-gap floor allows",
-      "statement": "LOCATION_MESSAGE_RETENTION_SECS is the CEILING on the NIP-40 window Haven requests, not the window every message carries: an application kind-445 gets it whenever the group declares no message-retention.v1 (0x8005) window, declares zero, or declares a LONGER one, while a SHORTER declared window is honoured as declared (bounded_retention_secs — see INV-W-445-EXPIRATION-SCOPE for the per-message rule and INV-U-CIRCLE-EXPIRY-SHOWN-IS-EXPIRY-SENT for what the user is shown). The constant equals kLocationPublishMaxInterval + 2 * kTtlNetworkBufferSeconds read out of haven/lib/src/constants/location.dart. Three things therefore move together: the no-widening bound (a larger window leaves every published location on relays longer than the design commits to), the no-narrowing bound (a smaller one leaves a member returning from offline with nothing unexpired left to fetch), and the honouring of a shorter declared window (a flat figure would be false in every circle another client created with a narrower window, which is the circle whose window the user cannot change; the wire-level proof is INV-W-445-EXPIRATION-SCOPE's a_shorter_group_policy_reaches_the_wire_as_declared, and the effective figure the user still sees is the circle-details subtitle, INV-U-CIRCLE-EXPIRY-SHOWN-IS-EXPIRY-SENT). The Privacy-page sentence that quoted the figure ('about four minutes', as an 'at most' bound) was removed with the page on 2026-08-29 and its copy-tie tests with it; SECURITY.md carries the derivation. Editing the constant, the Dart publish ceiling, or the honouring of a shorter declared window without the others fails.",
+      "title": "The relay-residency window Haven asks for is the CEILING the copy states, and the smallest the no-gap floor allows — at every roster the account bound admits",
+      "statement": "LOCATION_MESSAGE_RETENTION_SECS is the CEILING on the NIP-40 window Haven requests, not the window every message carries: an application kind-445 gets it whenever the group declares no message-retention.v1 (0x8005) window, declares zero, or declares a LONGER one, while a SHORTER declared window is honoured as declared (bounded_retention_secs — see INV-W-445-EXPIRATION-SCOPE for the per-message rule and INV-U-CIRCLE-EXPIRY-SHOWN-IS-EXPIRY-SENT for what the user is shown). The constant equals kLocationPublishMaxInterval + 2 * kTtlNetworkBufferSeconds read out of haven/lib/src/constants/location.dart. Three things therefore move together: the no-widening bound (a larger window leaves every published location on relays longer than the design commits to), the no-narrowing bound (a smaller one leaves a member returning from offline with nothing unexpired left to fetch), and the honouring of a shorter declared window (a flat figure would be false in every circle another client created with a narrower window, which is the circle whose window the user cannot change; the wire-level proof is INV-W-445-EXPIRATION-SCOPE's a_shorter_group_policy_reaches_the_wire_as_declared, and the effective figure the user still sees is the circle-details subtitle, INV-U-CIRCLE-EXPIRY-SHOWN-IS-EXPIRY-SENT). The Privacy-page sentence that quoted the figure ('about four minutes', as an 'at most' bound) was removed with the page on 2026-08-29 and its copy-tie tests with it; SECURITY.md carries the derivation. Editing the constant, the Dart publish ceiling, or the honouring of a shorter declared window without the others fails. The no-gap floor the ceiling is sized against is a bound on the SCHEDULED gap and it holds for rosters up to kMaxCirclesPerBurst (11): one coalesced burst per interval publishes every eligible circle (PUB-COALESCE), so a circle that leads one burst and trails the next waits kLocationPublishMaxInterval (168 s) plus at most one burst spread (kPublishStaggerMaxSpread, 30 s) = 198 s, leaving the whole 30 s of kTtlNetworkBufferSeconds unspent. From the twelfth circle up the burst would defer its tail and that floor would no longer hold, which is why the ROSTER is bounded below the burst cap: kMaxCirclesPerAccount (10) refuses circle creation and invitation accept — the only two operations that CREATE a circles row — at the one seam both reach the core through, so the floor holds at every roster a user can have and the ceil(N / kMaxCirclesPerBurst) service-period ladder is unreachable in production. What this entry does NOT promise is the propagation margin its predecessor had: the burst spread spends one of the two kTtlNetworkBufferSeconds, so the margin is 30 s and not 60 s at every roster from two circles up, and the residual says so — as it does for the three REALIZED-gap terms that sit outside this SCHEDULED bound, TWO of which cross the retention at rosters this bound admits.",
       "status": "enforced",
       "assertion_arb_keys": [],
       "disclosure_arb_keys": [],
@@ -1165,6 +1585,22 @@
         {
           "file": "haven-core/src/nostr/mls/retention.rs",
           "symbol": "bounded_retention_secs"
+        },
+        {
+          "file": "haven/lib/src/services/publish_stagger.dart",
+          "symbol": "kMaxCirclesPerBurst"
+        },
+        {
+          "file": "haven/lib/src/providers/location_publish_scheduler_provider.dart",
+          "symbol": "_takeBurstSlice"
+        },
+        {
+          "file": "haven/lib/src/services/publish_stagger.dart",
+          "symbol": "kMaxCirclesPerAccount"
+        },
+        {
+          "file": "haven/lib/src/services/nostr_circle_service.dart",
+          "symbol": "_refuseIfRosterFull"
         }
       ],
       "tests": [
@@ -1175,9 +1611,64 @@
         {
           "file": "haven-core/tests/privacy_copy_ties.rs",
           "name": "narrowing_the_retention_would_strand_a_returning_member"
+        },
+        {
+          "file": "haven/test/services/publish_stagger_test.dart",
+          "name": "the no-gap invariant holds across the WHOLE admissible range, with the disclosed propagation margin intact"
+        },
+        {
+          "file": "haven/test/services/publish_stagger_test.dart",
+          "name": "expected whole-second delta alphabet, swept over every burst size the app admits"
+        },
+        {
+          "file": "haven/test/providers/location_publish_scheduler_provider_test.dart",
+          "name": "a deferred circle waits ceil(N / kMaxCirclesPerBurst) bursts — the service-period ladder, not \"two intervals\" at every roster"
+        },
+        {
+          "file": "haven/test/services/publish_stagger_test.dart",
+          "name": "and past the cap, the deferral ladder in SECONDS — the figures the record quotes for a ceil(N / kMaxCirclesPerBurst) service period"
+        },
+        {
+          "file": "haven/test/providers/location_publish_scheduler_provider_test.dart",
+          "name": "a deferred circle is not deferred again by every resume"
+        },
+        {
+          "file": "haven/test/providers/location_publish_scheduler_provider_test.dart",
+          "name": "a transient empty roster emission does not re-phase whose turn it is"
+        },
+        {
+          "file": "haven/test/providers/location_publish_scheduler_provider_test.dart",
+          "name": "a roster change keeps survivors' places in the queue"
+        },
+        {
+          "file": "haven/test/services/publish_stagger_test.dart",
+          "name": "kMaxCirclesPerAccount puts the deferral ladder out of production reach, with exactly one circle of headroom"
+        },
+        {
+          "file": "haven/test/services/nostr_circle_service_roster_bound_test.dart",
+          "name": "is refused AT the bound, and nothing is staged"
+        },
+        {
+          "file": "haven/test/services/nostr_circle_service_roster_bound_test.dart",
+          "name": "is refused AT the bound, and the held Welcome is not ingested"
+        },
+        {
+          "file": "haven/test/services/nostr_circle_service_roster_bound_test.dart",
+          "name": "admit exactly one when only one slot is left"
+        },
+        {
+          "file": "haven/test/lints/circle_roster_bound_sites_test.dart",
+          "name": "only the gated service grows the account roster"
+        },
+        {
+          "file": "haven/test/services/background_burst_coordinator_test.dart",
+          "name": "the iOS burst head crosses the 228 s retention from FOUR circles up — the disclosed 226/235/238 s, in seconds and not in composition"
         }
       ],
-      "guards": []
+      "guards": [
+        "scripts/ci/check_publish_rotation_fairness.sh"
+      ],
+      "residual": "The no-gap property this constant is sized for is a bound on the SCHEDULED gap, and it is bounded by the ROSTER at eleven circles — which is why the roster itself is bounded at TEN. kMaxCirclesPerAccount (owner decision, 2026-09-09) refuses circle creation and invitation accept once the account holds ten accepted circles, enforced in NostrCircleService because its two roster-growing calls are the only Dart callers of the only two core operations that CREATE a circles row: create_circle_with_config, which upserts through CircleStorage::save_circle, and record_processed_invitation, which runs its own INSERT INTO circles. 'CREATE' and not 'write' is the property, and the difference is load-bearing rather than pedantic: save_circle is an UPSERT with three further non-test callers (resync_circle_relays_from_mdk, add_members, remove_members), and record_processed_invitation is not among them; each of those three reads the row back with storage.get_circle first and returns early when there is none, so none of them can mint one. The gate is also enforced against CONCURRENCY, not only against call sites: _refuseIfRosterFull RESERVES the admitted slot (_reservedRosterSlots, released in the caller's finally), because the row only exists once the core write returns, so without the reservation simultaneous accepts would each read the same pre-growth roster and enough of them would carry it past kMaxCirclesPerBurst — the deferral the bound exists to eliminate. The call-site half is pinned by 'only the gated service grows the account roster' (haven/test/lints/circle_roster_bound_sites_test.dart), an AST inventory over all of lib minus lib/src/rust/ — main.dart included, with its own anti-vacuity assertion — which fails on a third call site rather than letting one land silently; the concurrency half by 'admit exactly one when only one slot is left' and its two slot-release siblings. A burst is therefore never handed more than ten circles and the deferral ladder below is UNREACHABLE in production. THE LADDER IS KEPT ON RECORD BECAUSE THE DEFERRAL CODE IS, and lifting the bound re-opens it verbatim: a burst publishes at most kMaxCirclesPerBurst (11) circles and defers the rest to the next tick, _takeBurstSlice is strict round-robin, so a DEFERRED circle's worst SERVICE PERIOD would be ceil(N / 11) bursts rather than two at every roster — N = 12..22 -> TWO sampled intervals (144 s best, 240 s mean, 336 s worst, and 366 s once the burst-position differential is added, because a circle may lead one burst and trail the one two ticks later, a whole kPublishStaggerMaxSpread apart); N = 23..33 -> three (216 / 360 / 504 s); N >= 34 -> four or more, where even the BEST case (288 s) exceeds the 228 s retention on EVERY publish rather than on some. Both halves stay PINNED rather than left as prose, so that a lifted bound cannot re-open them unmeasured: the round-robin period by 'a deferred circle waits ceil(N / kMaxCirclesPerBurst) bursts' (which drives real ticks through _takeBurstSlice, so it fails when the slice size or the rotate moves) and the seconds by 'and past the cap, the deferral ladder in SECONDS' (which reads them off the cadence constants, so it fails when the cadence moves). The two scope limits that used to matter go with it: a tick folding into a running iOS burst (BackgroundBurstCoordinator._joinable), and the 21-circle point where a one-shot's own spread outlasts kLocationPublishOverlapGuard, are both reachable only at N >= 12. WHAT THE BOUND DOES NOT CLOSE, and what this entry therefore does not promise. FIRST, the PROPAGATION MARGIN. Against the ACTUAL predecessor — per-circle schedulers, where the gap was each circle's own sampled interval, <= 168 s at every N, with no spread and no deferral — the full 60 s (2 x kTtlNetworkBufferSeconds) was margin; since PUB-COALESCE the burst spread spends one of the two, so this invariant runs on 30 s of propagation and clock-skew margin at every roster from TWO circles up. That halving is not a past-eleven effect and the roster bound does not touch it; it is recorded in the ratchet_override block for PUB-COALESCE, the change that caused it, so it sits in a reviewed diff and not only here. SECOND, the period is a period of TURNS, and a turn is a SELECTION rather than a publish: the rotation advances when the tick FIRES, ahead of the chain, the window and the sink, so a slice that loses its window (no identity, disclosure not accepted, a fix that timed out, a pause under it, an iOS coordinator that drops a queued burst) publishes nothing and waits a whole interval over again — up to 336 s against this 228 s retention, at every roster including a bounded one. The health model is told; the queue is not. THIRD, THREE REALIZED-gap terms sit outside this SCHEDULED bound, and two of them cross the retention at rosters the bound admits. The Android foreground service publishes on a platform delivery that arrives a TTFF late: on API 23-30 a cold acquisition reaches 248 s, i.e. 20 s past this 228 s, pinned by equality per API regime in haven/test/services/background_fix_request_test.dart. The iOS burst HEAD (connect, backlog wait and one-shot fix, up to 40 s) varies between bursts and so enters the realized gap as a differential on top of the spread: 168 + 40 + spread reaches 235 s at four circles and 238 s from five up, so iOS is inside 228 s only up to three circles. The THIRD is the only one that scales with N and coalescing introduced it: the pass is SERIAL and the stagger buys separation on top of each publish rather than inside it, so the foreground _pacedPublish — which measures the gap from the previous publish's START — spans sum(max(gap_i, dur_i)), while the background pass awaits the gap AFTER the previous publish returns and is strictly additive, sum(dur_i + gap_i+1); at one publish priced at kBurstPublishBudget (10 s) the realized span reaches about 100 s (foreground shape) or 130 s (background) against a SCHEDULED 30 s spread, and it lands twice — once in a realized gap and once in the duration-shaped circle-count estimator PUB-COALESCE records. So this entry is a promise about the SCHEDULE at every reachable roster, and must not be read as 'a peer's marker never expires': on iOS with background sharing on it CAN expire before the replacement lands, from FOUR circles up, which is an ordinary roster and not a corner. All three are stated on haven/lib/src/constants/location.dart, and their PROOF status differs, which is the reason to state it: only the Android 248 s is pinned, by equality per API regime (haven/test/services/background_fix_request_test.dart, 'a cold TTFF outruns the lead, and on API ≤ 30 it outruns the retention as well — the residual, exactly'). The iOS 235/238 s crossing and the 100/130 s serial span are arithmetic over kBurstConnectBudget, kBurstBacklogBudget, kBurstWindowBudget, kBurstPublishBudget and the stagger that NO test asserts — burstBound pins the composition of those budgets, never the seconds they add up to — so those two are DISCLOSED and not enforced, and moving a budget moves them silently. THE ROTATION FACTS THAT MAKE THE PERIOD ABSOLUTE ARE UNCHANGED and still worth stating, because they are what keeps a lost turn from compounding: _rotation outlives stopScheduling()/startScheduling() and outlives an emission reporting nothing eligible (circlesProvider degrades ANY roster-read failure to an empty list, so an empty emission is at least as often a transient FFI/keyring error as a real departure), so neither a backgrounding nor a failed roster read re-phases whose turn it is — pinned by 'a deferred circle is not deferred again by every resume', 'a transient empty roster emission does not re-phase whose turn it is' and 'a roster change keeps survivors' places in the queue', and structurally by scripts/ci/check_publish_rotation_fairness.sh, which pins _rotation.clear() to exactly ONE site inside build() and the survivor merge to below the _circles.isEmpty guard. What DOES rewind the queue is build() — a fresh container, or the invalidate in IdentityNotifier.deleteIdentity — and a process restart, which does not persist it; and because the roster keeps filterPublishEligibleCircles order (getVisibleCircles() orders by updated_at DESC) a rewind returns to the SAME head and re-serves the same first slice, a deterministic re-service and not a re-phase. At a bounded roster the first slice IS the roster, so a rewind serves all of it."
     },
     {
       "id": "INV-W-GROUP-TAG-PSEUDONYMOUS-AND-STABLE",
@@ -1465,15 +1956,11 @@
       "title": "Haven operates no server of its own on any plane",
       "statement": "There is no Haven-operated relay, no Haven backend, and no account record: the seeded relays are third-party Nostr relays, identity creation takes no email, phone number or password, and the map plane's only first-party artefact is a single shared Stadia API key carrying no per-user identifier. Introducing a Haven-hosted endpoint that receives user data falsifies this.",
       "status": "enforced",
-      "assertion_arb_keys": [],
-      "disclosure_arb_keys": [],
-      "non_arb_claims": [
-        {
-          "carrier": "dart_source",
-          "id": "LocationDisclosureStrings.how",
-          "kind": "assertion"
-        }
+      "assertion_arb_keys": [
+        "locationDisclosureHow"
       ],
+      "disclosure_arb_keys": [],
+      "non_arb_claims": [],
       "symbols": [
         {
           "file": "haven-core/src/circle/types.rs",
@@ -1627,27 +2114,250 @@
       ]
     },
     {
+      "id": "INV-R-PUBLISH-POOL-NO-KEEPALIVE",
+      "title": "The publish relay pool sends no keepalives and closes between bursts",
+      "statement": "Every RelayManager publish pool — the UI isolate's, the Android foreground service's, and any other isolate that builds one — registers each relay through RelayPool::add_relay with publish_relay_options(): ping(false), so no WebSocket keepalive frame leaves the device between publish bursts; sleep_when_idle(true) with a 10 s idle timeout, so the socket closes within roughly a minute of the last publish rather than being held open; and reconnect(false), because the idle monitor runs only inside a live connection task, so a dropped socket that kept reconnecting would never reach Sleeping. Client::add_relay must never be used on that pool: for a URL the pool already holds it ORs RelayServiceFlags::default() (READ | WRITE | PING) onto the live relay and silently restores the keepalive on every socket. Every RelayManager fetch primitive leaves no subscription registered behind it, so nothing holds the socket awake after a fetch. The ENGINE pool (build_engine_client) deliberately KEEPS the pool's ping, because it holds standing REQs and carries no other traffic: turning it off there re-creates the dead-but-running relay blackout that nothing notices until the 15-minute health tick.",
+      "status": "enforced",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [],
+      "non_arb_claims": [],
+      "symbols": [
+        {
+          "file": "haven-core/src/relay/manager.rs",
+          "symbol": "publish_relay_options"
+        },
+        {
+          "file": "haven-core/src/relay/live_sync/session.rs",
+          "symbol": "build_engine_client"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/src/relay/manager.rs",
+          "name": "publish_relay_options_turn_ping_off"
+        },
+        {
+          "file": "haven-core/src/relay/manager.rs",
+          "name": "a_second_add_of_the_same_url_never_restores_ping"
+        },
+        {
+          "file": "haven-core/src/relay/manager.rs",
+          "name": "every_fetch_primitive_leaves_no_subscription_registered"
+        },
+        {
+          "file": "haven-core/src/relay/live_sync/session.rs",
+          "name": "engine_pool_keeps_ping_while_subscribed"
+        }
+      ],
+      "guards": [
+        "scripts/ci/check_engine_client_options.sh"
+      ]
+    },
+    {
+      "id": "INV-R-BACKGROUND-PRESENCE-ONLY-AT-PUBLISH",
+      "title": "Backgrounded on iOS, presence is revealed only at publish instants",
+      "statement": "While backgrounded on iOS with background sharing ON, from the completion of the pause branch's teardown until the next burst's open, the live-sync engine holds no standing subscription and no socket IT ASKED FOR: pause_subscriptions CLOSEs every REQ, sweeps any that a partial unsubscribe_all left registered (both bounded by RELAY_LIFECYCLE_OP_TIMEOUT and log-and-proceed on expiry), drains what is already downloaded through the Pause marker (note_delivery_gap, never a forget_*, so an un-applied hold-back survives; best-effort — on a dead worker or an unacked marker the router is cleared directly and the undrained backlog is re-downloaded by the next re-anchor), waits UNCAPPED for every in-flight publish (Security Rule 13), and only then terminates every relay through terminate_all_relays (client.disconnect(), re-read and re-asserted over RELAY_TERMINATE_ROUNDS rounds, never client.shutdown()), so that where the termination converges the crate's per-relay connection task and its 55 s pinger exit with it — see exception (iii) for where it does not. Each publish tick runs exactly one bounded burst instead: open_background_burst re-issues every REQ in the Resubscribe phase — each circle at its persisted cursor less GROUP_RESUBSCRIBE_BUFFER_SECS, and the inbox at INBOX_RESUBSCRIBE_LOOKBACK_SECS on every INBOX_BURSTS_PER_REQ-th background burst, never the cold-start window — waits up to BURST_BACKLOG_WAIT_SECS per (relay, subscription) endpoint for EOSE so a peer commit ingested here is APPLIED before the location is encrypted, publishes, folds due KeyPackage/relay-list maintenance onto the warm publish pool, settles (COMMIT_SETTLE_WINDOW_SECS from the last commit activity, capped by BURST_SETTLE_CAP_SECS, which bounds idle follow-on activity only and never an in-flight publish), pauses, drains any commit-critical publish still on the shared publish pool, and shuts that pool. A pause that drives no burst — nothing eligible, or a publish still inside kLocationPublishOverlapGuard — runs that same teardown on its own (closeIdle, on the same chain and under the same in-burst flag, so it can never run beside a burst), which is what makes the gap before the first burst no exception. THREE exception classes and one separate plane, all stated. (i) The teardown STOPS wherever the foreground reclaimed the engine, leaving the publish pool to the next pause's teardown. (ii) A cold launch whose un-awaited engine start completes after the teardown ran comes up Live in the background — bounded by the first tick's own teardown, and UNBOUNDED where no tick is coming: with no publish-eligible circle there is no per-circle tick, so nothing calls open_background_burst and nothing calls pause_subscriptions, and the engine holds every group REQ, the inbox #p REQ and its socket for the whole background window. (iii) The termination is a REPAIR PLUS A WATCH, never a prevention: nostr-relay-pool's own retry loop can re-open a REAL socket over the pause's Terminated and hold it with 55 s pings indefinitely (the race is inside the pinned crate, between two adjacent statements of InnerRelay::disconnect, so the engine cannot make it impossible), and non-convergence after RELAY_TERMINATE_ROUNDS warns with a COUNT only. What is promised instead is that no such socket SURVIVES — run_monitor's radio-off watch cuts every one, including the strand this loop cannot see at all (a Disconnected write that landed BEFORE the pool's Terminated store), and unrequested_connections is how many there were. The publish pool is a separate plane the burst does not own — the motion trigger may re-open it between bursts — and how it closes SPLITS BY PLANE, so no single claim covers all three. On this branch and on the Android foreground service it is closed COLLECTIVELY: RelayManager::shutdown is one client.disconnect() over the whole pool, reached from every burst teardown here (_shutdownPublishPool) and at step 9b of every Android delivery cycle plus onDestroy — so on BOTH background planes a relay carrying exactly one circle in a pass sees connect-at-its-own-publish through disconnect-at-teardown, a tail that grows with the circles published after it and converges over the CSPRNG permutation to the whole pass length. Only in the FOREGROUND is there no collective disconnect: publish_relay_options() is ping(false).reconnect(false).sleep_when_idle(true).idle_timeout(10 s) polled once a minute, so each relay's socket sleeps independently in (60 s, 70 s] after that relay's own last send. Presence is revealed to a circle relay at every burst instant. Since PUB-COALESCE one burst publishes EVERY publish-eligible circle, so for an eligible circle the REQ/CLOSE pair and this device's kind-445 for that circle now coincide on essentially every burst — the fractional mismatch this clause used to disclose is gone for that class. Four classes still produce a re-anchored #h REQ with no kind-445 for the circle it re-anchored: (a) the burst publishes NOTHING when openBurstPublishWindow returns null (no identity, disclosure not accepted, location permission revoked, one-shot GPS timeout) or consent flips inside the pass — the open precedes the publish unconditionally; (b) a circle in the stored live set that is not publish-eligible is re-anchored on every burst and never published to at all. The two sides are read from different places, and the subscription side is a STORED SNAPSHOT: resume_burst re-anchors active.group_subs, which only subscribe_circle, unsubscribe_circle and the relay-update paths mutate, all of them driven by LiveSyncResubscriber._applyDelta off a circlesProvider emission — and nothing re-derives it while backgrounded (the coordinator drives its work by direct call precisely because a provider invalidation schedules a rebuild a paused app never performs). So the subscribed set is every ACCEPTED circle AS OF THE LAST FOREGROUND EMISSION (groupsForCircles), while the publish target is re-read FRESH at encrypt time (encrypt_location -> get_circle -> circle.relays) and filterPublishEligibleCircles additionally excludes isLegacyOrphaned and engine-flagged Unrecoverable circles, so this is a permanent mismatch rather than a fractional one; (c) a per-circle send that fails or is DEFERRED by the MLS engine, and the tail of a roster past kMaxCirclesPerBurst (11), which the burst itself defers to the next tick; (d) a circle-set or relay-set change applied DURING the background window, where the two sides diverge because only one is re-read — a circle REMOVED while backgrounded keeps its #h REQ re-anchored on every burst with no kind-445 behind it, unbounded until the next foreground emission reaches _applyDelta, and a RELAY-SET change applied while backgrounded leaves the OLD relays subscribed and the NEW ones published to, so each set sees one half of the pair. Coalescing also LENGTHENS the exposure it narrows: the burst holds its connection across the whole staggered publish pass, so the connect-to-disconnect span grows with the number of eligible circles — saturating at the cap — and is a single-relay estimator of that count for every relay in the union resume_burst connects, inbox relays included (PUB-COALESCE). An inbox-only relay sees the same pair on every INBOX_BURSTS_PER_REQ-th burst with no kind-445 to pair it with, which is itself the inference that this pubkey is background-sharing now. The three RELAY-CONTACTING Dart maintenance timers — KeyPackage, relay-list, and the 15-minute subscription-health tick — are foreground-only on this branch (suspendForBackground cancels all three at the pause; health is gated again where it fires, the other two at arming only), because the burst IS the repair, at 72-168 s rather than 15 min. The FOURTH timer is not: the ~45 min public-profile anti-entropy sweep keeps its armed timer, gates at FIRE time (_appIsForegrounded) and RE-ARMS itself on the backgrounded branch, so it is a periodic CPU-only wake between bursts that contacts no relay. The complementary arm: every OTHER pause STOPS the engine rather than pausing it (MapShell.shouldStopLiveSyncOnPause = !(isIOS && backgroundSharingEnabled)), including iOS with background sharing off, and the Android foreground service shuts its own publish pool at the end of every cycle.",
+      "status": "enforced",
+      "residual": "'enforced' is the BEHAVIOUR; parts of the pause ORDER, most of the Dart teardown, and one whole exception rest on less. (1) The five-step pause order is only PARTLY pinned. The Rule-13 link — the in-flight publish gauge before the radio cut — is pinned twice: rule13_a_burst_never_pauses_with_a_pending_publish_outstanding asserts the source order in BOTH pause_subscriptions and resume_burst's failure exit (and that neither cuts through a bare client.disconnect()), and pause_never_disconnects_while_an_auto_commit_awaits_its_ok proves it over a relay withholding a real OK. The drain-before-clear link has two oracles (pause_subscriptions_drains_the_intake_before_it_clears_the_router, a_pause_marker_drains_every_queued_event_before_the_router_is_cleared). Pinned by NOTHING: the placement of the unsubscribe sweep relative to the Pause marker, and of repair.clear() at the end — only their end states are asserted. check_engine_client_options.sh check 8 pins PRESENCE and deliberately not order (docs/POWER_EFFICIENCY_PLAN.md §5.4 says so in as many words); it is additionally fail-open on a terminate_all_relays() call wrapped in `if false`, on RELAY_TERMINATE_ROUNDS = 0, on an aliased shutdown(), and on a bare client.subscribe(...) in the burst-open path, and it opens neither config.rs, cursor.rs nor any Dart file. (2) check_ios_background_publish.sh, cited above, gates only who may ENTER the burst plane (BackgroundBurstCoordinator constructed and installed as the scheduler's tick sink in exactly map_shell.dart; openBackgroundBurst named in exactly the coordinator and the engine API and impl; the native wake handlers invoking only runCatchup), the mid-pause consent-withdrawal release, and presence-only logging. It names none of closeIdle, shouldStopLiveSyncOnPause, pausedRelayOwner or kLocationPublishOverlapGuard, and stays GREEN under mutation when shouldStopLiveSyncOnPause is inverted, when closeIdle's body is emptied or both of its call sites deleted, when the three _handedBack early-returns are deleted, and — verified by mutating the tree — when _closeBurst drops both pauseSubscriptions and shutdownPublishPool. Every Dart clause of this statement therefore rests on the background_burst_coordinator_test.dart cases cited here, not on that guard. (3) The cold-launch exception has NO test anywhere in the repository: the race is MapShell's un-awaited _startLiveSync against _onPaused, MapShell is never mounted host-side (it needs the Rust bridge — every map_shell_*_test.dart is a predicate, collaborator or source-scan test), and the only host-visible seam, LiveSyncResubscriber, knows nothing of the app lifecycle. Nothing fails if that window widens.",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [],
+      "non_arb_claims": [],
+      "doc_anchors": [
+        "haven-core/SECURITY.md#ios-background-sharing-presence-only-at-publish-instants-p4",
+        "haven-core/SECURITY.md#relay-observable-metadata-and-correlation-accepted"
+      ],
+      "event_kinds": [
+        {
+          "kind": 445,
+          "token": "out_of_tree:transport-nostr-peeler",
+          "note": "The group plane the burst re-anchors at its persisted cursor: the #h REQ closed at every pause and re-issued at EVERY burst open, whether or not this circle is the one whose tick drove the burst — and since PUB-COALESCE the pair COINCIDES with this device's kind-445 for that circle on essentially every burst. What is left over is not a fraction but the four classes the statement enumerates, plus a burst length that scales with the circle count."
+        },
+        {
+          "kind": 1059,
+          "token": "out_of_tree:transport-nostr-peeler",
+          "note": "The inbox plane, folded onto every INBOX_BURSTS_PER_REQ-th background burst at the 49 h re-subscribe lookback, never the 7-day cold-start one."
+        }
+      ],
+      "symbols": [
+        {
+          "file": "haven-core/src/relay/live_sync/session.rs",
+          "symbol": "pause_subscriptions"
+        },
+        {
+          "file": "haven-core/src/relay/live_sync/session.rs",
+          "symbol": "open_background_burst"
+        },
+        {
+          "file": "haven-core/src/relay/live_sync/session.rs",
+          "symbol": "terminate_all_relays"
+        },
+        {
+          "file": "haven-core/src/relay/live_sync/config.rs",
+          "symbol": "INBOX_BURSTS_PER_REQ"
+        },
+        {
+          "file": "haven-core/src/relay/live_sync/config.rs",
+          "symbol": "BURST_BACKLOG_WAIT_SECS"
+        },
+        {
+          "file": "haven-core/src/relay/cursor.rs",
+          "symbol": "INBOX_RESUBSCRIBE_LOOKBACK_SECS"
+        },
+        {
+          "file": "haven/lib/src/services/background_burst_coordinator.dart",
+          "symbol": "closeIdle"
+        },
+        {
+          "file": "haven/lib/src/pages/map_shell.dart",
+          "symbol": "pausedRelayOwner"
+        },
+        {
+          "file": "haven/lib/src/pages/map_shell.dart",
+          "symbol": "shouldStopLiveSyncOnPause"
+        },
+        {
+          "file": "haven-core/src/relay/cursor.rs",
+          "symbol": "GROUP_RESUBSCRIBE_BUFFER_SECS"
+        },
+        {
+          "file": "haven-core/src/relay/live_sync/config.rs",
+          "symbol": "COMMIT_SETTLE_WINDOW_SECS"
+        },
+        {
+          "file": "haven-core/src/relay/live_sync/config.rs",
+          "symbol": "BURST_SETTLE_CAP_SECS"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/tests/live_sync_burst_e2e.rs",
+          "name": "pause_subscriptions_leaves_no_subscription_in_the_pool"
+        },
+        {
+          "file": "haven-core/tests/live_sync_burst_e2e.rs",
+          "name": "background_burst_holds_no_standing_req"
+        },
+        {
+          "file": "haven-core/tests/live_sync_burst_e2e.rs",
+          "name": "burst_ingests_a_peer_commit_before_the_location_is_encrypted"
+        },
+        {
+          "file": "haven-core/src/relay/live_sync/session.rs",
+          "name": "a_burst_reissues_the_inbox_req_every_kth_burst"
+        },
+        {
+          "file": "haven-core/src/relay/live_sync/session.rs",
+          "name": "a_socket_re_opened_while_the_radio_is_off_is_cut_and_counted"
+        },
+        {
+          "file": "haven-core/src/relay/live_sync/session.rs",
+          "name": "settle_before_pause_never_caps_the_in_flight_publish_wait"
+        },
+        {
+          "file": "haven/test/services/background_burst_coordinator_test.dart",
+          "name": "the publish socket is shut down after every burst"
+        },
+        {
+          "file": "haven/test/services/background_burst_coordinator_test.dart",
+          "name": "the engine is paused after every burst"
+        },
+        {
+          "file": "haven/test/services/background_burst_coordinator_test.dart",
+          "name": "it settles, pauses and shuts the pool without opening or publishing"
+        },
+        {
+          "file": "haven/test/services/background_burst_coordinator_test.dart",
+          "name": "it stops where the foreground takes the engine back"
+        },
+        {
+          "file": "haven/test/services/background_burst_coordinator_test.dart",
+          "name": "it never runs beside a burst"
+        },
+        {
+          "file": "haven/test/services/background_burst_coordinator_test.dart",
+          "name": "runningBurst is non-null while it runs"
+        },
+        {
+          "file": "haven/test/services/background_burst_coordinator_test.dart",
+          "name": "the pool shutdown waits, unbounded, for a ladder in flight"
+        },
+        {
+          "file": "haven/test/services/background_burst_coordinator_test.dart",
+          "name": "a handback followed by another pause closes the pool"
+        },
+        {
+          "file": "haven/test/pages/map_shell_test.dart",
+          "name": "stops on iOS with background sharing off"
+        },
+        {
+          "file": "haven/test/services/background_location_task_delivery_cycle_test.dart",
+          "name": "the publish pool is shut down at the end of every cycle"
+        },
+        {
+          "file": "haven-core/src/relay/live_sync/session.rs",
+          "name": "a_partial_unsubscribe_all_is_swept_before_disconnect"
+        },
+        {
+          "file": "haven-core/src/relay/live_sync/session.rs",
+          "name": "pause_subscriptions_blocks_on_the_in_flight_publish_gauge"
+        },
+        {
+          "file": "haven-core/src/relay/live_sync/session.rs",
+          "name": "settle_before_pause_with_caps_follow_on_activity_at_eighteen_seconds"
+        },
+        {
+          "file": "haven-core/src/relay/live_sync/session.rs",
+          "name": "wait_backlog_settled_times_out_without_a_relay_eose_and_reports_it"
+        },
+        {
+          "file": "haven-core/src/relay/live_sync/config.rs",
+          "name": "every_burst_carries_the_inbox_req_at_the_shipped_period"
+        },
+        {
+          "file": "haven-core/tests/security_rule_gates.rs",
+          "name": "rule13_a_burst_never_pauses_with_a_pending_publish_outstanding"
+        },
+        {
+          "file": "haven-core/tests/live_sync_burst_e2e.rs",
+          "name": "pause_never_disconnects_while_an_auto_commit_awaits_its_ok"
+        },
+        {
+          "file": "haven-core/src/relay/live_sync/supervisor.rs",
+          "name": "a_pause_marker_drains_every_queued_event_before_the_router_is_cleared"
+        },
+        {
+          "file": "haven-core/src/relay/live_sync/session.rs",
+          "name": "pause_subscriptions_drains_the_intake_before_it_clears_the_router"
+        }
+      ],
+      "guards": [
+        "scripts/ci/check_engine_client_options.sh",
+        "scripts/ci/check_ios_background_publish.sh"
+      ]
+    },
+    {
       "id": "INV-R-CROSS-PLANE-CORRELATION",
       "title": "One standing connection lets a relay link identity to circle membership",
-      "statement": "Since live sync became standing, a single persistent socket per relay carries both the inbox filter naming the user's own pubkey (gift-wrap #p) and every subscribed circle's routing-tag filter (#h), so a relay serving both planes can correlate identity to circle membership by connection continuity — the ephemeral per-message 445 author keys do not prevent this, and on a new install the inbox and per-circle relay sets seed from the same defaults so the overlap is the default configuration.",
+      "statement": "While the app is FOREGROUNDED, a single persistent socket per relay carries both the inbox filter naming the user's own pubkey (gift-wrap #p) and every subscribed circle's routing-tag filter (#h), so a relay serving both planes can correlate identity to circle membership by connection continuity — the ephemeral per-message 445 author keys do not prevent this, and on a new install the inbox and per-circle relay sets seed from the same defaults so the overlap is the default configuration. For CIRCLE relays the standing form is now foreground-only: backgrounded on iOS with sharing on the two filters ride ONE BOUNDED BURST PER PUBLISH TICK and the join is per-burst rather than continuous, and every other pause stops the engine outright. Per-burst is not per-publish, but since PUB-COALESCE it is much closer to it: a burst re-anchors EVERY circle's #h REQ, connects the whole relay union, AND publishes every publish-eligible circle, so for an eligible circle the join now coincides with that circle's own kind-445 on essentially every burst. It stays strictly wider in three cases — a burst whose publish window refuses publishes nothing at all; a subscribed circle that is not publish-eligible (isLegacyOrphaned, or engine-flagged Unrecoverable) is re-anchored on every burst and never publishes; a deferred or failed send, and the tail of a roster past kMaxCirclesPerBurst, re-anchors without a kind-445 — and the join is no longer instantaneous: the connection is held across the coalesced publish pass, whose length grows with the number of eligible circles and is therefore itself a single-relay estimator of that count. That is a narrowing, NOT a strict one: an inbox-ONLY relay — one holding the user's kind-10050 inbox but none of their circles, an independent set — carries no kind-445 to correlate with, and where it used to see one continuous socket it now sees a REQ/CLOSE pair every 72-168 s (the 120 s nominal cadence, jittered ±40 %), which is itself the inference that this pubkey is background-sharing right now. Raising INBOX_BURSTS_PER_REQ removes that cadence at the cost of background invitation latency (OD4-b, accepted, not yet raised); at the shipped value the inference is disclosed rather than mitigated. Both planes still open from the same address in the same seconds, so the two-socket join by source address is unchanged.",
       "status": "accepted_deviation",
       "accepted_deviation_id": "RC1",
       "assertion_arb_keys": [],
       "disclosure_arb_keys": [],
       "non_arb_claims": [],
       "doc_anchors": [
-        "haven-core/SECURITY.md#relay-observable-metadata-and-correlation-accepted"
+        "haven-core/SECURITY.md#relay-observable-metadata-and-correlation-accepted",
+        "haven-core/SECURITY.md#ios-background-sharing-presence-only-at-publish-instants-p4"
       ],
       "event_kinds": [
         {
           "kind": 1059,
           "token": "out_of_tree:transport-nostr-peeler",
-          "note": "The inbox-plane filter side of the correlation: a #p filter naming the reader's own pubkey."
+          "note": "The inbox-plane filter side of the correlation: a #p filter naming the reader's own pubkey. Standing while foregrounded; backgrounded on iOS it rides every INBOX_BURSTS_PER_REQ-th publish burst, which is the residual cadence an inbox-only relay reads."
         },
         {
           "kind": 445,
           "token": "out_of_tree:transport-nostr-peeler",
-          "note": "The group-plane filter side: an #h filter naming each subscribed circle's routing tag."
+          "note": "The group-plane filter side: an #h filter naming each subscribed circle's routing tag. Standing while on screen; on iOS-bg one bounded burst per publish tick — every burst re-anchors every circle AND publishes every publish-eligible one, so the join coincides with this circle's own kind-445 on essentially every burst, and the burst's connection is held across the whole staggered pass."
         }
       ],
       "symbols": [
@@ -1700,33 +2410,80 @@
     },
     {
       "id": "INV-R-PER-CIRCLE-PUBLISH-DECORRELATED",
-      "title": "Multiple circles publish on independent schedules",
-      "statement": "Each circle's publish cycle is seeded from a staggered per-circle offset and paced by the running-gap slot rule, so a user in several circles does not emit one synchronous burst that ties those circles together for an observer watching more than one relay; collapsing the per-circle schedules back onto one shared timer falsifies this.",
-      "status": "enforced",
+      "title": "One burst publishes every eligible circle; only the CSPRNG stagger keeps their created_at stamps apart, and how much it buys shrinks with the roster",
+      "statement": "Circles publish in ONE jittered burst per interval — up to kMaxCirclesPerBurst (11) of them, the rest deferred to the next tick, a branch kMaxCirclesPerAccount (10) keeps out of production reach — with consecutive encrypts at least kPublishStaggerMinGap (2 s) apart, so no two circles share a kind-445 created_at. The per-gap CEILING is kPublishStaggerMaxGap (9 s) only for small bursts: PublishStagger.maxGapFor prices each gap at the burst's own size, so it shrinks to 3333 ms at kMaxCirclesPerAccount (10) — the largest burst a bounded roster produces — and to a flat 3 s one circle further on, at the cap. The per-circle schedules this invariant used to enforce are gone, and so is the claim they carried: every relay carrying ANY of your circles now sees the same burst rhythm, so relays each holding only ONE of your circles can match the timing and tell those circles belong to the same phone. Two costs the record did not previously carry, both stated here rather than in the deviation alone. FIRST, the surviving archive claim is NARROWER than 'the stagger is the archive-adversary defence': after coalescing the archive reader gets the link anyway, from the shared inter-burst interval sequence. What the stagger still buys is ROSTER-SCOPED, because the observer reads no milliseconds — only floor(created_at) — so its alphabet is the whole-second delta, and maxGapFor thins that alphabet monotonically as the burst grows: {2..9} (eight values) at n <= 4, {2..6} at n = 6, {2..5} at n = 8, and {2,3,4} at n = kMaxCirclesPerAccount (10), the largest burst a bounded roster produces; {2,3} is maxGapFor's answer one circle further on and no observer reaches it while the bound holds. Both production call sites price the gap at the real burst size — the foreground tick through sampleGaps(count), the background pass through sampleGap(totalPublishes: total) where total is _encrypted.length + pending.length. COALESCING CAUSED THE THINNING: pre-P5 every gap was priced at the default totalPublishes = 2, so the alphabet was always eight. At small rosters the downgrade in KIND is real — a byte-identical created_at is a zero-cost equality join over a whole-network index (created_at_A == created_at_B, decisive on a single burst), while eight admissible offsets force a windowed correlation that must first hypothesise WHICH two circles share a device and then test that against a sequence of offsets. AT THE ROSTER BOUND IT BARELY IS: a three-element alphabet is three shifted equality joins over that same whole-network index, still un-targeted mass linkage, so what survives at ten circles is a constant factor rather than a change in kind. SECOND, coalescing makes the NUMBER of circles you are in a SINGLE-RELAY observable. Backgrounded on iOS the burst's engine socket connects the WHOLE relay union — every circle's relays AND the inbox relays (relay_union) — at the open and disconnects at the pause after the staggered pass, so the connect-to-disconnect span grows by one stagger gap per additional eligible circle (mean 5.5 s while the per-gap ceiling is the full 9 s, narrowing toward 2.5 s as the burst approaches the cap, the pass bounded by kPublishStaggerMaxSpread = 30 s) and is measurable server-side by ANY relay in that union: one carrying a single circle of yours, or an inbox relay carrying none of them. Sharply: the old scheme leaked the circle count only as a RATE, to shared relays that already read it off the multiplexed #h filter; the new one leaks it as a DURATION, to relays that previously could not know it at all. The account bound caps that estimator at ten, one circle under where the per-gap ceiling saturates. Restoring per-circle schedules is not the fix and is not proposed (it never decorrelated anything at a shared relay, and cost one radio wake per circle per interval); what falsifies THIS entry is a burst that publishes two circles inside one whole second, a stagger drawn from anything but a CSPRNG, or a per-gap floor at or below one second.",
+      "status": "accepted_deviation",
+      "accepted_deviation_id": "PUB-COALESCE",
       "assertion_arb_keys": [],
       "disclosure_arb_keys": [],
       "non_arb_claims": [],
+      "doc_anchors": [
+        "haven-core/SECURITY.md#coalesced-multi-circle-publish-bursts-pub-coalesce",
+        "haven-core/SECURITY.md#publish-cadence-jittered-scheduler"
+      ],
       "symbols": [
         {
           "file": "haven/lib/src/constants/location.dart",
           "symbol": "kLocationPublishOverlapGuard"
+        },
+        {
+          "file": "haven/lib/src/services/publish_stagger.dart",
+          "symbol": "kMaxCirclesPerBurst"
+        },
+        {
+          "file": "haven/lib/src/services/publish_stagger.dart",
+          "symbol": "kPublishStaggerMaxSpread"
+        },
+        {
+          "file": "haven/lib/src/providers/location_publish_scheduler_provider.dart",
+          "symbol": "filterPublishEligibleCircles"
         }
       ],
       "tests": [
         {
           "file": "haven/test/lints/publish_decorrelation_wiring_test.dart",
-          "name": "seeds per-circle schedules through the STAGGERED seed"
-        },
-        {
-          "file": "haven/test/lints/publish_decorrelation_wiring_test.dart",
-          "name": "does not seed every circle at the cycle timestamp"
-        },
-        {
-          "file": "haven/test/lints/publish_decorrelation_wiring_test.dart",
           "name": "paces each publish through the running-gap slot rule"
+        },
+        {
+          "file": "haven/test/lints/publish_decorrelation_wiring_test.dart",
+          "name": "a sampled burst never overruns its predicted spread, for every burst size the app admits"
+        },
+        {
+          "file": "haven/test/services/publish_stagger_test.dart",
+          "name": "expected whole-second delta alphabet, swept over every burst size the app admits"
+        },
+        {
+          "file": "haven/test/services/publish_stagger_test.dart",
+          "name": "the per-gap ceiling is the priced table, for every burst size"
+        },
+        {
+          "file": "haven/test/services/publish_stagger_test.dart",
+          "name": "whole-second created_at deltas take all EIGHT distinct values over 1000 sampled gaps, at the DEFAULT burst size of two"
+        },
+        {
+          "file": "haven/test/services/publish_stagger_test.dart",
+          "name": "kMaxCirclesPerBurst is DERIVED from the spread budget and the per-gap floor, not chosen"
+        },
+        {
+          "file": "haven/test/providers/location_publish_scheduler_provider_test.dart",
+          "name": "EVERY publish is spaced, the BURST BOUNDARY included"
+        },
+        {
+          "file": "haven/test/providers/location_publish_scheduler_provider_test.dart",
+          "name": "a SLOW first fix cannot subtract itself from the next circle's gap — the burst takes ONE fix"
+        },
+        {
+          "file": "haven/test/providers/location_publish_scheduler_provider_test.dart",
+          "name": "a roster past kMaxCirclesPerBurst rotates: every circle publishes, and none is deferred twice in a row"
+        },
+        {
+          "file": "haven/test/services/per_circle_due_tracker_test.dart",
+          "name": "a burst re-arms every circle it published onto ONE due"
         }
       ],
-      "guards": []
+      "guards": [
+        "scripts/ci/check_delta_alphabet_parity.sh"
+      ]
     },
     {
       "id": "INV-R-IP-VISIBLE-TO-EVERY-SERVER",
@@ -1735,14 +2492,10 @@
       "status": "accepted_deviation",
       "accepted_deviation_id": "P6",
       "assertion_arb_keys": [],
-      "disclosure_arb_keys": [],
-      "non_arb_claims": [
-        {
-          "carrier": "dart_source",
-          "id": "LocationDisclosureStrings.how",
-          "kind": "disclosure"
-        }
+      "disclosure_arb_keys": [
+        "locationDisclosureHow"
       ],
+      "non_arb_claims": [],
       "doc_anchors": [
         "haven-core/SECURITY.md#ip-level-linkage-is-out-of-scope-p6"
       ],
@@ -1827,14 +2580,10 @@
       "statement": "The tile prefetcher warms rings around the coordinates of visible circle members, not only around the viewport, so the map provider receives tile coordinates derived from where the user's circle is — not merely where the user is looking; it never receives a name, key or member list. Making the prefetch viewport-only would narrow the leak; removing the disclosure while keeping the prefetch would make the copy false.",
       "status": "enforced",
       "assertion_arb_keys": [],
-      "disclosure_arb_keys": [],
-      "non_arb_claims": [
-        {
-          "carrier": "dart_source",
-          "id": "LocationDisclosureStrings.how",
-          "kind": "disclosure"
-        }
+      "disclosure_arb_keys": [
+        "locationDisclosureHow"
       ],
+      "non_arb_claims": [],
       "symbols": [
         {
           "file": "haven/lib/src/services/tile_prefetch_service.dart",
@@ -1864,16 +2613,12 @@
       "title": "The tile provider's policy is reported, never asserted as Haven's own fact",
       "statement": "The consent artefact states the Stadia Maps policy in attributed form (\"Stadia Maps says … — its own policy, which Haven cannot enforce\") and never as an unqualified Haven guarantee; collapsing it into \"Stadia Maps does not sell your data\", or shortening it to a \"no logging\" or \"anonymous\" claim, states as Haven's fact something Haven has no standing to know and nothing in this tree re-checks.",
       "status": "enforced",
-      "attributed_arb_keys": [],
+      "attributed_arb_keys": [
+        "locationDisclosureHow"
+      ],
       "assertion_arb_keys": [],
       "disclosure_arb_keys": [],
-      "non_arb_claims": [
-        {
-          "carrier": "dart_source",
-          "id": "LocationDisclosureStrings.how",
-          "kind": "attributed"
-        }
-      ],
+      "non_arb_claims": [],
       "attribution": {
         "source": "Stadia Maps privacy policy",
         "url": "https://stadiamaps.com/privacy-policy/",
@@ -3427,9 +4172,16 @@
     }
   ],
   "ratchet_override": {
-    "reason": "Owner directive 2026-08-29: the Settings → Privacy page, every privacy* ARB key and the About-page VPN link were removed. INV-O-VPN-IS-A-THIRD-PARTY-MITIGATION existed to keep the VPN recommendation attributed; the recommendation and its kMullvadUrl symbol no longer exist, so there is nothing left for it to hold. Delete this override in the next change (it is stale once this lands on main).",
+    "reason": "OD-P3-g: the prominent-disclosure consent dialog's copy moved from hard-coded English `LocationDisclosureStrings` constants into the ARB (`locationDisclosure*`), so the twelve non-English locales are no longer asked to consent in a language they may not read. Nothing is de-listed: every one of these disclosures is re-listed on the SAME invariant as an ARB key, which is strictly stronger — it now also falls under rule 10, the ratchet's key-deletion rule and the l10n parity gate, and rule 12 enumerates the dialog's render site in its place. The ratchet enumerates it anyway because a non-ARB disclosure id that disappears is never exempt (by design: a non-ARB deletion is not the 13-locale diff an ARB deletion is), and it cannot see that the same sentence reappeared under a new carrier. The assertion-kind rows in the same move (backgroundIos, manage, how) are not enumerated at all. Delete this override in the FIRST commit after this change merges: it is compared against the PR base, so it goes stale — and fails the gate — on the next PR. SECOND, UNRELATED DOWNGRADE IN THE SAME UNMERGED WORKING TREE (owner decision OD3, accepted 2026-08-29; both blocks stay until each has merged and is deleted in the FIRST commit after): INV-R-PER-CIRCLE-PUBLISH-DECORRELATED is downgraded to accepted deviation PUB-COALESCE. Per-circle schedules never decorrelated a device's circles at a shared relay — the multiplexed #h REQ names the whole set on one socket and every publish leaves over one publish socket — while they cost one radio wake per circle per interval on every plane. One coalesced burst per interval replaces them; the archive-timestamp defence is kept through the CSPRNG stagger, whose constants did not move - but it is ROSTER-SCOPED rather than a flat 2-9 s, because maxGapFor prices every gap at the burst's OWN size (clamp(30000 / (n - 1), 3000, 9000) ms). The observable whole-second delta alphabet is therefore {2..9} up to four circles, {2..8} at five, {2..6} at six, {2..5} at seven and eight, and {2,3,4} at nine and ten — ten being the largest burst a bounded roster can produce (kMaxCirclesPerAccount), so the {2,3} maxGapFor answers at eleven is unreachable. THREE costs are accepted and disclosed on the deviation: circles on disjoint relay sets now share one inter-burst rhythm, the burst's connection duration makes the circle count a single-relay observable, and the signed created_at deltas carry an estimate of that count into every archive of the events. This override covers ONLY that status change: the two upgrades that ride with it (INV-R-BACKGROUND-PRESENCE-ONLY-AT-PUBLISH, INV-R-CROSS-PLANE-CORRELATION) are strengthenings, and the residual added to INV-W-445-EXPIRATION-WINDOW is an added disclosure — it records that the burst spread spends one of the two kTtlNetworkBufferSeconds, so that entry now runs on 30 s of propagation and clock-skew margin where the per-circle predecessor had 60 s, at every roster from two circles up. Neither is a weakening enumerate_weakenings reads and neither is named in items; the margin halving is stated HERE, in the block for the change that caused it, so it lands in a reviewed diff rather than only in prose. INV-W-445-EXPIRATION-WINDOW IS NOT DOWNGRADED, and an earlier revision of this same unmerged tree said otherwise: it moved that entry to 'ratcheted' for the past-eleven-circles coverage hole, and named it here. The owner bounded the account roster at ten on 2026-09-09 (kMaxCirclesPerAccount, one circle under the burst cap, refused at circle creation and at invitation accept), which puts the hole out of production reach, so the entry stays 'enforced' at the base ref's rank and the item was deleted with the downgrade it allowed. An upgrade needs no override; what the roster bound does NOT close is the margin halving, stated in the PUB-COALESCE block above.",
     "items": [
-      "INV-O-VPN-IS-A-THIRD-PARTY-MITIGATION.deleted"
+      "INV-L-ANDROID-REBOOT-RESURRECTS-PUBLISHING.disclosure:LocationDisclosureStrings.backgroundAndroid",
+      "INV-L-ANDROID-SWIPE-OUT-SURVIVES.disclosure:LocationDisclosureStrings.backgroundAndroid",
+      "INV-L-BACKGROUND-DISCLOSURE-GATE.disclosure:LocationDisclosureStrings.backgroundAndroid",
+      "INV-L-FOREGROUND-SHARING-UNPAUSABLE.disclosure:LocationDisclosureStrings.sharing",
+      "INV-L-PAYLOAD-FIELDS-MINIMAL.disclosure:LocationDisclosureStrings.why",
+      "INV-R-IP-VISIBLE-TO-EVERY-SERVER.disclosure:LocationDisclosureStrings.how",
+      "INV-R-PER-CIRCLE-PUBLISH-DECORRELATED.status",
+      "INV-R-TILE-COORDS-CARRY-MEMBER-POSITIONS.disclosure:LocationDisclosureStrings.how"
     ]
   }
 }

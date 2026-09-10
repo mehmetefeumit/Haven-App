@@ -15,7 +15,9 @@ library;
 /// Maximum total size of the encrypted tile cache in bytes (48 MB).
 ///
 /// Tiles totalling more than this are evicted oldest-accessed-first by
-/// `tileCacheEvict` on each cold start (M-D adds a warm-resume path).
+/// `tileCacheEvict` on each cold start (M-D adds a warm-resume path, which
+/// runs when the shell's resume-extras window opens rather than on every
+/// foreground return — see `kResumeExtrasMinInterval`).
 const int kTileCacheMaxBytes = 48 * 1024 * 1024;
 
 /// Absolute retention window (7 days).

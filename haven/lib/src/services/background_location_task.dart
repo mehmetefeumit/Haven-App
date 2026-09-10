@@ -1,17 +1,40 @@
 /// Background location sharing task handler.
 ///
 /// Runs in a separate Dart isolate (Android foreground service) and
-/// periodically publishes the user's encrypted location to all accepted
-/// circles. Uses the same Rust FFI pipeline as the foreground publisher
-/// but with its own service instances to avoid cross-isolate state sharing.
+/// publishes the user's encrypted location to all accepted circles. Uses the
+/// same Rust FFI pipeline as the foreground publisher but with its own service
+/// instances to avoid cross-isolate state sharing.
 ///
-/// ## Jitter strategy
+/// ## Cadence: one platform request, aimed
 ///
-/// The `FlutterForegroundTask` repeat interval is set to
-/// [kBackgroundRepeatInterval] (72 s, the minimum jittered interval).
-/// Each `onRepeatEvent` call samples a fresh jittered target time and skips
-/// early ticks, achieving the full `[72 s, 168 s]` publish cadence
-/// without requiring dynamic interval changes.
+/// The isolate holds exactly ONE `LocationManager` registration and publishes
+/// on its deliveries. Its interval is the time to the earliest per-circle
+/// due-time minus [kBackgroundFixLeadTime], floored at
+/// [kMinFixRequestInterval] — so the platform hibernates the GNSS engine
+/// between fixes (`docs/POWER_EFFICIENCY_PLAN.md` §2.2) instead of navigating
+/// continuously, and a publish costs about one acquisition rather than a
+/// permanent receiver plus a 30 s HIGH_ACCURACY one-shot per wake.
+///
+/// Three inputs, one behaviour: a delivery, a foreground-handoff signal
+/// ([kForegroundPausedSignal] / [kForegroundResumedSignal]) and the plugin's
+/// [kBackgroundRepeatInterval] repeat all reach `_publishCycle` and nothing
+/// else. That is what keeps every registration below the consent, ownership
+/// and disclosure gates — `_ensureRegistration` is reachable from the cycle
+/// alone.
+/// The repeat is a WATCHDOG, not the cadence: it acts only when no delivery
+/// can arrive (nothing registered, the registration went silent past
+/// [kStreamPositionMaxAge], or it errored), which indoors on a GNSS-only
+/// device is the only thing that publishes at all — the platform's own retry
+/// alarms produce no app callback. That is why the plugin's permanent wake
+/// lock is kept for now; [PublishWakeLock] is Haven's own, bounded hold over
+/// fix→encrypt→publish→ack→fetch.
+///
+/// States, from three fields rather than an enum that could disagree with
+/// them: **Idle** (`_fixSub == null`, the foreground owns publishing or the
+/// request was dropped), **Armed** (`_registeredTarget` names what the live
+/// request aims at) and **Cycling** (`_inFlightPublish != null`). A delivery
+/// during a cycle sets `_deliveryPending` and is served by one follow-up
+/// cycle; a watchdog tick during one is a no-op.
 ///
 /// ## MLS safety
 ///
@@ -33,6 +56,8 @@ import 'package:haven/src/providers/location_publish_scheduler_provider.dart'
     show filterPublishEligibleCircles;
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/rust/frb_generated.dart';
+import 'package:haven/src/services/background_deferred_send.dart';
+import 'package:haven/src/services/background_fix_request.dart';
 import 'package:haven/src/services/background_identity_service.dart';
 import 'package:haven/src/services/background_location_manager.dart';
 import 'package:haven/src/services/circle_health_service.dart';
@@ -40,6 +65,7 @@ import 'package:haven/src/services/circle_service.dart' show Circle;
 import 'package:haven/src/services/foreground_liveness_probe.dart';
 import 'package:haven/src/services/fresh_secret.dart';
 import 'package:haven/src/services/geolocator_location_service.dart';
+import 'package:haven/src/services/location_service.dart' show Position;
 import 'package:haven/src/services/location_sharing_service.dart';
 import 'package:haven/src/services/mls_session_handover.dart'
     show kBackgroundTeardownDrainBudget;
@@ -48,6 +74,7 @@ import 'package:haven/src/services/nostr_relay_service.dart';
 import 'package:haven/src/services/pending_mls_wipe_service.dart';
 import 'package:haven/src/services/per_circle_due_tracker.dart';
 import 'package:haven/src/services/publish_stagger.dart';
+import 'package:haven/src/services/publish_wake_lock.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// Top-level callback required by [FlutterForegroundTask].
@@ -100,7 +127,7 @@ bool backgroundPublishDisclosureAccepted({
 ///
 /// Lifecycle:
 /// 1. [onStart] — initializes Rust FFI, services, and identity
-/// 2. [onRepeatEvent] — fires every ~72 s; skips if jitter target not reached
+/// 2. [onRepeatEvent] — the ~72 s watchdog; acts only when no fix can arrive
 /// 3. [onDestroy] — tears down relay connections
 /// Why a session reclaim was or was not authorised.
 ///
@@ -214,17 +241,18 @@ class BackgroundLocationTaskHandler extends TaskHandler {
   /// overwhelming majority of every cycle.
   Future<void>? _inFlightCommitCritical;
 
-  /// Independent per-circle publish scheduling (privacy: decorrelation). Each
-  /// circle is registered on its own CSPRNG-staggered due-time when the
-  /// background first owns publishing, then re-armed on its OWN jittered
-  /// cadence, so a relay can't correlate a device's circles by co-timing.
-  /// Cleared whenever the foreground owns publishing, which is why the SEED
-  /// has to be staggered: it re-runs on every foreground→background handoff.
+  /// Publish-due bookkeeping for the burst (battery: one wake per interval).
+  /// Every eligible circle is registered on the SAME due-time when the
+  /// background first owns publishing and re-armed on the burst's ONE jittered
+  /// sample, so a cycle serves the whole roster instead of paying a radio wake
+  /// per circle. Cleared whenever the foreground owns publishing, so the seed
+  /// re-runs on every foreground→background handoff.
   final PerCircleDueTracker _dueTracker = PerCircleDueTracker();
 
-  /// CSPRNG gaps that keep two circles' kind-445 events out of the same
-  /// wall-clock second (the engine stamps the outer `created_at` from the
-  /// inner event's whole-second clock — see [PublishStagger]).
+  /// CSPRNG gaps and burst order that keep two circles' kind-445 events out of
+  /// the same wall-clock second (the engine stamps the outer `created_at` from
+  /// the inner event's whole-second clock — see [PublishStagger]). This is the
+  /// whole of the cross-circle timing defence now that the SCHEDULE is shared.
   ///
   /// The isolate builds its own rather than reading a provider: there is no
   /// Riverpod container here. Both planes share the same bounds via the
@@ -243,10 +271,75 @@ class BackgroundLocationTaskHandler extends TaskHandler {
 
   bool get _shuttingDown => _shutdownSignal.isCompleted;
 
+  /// The isolate's single platform location registration, or `null` (Idle).
+  ///
+  /// Cancelled, never closed: cancelling releases the plugin registration
+  /// while leaving the service's cached fix intact, so a handoff back does not
+  /// throw away a coordinate that is still fresh. Closing would read as an
+  /// access loss and drop it.
+  ///
+  /// Released by [_cancelRegistration] — from `onDestroy`, from every re-aim,
+  /// and from EVERY exit of `_publishCycle` above the registration, because a
+  /// cycle that cannot publish would otherwise keep the receiver duty-cycling
+  /// until the next one reached the same gate (check (5b) of
+  /// `check_android_location_power.sh`). None of those is recognised by the
+  /// `cancel_subscriptions` lint, which only looks for a `dispose()`.
+  // ignore: cancel_subscriptions
+  StreamSubscription<Position>? _fixSub;
+
+  /// What the live registration aims at: the instant the next fix is wanted
+  /// (the earliest due-time minus [kBackgroundFixLeadTime]).
+  DateTime? _registeredTarget;
+
+  /// Fix time of the last delivery this isolate acted on.
+  ///
+  /// Every re-registration is answered on S+ with the fix just consumed
+  /// (historical delivery, `LocationProviderManager:868-898`). Without this
+  /// the replay would drive another cycle, which would re-register, which
+  /// would replay: the dedupe is one half of the loop breaker,
+  /// [registrationIsAligned] is the other.
+  DateTime? _lastConsumedFixTs;
+
+  /// When the last NEW fix arrived, so the watchdog can tell a silent
+  /// registration from a delivering one. A replay is not a delivery.
+  DateTime? _lastDeliveryAt;
+
+  /// A fix arrived while a cycle was running, and no cycle has consumed it.
+  ///
+  /// Set only from [_onFixDelivered] and consumed only in
+  /// [_runCycleWithIdleTracking], so it cannot leak: the cycle it interrupts
+  /// serves it with one follow-up, and the watchdog is the backstop for a
+  /// delivery that lands during THAT.
+  bool _deliveryPending = false;
+
+  /// When the live registration was armed.
+  ///
+  /// A registration that has not yet had time to deliver is not a dead one:
+  /// its interval alone can be [kLocationPublishMaxInterval] minus the lead,
+  /// so silence is measured from the later of this and [_lastDeliveryAt].
+  DateTime? _registeredAt;
+
+  /// The live registration is not known to be working — it reported an error,
+  /// or it has produced nothing for longer than a fix may take. Either way it
+  /// is re-issued rather than waited on; cleared by the registration that
+  /// replaces it.
+  ///
+  /// Recovery for V-P2-2: the plugin binds its Android service asynchronously
+  /// and `onListen` returns silently until it is bound, so a registration can
+  /// be live, aligned and delivering nothing at all.
+  bool _registrationSuspect = false;
+
+  /// Completed by the first delivery while a cycle is waiting for one.
+  Completer<void>? _firstDeliveryWaiter;
+
+  /// The scoped `Haven:publish` hold. Stateless client over a method channel
+  /// that exists only inside the foreground-service engine.
+  final PublishWakeLock _wakeLock = const PublishWakeLock();
+
   /// Last time the background ran the all-circles peer-location fetch.
-  /// Throttles the fetch to ~`kLocationUpdateInterval` so per-circle publish
-  /// decorrelation (which wakes more often) does not multiply background relay
-  /// round-trips by the circle count (battery parity — see `_publishCycle`).
+  /// Throttles the fetch to ~`kLocationUpdateInterval` so a cycle that
+  /// publishes (or a deferred circle that makes one fire early) does not
+  /// multiply background relay round-trips (battery parity, `_publishCycle`).
   DateTime? _lastBackgroundFetchAt;
 
   /// Number of completed publish cycles since the last prune. The bg
@@ -411,13 +504,13 @@ class BackgroundLocationTaskHandler extends TaskHandler {
       //    end (see [startWithoutBridgeForTest]).
       await _bringUpSession(dataDir);
 
-      // 8. Per-circle publish scheduling (privacy: decorrelation) is seeded
-      //    lazily in `_publishCycle` — each circle is registered "due now" the
-      //    first cycle the background actually owns publishing, then re-armed
-      //    on its own independent jittered cadence. No single seed timestamp is
-      //    needed (or read): seeding due-now bounds a circle's worst-case
-      //    inter-publish gap across the foreground→background handoff to one
-      //    background cycle, keeping the kind-445 TTL no-gap invariant intact.
+      // 8. Publish scheduling is seeded lazily in `_publishCycle` — every
+      //    eligible circle is registered "due now" on the first cycle the
+      //    background actually owns publishing, then re-armed on the burst's
+      //    one jittered sample. No seed timestamp is needed (or read) here:
+      //    seeding due-now bounds a circle's worst-case inter-publish gap
+      //    across the foreground→background handoff to one background cycle,
+      //    keeping the kind-445 TTL no-gap invariant intact.
 
       debugPrint(
         '[BackgroundTask] Initialized '
@@ -453,14 +546,84 @@ class BackgroundLocationTaskHandler extends TaskHandler {
     _wireSharingServices();
   }
 
+  /// The WATCHDOG. Covers the states in which no delivery can arrive, and
+  /// nothing else.
+  ///
+  /// It never registers: it can only invoke [_publishCycle], which registers
+  /// below the ownership and disclosure gates. Wiring a registration here
+  /// would put one above both, on the one path that runs unconditionally.
   @override
   void onRepeatEvent(DateTime timestamp) {
-    // Skip if a previous cycle is still running to preserve the MLS
-    // single-writer invariant. Under poor network conditions a cycle
-    // could exceed the 72 s repeat interval.
+    // A tick during a cycle is a no-op — two cycles in flight are two writers
+    // on one MLS group. A delivery that lands meanwhile is not lost: it sets
+    // `_deliveryPending`, which this reads on the next tick.
     if (_inFlightPublish != null) return;
 
-    _inFlightPublish = _runCycleWithIdleTracking(timestamp);
+    _trackCycle(_runWatchdog(timestamp));
+  }
+
+  /// Records [cycle] as THE in-flight one and releases the slot when it
+  /// settles.
+  ///
+  /// The release cannot live in [_runCycleWithIdleTracking] alone, because
+  /// [_runWatchdog] has exits that never reach it: the foreground-ownership
+  /// yield and the healthy "nothing to do" return. A slot left pointing at a
+  /// COMPLETED future latches the isolate — every later tick, every delivery
+  /// and both handoff signals read it as "a cycle is running" and return, so
+  /// the service publishes once per backgrounding and then goes silent.
+  ///
+  /// [identical] because [_runCycleWithIdleTracking] releases the slot from
+  /// underneath this on the cycle path, and a later input may already have
+  /// claimed it by the time [cycle] settles.
+  void _trackCycle(Future<void> cycle) {
+    _inFlightPublish = cycle;
+    unawaited(
+      cycle.whenComplete(() {
+        if (identical(_inFlightPublish, cycle)) _inFlightPublish = null;
+      }),
+    );
+  }
+
+  /// Decides whether [timestamp]'s tick has anything to do.
+  ///
+  /// Deliberately NOT "run the cycle every tick": in the steady state the
+  /// registration IS the cadence, and a tick that ran a cycle anyway would
+  /// re-introduce the 72 s poll this phase removed — a roster read, a wake and
+  /// (once the cached fix ages out) an acquisition, all for a schedule that
+  /// already has a fix on the way.
+  Future<void> _runWatchdog(DateTime timestamp) async {
+    if (await _foregroundOwnsPublishing()) {
+      // Not merely "skip this tick": while the UI isolate owns publishing it
+      // also owns the platform registration, and two at once is the state the
+      // ownership stamp exists to prevent.
+      await _yieldToForeground();
+      return;
+    }
+
+    // Silence past the age at which a fix stops being publishable is the
+    // signal that the registration is not working — the platform's own retry
+    // alarms produce no app callback, so nothing else would ever say so.
+    final quietSince = _laterOf(_lastDeliveryAt, _registeredAt);
+    if (_fixSub != null &&
+        (quietSince == null ||
+            timestamp.difference(quietSince) > kStreamPositionMaxAge)) {
+      _registrationSuspect = true;
+    }
+    // An OVERDUE circle is the other thing only this tick can see. In the
+    // healthy steady state there is never one — the fix is asked for
+    // `kBackgroundFixLeadTime` early and the horizon selects the circle
+    // before its due-time — so this does not re-introduce the poll. It fires
+    // exactly when the delivery-driven path has already failed the circle: a
+    // fix that came late, or a publish that did not land.
+    if (_fixSub != null &&
+        !_registrationSuspect &&
+        !_deliveryPending &&
+        !_anythingDueBy(timestamp)) {
+      return;
+    }
+
+    debugPrint('[BackgroundTask] cycle trigger=watchdog');
+    await _runCycleWithIdleTracking(timestamp);
   }
 
   Future<void> _runCycleWithIdleTracking(DateTime timestamp) async {
@@ -473,9 +636,195 @@ class BackgroundLocationTaskHandler extends TaskHandler {
     await _setIdle(false);
     try {
       await _publishCycle(timestamp);
+
+      // A fix that arrived mid-cycle is served here, inside the SAME
+      // single-flight envelope, so it can neither race the cycle it
+      // interrupted nor be dropped. Only when something is actually due: a
+      // delivery that beat its circle's due-time has nothing to publish, and
+      // re-running the whole cycle for it would cost a roster read per fix.
+      final pending = _deliveryPending;
+      _deliveryPending = false;
+      final now = DateTime.now();
+      if (pending && _dueWithinHorizon(now)) {
+        debugPrint('[BackgroundTask] cycle trigger=pending-delivery');
+        await _publishCycle(now);
+      }
     } finally {
       _inFlightPublish = null;
       await _setIdle(true);
+    }
+  }
+
+  /// Whether any tracked circle is due at or before [at].
+  bool _anythingDueBy(DateTime at) =>
+      _dueTracker.dueKeysUpTo(_dueTracker.trackedKeys, at).isNotEmpty;
+
+  /// Whether any tracked circle is due inside [kBackgroundFixHorizon] of
+  /// [now] — the same window [_publishCycle] selects with.
+  bool _dueWithinHorizon(DateTime now) =>
+      _anythingDueBy(now.add(kBackgroundFixHorizon));
+
+  /// Reads the foreground-ownership stamp from a freshly reloaded snapshot.
+  ///
+  /// One judgement, two callers ([_runWatchdog] and [_publishCycle]) — a
+  /// second, hand-rolled reading of the same stamp is how the two paths
+  /// silently disagree about who owns publishing.
+  Future<bool> _foregroundOwnsPublishing() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.reload();
+    return _foregroundActiveFrom(prefs);
+  }
+
+  /// Fix 2: when the key has never been written (cold-start Android
+  /// auto-restart before `MapShell.initState` runs), assume the foreground is
+  /// active so the background does not race it.
+  /// `BackgroundLocationManager.isForegroundActive()` treats a null/missing
+  /// key as `false`, which is the wrong default for that one window.
+  Future<bool> _foregroundActiveFrom(SharedPreferences prefs) async {
+    if (prefs.getInt(kForegroundActiveAtMsKey) == null) return true;
+    return BackgroundLocationManager.isForegroundActive();
+  }
+
+  /// Everything this isolate must let go of the moment it stops owning
+  /// publishing — because the UI isolate took it back, or because the user
+  /// switched background sharing off: its platform registration and every
+  /// per-circle schedule.
+  ///
+  /// Emptying the schedule is what makes every circle due-now on the NEXT
+  /// handoff, bounding the gap across it to one background cycle instead of a
+  /// full jittered interval.
+  Future<void> _yieldToForeground() async {
+    await _cancelRegistration();
+    _dueTracker.pruneToKeys(<String>{});
+  }
+
+  /// One platform delivery.
+  ///
+  /// Synchronous and short on purpose: it is called from a stream callback, so
+  /// anything awaited here would run outside the single-flight envelope.
+  void _onFixDelivered(Position fix) {
+    // The replay of the fix this isolate already used (S+ historical
+    // delivery). It carries no new information, so it is not a delivery for
+    // the watchdog's freshness either.
+    if (_lastConsumedFixTs == fix.timestamp) return;
+    _lastConsumedFixTs = fix.timestamp;
+    _lastDeliveryAt = DateTime.now();
+
+    // A cycle that is waiting for its first fix takes this one directly; it
+    // must not also read as pending, or the cycle would follow itself up.
+    final waiter = _firstDeliveryWaiter;
+    if (waiter != null && !waiter.isCompleted) {
+      waiter.complete();
+      return;
+    }
+
+    if (_inFlightPublish != null) {
+      _deliveryPending = true;
+      return;
+    }
+
+    debugPrint('[BackgroundTask] cycle trigger=delivery');
+    _trackCycle(_runCycleWithIdleTracking(DateTime.now()));
+  }
+
+  /// Aims the isolate's single platform location request at [earliestDue].
+  ///
+  /// THE only registration site, and it is reached only from [_publishCycle],
+  /// below the background-sharing consent gate and the foreground-ownership
+  /// and Play-disclosure ones — which is what makes "no platform request
+  /// without consent" a property of the source rather than of review
+  /// (`check_android_location_power.sh` check 5).
+  ///
+  /// A registration whose aim has not meaningfully moved is KEPT. Re-issuing
+  /// it costs a cancel + listen and, on S+, a replay of the fix just
+  /// consumed — which would drive another cycle, which would re-register.
+  Future<void> _ensureRegistration({
+    required DateTime earliestDue,
+    required DateTime now,
+    required DateTime plannedPublishStart,
+  }) async {
+    final target = earliestDue.subtract(kBackgroundFixLeadTime);
+    final registered = _registeredTarget;
+    if (_fixSub != null &&
+        !_registrationSuspect &&
+        registered != null &&
+        registrationIsAligned(registered, target)) {
+      return;
+    }
+
+    final interval = nextFixRequestInterval(
+      earliestDue: earliestDue,
+      now: now,
+      plannedPublishStart: plannedPublishStart,
+    );
+    await _cancelRegistration();
+    final service = _locationService;
+    if (service == null) return;
+    _fixSub = service
+        .getLocationStream(
+          profile: AndroidStreamProfile.backgroundService(interval: interval),
+        )
+        .listen(
+          _onFixDelivered,
+          onError: (Object e) {
+            // Presence only (Rule 8): the type, never the message, which on
+            // this boundary can carry provider and permission detail.
+            debugPrint(
+              '[BackgroundTask] fix stream error: ${e.runtimeType}',
+            );
+            _registrationSuspect = true;
+          },
+          onDone: () {
+            // The stream ended (a closed provider). Back to Idle so the
+            // watchdog re-arms rather than waiting on a dead registration.
+            _fixSub = null;
+            _registeredTarget = null;
+          },
+        );
+    _registeredTarget = target;
+    _registeredAt = DateTime.now();
+    debugPrint(
+      '[BackgroundTask] registration armed (${interval.inSeconds}s)',
+    );
+  }
+
+  /// Releases the platform registration, if any. Idempotent.
+  Future<void> _cancelRegistration() async {
+    final sub = _fixSub;
+    _fixSub = null;
+    _registeredTarget = null;
+    _registeredAt = null;
+    _registrationSuspect = false;
+    if (sub == null) return;
+    await sub.cancel();
+  }
+
+  /// The later of two optional instants, or whichever one exists.
+  static DateTime? _laterOf(DateTime? a, DateTime? b) {
+    if (a == null) return b;
+    if (b == null) return a;
+    return a.isAfter(b) ? a : b;
+  }
+
+  /// Waits for the platform's first fix, bounded by [firstDeliveryWait].
+  ///
+  /// Only reached with a COLD cache — the first cycle after a handoff, or one
+  /// whose cached fix aged out. On S+ the registration itself is answered with
+  /// the provider's last location, so this normally returns in one event-loop
+  /// hop and spares the cycle a 30 s HIGH_ACCURACY one-shot; where there is no
+  /// historical delivery it lapses and the one-shot runs exactly as before.
+  Future<void> _awaitFirstDelivery() async {
+    if (_shuttingDown || _fixSub == null) return;
+    final waiter = Completer<void>();
+    _firstDeliveryWaiter = waiter;
+    try {
+      await Future.any<void>(<Future<void>>[
+        waiter.future,
+        Future<void>.delayed(firstDeliveryWait),
+        _shutdownSignal.future,
+      ]);
+    } finally {
+      _firstDeliveryWaiter = null;
     }
   }
 
@@ -503,6 +852,33 @@ class BackgroundLocationTaskHandler extends TaskHandler {
     // that into "finish the publish already in flight, then stop".
     if (!_shutdownSignal.isCompleted) _shutdownSignal.complete();
 
+    // Release the platform registration BEFORE the drain, not after it: a
+    // request still delivering into an isolate that is tearing down is a fix
+    // nobody can publish and a GNSS engine nobody turns off. It also removes
+    // the only way a new cycle could start underneath the teardown.
+    await _cancelRegistration();
+
+    // Hold the CPU across the drain. The plugin invokes the Kotlin lifecycle
+    // listeners synchronously right after it invokes this method
+    // asynchronously, i.e. before the drain below has started, so its own lock
+    // can be gone by now — which is exactly why the scoped lock is released
+    // from THIS method's `finally` and never from those listeners.
+    await _wakeLock.acquire();
+    try {
+      await _drainAndTearDown();
+    } finally {
+      await _wakeLock.release();
+    }
+
+    // Signal to the foreground isolate that no publish cycle is in
+    // flight. The foreground reads this flag on resume to know it is
+    // safe to start its own publisher without violating the MLS
+    // single-owner invariant.
+    await _setIdle(true);
+  }
+
+  /// The teardown [onDestroy] runs under the scoped wake lock.
+  Future<void> _drainAndTearDown() async {
     // Await any in-flight publish cycle so it can finish its
     // `encryptLocation` + `publishEvent` calls before we tear down
     // services. Without this, nulling `_relayService` mid-publish
@@ -529,6 +905,15 @@ class BackgroundLocationTaskHandler extends TaskHandler {
       // designed outcome rather than a failure.
     }
 
+    // RE-POST the timer. The hold taken above expires
+    // [kPublishWakeLockTimeout] after IT, and this drain may just have spent
+    // half of that budget; everything below (the unbounded Rule-13 wait, the
+    // relay shutdown, the Rule-14 handback) would otherwise run on the tail of
+    // it, with the plugin's permanent lock already gone —
+    // `stopForegroundService()` releases that one synchronously before Dart's
+    // `onDestroy` is even entered.
+    await _wakeLock.acquire();
+
     // ...and then UNBOUNDED for the one slice of that cycle where the budget
     // above would be a correctness bug rather than a lost sample. A
     // `fetchMemberLocations` can publish a receiver-side auto-commit and then
@@ -547,6 +932,11 @@ class BackgroundLocationTaskHandler extends TaskHandler {
         // Handled per-circle inside the cycle; what matters here is that it
         // reached its own conclusion rather than being cut short.
       }
+      // Unbounded by construction, so it can outlast the native
+      // [kPublishWakeLockTimeout] ceiling on its own. The handback below is
+      // the last thing that frees the Rule-14 slot for the foreground, so it
+      // does not run on the tail of an expiring hold.
+      await _wakeLock.acquire();
     }
 
     try {
@@ -581,21 +971,41 @@ class BackgroundLocationTaskHandler extends TaskHandler {
     _locationService = null;
     _locationEventService = null;
     _pubkeyHex = null;
-
-    // Signal to the foreground isolate that no publish cycle is in
-    // flight. The foreground reads this flag on resume to know it is
-    // safe to start its own publisher without violating the MLS
-    // single-owner invariant.
-    await _setIdle(true);
   }
 
   @override
   void onReceiveData(Object data) {
     // `onReceiveData` is the ONE dispatch point for everything sent to this
     // task, so anything added later must branch here rather than assume it is
-    // reached. The probe reports whether it consumed the payload; today it is
-    // the only sender, so an unconsumed payload has no other handler to reach.
+    // reached. The probe reports whether it consumed the payload.
     if (_livenessProbe.onData(data)) return;
+
+    // The UI isolate's handoff signals. Both are prompts, never
+    // authorisations: the paused one runs the ordinary cycle, which reloads
+    // preferences and re-runs every gate before it registers or collects, so
+    // a signal that arrives while the ownership stamp is still fresh does
+    // nothing. The resumed one only ever REMOVES capability.
+    if (data == kForegroundPausedSignal) {
+      if (_inFlightPublish != null) return;
+      debugPrint('[BackgroundTask] cycle trigger=paused-signal');
+      _trackCycle(_runCycleWithIdleTracking(DateTime.now()));
+      return;
+    }
+    if (data == kForegroundResumedSignal) {
+      // Ahead of the UI isolate re-taking its own 1 Hz stream, and without
+      // waiting for a delivery that may be a whole interval away.
+      unawaited(_cancelRegistration());
+      // And again when any in-flight cycle ends. That cycle passed its own
+      // ownership gate before this signal existed and can still arm a request
+      // below it (the retry cadence a failed publish sets), which would
+      // outlive the cancel above and leave two live platform requests while
+      // the UI isolate re-takes its own. This signal only ever REMOVES
+      // capability, so doing it twice costs nothing.
+      final cycle = _inFlightPublish;
+      if (cycle != null) unawaited(cycle.whenComplete(_cancelRegistration));
+      return;
+    }
+
     debugPrint('[BackgroundTask] unrouted task data: ${data.runtimeType}');
   }
 
@@ -969,26 +1379,25 @@ class BackgroundLocationTaskHandler extends TaskHandler {
     return forceReleaseLiveSession();
   }
 
-  /// Runs the Rule-13 ladder over the commits a DEFERRED send handed back.
+  /// Registers [publishStagedCommits] as [_inFlightCommitCritical] for the
+  /// same reason a fetch is: abandoning it between `publishEvent` and
+  /// `confirmPublished` leaves a commit that is neither confirmed nor rolled
+  /// back while possibly already on a relay.
   ///
-  /// `should_queue_outbound_intent` returns true precisely when the engine has
-  /// just STAGED a peer's `SelfRemove` eviction, and that commit arrives on the
-  /// deferred outcome carrying a pending token. All three of the obvious
-  /// dispositions are wrong: confirming applies a commit no relay acked;
-  /// rolling it back drops the engine's retry schedule so the leaver never
-  /// leaves; dropping it pins the group in `PendingPublish`, where every later
-  /// send fails. Publish, then confirm on a ≥1-relay ACK, else roll back.
-  ///
-  /// Registered as [_inFlightCommitCritical] for the same reason a fetch is:
-  /// abandoning this between `publishEvent` and `confirmPublished` leaves a
-  /// commit that is neither confirmed nor rolled back while possibly already on
-  /// a relay. Never throws — a failure here must not abort the publish loop.
+  /// The ladder itself lives in `background_deferred_send.dart` so that no
+  /// file both resolves a staged commit and takes the one-shot location
+  /// publish (Security Rule 13 — see that library's doc).
   Future<void> _resolveDeferredCommits(
     Circle circle,
     DeferredSendFfi deferred,
   ) async {
     if (deferred.commits.isEmpty) return;
-    final work = _resolveDeferredCommitsInner(circle, deferred);
+    final work = publishStagedCommits(
+      relayService: _relayService!,
+      circleManager: _circleManager!,
+      circle: circle,
+      deferred: deferred,
+    );
     _inFlightCommitCritical = work;
     try {
       await work;
@@ -997,124 +1406,96 @@ class BackgroundLocationTaskHandler extends TaskHandler {
     }
   }
 
-  Future<void> _resolveDeferredCommitsInner(
-    Circle circle,
-    DeferredSendFfi deferred,
-  ) async {
-    for (final commit in deferred.commits) {
-      var published = false;
-      if (circle.relays.isNotEmpty) {
-        try {
-          final result = await _relayService!.publishEvent(
-            eventJson: commit.commitEventJson,
-            relays: circle.relays,
-          );
-          published = result.acceptedBy.isNotEmpty;
-        } on Object catch (e) {
-          debugPrint(
-            '[BackgroundTask] deferred commit publish failed: '
-            '${e.runtimeType}',
-          );
-        }
-      }
-      try {
-        if (published) {
-          await _circleManager!.confirmPublished(pending: commit.pending);
-        } else {
-          await _circleManager!.publishFailed(pending: commit.pending);
-        }
-      } on Object catch (e) {
-        debugPrint(
-          '[BackgroundTask] deferred commit '
-          '${published ? "confirm" : "rollback"} failed: ${e.runtimeType}',
-        );
-      }
-    }
-  }
-
-  /// Publishes the bare proposals a DEFERRED send handed back, to the circle's
-  /// relays.
-  ///
-  /// Mirrors the foreground's `LocationSharingService._publishDeferredProposals`.
-  /// No confirm step and no rollback: a proposal carries no staged state, so
-  /// there is nothing to apply. Losing one costs a cycle rather than
-  /// correctness — the durable leave request that produced it makes a later
-  /// convergence pass re-emit it — so every failure is logged and swallowed
-  /// rather than allowed to abort the publish loop.
-  Future<void> _publishDeferredProposals(
-    Circle circle,
-    DeferredSendFfi deferred,
-  ) async {
-    if (deferred.proposals.isEmpty || circle.relays.isEmpty) return;
-    for (final eventJson in deferred.proposals) {
-      try {
-        final result = await _relayService!.publishEvent(
-          eventJson: eventJson,
-          relays: circle.relays,
-        );
-        if (result.acceptedBy.isEmpty) {
-          debugPrint(
-            '[BackgroundTask] deferred proposal rejected by all relays',
-          );
-        }
-      } on Object catch (e) {
-        debugPrint(
-          '[BackgroundTask] deferred proposal publish failed: '
-          '${e.runtimeType}',
-        );
-      }
-    }
-  }
-
   Future<void> _publishCycle(DateTime timestamp) async {
+    // 0. A cycle that begins after the stop signal must take NO hold: from
+    //    that signal on the release below belongs to `onDestroy`, which
+    //    performs it exactly once, so a hold taken here would outlive the
+    //    teardown with only the native ceiling to end it. Reachable for real
+    //    — the pending-delivery follow-up in [_runCycleWithIdleTracking] runs
+    //    after the drain has already abandoned the cycle it belongs to — and
+    //    it would also re-arm a platform request underneath the teardown.
+    if (_shuttingDown) {
+      await _cancelRegistration();
+      return;
+    }
+
+    // 1. Take the scoped CPU hold before the first gate, so no path through
+    //    this method can reach a fix, an encrypt or a relay without it — and
+    //    so the `finally` below is the single release site for all of them.
+    //    Awaited: the channel call is asynchronous, and only awaiting makes
+    //    "held before the fix leaves the device" an order rather than a race.
+    await _wakeLock.acquire();
     try {
-      // Per-circle jitter now lives in `_dueTracker` (step 7 below), so there
-      // is no single cycle-wide jitter gate here — the master `onRepeatEvent`
-      // cadence (`kBackgroundRepeatInterval`) is just the polling granularity.
+      // Per-circle jitter lives in `_dueTracker` (step 7 below), so there is
+      // no cycle-wide jitter gate here: the registration's own interval is
+      // what schedules the cycle, and the repeat event is only a watchdog.
 
       // 2. Abort if no identity is loaded. A MISSING MANAGER is no longer fatal
       //    here — it may be the recoverable "Rule-14 guard held by an isolate
       //    that is gone" case, which is retried below once the foreground gate
       //    has confirmed this isolate owns publishing.
-      if (_pubkeyHex == null) return;
-
-      // 3. Defer to the foreground UI isolate while it is active.
-      //    BackgroundLocationManager.isForegroundActive() uses a
-      //    timestamp-based staleness check: if the foreground was killed
-      //    without cleaning up (OOM, force-stop), the stale timestamp is
-      //    automatically expired after 2 * kBackgroundRepeatInterval (144 s).
-      //    The default when the key has never been written is `true` so that
-      //    a cold Android service auto-restart (before MapShell.initState
-      //    writes the flag) does not race with whatever the foreground does
-      //    next — BackgroundLocationManager.isForegroundActive() treats a
-      //    null/missing key as `false`, but the explicit ?? true guard below
-      //    protects the window before the first markForegroundActive write.
-      //    The service stays running so it can take over the moment the
-      //    foreground pauses, without re-incurring an Android 12+
-      //    background-start that would be rejected for
-      //    `FOREGROUND_SERVICE_LOCATION`.
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.reload();
-      // Fix 2: when the key has never been written (cold-start Android
-      // auto-restart before MapShell.initState runs), assume the foreground
-      // is active so the background doesn't race it. Once the foreground
-      // writes the first timestamp on init/resume, normal staleness checks
-      // apply via BackgroundLocationManager.isForegroundActive().
-      final bool foregroundActive;
-      if (prefs.getInt(kForegroundActiveAtMsKey) == null) {
-        foregroundActive = true;
-      } else {
-        foregroundActive = await BackgroundLocationManager.isForegroundActive();
-      }
-      if (foregroundActive) {
-        // The foreground owns publishing: keep NO per-circle schedule state so
-        // that the moment the foreground goes inactive, every circle is seeded
-        // "due now" (bounding the handoff gap to one background cycle).
-        _dueTracker.pruneToKeys(<String>{});
+      //
+      //    Every `return` from here down releases the registration first, for
+      //    the reason the empty-roster path below states: a request that keeps
+      //    duty-cycling GNSS for an isolate that provably cannot publish is
+      //    drain with no product, and it would persist indefinitely — the
+      //    watchdog re-runs the cycle and arrives at the same return.
+      if (_pubkeyHex == null) {
+        await _cancelRegistration();
         return;
       }
 
-      // 3b. No manager? Try to recover the MLS session, but only from HERE —
+      // 3. The preference snapshot every gate below reads, reloaded from disk
+      //    once per cycle so a revocation written by the UI isolate takes
+      //    effect on the very next one.
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.reload();
+
+      // 3a. CURRENT consent to background sharing.
+      //
+      //     The disclosure flags (step 6b) are the record that the dialogs
+      //     were accepted; they are sticky and are never cleared on opt-out,
+      //     so they cannot answer "does the user still want this". Only this
+      //     key can — and the teardown that should have stopped this service
+      //     is best-effort (`stop()` is unawaited on every path that flips the
+      //     toggle off), so a service that outlives it reaches here holding a
+      //     STANDING platform location request.
+      //
+      //     Standing down rather than returning bare is what releases that
+      //     request and drops every schedule, so an opt-out costs one cycle
+      //     instead of a whole registration interval of a GNSS receiver the
+      //     user has already said stop to.
+      if (!(prefs.getBool(kBackgroundSharingKey) ?? false)) {
+        await _yieldToForeground();
+        return;
+      }
+
+      // 3b. Defer to the foreground UI isolate while it is active.
+      //     BackgroundLocationManager.isForegroundActive() uses a
+      //     timestamp-based staleness check: if the foreground was killed
+      //     without cleaning up (OOM, force-stop), the stale timestamp is
+      //     automatically expired after 2 * kBackgroundRepeatInterval (144 s).
+      //     The default when the key has never been written is `true` so that
+      //     a cold Android service auto-restart (before MapShell.initState
+      //     writes the flag) does not race with whatever the foreground does
+      //     next — BackgroundLocationManager.isForegroundActive() treats a
+      //     null/missing key as `false`, but the explicit ?? true guard below
+      //     protects the window before the first markForegroundActive write.
+      //     The service stays running so it can take over the moment the
+      //     foreground pauses, without re-incurring an Android 12+
+      //     background-start that would be rejected for
+      //     `FOREGROUND_SERVICE_LOCATION`.
+      final foregroundActive = await _foregroundActiveFrom(prefs);
+      if (foregroundActive) {
+        // The foreground owns publishing: release the platform registration
+        // and keep NO per-circle schedule state, so that the moment the
+        // foreground goes inactive every circle is seeded "due now" (bounding
+        // the handoff gap to one background cycle).
+        await _yieldToForeground();
+        return;
+      }
+
+      // 3c. No manager? Try to recover the MLS session, but only from HERE —
       //     after the gate above has established the foreground is not
       //     publishing. Recovery stops the process-global live-sync engine, so
       //     running it from `onStart` (which executes regardless of foreground
@@ -1124,13 +1505,19 @@ class BackgroundLocationTaskHandler extends TaskHandler {
       //     question. `_attemptSessionReclaim` adds the gates specific to the
       //     destructive step, including a direct liveness probe.
       if (_circleManager == null) {
-        if (!await _ensureSession()) return;
+        if (!await _ensureSession()) {
+          await _cancelRegistration();
+          return;
+        }
       } else if (_locationSharingService == null) {
         // The manager opened but the wiring did not finish (see
         // `_ensureAuxServices`). No reclaim is warranted — this isolate already
         // owns the session — but without this the isolate would hold the
         // Rule-14 guard forever while publishing nothing.
-        if (!await _repairSharingServices()) return;
+        if (!await _repairSharingServices()) {
+          await _cancelRegistration();
+          return;
+        }
       }
 
       // 6b. Play "disclosure before collection" — NEVER publish location from
@@ -1155,8 +1542,8 @@ class BackgroundLocationTaskHandler extends TaskHandler {
       //     enforcement of what is otherwise only a documented precondition on
       //     `BackgroundSharingNotifier.setEnabled`.
       //
-      //     Reads the same `prefs` snapshot reloaded above (step 3), so it sees
-      //     a revocation written by the UI isolate on the very next cycle.
+      //     Reads the same `prefs` snapshot reloaded at step 3, so it sees a
+      //     revocation written by the UI isolate on the very next cycle.
       final foregroundDisclosed = prefs.getBool(kLocationDisclosureAcceptedKey);
       final backgroundDisclosed = prefs.getBool(
         kLocationDisclosureBackgroundAcceptedKey,
@@ -1170,6 +1557,10 @@ class BackgroundLocationTaskHandler extends TaskHandler {
           'accepted (foreground=$foregroundDisclosed, '
           'background=$backgroundDisclosed).',
         );
+        // Collection, not just publication: a live registration IS the
+        // platform producing this device's coordinates for Haven, which is
+        // the exact thing the undisclosed state may not have.
+        await _cancelRegistration();
         return;
       }
 
@@ -1180,51 +1571,156 @@ class BackgroundLocationTaskHandler extends TaskHandler {
       //    orphan, not engine-blocked (Rule 8). (Previously it only filtered
       //    on `accepted`, so it kept retrying orphaned/blocked circles that can
       //    never succeed.)
-      if (_circleService == null) return;
+      if (_circleService == null) {
+        await _cancelRegistration();
+        return;
+      }
       final circles = await _circleService!.getVisibleCircles();
       final accepted = filterPublishEligibleCircles(circles, _circleService!);
 
-      if (accepted.isEmpty) return;
+      if (accepted.isEmpty) {
+        // No circle can ever be published to, so a scheduled GNSS receiver
+        // buys the user nothing but drain — release it rather than leave it
+        // running for a roster that emptied while backgrounded.
+        await _cancelRegistration();
+        return;
+      }
 
-      // Per-circle decorrelation: register each eligible circle on its OWN
-      // CSPRNG-staggered due-time the first time we see it while owning
-      // publishing, then publish only the circles whose own time has come.
-      // Prune first so a left/blocked circle's schedule is dropped.
-      //
-      // The seed MUST be staggered, not shared. `pruneToKeys({})` above empties
-      // the tracker on every cycle where the foreground owns publishing, so
-      // this seed re-runs on EVERY foreground→background handoff — a shared
-      // `timestamp` therefore made every circle due in the same instant on
-      // every handoff, and the loop below then published them all inside one
-      // wall-clock second, i.e. with one identical `created_at`.
+      // One burst, not one schedule per circle: register every eligible circle
+      // on the SAME due-time the first time we see it while owning publishing,
+      // so a handoff hands them all to one wake instead of scattering them
+      // across a wake apiece. Prune first so a left/blocked circle's schedule
+      // is dropped. Seeded together is not published together — the loop below
+      // still holds each circle a CSPRNG gap behind the last, which is what
+      // keeps their whole-second `created_at`s distinct.
       final eligibleKeys = <String>{
         for (final c in accepted) _bgCircleKey(c.nostrGroupId),
       };
-      _dueTracker
-        ..pruneToKeys(eligibleKeys)
-        ..seedStaggered(eligibleKeys, timestamp, _stagger);
+      _dueTracker.pruneToKeys(eligibleKeys);
+      for (final key in eligibleKeys) {
+        _dueTracker.seedIfAbsent(key, timestamp);
+      }
 
-      // Select the circles whose own due-time falls inside this cycle's
-      // stagger window, most-overdue first. The horizon (rather than a bare
-      // `isDue(key, timestamp)`) is what lets a freshly staggered circle be
-      // serviced by THIS cycle: `onRepeatEvent` is a 72 s poll, so anything
-      // not picked up now waits a full interval.
+      // Select the circles whose own due-time falls inside this cycle's fix
+      // horizon, most-overdue first. The horizon (rather than a bare
+      // `isDue(key, timestamp)`) is what lets a fix taken
+      // [kBackgroundFixLeadTime] AHEAD of a due-time serve the circle it was
+      // taken for, and what lets a sibling due shortly after ride the same
+      // acquisition instead of paying for another.
       final byKey = <String, Circle>{
         for (final c in accepted) _bgCircleKey(c.nostrGroupId): c,
       };
+      // Shuffled in: a burst's circles are due in the same instant, so the
+      // tie-break IS the publish order, and a stable one would put the same
+      // circle's `created_at` permanently ahead of its sibling's.
       final dueKeys = _dueTracker.dueKeysUpTo(
-        eligibleKeys,
-        timestamp.add(kPublishStaggerMaxSpread),
+        _stagger.shuffled(eligibleKeys.toList()),
+        timestamp.add(kBackgroundFixHorizon),
       );
 
-      // Nothing due this cycle → skip the GPS fix + publish entirely (battery:
-      // no wake cost when no circle is scheduled).
+      // 7b. Plan the burst BEFORE anything is published, because the
+      //     registration below is aimed at what this cycle is about to do.
+      //
+      //     Two pre-samples, both from the same CSPRNG draws the loop then
+      //     uses — drawing them earlier changes no distribution, it only lets
+      //     the aim be computed from the schedule that will actually happen:
+      //
+      //     * the inter-publish GAPS, one per due circle, so the predicted
+      //       slots are the real ones (and so the deferral decision is taken
+      //       once);
+      //     * ONE jittered INTERVAL for the whole burst, so `earliestDue` is
+      //       the due-time `nextBurstDue` will record rather than a guess.
+      //       Shared, because a sample per circle would pull the roster apart
+      //       into a wake apiece again within a few cycles.
+      //
+      //     The predicted slots are a PREDICTION and nothing else: the loop
+      //     re-derives every slot from the actual previous publish start, for
+      //     the reason `nextBackgroundPublishSlot` documents — a fixed
+      //     schedule collapses the moment one publish overruns its slot, and
+      //     compressed gaps are exactly the co-timed `created_at` this whole
+      //     mechanism exists to prevent.
+      final gaps = _stagger.sampleGaps(dueKeys.length);
+      final burstIntervalSecs = _sampleJitteredInterval();
+      final planStart = DateTime.now();
+      final plannedKeys = <String>{};
+      DateTime? plannedSlot;
+      DateTime? firstPlannedSlot;
+      for (var i = 0; i < dueKeys.length; i++) {
+        final key = dueKeys[i];
+        final slot = nextBackgroundPublishSlot(
+          dueAt: _dueTracker.dueAt(key),
+          lastPublishStartedAt: plannedSlot,
+          gap: gaps[i],
+          phaseStart: planStart,
+          // Anchored at the burst's FIRST publish, not at the cycle start.
+          // The fix is deliberately delivered [kBackgroundFixLeadTime] BEFORE
+          // the due it was taken for, so a deadline measured from here hands
+          // the burst only `30 − lead` seconds of its own budget and splits
+          // rosters that fit — one wake per interval becoming two, on the
+          // plane whose wake count is the whole point.
+          deadline: (firstPlannedSlot ?? planStart).add(
+            kPublishStaggerMaxSpread,
+          ),
+        );
+        if (slot == null) break;
+        plannedSlot = slot;
+        firstPlannedSlot ??= slot;
+        plannedKeys.add(key);
+      }
+      // ONE projected due for the whole burst, because that is what the loop
+      // will record (`nextBurstDue`): a due per slot would aim the request at
+      // a schedule the burst never adopts.
+      final plannedDue = firstPlannedSlot == null
+          ? null
+          : nextBurstDue(
+              firstPublishStartedAt: firstPlannedSlot,
+              lastPublishStartedAt: plannedSlot!,
+              interval: Duration(seconds: burstIntervalSecs),
+              minInterval: kLocationPublishMinInterval,
+            );
+
+      // The earliest moment ANY circle will want a fix: the projected next
+      // due of the ones about to publish, or the standing due-time of the
+      // ones that are not (including any this burst's budget defers, which
+      // stay overdue and want a fix as soon as the platform will schedule
+      // one).
+      var earliestDue = _dueTracker.earliestDue(
+        eligibleKeys.where((k) => !plannedKeys.contains(k)),
+      );
+      if (plannedDue != null &&
+          (earliestDue == null || plannedDue.isBefore(earliestDue))) {
+        earliestDue = plannedDue;
+      }
+
+      // 7c. Aim the platform request. BEFORE any publish, and reached even
+      //     when nothing is due — a cycle that only registered when it had
+      //     something to publish would leave the 72 s watchdog driving
+      //     sharing through the one-shot this phase retires, forever.
+      if (earliestDue != null) {
+        await _ensureRegistration(
+          earliestDue: earliestDue,
+          now: DateTime.now(),
+          plannedPublishStart: firstPlannedSlot ?? planStart,
+        );
+      }
+
+      // Nothing due this cycle → skip the GPS fix + publish entirely, so a
+      // cycle with no scheduled circle takes neither a fix nor a wake. What
+      // that saves is ESTIMATED, never measured (model E E-A1/E-A2,
+      // `docs/POWER_EFFICIENCY_PLAN.md` §6.5a); what is checkable here is that
+      // the cycle returns before either one is asked for.
       if (dueKeys.isEmpty) return;
 
       // 4. Acquire a GPS fix (only now that at least one circle is due).
+      //    Normally free: the delivery that drove this cycle is already in the
+      //    service's cache, and `getCurrentLocation` serves it while fresh.
+      //    With a COLD cache — the first cycle after a handoff, or one the
+      //    watchdog started after a silent registration — wait briefly for the
+      //    platform's own answer first, then fall through to the one-shot.
       //    Raced against teardown: a one-shot fix is the single longest step in
       //    this cycle and nothing has been encrypted yet, so a stopping service
       //    must not spend its window inside it.
+      if (!_locationService!.hasFreshStreamFix()) await _awaitFirstDelivery();
       final position = await _unlessShuttingDown(
         _locationService!.getCurrentLocation(),
       );
@@ -1238,15 +1734,17 @@ class BackgroundLocationTaskHandler extends TaskHandler {
       //    clock, so back-to-back publishes carry a byte-identical
       //    `created_at` — an equality inside the SIGNED event that links two
       //    circles to one device for anyone holding both, including from
-      //    different relays or an archive. `onRepeatEvent` is a coarse 72 s
-      //    poll, so independent per-circle due-times routinely land in the
-      //    same cycle; the per-circle tracker cannot space them on its own.
+      //    different relays or an archive. A burst's circles are due in the
+      //    same instant BY DESIGN, so the tracker cannot space them at all —
+      //    the pacing below is the entire separation.
       //
       //    Each circle therefore waits until the later of (a) its own due-time
-      //    and (b) a fresh CSPRNG gap after the previous publish STARTED. The
-      //    spread is budgeted: once the next slot would fall past the deadline
-      //    the loop stops and leaves the rest due for the next master tick,
-      //    rather than compressing the gaps back to zero.
+      //    and (b) the pre-drawn CSPRNG gap after the previous publish
+      //    STARTED — measured from the ACTUAL start, never from the predicted
+      //    slot above, because a fixed schedule compresses the gaps back
+      //    together as soon as one publish overruns. The spread is budgeted:
+      //    once the next slot would fall past the deadline the loop stops and
+      //    leaves the rest due for the next cycle.
       //
       //    Re-check foreground ownership immediately before each
       //    encryptLocation call: the user can resume during any of the
@@ -1254,10 +1752,14 @@ class BackgroundLocationTaskHandler extends TaskHandler {
       //    foreground reclaimed ownership, break out rather than advancing an
       //    MLS epoch concurrently.
       var publishCount = 0;
+      var publishFailed = false;
+      var yieldedToForeground = false;
       final publishPhaseStart = DateTime.now();
-      final publishDeadline = publishPhaseStart.add(kPublishStaggerMaxSpread);
       DateTime? lastPublishStartedAt;
-      for (final key in dueKeys) {
+      DateTime? firstPublishStartedAt;
+      final publishedKeys = <String>[];
+      for (var i = 0; i < dueKeys.length; i++) {
+        final key = dueKeys[i];
         // A stop that arrives mid-burst must cost the in-flight publish only,
         // not every circle still queued behind it. The existing check below
         // fires only after a decorrelation wait, and a due circle with no wait
@@ -1269,11 +1771,19 @@ class BackgroundLocationTaskHandler extends TaskHandler {
         final notBefore = nextBackgroundPublishSlot(
           dueAt: _dueTracker.dueAt(key),
           lastPublishStartedAt: lastPublishStartedAt,
-          gap: _stagger.sampleGap(totalPublishes: dueKeys.length),
+          gap: gaps[i],
           phaseStart: publishPhaseStart,
-          deadline: publishDeadline,
+          // Anchored at the burst's first PUBLISH, for the reason the
+          // planning pass above documents.
+          deadline: (firstPublishStartedAt ?? publishPhaseStart).add(
+            kPublishStaggerMaxSpread,
+          ),
         );
         if (notBefore == null) {
+          // NOT a failure: a deferred circle stays overdue, so the planning
+          // pass above already folded its own past due-time into the aim —
+          // the request is pointed at the platform floor, which is as soon as
+          // a fix can be had.
           debugPrint(
             '[BackgroundTask] Stagger budget spent — deferring the remaining '
             'due circle(s) to the next cycle.',
@@ -1285,16 +1795,47 @@ class BackgroundLocationTaskHandler extends TaskHandler {
           await _sleepUnlessShuttingDown(wait);
           if (_shuttingDown) break;
         }
+        // Re-take the CPU hold after the decorrelation wait and before every
+        // publish, so the guarantee is "never held more than
+        // kPublishWakeLockTimeout past the LAST acquire" rather than past the
+        // start of a burst that may span the whole stagger spread.
+        await _wakeLock.acquire();
 
-        // Fix 4: Re-check before each MLS epoch advance.
+        // Fix 4: Re-check before each MLS epoch advance. BREAK, never
+        // return: everything below the loop is the cycle's own teardown, and
+        // the publish pool closed there is the Android presence claim that no
+        // socket stays open between publishes.
         if (await BackgroundLocationManager.isForegroundActive()) {
           debugPrint(
             '[BackgroundTask] Foreground reclaimed ownership mid-loop — '
             'aborting remaining circles.',
           );
-          return;
+          // The same stand-down the top-of-cycle gate performs, for the same
+          // reason: the UI isolate now holds its own registration, and this
+          // one is aimed at a schedule this isolate no longer owns. Breaking
+          // without it leaves two live platform requests for up to a whole
+          // watchdog period.
+          await _yieldToForeground();
+          yieldedToForeground = true;
+          break;
         }
-        lastPublishStartedAt = DateTime.now();
+        // Eligibility, re-read HERE and not only at the roster snapshot above.
+        // The snapshot is taken before the GPS acquisition and the whole
+        // stagger spread, so a circle the engine flagged Unrecoverable inside
+        // either would still be sent to — the one thing `CircleService` says
+        // must never happen (Rule 8). The engine's block flag is the only
+        // eligibility input that can change under a background cycle: a
+        // membership change arrives through the foreground, whose reclaim the
+        // check above already stood down for.
+        if (_circleService!.isCircleBlocked(circle.mlsGroupId)) {
+          debugPrint(
+            '[BackgroundTask] Circle blocked mid-burst — skipping its publish.',
+          );
+          continue;
+        }
+        final publishStartedAt = DateTime.now();
+        lastPublishStartedAt = publishStartedAt;
+        firstPublishStartedAt ??= publishStartedAt;
 
         try {
           final outcome = await _circleManager!.encryptLocation(
@@ -1328,7 +1869,12 @@ class BackgroundLocationTaskHandler extends TaskHandler {
               'stagedCommits=${deferred.commits.length}',
             );
             await _resolveDeferredCommits(circle, deferred);
-            await _publishDeferredProposals(circle, deferred);
+            await publishDeferredProposals(
+              relayService: _relayService!,
+              circle: circle,
+              deferred: deferred,
+            );
+            publishFailed = true;
             continue;
           }
           final encrypted = outcome.sent;
@@ -1340,10 +1886,22 @@ class BackgroundLocationTaskHandler extends TaskHandler {
               '[BackgroundTask] encrypt returned an empty outcome — '
               'skipping this circle',
             );
+            publishFailed = true;
             continue;
           }
 
-          final publishResult = await _relayService!.publishEvent(
+          // The one-shot ladder: one connect and one 5 s per-relay ack
+          // window, no retry. This tick's fix is superseded by the next one
+          // within [kLocationPublishMaxInterval], so a second attempt buys a
+          // stale sample at the price of a second radio wake. That price is
+          // ESTIMATED and cannot be ranked against the cycle's other costs:
+          // model E prices one background wake at `c` × 0.0208 %/h (E-A2) and
+          // carries NO application-processor term at all (E-P3 is UNKNOWN), so
+          // nothing in a background cycle can be called its dominant cost
+          // (`docs/POWER_EFFICIENCY_PLAN.md` §6.5a). The deferral branch above
+          // has already returned, so nothing carrying a `PendingStateRefFfi`
+          // reaches this call (Security Rule 13).
+          final publishResult = await _relayService!.publishLocationEvent(
             eventJson: encrypted.eventJson,
             relays: encrypted.relays,
           );
@@ -1361,19 +1919,47 @@ class BackgroundLocationTaskHandler extends TaskHandler {
             );
           }
 
-          // Re-arm THIS circle on its own fresh jittered cadence (independent
-          // per circle — the decorrelation guarantee).
-          _dueTracker.markPublished(
-            _bgCircleKey(circle.nostrGroupId),
-            DateTime.now(),
-            _sampleJitteredInterval(),
+          // Re-arm the whole burst so far onto ONE due (`nextBurstDue`), off
+          // the interval pre-sampled above — the two inputs the registration
+          // was aimed with, so the schedule the fix arrives for is the
+          // schedule that was recorded. Re-applied after every publish rather
+          // than once at the end, because a stop or a foreground reclaim can
+          // cut the loop and the circles that DID go out must be left holding
+          // what actually happened.
+          publishedKeys.add(_bgCircleKey(circle.nostrGroupId));
+          _dueTracker.markBurstPublished(
+            publishedKeys,
+            nextBurstDue(
+              firstPublishStartedAt: firstPublishStartedAt,
+              lastPublishStartedAt: publishStartedAt,
+              interval: Duration(seconds: burstIntervalSecs),
+              minInterval: kLocationPublishMinInterval,
+            ),
           );
           publishCount++;
         } on Object catch (e) {
           debugPrint(
             '[BackgroundTask] Publish failed for circle: ${e.runtimeType}',
           );
+          publishFailed = true;
         }
+      }
+
+      // A circle that did not publish is still due, but the registration is
+      // aimed at the due-time it WOULD have had. Pull the retry back to the
+      // watchdog's own period so a transient relay or engine failure costs one
+      // recovery interval rather than a full jittered one.
+      //
+      // Never after a mid-loop hand-back, though: a failed publish followed by
+      // a foreground reclaim would otherwise re-arm the very request the
+      // stand-down just released.
+      if (publishFailed && !yieldedToForeground) {
+        final retryAt = DateTime.now().add(kBackgroundRepeatInterval);
+        await _ensureRegistration(
+          earliestDue: retryAt,
+          now: DateTime.now(),
+          plannedPublishStart: DateTime.now(),
+        );
       }
 
       // 9. Fetch peer locations for each accepted circle. Piggybacks on
@@ -1383,37 +1969,54 @@ class BackgroundLocationTaskHandler extends TaskHandler {
       //    stale during long backgrounded sessions and the foreground
       //    rehydrates to old data on resume.
       //
-      //    Throttled to `kLocationUpdateInterval`: per-circle publish
-      //    decorrelation makes "a circle is due" fire more often than the
-      //    old single cycle-wide gate, but fetching ALL circles on every
-      //    such wake would multiply the background relay round-trips by the
-      //    circle count. Gating the fetch on its own ~nominal cadence keeps
-      //    background fetch frequency (and battery) at parity with the
-      //    pre-decorrelation behaviour regardless of how many circles the
-      //    user is in.
+      //    Throttled to `kLocationUpdateInterval`: "a circle is due" can fire
+      //    more often than the nominal cadence — a deferred circle stays
+      //    overdue, and the watchdog re-runs the cycle — but fetching ALL
+      //    circles on every such wake would multiply the background relay
+      //    round-trips. Gating the fetch on its own ~nominal cadence keeps
+      //    background fetch frequency (and battery) at parity with one fetch
+      //    per publish interval regardless of how many circles the user is
+      //    in.
       //
       //    Receiver-side auto-commit: `fetchMemberLocations` may
       //    publish + finalise an evolution event when MDK
       //    auto-commits a peer's `SelfRemove` proposal. The single-
       //    writer envelope (`_runCycleWithIdleTracking`) covers this
-      //    full flow. If the auto-commit publish fails, the existing
-      //    location service rolls back via `clearPendingCommit` and
-      //    leaves the proposal un-seen for retry on the next cycle —
-      //    we tolerate the failure here (catch + debugPrint per
-      //    circle) and let the next cycle re-process the same proposal
-      //    from a clean local epoch.
+      //    full flow. If that publish gets no ack, the location
+      //    service does NOT roll the commit back: Rust recorded the
+      //    publish as owed before the commit crossed the FFI
+      //    (`owe_removal_publish`) and refuses to discard a peer's
+      //    eviction, so the commit stays staged
+      //    and a FOREGROUND live-sync open publishes it. The next
+      //    cycle does not re-surface it — a probe against the engine
+      //    at the pinned MDK rev disproved that (this comment used to
+      //    claim it); the durable obligation is the retry, and it is
+      //    also what makes an isolate killed mid-publish visible
+      //    instead of a circle that silently stopped sharing. We
+      //    tolerate the failure here (catch + debugPrint per circle).
       var fetchCount = 0;
       final fetchDue = _lastBackgroundFetchAt == null ||
           timestamp.difference(_lastBackgroundFetchAt!) >=
               kLocationUpdateInterval;
-      if (fetchDue && _locationSharingService != null) {
+      if (fetchDue && !_shuttingDown && _locationSharingService != null) {
         _lastBackgroundFetchAt = timestamp;
+        // The burst above may have spent most of the hold on stagger waits and
+        // relay ladders; the fetch is commit-critical work and must not run on
+        // the tail of an expiring one.
+        //
+        // The stop check belongs on the GATE and not just inside the loop,
+        // which stands down on the same flag: everything between the two is
+        // awaited, so a cycle the drain abandoned would otherwise reach this
+        // acquire, take a hold, and fall through to a `finally` that (rightly)
+        // no longer releases it.
+        await _wakeLock.acquire();
         for (final circle in accepted) {
           if (await BackgroundLocationManager.isForegroundActive()) {
             debugPrint(
               '[BackgroundTask] Foreground reclaimed ownership before fetch '
               '— aborting remaining fetches.',
             );
+            await _yieldToForeground();
             break;
           }
           // LAST statement before the fetch, deliberately after the awaited
@@ -1447,6 +2050,21 @@ class BackgroundLocationTaskHandler extends TaskHandler {
         }
       }
 
+      // 9b. Close the publish pool. The relay work of this cycle is done, and
+      //     nothing else will use the socket before the next fix arrives 62 s
+      //     or more from now — so holding it open would keep a NAT binding
+      //     alive and a relay able to watch this device's presence between
+      //     publishes, which is precisely what the Android copy says does not
+      //     happen. The service re-initialises itself lazily, so the next
+      //     cycle reconnects without any wiring of its own.
+      try {
+        await _relayService?.shutdown();
+      } on Object catch (e) {
+        debugPrint(
+          '[BackgroundTask] publish pool close failed: ${e.runtimeType}',
+        );
+      }
+
       // 10. Persist the publish timestamp for cross-isolate coordination.
       final now = DateTime.now();
       await BackgroundLocationManager.writeLastPublishTime(now);
@@ -1475,8 +2093,10 @@ class BackgroundLocationTaskHandler extends TaskHandler {
         }
       }
 
-      // Per-circle next-publish times were re-armed inline (markPublished) as
-      // each due circle published — there is no single cycle-wide reschedule.
+      // The burst's shared next-publish time was re-armed inline
+      // (markBurstPublished) as each due circle published — a cycle-wide
+      // reschedule here would also re-arm the circles the budget deferred and
+      // the ones whose publish failed, which must both stay overdue.
       debugPrint(
         '[BackgroundTask] Published to $publishCount/${dueKeys.length} due '
         'circle(s) (${accepted.length} eligible), fetched '
@@ -1485,7 +2105,23 @@ class BackgroundLocationTaskHandler extends TaskHandler {
     } on Object catch (e) {
       debugPrint('[BackgroundTask] Publish cycle FAILED: ${e.runtimeType}');
       // Per-circle schedules re-arm on the next successful publish; a failed
-      // cycle leaves due circles due, so the next master tick retries them.
+      // cycle leaves due circles due, so the next watchdog tick retries them.
+    } finally {
+      // Every exit — the gates, the early returns, a throw — releases. A lock
+      // leaked on one of those paths holds the CPU awake until the native
+      // timeout on every cycle, which is the opposite of what it is for.
+      //
+      // ...unless a stop arrived while this cycle was running, in which case
+      // the lock is `onDestroy`'s from that moment and this cycle is only a
+      // guest on it. The drain ABANDONS a publish past its budget and the
+      // ladder keeps running for tens of seconds afterwards, so this
+      // `finally` can land in the middle of the teardown — and because the
+      // native lock is `setReferenceCounted(false)`, one release here drops
+      // the hold `onDestroy` re-took for the unbounded Rule-13 wait, the
+      // relay shutdown and the Rule-14 handback. `onDestroy`'s own `finally`
+      // is then the single release site, with the native ceiling still the
+      // backstop for a process that never reaches it.
+      if (!_shuttingDown) await _wakeLock.release();
     }
   }
 
@@ -1565,6 +2201,12 @@ class BackgroundLocationTaskHandler extends TaskHandler {
   @visibleForTesting
   PerCircleDueTracker get dueTrackerForTest => _dueTracker;
 
+  /// The isolate's own circle service, so a test can flag a circle
+  /// Unrecoverable MID-burst — the state the pre-fix roster snapshot could not
+  /// see and the pass must therefore re-read.
+  @visibleForTesting
+  NostrCircleService? get circleServiceForTest => _circleService;
+
   /// Test seam for [_inFlightCommitCritical]. Same reason as
   /// [inFlightPublishForTest], and the property is the opposite one: this
   /// window must be drained WITHOUT a budget.
@@ -1578,6 +2220,14 @@ class BackgroundLocationTaskHandler extends TaskHandler {
   /// bound-was-enforced case from costing 15 s of wall clock.
   @visibleForTesting
   Duration teardownDrainBudget = kBackgroundTeardownDrainBudget;
+
+  /// Test-only override for [kFirstDeliveryWait] — same reason as
+  /// [teardownDrainBudget]: what a test asserts is whether the cycle waits for
+  /// the platform's own answer at all, and every cycle that gets none would
+  /// otherwise sit out the real 2 s. The production default is the constant,
+  /// and `background_location_task_delivery_cycle_test.dart` pins that.
+  @visibleForTesting
+  Duration firstDeliveryWait = kFirstDeliveryWait;
 
   /// Test seam for [_ensureSession].
   ///

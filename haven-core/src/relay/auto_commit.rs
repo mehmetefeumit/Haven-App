@@ -7,10 +7,11 @@
 //! [`PublishWork::AutoPublish`] carrying the wrapped commit (`msg`) and a
 //! [`PendingStateRef`]. Its contract is IDENTICAL to
 //! [`PublishWork::GroupEvolution`] (publish-before-apply): the commit MUST be
-//! published to the group's relays and confirmed ONLY after ≥1 relay OK-acks,
-//! else rolled back. This mirrors the upstream reference consumer
-//! (`marmot-account`'s `publish_pending`): publish `msg`, then `confirm_published`
-//! iff at least one endpoint accepted it, else `publish_failed`.
+//! published to the group's relays and confirmed ONLY after ≥1 relay OK-acks.
+//! This mirrors the upstream reference consumer (`marmot-account`'s
+//! `publish_pending`): publish `msg`, then `confirm_published` iff at least one
+//! endpoint accepted it, else `publish_failed` — which for THESE commits keeps
+//! the publish owed rather than discarding it (see "One rule" below).
 //!
 //! Optimistically confirming an auto-commit WITHOUT publishing it (the DM-3
 //! stopgap) is a two-fold defect: (a) other remaining members never receive the
@@ -26,14 +27,43 @@
 //! pending auto-commit to its Dart caller (see
 //! [`crate::circle::CircleManager::decrypt_location_collecting_commits`]).
 //!
-//! # Crash safety
+//! # Crash safety, and the one window that is NOT crash-safe
 //!
-//! Not confirming an auto-commit before it is published is crash-safe by design:
-//! the staged commit persists to `OpenMLS`'s `PendingCommit`, and if the process
-//! dies before `confirm_published` / `publish_failed`, the engine's hydrate path
-//! clears it (treated as publish-failed) and emits
-//! `GroupEvent::PendingCommitRecovered`, prompting a resync. Confirming early
-//! (the old behaviour) is what would have been unsafe.
+//! Not confirming an auto-commit before it is published is crash-safe for every
+//! commit that removes NO member: the staged commit persists to `OpenMLS`'s
+//! `PendingCommit`, and if the process dies before `confirm_published` /
+//! `publish_failed`, the engine's hydrate path clears it (treated as
+//! publish-failed) and emits `GroupEvent::PendingCommitRecovered`, prompting a
+//! resync. Confirming early (the old behaviour) is what would have been unsafe.
+//!
+//! **A receive-side auto-commit is not in that class.** It is always
+//! removal-bearing — it commits a peer's `SelfRemove` — and hydrate's recovery
+//! deliberately short-circuits on exactly that: `staged_removes_member`
+//! matching `Proposal::Remove | Proposal::SelfRemove` skips the whole emit block
+//! (`cgka-engine/src/engine.rs:820-828` at the pinned rev `e391adc`, with the
+//! upstream comment explaining why — rolling back a removal would re-add the
+//! departed member and fork convergence). So a process killed between STAGE and
+//! resolution leaves the group with a staged commit no hydrate will clear, no
+//! `PendingCommitRecovered`, and every later send refused: the OD4-c wedge.
+//!
+//! That is what [`ReceiveAutoCommitPolicy::DeferToForeground`] exists for — and
+//! why NO plane here ever rolls one back.
+//!
+//! # One rule, two halves, every plane
+//!
+//! 1. **Record the obligation before opening the window.** Every function below
+//!    calls [`CircleManager::owe_removal_publish`] before it publishes (or
+//!    instead of publishing), so a process killed mid-publish leaves a durable
+//!    per-circle row and the next foreground LIVE-SYNC open REPORTS the wedge
+//!    (only live-sync reaches the reporter; a flag-off build writes the row and
+//!    reads it never). Before this,
+//!    only the burst's park wrote that row, which left the detector blind to
+//!    every other plane's crash window.
+//! 2. **Never roll one back.** An unacked publish keeps the obligation owed. The
+//!    decision lives in [`CircleManager::publish_failed`] rather than in each
+//!    caller, so it also covers the two Dart planes that resolve a surfaced
+//!    auto-commit over the FFI (the foreground poll and the Android foreground
+//!    service's publish cycle).
 
 use std::future::Future;
 use std::pin::Pin;
@@ -71,8 +101,8 @@ pub const CONVERGENCE_RETICK_DELAY: Duration = Duration::from_millis(20);
 /// report whether at least one relay OK-acked it.
 ///
 /// Rule 13: "acked" MUST mean a relay returned OK, never merely "sent". Any
-/// transport error or a zero-ack outcome resolves to `false` so the caller rolls
-/// the staged commit back (never an optimistic apply).
+/// transport error or a zero-ack outcome resolves to `false`, so the caller takes
+/// the fail rung (never an optimistic apply).
 ///
 /// The method returns a boxed future rather than using `async fn` in the trait so
 /// the trait stays object-safe (`dyn AutoCommitPublisher`) without pulling in the
@@ -132,9 +162,16 @@ impl AutoCommitPublisher for nostr_sdk::Client {
 ///
 /// Everything short of an OK-ack — a relay that answered `OK: false`, a send
 /// the relay never acknowledged, a transport error, or a relay set that cannot
-/// be published to at all — is a rollback, because each of them leaves the group
-/// at an epoch its peers never received. An empty `relays` can never produce an
-/// ack, so it fails closed without touching the transport.
+/// be published to at all — takes the fail rung, because each of them leaves the
+/// group at an epoch its peers never received. An empty `relays` can never
+/// produce an ack, so it fails closed without touching the transport.
+///
+/// For a removal-bearing receive-side auto-commit that fail rung is NOT a
+/// rollback: [`CircleManager::publish_failed`] keeps the publish owed, because
+/// discarding the eviction is a permanent silent drop of the removal. The caller
+/// must have recorded the obligation first
+/// ([`CircleManager::owe_removal_publish`]) or that guarantee does not apply to
+/// its commit.
 ///
 /// This is the RECEIVE path's copy of the decision, and its only non-test caller
 /// is [`resolve_receive_publish_work`] below. The send-side staged commits
@@ -165,11 +202,18 @@ pub async fn publish_then_resolve(
 /// Only [`PublishWork::AutoPublish`] carries a pending ref on the RECEIVE path
 /// (send-side `GroupCreated` / `GroupEvolution` originate from `send`, never from
 /// inbound processing). For each auto-commit: convert the wrapped commit to a
-/// signed `kind:445`, publish it to the group's relays (resolved from the
-/// commit's own `#h`, so a batch that mixes groups still routes each correctly),
-/// then [`CircleManager::confirm_published`] ONLY on a ≥1-relay OK-ack, else
-/// [`CircleManager::publish_failed`]. `ApplicationMessage` / `Proposal` carry no
-/// pending ref and are routed/surfaced elsewhere.
+/// signed `kind:445`, RECORD the publish this device now owes for it, publish it
+/// to the group's relays (resolved from the commit's own `#h`, so a batch that
+/// mixes groups still routes each correctly), then
+/// [`CircleManager::confirm_published`] ONLY on a ≥1-relay OK-ack — else the
+/// obligation stands and the next foreground pass retries it.
+/// `ApplicationMessage` / `Proposal` carry no pending ref and are routed/surfaced
+/// elsewhere.
+///
+/// The record is written BEFORE the publish and not after it fails, because the
+/// failure this plane cannot observe is the interesting one: a process killed
+/// between SEND and OK leaves a staged removal-bearing commit MDK's hydrate will
+/// not clear, and the durable row is the only thing that survives to say so.
 pub async fn resolve_receive_publish_work(
     circle: &CircleManager,
     publisher: &dyn AutoCommitPublisher,
@@ -196,27 +240,201 @@ pub async fn resolve_receive_publish_work(
             continue;
         };
 
+        // Write-ahead: this plane is about to open a publish-before-apply window
+        // it may not survive, and it is the only plane that can then resolve this
+        // ref. `false` means the obligation could not be recorded at all, which
+        // is worth saying out loud — it is the one shape in which the fail rung
+        // below can still discard the eviction.
+        let commit = crate::circle::CommitToPublish {
+            commit_event: event,
+            pending,
+        };
+        if !circle.owe_removal_publish(&commit) {
+            log::warn!(
+                "receive-side eviction commit published with no recorded obligation: an \
+                 unacked publish will roll it back"
+            );
+        }
         // Resolve the group's relays from the commit's own `#h` (nostr_group_id).
-        // No relays / unknown group ⇒ cannot publish ⇒ roll back (fail closed).
-        let relays = circle.relays_for_commit_event(&event).unwrap_or_default();
-        publish_then_resolve(circle, publisher, &event, &relays, pending).await;
+        // No relays / unknown group ⇒ cannot publish ⇒ the fail rung (which for
+        // this commit keeps the publish owed, never discards it).
+        let relays = circle
+            .relays_for_commit_event(&commit.commit_event)
+            .unwrap_or_default();
+        publish_then_resolve(
+            circle,
+            publisher,
+            &commit.commit_event,
+            &relays,
+            commit.pending,
+        )
+        .await;
     }
 }
 
-/// Rolls back — never confirms — every staged commit in a receive-side batch.
+/// Never confirms anything in a receive-side batch: an eviction auto-commit is
+/// PARKED as an owed obligation, and any other staged commit is rolled back.
 ///
-/// The fail-closed path for a processor with NO relay plane wired: without a
-/// publisher the auto-commit cannot be broadcast, so applying it would fork the
-/// group. Rolling it back (Rule 13: never apply an unpublished commit) returns the
-/// group to its prior stable epoch; the eviction re-derives when a relay-backed
-/// path (live-sync / catch-up) next processes the leaver's proposal.
-pub async fn rollback_receive_publish_work(circle: &CircleManager, work: &[PublishWork]) {
+/// The fail-closed path for a processor with NO relay plane wired. Without a
+/// publisher the commit cannot be broadcast, so applying it would fork the group
+/// (Rule 13: never apply an unpublished commit) — but the two staged shapes need
+/// opposite treatment, and giving them the same one is what this function did
+/// wrong while it was called `rollback_receive_publish_work`.
+///
+/// # Why an eviction is parked and not rolled back
+///
+/// A rollback DROPS the removal, permanently and silently. Verified at the pinned
+/// MDK rev `e391adc`, by source and by experiment: the engine removes its
+/// in-memory `scheduled_self_remove_auto_commits` entry BEFORE staging,
+/// `do_publish_failed` does not re-arm it, and a redelivery of the proposal
+/// short-circuits to `IngestOutcome::Buffered` off its durable `Created`
+/// `MessageRecord` without ever reaching the arm that reschedules. No later
+/// `advance_convergence`, no re-ingest of the same proposal, no outbound send and
+/// no process restart re-derives it. The leaver stays in the circle — still able
+/// to derive its keys — until some unrelated commit moves the epoch and its own
+/// client re-proposes.
+///
+/// And it buys nothing in exchange. `do_publish_failed` clears the staged COMMIT
+/// but not the stored PROPOSAL it was built from, and `OpenMLS`'s
+/// `create_message` refuses while the proposal store is non-empty: the next
+/// `encrypt_location` fails with `GroupStateError(PendingProposal)` until some
+/// commit merges and empties the store. So a rollback trades a `PendingPublish`
+/// refusal for a `PendingProposal` refusal AND loses the removal.
+///
+/// Parking keeps the removal owed and makes the wedge visible
+/// ([`CircleManager::owe_removal_publish`]). If even the park cannot be recorded
+/// the commit is left STAGED rather than discarded — this device's projected
+/// roster keeps the leaver out either way, and only the rollback puts them back.
+pub async fn park_or_rollback_receive_publish_work(circle: &CircleManager, work: &[PublishWork]) {
     for item in work {
-        if let PublishWork::AutoPublish { pending, .. }
-        | PublishWork::GroupCreated { pending, .. }
-        | PublishWork::GroupEvolution { pending, .. } = item
-        {
-            let _ = circle.publish_failed(*pending).await;
+        match item {
+            PublishWork::AutoPublish { msg, pending } => {
+                // A commit whose transport message will not serialize can be
+                // neither published nor parked, so it is the one staged eviction
+                // still rolled back: there is no event to owe a publish for.
+                match SessionManager::transport_message_to_event(msg) {
+                    Ok(commit_event) => {
+                        let commit = crate::circle::CommitToPublish {
+                            commit_event,
+                            pending: *pending,
+                        };
+                        if circle.defer_removal_commit(commit).is_some() {
+                            log::warn!(
+                                "eviction commit left staged: no relay plane and no \
+                                 recordable obligation"
+                            );
+                        }
+                    }
+                    Err(_) => {
+                        let _ = circle.publish_failed(*pending).await;
+                    }
+                }
+            }
+            PublishWork::GroupCreated { pending, .. }
+            | PublishWork::GroupEvolution { pending, .. } => {
+                let _ = circle.publish_failed(*pending).await;
+            }
+            PublishWork::ApplicationMessage { .. } | PublishWork::Proposal { .. } => {}
         }
     }
+}
+
+/// What a receive plane does with a staged auto-commit it has just been handed.
+///
+/// The variant is chosen by the plane's LIFECYCLE, not by the work item: a
+/// background burst and a foreground session run the same processor over the
+/// same engine, and the only thing that differs is whether the OS may end the
+/// wake window mid-publish. Making it a value the session sets means the scoping
+/// is a state read, never a comment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReceiveAutoCommitPolicy {
+    /// Publish now, confirm on a ≥1-relay OK-ack, roll back otherwise
+    /// (Rule 13). What a FOREGROUND session does, unchanged.
+    Publish,
+    /// Do not publish and do not resolve: park the commit as a durable
+    /// per-circle obligation for the next FOREGROUND pass
+    /// ([`CircleManager::defer_removal_commit`]).
+    ///
+    /// What a BACKGROUND burst does (owner decision OD4-c, option (iv)): a burst
+    /// must not open a publish-before-apply window for a removal-bearing commit,
+    /// because the OS may end its wake window mid-publish and MDK's hydrate
+    /// deliberately does not recover a removal-bearing staged commit.
+    DeferToForeground,
+}
+
+/// [`resolve_receive_publish_work`] under `policy`.
+///
+/// Under [`ReceiveAutoCommitPolicy::Publish`] this IS
+/// [`resolve_receive_publish_work`]. Under
+/// [`ReceiveAutoCommitPolicy::DeferToForeground`] each auto-commit is parked
+/// instead of published, and everything else in the batch keeps its existing
+/// disposition — a `GroupCreated` / `GroupEvolution` that has no business on a
+/// receive path is still rolled back (never confirmed, Rule 13), and an
+/// `ApplicationMessage` / `Proposal` still carries no pending ref.
+///
+/// Returns how many auto-commits were parked, so a caller can tell a deferral
+/// from a publish without re-deriving the classification.
+///
+/// A park that cannot be recorded falls back to publishing that item: an
+/// un-recorded deferral is the silent wedge the deferral exists to prevent, so
+/// it fails towards the behaviour that at least lands the removal. That fallback
+/// publish has no obligation behind it either, so its own no-ack rung CAN discard
+/// the eviction — the one residual, and the reason the record is attempted first
+/// rather than as a consolation.
+///
+/// The one remaining rollback is a commit whose wrapped transport message cannot
+/// be turned into an event at all. There is then nothing to publish AND nothing
+/// to park, and leaving it staged would freeze the circle's sends with no
+/// obligation recorded, so it is rolled back — the same choice
+/// `CircleManager::collect_deferred_work` makes for the same case. It is
+/// unreachable in practice: the engine built that message a moment earlier.
+pub async fn resolve_receive_publish_work_with_policy(
+    circle: &CircleManager,
+    publisher: &dyn AutoCommitPublisher,
+    work: &[PublishWork],
+    policy: ReceiveAutoCommitPolicy,
+) -> usize {
+    if policy == ReceiveAutoCommitPolicy::Publish {
+        resolve_receive_publish_work(circle, publisher, work).await;
+        return 0;
+    }
+    let mut deferred = 0;
+    for item in work {
+        let (msg, pending) = match item {
+            PublishWork::AutoPublish { msg, pending } => (msg, *pending),
+            PublishWork::GroupCreated { pending, .. }
+            | PublishWork::GroupEvolution { pending, .. } => {
+                let _ = circle.publish_failed(*pending).await;
+                continue;
+            }
+            PublishWork::ApplicationMessage { .. } | PublishWork::Proposal { .. } => continue,
+        };
+        let Ok(event) = SessionManager::transport_message_to_event(msg) else {
+            let _ = circle.publish_failed(pending).await;
+            continue;
+        };
+        let commit = crate::circle::CommitToPublish {
+            commit_event: event,
+            pending,
+        };
+        // Parked: `None` back. Otherwise the commit comes back unparked (unknown
+        // circle, or the durable write failed) and falls through to the Rule-13
+        // ladder rather than staying staged with nothing recording the debt.
+        let Some(commit) = circle.defer_removal_commit(commit) else {
+            deferred += 1;
+            continue;
+        };
+        let relays = circle
+            .relays_for_commit_event(&commit.commit_event)
+            .unwrap_or_default();
+        publish_then_resolve(
+            circle,
+            publisher,
+            &commit.commit_event,
+            &relays,
+            commit.pending,
+        )
+        .await;
+    }
+    deferred
 }

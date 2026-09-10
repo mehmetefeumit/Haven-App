@@ -71,10 +71,12 @@ enum KeyPackageFailureKind {
   ///
   /// Not a network condition and not retryable: the Rust tick's early return
   /// is deterministic until the user adds a relay, so escalating the retry
-  /// ladder against it only burns wakeups. Distinct from [noRelayResponded]
-  /// because the remedies are opposite — wait for the network vs. change a
-  /// setting — and both were one value until the FFI started reporting
-  /// `relaysTargeted`.
+  /// ladder against it only adds wakeups that cannot succeed — a wake COUNT
+  /// this code decides, whose energy is ESTIMATED and never measured (model E
+  /// E-A2, `docs/POWER_EFFICIENCY_PLAN.md` §6.5a). Distinct from
+  /// [noRelayResponded] because the remedies are opposite — wait for the
+  /// network vs. change a setting — and both were one value until the FFI
+  /// started reporting `relaysTargeted`.
   noRelaysConfigured,
 
   /// A `KeyPackage` was built and sent, and **no relay acknowledged it**. The
@@ -390,6 +392,15 @@ enum SubscriptionHealthAction {
   /// device as repeatedly losing its relays. For "did the receive plane get
   /// repaired?" purposes a caller should treat it like [resubscribed].
   targetedReanchor,
+
+  /// The engine is PAUSED between background bursts: it holds no standing REQ
+  /// and no socket, so there was nothing for this tick to heal.
+  ///
+  /// Proof of nothing, like [engineOff] — the next burst re-issues every REQ at
+  /// its persisted cursor, which is what a healer would have done. A caller
+  /// that read it as "the receive plane is whole" would clear a real fault
+  /// latch on the strength of a session it never inspected.
+  paused,
 }
 
 /// Presence-only result of an M8 subscription-health maintenance tick.
@@ -666,10 +677,35 @@ abstract class RelayService {
 
   /// Publishes a signed event to relays.
   ///
+  /// Takes up to three attempts before giving up, so an event whose loss
+  /// cannot be repaired by a later send — a commit, a welcome, a proposal, a
+  /// KeyPackage, a relay list, a profile — is worth the radio time.
+  ///
   /// Returns the publish result with success/failure per relay.
   ///
   /// Throws [RelayServiceException] if publishing fails completely.
   Future<PublishResult> publishEvent({
+    required String eventJson,
+    required List<String> relays,
+  });
+
+  /// Publishes a kind-445 LOCATION event, and only that.
+  ///
+  /// One connect and one 5 s per-relay ack window — 10 s worst case against
+  /// [publishEvent]'s ~49 s ladder — succeeding as soon as one relay returns
+  /// `OK`. A missed location is superseded by the next tick, so a retry buys
+  /// a stale sample at the price of holding the radio awake; a commit is
+  /// never superseded, and one that is neither confirmed nor rolled back
+  /// forks the group, so everything that resolves a staged `PendingStateRef`
+  /// keeps [publishEvent] (Security Rule 13).
+  ///
+  /// Returns the publish result with success/failure per relay.
+  ///
+  /// Throws [RelayClockRejectionException] when the relays refused the event
+  /// on timestamp grounds — the one publish failure a user can act on, kept
+  /// distinct here exactly as [publishEvent] keeps it — and
+  /// [RelayServiceException] if publishing fails for any other reason.
+  Future<PublishResult> publishLocationEvent({
     required String eventJson,
     required List<String> relays,
   });

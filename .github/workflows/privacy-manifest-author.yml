@@ -214,11 +214,14 @@ jobs:
                label, button or screen-reader announcement that asserts no
                checkable fact — if it makes a claim, it belongs to an invariant.
             2. Unclassified non-ARB claims. The four NS*UsageDescription strings
-               in haven/ios/Runner/Info.plist and every field of
-               LocationDisclosureStrings in
-               haven/lib/src/widgets/location/location_disclosure_dialog.dart
-               are user-facing claims that are NOT in the ARB. Each must map to
-               a non_arb_claims entry.
+               in haven/ios/Runner/Info.plist are user-facing claims that are
+               NOT in the ARB. Each must map to a non_arb_claims entry. The
+               prominent-disclosure dialog
+               (haven/lib/src/widgets/location/location_disclosure_dialog.dart)
+               is ARB copy since OD-P3-g: every locationDisclosure* key it
+               renders is classified like any other ARB key, and hard-coded
+               copy in that file is a rule 12 failure, never something to
+               classify as a non_arb_claim.
             3. New proof. A test added under haven-core/tests/,
                haven-core/src/**/mod tests, haven/test/lints/ or
                haven/test/security/, or a guard newly wired as a `run: bash

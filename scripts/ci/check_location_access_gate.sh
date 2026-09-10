@@ -41,10 +41,16 @@
 #      only signal for an iOS "Precise Location" / Android FINE-vs-COARSE
 #      downgrade, which `checkPermission()` still reports as `whileInUse`.
 #   7. getLocationStream drops the cache on BOTH stream error and close.
-#   8. The per-circle publish chain bounds each link with `.timeout(` — an
-#      unfinished future raises no error, so `catchError` cannot see it and a
-#      single hung link stalls publishing for every circle until the provider
-#      is rebuilt.
+#   8. The publish chain bounds each link with `.timeout(`, on BOTH of its
+#      branches — an unfinished future raises no error, so `catchError` cannot
+#      see it and a single hung link stalls publishing for every circle until
+#      the provider is rebuilt. The chain link delegates to a dispatcher that
+#      branches (background burst sink / direct paced publish), and only the
+#      direct branch reaches `_publishCircle`, several calls down. So the check
+#      resolves the delegate, requires a bound on it (the sink branch is
+#      awaited there and nowhere deeper), then WALKS the private calls and
+#      requires a bound in every body that awaits `_publishCircle`. Nothing
+#      resolvable, or nothing reaching the publish at all, fails CLOSED.
 #   9. Exactly ONE call site reaches `_geolocator.requestPermission(`, inside a
 #      helper that returns the request already in flight instead of starting a
 #      second. Android refuses a concurrent permission request and answers it
@@ -279,28 +285,77 @@ check_service() {
     fi
   fi
 
-  # -- getLocationStream ----------------------------------------------------
+  # -- the position stream's end-of-life handlers ---------------------------
+  #
+  # An ERROR and a CLOSE are the two ways the platform reports a mid-session
+  # revocation, and both mean no further fix will arrive — so the teed
+  # coordinate must be dropped THEN, not left to age out over
+  # kStreamPositionMaxAge.
+  #
+  # Where the handlers live is not fixed: `getLocationStream` hands back an
+  # outer controller whose platform subscription is established in
+  # `_listenInner` (`listen(onError:/onDone:)`), and it used to transform the
+  # plugin stream inline (`handleError:`/`handleDone:`). Both spellings are
+  # accepted; a missing handler, or one that does not drop the cache, is not.
   body="$(fn_slice 'Stream<Position> getLocationStream(' "${service}")"
   if [[ -z "${body}" ]]; then
     fail "getLocationStream() not found in $(basename "${service}")"
   else
-    local h
-    for h in handleError handleDone; do
-      if ! grep -qE "${h}:" <<<"${body}"; then
-        fail "getLocationStream: no ${h} handler — the end of the stream is how a mid-session revocation is reported, and it must drop the teed coordinate"
+    # Declaration-shaped, so the `_listenInner(outer);` CALL inside
+    # getLocationStream cannot be sliced instead (it has no braces to balance,
+    # so fn_slice would run to end of file).
+    body="${body}
+$(fn_slice 'void _listenInner(' "${service}")"
+    local h name
+    for h in 'handleError|onError' 'handleDone|onDone'; do
+      name="${h//|/ or }"
+      if ! grep -qE "(${h}):" <<<"${body}"; then
+        fail "the position stream has no ${name} handler — the end of the stream is how a mid-session revocation is reported, and it must drop the teed coordinate"
         continue
       fi
       # The _noteAccessLost call must be inside that handler, not merely
       # somewhere in the method.
-      if ! awk -v h="${h}:" '
-            index($0, h) > 0 { inh = 1 }
+      if ! awk -v h="(${h}):" '
+            $0 ~ h { inh = 1 }
             inh && /_noteAccessLost\(/ { found = 1; exit }
             inh && /^ *\},? *$/ { inh = 0 }
             END { exit(found ? 0 : 1) }' <<<"${body}"; then
-        fail "getLocationStream: ${h} does not call _noteAccessLost( — no further fix will arrive, so the cached one must be dropped now instead of ageing out over kStreamPositionMaxAge"
+        fail "the position stream's ${name} handler does not call _noteAccessLost( — no further fix will arrive, so the cached one must be dropped now instead of ageing out over kStreamPositionMaxAge"
       fi
     done
   fi
+}
+
+# Prints the brace-balanced body of the DECLARATION of `name` in `file`.
+#
+# A declaration, never a call site. `await _publishCircle(...).timeout(` is a
+# call and satisfies every "type then name" shape you can write, and it sits
+# ABOVE the real declaration — a resolver that picked it would find a
+# `.timeout(` belonging to a different call and pass an unbounded chain. Two
+# discriminators, because Dart wraps long signatures:
+#
+#   * the line ends with `{` (single-line signature) or with `(` (a signature
+#     whose parameters continue on the next line), and
+#   * it does not START with a statement keyword and carries no `=` or `.`
+#     before the name, which is what every call site here does.
+#
+# Empty when nothing matches, which every caller treats as FAIL CLOSED.
+decl_slice() {
+  local name="$1" file="$2" decl
+  decl="$(code_view "${file}" \
+    | grep -E "^[[:space:]]*[A-Za-z_][A-Za-z0-9_<>,?]*[[:space:]]+${name}\((.*\{|)[[:space:]]*$" \
+    | grep -vE "^[[:space:]]*(await|return|yield|final|var|const)[[:space:]]" \
+    | grep -vE "^[^_]*[=.][^_]*${name}\(" \
+    | head -1 | sed 's/^[[:space:]]*//')"
+  [[ -z "${decl}" ]] && return 0
+  fn_slice "${decl}" "${file}"
+}
+
+# Every private method `body` calls, so the chain can be followed rather than
+# assumed. The declaration line is dropped first: a method's own name appears
+# in its signature, and following that is an infinite loop.
+callees_of() {
+  tail -n +2 <<<"$1" | grep -oE '_[A-Za-z0-9_]+\(' | tr -d '(' | sort -u
 }
 
 check_scheduler() {
@@ -316,49 +371,82 @@ check_scheduler() {
     fail "_onCircleTick() not found in $(basename "${scheduler}")"
     return
   fi
-  # The bound may live one call deeper than the chain link. `_onCircleTick`
-  # enqueues `.then((_) => X(...))`, and X is where the publish is actually
-  # awaited — so that is where `.timeout(` belongs once a stagger/pacing step
-  # exists between the two. Checking only `_onCircleTick` failed the healthy
-  # tree in CI run 31216078806 after exactly that refactor, while the bound was
-  # intact in the delegate.
-  #
-  # So: accept the timeout inline OR in the single function the link delegates
-  # to, and RESOLVE that delegate rather than assuming it. Unresolvable means
-  # FAIL — an unfollowable chain is not evidence of a bounded one.
-  local delegate
-  if grep -qE '\.timeout\(' <<<"${body}"; then
-    : # bounded inline
-  elif delegate="$(grep -oE '\.then\(\([^)]*\) => _[A-Za-z0-9_]+\(' <<<"${body}" \
-                   | head -1 | grep -oE '_[A-Za-z0-9_]+\($' | tr -d '(')" \
-       && [[ -n "${delegate}" ]]; then
-    # DECLARATION-shaped, for the same reason `_onCircleTick` is matched that
-    # way above: a bare `_pacedPublish(` hits the CALL SITE inside the chain
-    # link first and would slice a one-line closure that contains none of the
-    # tokens we are looking for — the guard would then fail a healthy tree
-    # while appearing to have found something.
-    local ddecl dbody
-    # Anchored on the trailing `{`, the only reliable discriminator here: a
-    # leading-keyword call site (`await _publishCircle(...).timeout(`) satisfies
-    # every "type then name" shape you can write, and it sits ABOVE the real
-    # declaration — so `head -1` picked the CALL SITE and found a `.timeout(`
-    # belonging to a different call, passing an unbounded chain. A declaration
-    # opens a body; a call does not. A signature wrapped across lines simply
-    # will not match, which lands in the unresolvable branch and fails closed.
-    ddecl="$(grep -oE "^[[:space:]]*[A-Za-z_][A-Za-z0-9_<>,?]*[[:space:]]+${delegate}\(.*\{[[:space:]]*$" \
-             "${scheduler}" | head -1 | sed 's/^[[:space:]]*//')"
-    dbody=""
-    [[ -n "${ddecl}" ]] && dbody="$(fn_slice "${ddecl}" "${scheduler}")"
-    if [[ -z "${dbody}" ]]; then
-      fail "_onCircleTick delegates its publish to ${delegate}(), which could not be found in $(basename "${scheduler}") — the per-link bound cannot be verified, so it is treated as absent"
-    elif ! grep -qE '\.timeout\(' <<<"${dbody}"; then
-      fail "_onCircleTick delegates its publish to ${delegate}(), and NEITHER has a .timeout( — a link that never completes raises no error, so catchError cannot see it, and one hung publish (e.g. a permission prompt the OS deferred) stalls EVERY circle until the provider is rebuilt"
-    fi
-  else
-    fail "_onCircleTick: the per-circle publish chain has no .timeout( and no resolvable delegate to carry one — a link that never completes raises no error, so catchError cannot see it, and one hung publish (e.g. a permission prompt the OS deferred) stalls EVERY circle until the provider is rebuilt"
-  fi
   if ! grep -qE 'catchError\(' <<<"${body}"; then
     fail "_onCircleTick: the per-circle publish chain has no catchError( — one failed publish would poison the chain for every later circle"
+  fi
+
+  # The bound lives one or more calls deeper than the chain link. `_onCircleTick`
+  # enqueues `.then((_) => X(...))`, X dispatches to a BRANCH per publish plane
+  # — the background burst sink and the direct paced publish — and only the
+  # branch that actually awaits `_publishCircle` can carry the per-publish
+  # bound. Checking one level found a `.timeout(` in the sink branch and
+  # declared the whole chain bounded, so deleting the direct branch's timeout
+  # outright left this guard GREEN while printing "the publish chain is
+  # bounded".
+  #
+  # So: resolve the delegate, then WALK the private calls from it and require a
+  # `.timeout(` in every body that awaits `_publishCircle`. Nothing resolvable,
+  # or nothing reaching `_publishCircle` at all, is FAIL CLOSED — an
+  # unfollowable chain is not evidence of a bounded one.
+  local delegate
+  delegate="$(grep -oE '\.then\(\([^)]*\) => _[A-Za-z0-9_]+\(' <<<"${body}" \
+              | head -1 | grep -oE '_[A-Za-z0-9_]+\($' | tr -d '(')"
+  if grep -qE '\.timeout\(' <<<"${body}"; then
+    : # the link is bounded inline; there is no delegate to follow
+  elif [[ -z "${delegate}" ]]; then
+    fail "_onCircleTick: the per-circle publish chain has no .timeout( and no resolvable delegate to carry one — a link that never completes raises no error, so catchError alone cannot see it, and one hung publish (e.g. a permission prompt the OS deferred) stalls EVERY circle until the provider is rebuilt"
+    return
+  fi
+
+  local dbody
+  if [[ -n "${delegate}" ]]; then
+    dbody="$(decl_slice "${delegate}" "${scheduler}")"
+    if [[ -z "${dbody}" ]]; then
+      fail "_onCircleTick delegates its publish to ${delegate}(), whose declaration could not be found in $(basename "${scheduler}") — the per-link bound cannot be verified, so it is treated as absent"
+      return
+    fi
+    # The delegate's own body must be bounded too: it is where the branch that
+    # hands the tick to the background burst sink is awaited, and that branch
+    # never reaches `_publishCircle` at all.
+    if ! grep -qE '\.timeout\(' <<<"${dbody}"; then
+      fail "_onCircleTick delegates its publish to ${delegate}(), which has no .timeout( — the branch that hands the tick to the burst sink is awaited there and nowhere deeper, so nothing bounds it"
+    fi
+  else
+    dbody="${body}"
+  fi
+
+  # Walk. Bounded by the `seen` set, so a cycle in the call graph terminates.
+  # The seed is the delegate's own body (or the tick's, when the link does not
+  # delegate at all) — the publish can be right there.
+  local -A seen=()
+  local -a queue=()
+  local reached=0 fn next fbody
+  queue=("__seed__")
+  while (( ${#queue[@]} > 0 )); do
+    fn="${queue[0]}"
+    queue=("${queue[@]:1}")
+    [[ -n "${seen[${fn}]:-}" ]] && continue
+    seen[${fn}]=1
+    if [[ "${fn}" == "__seed__" ]]; then
+      fbody="${dbody}"
+    else
+      fbody="$(decl_slice "${fn}" "${scheduler}")"
+    fi
+    # Fields, getters and cross-object calls resolve to nothing; they are not
+    # steps in the chain, so they are skipped rather than failed. The
+    # fail-closed case is reaching NO `_publishCircle` at all, below.
+    [[ -z "${fbody}" ]] && continue
+    if tail -n +2 <<<"${fbody}" | grep -qE '_publishCircle\('; then
+      reached=1
+      if ! grep -qE '\.timeout\(' <<<"${fbody}"; then
+        fail "the publish chain awaits _publishCircle() in ${fn}() with no .timeout( — a link that never completes raises no error, so catchError cannot see it, and one hung publish (e.g. a permission prompt the OS deferred) stalls EVERY circle until the provider is rebuilt"
+      fi
+      continue
+    fi
+    while read -r next; do queue+=("${next}"); done < <(callees_of "${fbody}")
+  done
+  if (( reached == 0 )); then
+    fail "_onCircleTick: no function reachable from the publish chain awaits _publishCircle() — the guard can no longer see where the publish happens, so it cannot certify that anything bounds it"
   fi
 }
 
@@ -470,24 +558,46 @@ DART
 # 31216078806 while the bound was intact one call deeper.
 GOOD_SCHEDULER_DELEGATED=$(cat <<'DART'
 class LocationPublishSchedulerNotifier extends Notifier<void> {
-  void _onCircleTick(String key, int generation) {
+  void _onCircleTick(int generation) {
     if (!_isCurrent(generation) || !_active) return;
-    final circle = _circles[key];
-    if (circle == null) return;
     _publishChain = _publishChain
-        .then((_) => _pacedPublish(circle, generation))
+        .then((_) => _dispatchBurst(burst, generation))
         .catchError((Object _) {});
   }
 
-  Future<void> _pacedPublish(Circle circle, int generation) async {
-    await _stagger();
-    await _publishCircle(circle, generation).timeout(
+  Future<void> _dispatchBurst(List<Target> burst, int generation) {
+    final sink = _tickSink;
+    if (sink == null) return _publishBurst(burst, generation);
+    return Future.wait(handovers).then<void>((_) {}).timeout(
+      _publishLinkTimeout,
+      onTimeout: () => debugPrint('reported'),
+    );
+  }
+
+  Future<void> _publishBurst(List<Target> burst, int generation) async {
+    for (var i = 0; i < burst.length; i++) {
+      await _pacedPublish(burst[i].key, generation, gaps[i], fix);
+    }
+  }
+
+  Future<void> _pacedPublish(
+    String circleKey,
+    int generation,
+    Duration gap,
+    BurstFix fix,
+  ) async {
+    await _wait(gap);
+    await _publishCircle(circle, generation, fix: fix).timeout(
       _publishLinkTimeout,
       onTimeout: () => debugPrint('abandoned'),
     );
   }
 
-  Future<void> _publishCircle(Circle circle, int generation) async {
+  Future<void> _publishCircle(
+    Circle circle,
+    int generation, {
+    required BurstFix fix,
+  }) async {
     await service.publishLocation();
   }
 }
@@ -627,6 +737,39 @@ self_test() {
   _expect "handleError without _noteAccessLost must fail" check_service \
     "$(sed -e "s/^          _noteAccessLost('position stream error');$//" <<<"${GOOD_SERVICE}")" 1
 
+  # The same rule against the shape the service actually has: an outer
+  # controller whose platform subscription — and therefore whose end-of-life
+  # handlers — live in `_listenInner`. Without these three the guard could
+  # accept the production spelling while enforcing nothing about it.
+  local OUTER_SERVICE
+  OUTER_SERVICE="$(sed -e '/^  Stream<Position> getLocationStream(/,/^  }$/c\
+  Stream<Position> getLocationStream({bool backgroundSharingEnabled = false}) {\
+    final outer = StreamController<Position>(sync: true);\
+    _listenInner(outer);\
+    return outer.stream;\
+  }\
+\
+  void _listenInner(StreamController<Position> outer) {\
+    _inner = _geolocator.getPositionStream().listen(\
+      outer.add,\
+      onError: (Object error, StackTrace stackTrace) {\
+        _noteAccessLost('"'"'position stream error'"'"');\
+        outer.addError(error, stackTrace);\
+      },\
+      onDone: () {\
+        _noteAccessLost('"'"'position stream closed'"'"');\
+        unawaited(outer.close());\
+      },\
+    );\
+  }' <<<"${GOOD_SERVICE}")"
+
+  _expect "the outer-controller stream shape must pass" check_service \
+    "${OUTER_SERVICE}" 0
+  _expect "onDone without _noteAccessLost must fail" check_service \
+    "$(sed -e "s/^        _noteAccessLost('position stream closed');$//" <<<"${OUTER_SERVICE}")" 1
+  _expect "onError without _noteAccessLost must fail" check_service \
+    "$(sed -e "s/^        _noteAccessLost('position stream error');$//" <<<"${OUTER_SERVICE}")" 1
+
   # The fresh path has its own ordering: it never serves the cache, but it is
   # the path that DISCOVERS a revocation and clears the cache for everyone
   # else, so a read placed ahead of its gate loses that too.
@@ -656,28 +799,50 @@ self_test() {
   _expect "a publish chain without catchError must fail" check_scheduler \
     "${GOOD_SCHEDULER//.catchError((Object _) {})/}" 1
 
-  # --- delegated shape: the bound may live one call deeper ------------------
-  _expect "a bounded chain whose timeout lives in the delegate passes" \
+  # --- delegated shape: the bound lives SEVERAL calls deeper -----------------
+  # The real scheduler's shape: the chain link delegates to a dispatcher that
+  # BRANCHES — one branch hands the tick to the background burst sink and is
+  # bounded there, the other walks a paced publish loop whose own bound is two
+  # calls further down.
+  _expect "a two-branch chain bounded on both branches passes" \
     check_scheduler "${GOOD_SCHEDULER_DELEGATED}" 0
 
-  # The regression the delegation support must still catch: the delegate loses
-  # its bound, so nothing anywhere bounds the link.
-  _expect "an unbounded DELEGATE must fail" check_scheduler \
-    "${GOOD_SCHEDULER_DELEGATED//.timeout(/.ignoreTimeout(}" 1
+  # THE HOLE THAT SHIPPED. Only the SINK branch's timeout is left. One level of
+  # delegate resolution finds it, declares the chain bounded and prints
+  # "the publish chain is bounded" — while the direct branch, two levels
+  # deeper, has no bound at all and one hung publish stalls every circle.
+  _expect "a direct branch that lost its bound must fail" check_scheduler \
+    "$(sed -e '/await _publishCircle(circle, generation, fix: fix).timeout(/,+3c\
+    await _publishCircle(circle, generation, fix: fix);' \
+        <<<"${GOOD_SCHEDULER_DELEGATED}")" 1
 
-  # THE HOLE THAT NEARLY SHIPPED. The link stops delegating and calls an
-  # UNBOUNDED function directly, while a bounded-but-now-dead delegate remains
-  # in the file. A resolver that matched the call site `await _publishCircle(
-  # ...).timeout(` instead of the declaration would find that stray timeout and
-  # pass an unbounded chain.
+  # ...and the mirror image: the SINK branch loses its bound while the direct
+  # branch keeps one. A guard that only followed the chain to `_publishCircle`
+  # would miss this, because the sink branch never reaches it.
+  _expect "a sink branch that lost its bound must fail" check_scheduler \
+    "$(sed -e '/return Future.wait(handovers).then<void>((_) {}).timeout(/,+3c\
+    return Future.wait(handovers).then<void>((_) {});' \
+        <<<"${GOOD_SCHEDULER_DELEGATED}")" 1
+
+  # The link stops delegating and calls an UNBOUNDED function directly, while a
+  # bounded-but-now-dead delegate remains in the file. A resolver that matched
+  # the call site `await _publishCircle(...).timeout(` instead of the
+  # declaration would find that stray timeout and pass an unbounded chain.
   _expect "a link calling an unbounded function directly must fail" \
     check_scheduler \
-    "${GOOD_SCHEDULER_DELEGATED//_pacedPublish(circle, generation))/_publishCircle(circle, generation))}" 1
+    "${GOOD_SCHEDULER_DELEGATED//await _pacedPublish(/await _publishCircle(}" 1
 
   # Unresolvable delegate: fail CLOSED. An unfollowable chain is not evidence
   # of a bounded one.
   _expect "an unresolvable delegate must fail closed" check_scheduler \
-    "${GOOD_SCHEDULER_DELEGATED//Future<void> _pacedPublish(/Future<void> _pacedPublishGone(}" 1
+    "${GOOD_SCHEDULER_DELEGATED//Future<void> _dispatchBurst(/Future<void> _dispatchBurstGone(}" 1
+
+  # The publish itself moves out of reach of the walk: nothing the chain can
+  # follow awaits `_publishCircle` any more, so the guard has stopped being
+  # able to certify anything and must say so instead of passing.
+  _expect "a chain that no longer reaches the publish must fail closed" \
+    check_scheduler \
+    "${GOOD_SCHEDULER_DELEGATED//await _publishCircle(circle, generation, fix: fix).timeout(/await somethingElse(circle).timeout(}" 1
 
   if (( failures > 0 )); then
     printf '%s[%s] self-test FAILED (%d case(s)) — this guard cannot be trusted until it is fixed%s\n' \

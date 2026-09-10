@@ -69,6 +69,23 @@ class NostrSubscriptionService implements SubscriptionService {
   }
 
   @override
+  bool get isPaused {
+    try {
+      return _engine?.isPaused() ?? false;
+    } on Object catch (e) {
+      // `false` is the answer a failed read must give, but it is fail-safe
+      // only for the callers that re-anchor on it (`_ensureRunning`,
+      // `_fullRestart`). `MapShell.reanchorOnResume` reads it as "no second
+      // re-anchor needed" and would leave a paused engine live in the
+      // foreground. Either way it is indistinguishable from a genuine
+      // un-paused session, so the read failing at all has to be visible
+      // somewhere. The type only; the FFI message is remote text (Rule 8).
+      debugPrint('[Subscription] isPaused read failed: ${e.runtimeType}');
+      return false;
+    }
+  }
+
+  @override
   Future<void> start({
     required List<FfiGroupSpec> groups,
     required List<String> inboxRelays,
@@ -179,6 +196,121 @@ class NostrSubscriptionService implements SubscriptionService {
       await engine.resumeAfterBackground();
     } on Object catch (e) {
       debugPrint('[Subscription] resume failed: ${e.runtimeType}');
+    }
+  }
+
+  /// Unlike [resumeAfterBackground], this THROWS on failure.
+  ///
+  /// A foreground re-anchor is one of several redundant repairs — the health
+  /// tick and the next app resume both retry it — so swallowing there costs
+  /// nothing. A burst open has no redundancy: if it fails, this burst holds no
+  /// subscription, and a caller that went on to wait for a backlog nobody
+  /// requested would spend the whole wait budget to learn nothing.
+  @override
+  Future<void> openBackgroundBurst() async {
+    final engine = _engine;
+    if (engine == null) {
+      throw const SubscriptionServiceException('no active live session');
+    }
+    try {
+      await engine.openBackgroundBurst();
+    } on Object catch (e) {
+      debugPrint('[Subscription] burst open failed: ${e.runtimeType}');
+      throw const SubscriptionServiceException('failed to open burst');
+    }
+  }
+
+  /// How many long-lived subscriptions the engine pool holds right now, across
+  /// every relay — the DIRECT read of the background-burst promise "no standing
+  /// REQ between publish ticks".
+  ///
+  /// [isPaused] cannot stand in for it, and an oracle built on that flag is the
+  /// specific mistake this method exists to prevent: the engine raises it as
+  /// the FIRST statement of its pause — before `unsubscribe_all`, before the
+  /// router drain, before the uncapped Rule-13 publish gauge and before the
+  /// disconnect — so it reports that the pause was ENTERED, not that the REQs
+  /// are gone. The flag asserts an intent; this asserts the state.
+  ///
+  /// THROWS when there is no session, and deliberately never answers `0` for
+  /// one: zero is the PASSING value of the promise, so "there was nothing to
+  /// ask" must not be readable as "nothing is standing".
+  ///
+  /// Not on [SubscriptionService]: no production caller decides anything from
+  /// it, and the two that read [isPaused] must keep reading that. Its one
+  /// caller is the `e2e-ios-background-publish` drive, which already narrows to
+  /// this type to prove the production path was not bypassed.
+  ///
+  /// Test-only, so annotated — but deliberately NOT renamed to the repo's
+  /// `…ForTest` convention (`LocationSharingService.trackCommitCriticalForTest`
+  /// carries both). Two things pin this spelling: it is the FFI method's own
+  /// name one layer down, and `check_ios_background_publish.sh` requires the
+  /// drive to read `poolSubscriptionCount(` verbatim — the guard that stops
+  /// the drive's oracle from being swapped for the engine's paused flag, which
+  /// would go green through every state it exists to catch. Renaming means
+  /// re-pointing that guard in the same commit.
+  @visibleForTesting
+  Future<int> poolSubscriptionCount() async {
+    final engine = _engine;
+    if (engine == null) {
+      throw const SubscriptionServiceException('no active live session');
+    }
+    try {
+      return await engine.poolSubscriptionCount();
+    } on Object catch (e) {
+      // Rule 8: the type only — the FFI message is a Rust `Result` string.
+      debugPrint('[Subscription] pool count read failed: ${e.runtimeType}');
+      throw const SubscriptionServiceException(
+        'failed to read the pool subscription count',
+      );
+    }
+  }
+
+  /// A missing session or a failed wait answers [BacklogOutcomeFfi.timedOut] —
+  /// the outcome that promises nothing. Answering `settled` would tell the
+  /// caller every endpoint had replayed when none was even asked, and the
+  /// caller would encrypt at an epoch a peer commit may already have moved.
+  @override
+  Future<BacklogOutcomeFfi> waitBacklogSettled() async {
+    final engine = _engine;
+    if (engine == null) return BacklogOutcomeFfi.timedOut;
+    try {
+      return await engine.waitBacklogSettled();
+    } on Object catch (e) {
+      debugPrint('[Subscription] backlog wait failed: ${e.runtimeType}');
+      return BacklogOutcomeFfi.timedOut;
+    }
+  }
+
+  @override
+  Future<void> settleBeforePause() async {
+    final engine = _engine;
+    if (engine == null) return;
+    try {
+      await engine.settleBeforePause();
+    } on Object catch (e) {
+      debugPrint('[Subscription] settle failed: ${e.runtimeType}');
+    }
+  }
+
+  /// Best-effort, and deliberately non-throwing: this is the caller's `finally`
+  /// link, so a throw here would REPLACE whatever failure aborted the burst
+  /// with a less informative one.
+  ///
+  /// A failure is therefore invisible to the caller beyond the log, and
+  /// [isPaused] does not close that gap: the engine raises its flag as the
+  /// first statement of the pause, so it answers `true` for a pause that only
+  /// half-completed exactly as it does for one that finished, and `false` both
+  /// for "there was no session to pause" and for an FFI read that threw. The
+  /// recovery is the next burst, which re-anchors from the stored live set
+  /// whatever state this left behind.
+  @override
+  Future<void> pauseSubscriptions() async {
+    final engine = _engine;
+    if (engine == null) return;
+    try {
+      await engine.pauseSubscriptions();
+    } on Object catch (e) {
+      debugPrint('[Subscription] pause failed: ${e.runtimeType}');
     }
   }
 

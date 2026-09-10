@@ -33,6 +33,7 @@ export 'identity/avatar.dart';
 export 'identity/npub_qr_code.dart';
 
 // Location widgets
+export 'location/android_reliability_card.dart';
 export 'location/clock_skew_banner.dart';
 export 'location/location_disclosure_dialog.dart';
 

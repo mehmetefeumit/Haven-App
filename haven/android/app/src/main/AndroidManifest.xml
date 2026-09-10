@@ -26,6 +26,14 @@
     <!-- Battery optimization exemption request -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
+    <!-- Wake lock for the scoped `Haven:publish` PARTIAL_WAKE_LOCK the
+         foreground service holds across one publish cycle
+         (PublishWakeLock.kt). Declared explicitly rather than relying on the
+         transitive merge from flutter_foreground_task's manifest, so removing
+         or replacing that plugin cannot silently take the permission — and the
+         lock — away with it. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
     <!-- Receive-boot-completed permission required by the RebootReceiver so the
          FGS can be restarted after a device reboot when background sharing is
          enabled. LIVE since M7-E: the receiver below is enabled="true" and
@@ -112,9 +120,15 @@
             android:value="2" />
         <!-- Google Play monitoring-app declaration. Haven is consensual
              circle/family location sharing (not parental control or
-             enterprise), so the value is "other". Play also requires a
-             matching "monitoring app" + Data safety declaration in the
-             Play Console (see docs/MAP_AND_PRIVACY_BACKLOG.md). -->
+             enterprise), so the value is "other". The matching "monitoring
+             app" + Data safety declarations are console-side: they live in the
+             Play Console, not in this repository, so nothing here can assert
+             they are current. What the app actually does in the background —
+             the behaviour those declarations must match — is stated in
+             docs/privacy/README.md and in haven-core/SECURITY.md, "Scheduled
+             background wakes (M7)". (This comment used to cite
+             docs/MAP_AND_PRIVACY_BACKLOG.md, which does not exist in this
+             tree.) -->
         <meta-data
             android:name="isMonitoringTool"
             android:value="other" />

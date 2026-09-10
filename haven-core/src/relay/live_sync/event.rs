@@ -48,6 +48,20 @@ pub enum SyncStatusReason {
     SessionStopped,
     /// The session resumed from background.
     BackgroundResumed,
+    /// The session is paused between background bursts: no standing REQ, no
+    /// socket.
+    ///
+    /// Emitted ONCE per ENTRY into that state, by both things that produce it:
+    /// a deliberate pause, and a burst open that failed after `connect()` and
+    /// therefore put the radio back itself. It is a state, never a fault — a
+    /// consumer must not stamp a "disconnected since" from it. The per-relay
+    /// [`Self::Disconnected`] transitions a pause necessarily produces are
+    /// suppressed while paused for the same reason: a burst interval can be as
+    /// long as the receive-silence threshold, so a health model fed those
+    /// transitions would confirm a relay outage on a deliberate pause. The
+    /// `Reconnecting`/`Connected` churn each burst produces is harmless and
+    /// expected.
+    Paused,
 }
 
 /// An event emitted by the engine onto its internal broadcast bus.
@@ -93,6 +107,47 @@ pub enum LiveSyncEvent {
         /// The raw kind:1059 event JSON.
         gift_wrap_json: String,
     },
+    /// A circle that cannot recover on its own and needs a re-invite.
+    ///
+    /// A TERMINAL verdict about ONE circle, and the only event on this bus that
+    /// is. It means: this device holds group state no code path will move again,
+    /// so waiting cannot help and neither can a retry — the circle has to be
+    /// re-created. A consumer may therefore offer a destructive repair on it,
+    /// which is exactly why nothing transient may ever be spelled this way.
+    ///
+    /// Two things produce it, and they are the same verdict from opposite ends:
+    ///
+    /// * the ENGINE reported the group `Unrecoverable` (`GroupUnrecoverable` →
+    ///   [`crate::nostr::mls::types::LocationMessageResult::Unrecoverable`]);
+    ///   its one legal exit has no caller at the pinned rev, so it never clears;
+    /// * a DURABLE removal deferral outlived the session that staged it
+    ///   ([`crate::circle::CircleManager::orphaned_removal_deferrals`]): a
+    ///   departing peer's eviction commit is staged in the engine with its
+    ///   `PendingStateRef` gone, which nothing can publish and hydrate will not
+    ///   clear.
+    ///
+    /// # What it is NOT
+    ///
+    /// Not a relay outage ([`SyncStatusReason::RelayError`] /
+    /// [`SyncStatusReason::Disconnected`]), not a pause
+    /// ([`SyncStatusReason::Paused`]), not a message that could not be applied
+    /// ([`SyncStatusReason::Unprocessable`]), and above all not a future-epoch
+    /// backlog: convergence drains that on its own, and Rule 12 forbids
+    /// treating legitimate offline backlog as a fault. Each of those clears by
+    /// itself; this one does not, and telling a user to re-create a working
+    /// circle is worse than telling them nothing.
+    ///
+    /// Repeats, and a consumer must treat it as idempotent per circle rather than
+    /// counting it: the engine-reported source emits once per inbound event that
+    /// carries the verdict, and the deferral source re-emits on every FOREGROUND
+    /// re-anchor that still finds the state — so a consumer that missed the first
+    /// one is not left blind. There is no paired clearing event: the state's only
+    /// exit is the circle being re-created or left, and both remove the circle
+    /// this names.
+    GroupUnrecoverable {
+        /// The circle's pseudonymous `nostr_group_id` (NOT the MLS group id).
+        nostr_group_id: Vec<u8>,
+    },
     /// A non-content status / lifecycle signal.
     Status {
         /// The closed status reason.
@@ -125,6 +180,10 @@ impl std::fmt::Debug for LiveSyncEvent {
                 .debug_struct("Welcome")
                 .field("gift_wrap_json", &"<redacted>")
                 .finish(),
+            Self::GroupUnrecoverable { .. } => f
+                .debug_struct("GroupUnrecoverable")
+                .field("nostr_group_id", &"<redacted>")
+                .finish(),
             Self::Status { reason } => f.debug_struct("Status").field("reason", reason).finish(),
         }
     }
@@ -151,8 +210,11 @@ mod tests {
             event_created_at_secs: 1234,
         };
         let group_update = LiveSyncEvent::GroupUpdate {
-            nostr_group_id: group_id,
+            nostr_group_id: group_id.clone(),
             evolution_event_json: Some(EVOLUTION_JSON.to_string()),
+        };
+        let unrecoverable = LiveSyncEvent::GroupUnrecoverable {
+            nostr_group_id: group_id,
         };
         let welcome = LiveSyncEvent::Welcome {
             gift_wrap_json: GIFTWRAP_JSON.to_string(),
@@ -161,7 +223,7 @@ mod tests {
             reason: SyncStatusReason::Connected,
         };
 
-        for ev in [&location, &group_update, &welcome, &status] {
+        for ev in [&location, &group_update, &welcome, &status, &unrecoverable] {
             let dbg = format!("{ev:?}");
             assert!(!dbg.contains(SECRET_CONTENT), "leaked content: {dbg}");
             assert!(!dbg.contains(SENDER_PK), "leaked sender pubkey: {dbg}");

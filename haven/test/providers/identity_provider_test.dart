@@ -26,7 +26,7 @@ import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/live_sync_provider.dart' show liveSyncEnabled;
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/providers/tile_prefetch_provider.dart';
-import 'package:haven/src/rust/api.dart' show FfiGroupSpec;
+import 'package:haven/src/rust/api.dart' show BacklogOutcomeFfi, FfiGroupSpec;
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/pending_leave_service.dart' show kPendingLeaveKey;
@@ -696,6 +696,36 @@ void main() {
         }
       },
     );
+
+    test('a PAUSED engine is stopped too, not left holding the MLS guard',
+        () async {
+      // A pause drops the REQs and the sockets; it does NOT release the
+      // engine's `Arc<CircleManager>`, and with it the MLS database's Rule-14
+      // single-session guard. So a logout that skipped the stop because the
+      // engine "was not doing anything" would wipe the identity and leave the
+      // guard registered against a database nothing can reopen.
+      final mockCircle = MockCircleService();
+      final engine = _RecordingSubscriptionService(
+        sharedLog: mockCircle.methodCalls,
+      )..paused = true;
+      final container = ProviderContainer(
+        overrides: [
+          identityServiceProvider.overrideWithValue(
+            _MockIdentityService(
+              initialIdentity: createdIdentity,
+              deleteClears: true,
+            ),
+          ),
+          circleServiceProvider.overrideWithValue(mockCircle),
+          subscriptionServiceProvider.overrideWithValue(engine),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await container.read(identityNotifierProvider.notifier).deleteIdentity();
+
+      expect(engine.stopCalls, liveSyncEnabled ? 1 : 0);
+    });
   });
 
   // ---------------------------------------------------------------------------
@@ -1646,4 +1676,29 @@ class _RecordingSubscriptionService implements SubscriptionService {
 
   @override
   bool get isRunning => _running;
+
+  /// Whether the engine is between background bursts. Mutable for the same
+  /// reason the resubscriber's fake makes it mutable: a getter hardcoded
+  /// `false` cannot fail loudly the way the throwing burst members below do —
+  /// a caller that ignored it would simply no-op, which is the shape of defect
+  /// this fake is meant to expose.
+  bool paused = false;
+
+  @override
+  bool get isPaused => paused;
+
+  // The burst API is unreachable from `deleteIdentity`. Throwing rather than
+  // no-op'ing means a future change that routes teardown through a burst fails
+  // here instead of silently passing on a fake that did nothing.
+  @override
+  Future<void> openBackgroundBurst() => throw UnimplementedError();
+
+  @override
+  Future<BacklogOutcomeFfi> waitBacklogSettled() => throw UnimplementedError();
+
+  @override
+  Future<void> settleBeforePause() => throw UnimplementedError();
+
+  @override
+  Future<void> pauseSubscriptions() => throw UnimplementedError();
 }

@@ -35,6 +35,8 @@ class IosBackgroundSessionStatus {
     required this.supported,
     required this.backgroundActivitySessionHeld,
     required this.serviceSessionHeld,
+    required this.alwaysConfirmed,
+    required this.armed,
   });
 
   /// Whether the OS supports `CLBackgroundActivitySession` (iOS 17+).
@@ -45,6 +47,30 @@ class IosBackgroundSessionStatus {
 
   /// Whether a `CLServiceSession` (iOS 18+, Always-authorized only) is held.
   final bool serviceSessionHeld;
+
+  /// Whether "Always" has been POSITIVELY confirmed by a service-session
+  /// diagnostic (iOS 18+).
+  ///
+  /// False until a diagnostic says so, and permanently false on iOS 17, which
+  /// has no diagnostics API. A **provisional** Always — the OS reports
+  /// `.authorizedAlways` while the second prompt is still unanswered, and
+  /// treats the app as When-In-Use meanwhile — therefore reads false here,
+  /// which is what keeps that cohort on the When-In-Use posture (activity
+  /// session held, indicator shown) instead of the un-evidenced shape.
+  ///
+  /// Only a reading while [armed]: `disarm()` clears the predicate, so a
+  /// disarmed handler reports `false` whatever the tier is.
+  final bool alwaysConfirmed;
+
+  /// Whether the native handler's consent and authorization gates last passed,
+  /// i.e. whether a session is running at all.
+  ///
+  /// The qualifier on [alwaysConfirmed]. While this is false the handler has
+  /// measured nothing — background sharing is off, the background disclosure
+  /// was never accepted, location authorization is not granted, or no answer
+  /// arrived from the channel — and `alwaysConfirmed: false` is the residue of
+  /// the last `disarm()` rather than a verdict about this device.
+  final bool armed;
 }
 
 /// Bridge for the iOS CoreLocation background session objects.
@@ -104,6 +130,8 @@ class MethodChannelIosBackgroundSessionService
         backgroundActivitySessionHeld:
             raw?['backgroundActivitySessionHeld'] ?? false,
         serviceSessionHeld: raw?['serviceSessionHeld'] ?? false,
+        alwaysConfirmed: raw?['alwaysConfirmed'] ?? false,
+        armed: raw?['armed'] ?? false,
       );
     } on PlatformException catch (e) {
       // No key material involved; logging the opaque error code is safe.
@@ -111,10 +139,15 @@ class MethodChannelIosBackgroundSessionService
     } on MissingPluginException {
       debugPrint('[IosBackgroundSession] status: no native handler registered');
     }
+    // Fail-closed on both axes: nothing held, and nothing MEASURED — a
+    // handler that did not answer has no tier reading to report, which is why
+    // `armed` is false here rather than merely `alwaysConfirmed`.
     return const IosBackgroundSessionStatus(
       supported: false,
       backgroundActivitySessionHeld: false,
       serviceSessionHeld: false,
+      alwaysConfirmed: false,
+      armed: false,
     );
   }
 
@@ -148,5 +181,7 @@ class NoopIosBackgroundSessionService implements IosBackgroundSessionService {
         supported: false,
         backgroundActivitySessionHeld: false,
         serviceSessionHeld: false,
+        alwaysConfirmed: false,
+        armed: false,
       );
 }

@@ -89,6 +89,11 @@ class _FakeLocationService implements LocationService {
   int serviceChecks = 0;
   int permissionChecks = 0;
 
+  /// Number of handed-out streams that were CANCELLED — i.e. how many times
+  /// the provider tore its subscription down. An `invalidate` shows up here
+  /// and in [streamSubscriptions]; nothing else does.
+  int streamCancellations = 0;
+
   /// When true, every `getLocationStream()` call hands back the SAME dead
   /// stream, which never emits and never closes.
   ///
@@ -110,7 +115,8 @@ class _FakeLocationService implements LocationService {
       final corpse = _corpse ??= StreamController<Position>.broadcast();
       return corpse.stream;
     }
-    final fresh = StreamController<Position>();
+    final fresh = StreamController<Position>()
+      ..onCancel = (() => streamCancellations++);
     _controllers.add(fresh);
     // Released, never awaited. These controllers are created inside a
     // `fakeAsync` zone, and once a test has closed one there itself, `close()`
@@ -1076,12 +1082,11 @@ void main() {
       );
     });
 
-    _timedTest('suspend() stops probing until something re-arms it', (async) {
+    _timedTest('suspend() stops probing until resume() lets it back', (async) {
       // The app is paused: nobody can see the banner, and a recovery edge
       // fired while backgrounded would invalidate `locationStreamProvider` —
-      // which with background sharing OFF also runs that provider's
-      // `clearCachedPosition()`, throwing away the fix the publish path
-      // serves from.
+      // which cancels the running platform subscription NOW and can only
+      // rebuild it at the next frame, i.e. at resume.
       final container = harness();
       service.serviceEnabled = false;
       _settle(async);
@@ -1106,16 +1111,17 @@ void main() {
         reason: 'and therefore must not have noticed the recovery either',
       );
 
-      // The resume path: `_onResumed` calls refresh() before anything else.
+      // The resume path: `_onResumed` calls resume() and then refresh().
       // Microtasks only, no clock movement — so the verdict below is
-      // attributable to this call, and cannot be a watchdog tick that slipped
-      // in behind it.
+      // attributable to those calls, and cannot be a watchdog tick that
+      // slipped in behind them.
+      container.read(locationAccessProvider.notifier).resume();
       unawaited(container.read(locationAccessProvider.notifier).refresh());
       async.flushMicrotasks();
       expect(
         container.read(locationAccessProvider),
         LocationAccessStatus.available,
-        reason: 'refresh() must re-arm and re-decide, or suspend() would be a '
+        reason: 'resume() + refresh() must re-decide, or suspend() would be a '
             'one-way door',
       );
 
@@ -1124,6 +1130,189 @@ void main() {
       _settle(async);
       expect(container.read(locationAccessProvider),
           LocationAccessStatus.serviceDisabled);
+    });
+
+    _timedTest('refresh() alone does NOT lift the suspension', (async) {
+      // `refresh()` is reached from the stream-error branch, from the map's
+      // retry button and from a failed one-shot read — none of which mean the
+      // app came back. A permission revoked in Settings while the app is away
+      // faults the stream, and if that refresh re-armed, the 30 s probe loop
+      // would run for the whole backgrounded window: the precise cost
+      // `suspend()` exists to remove.
+      //
+      // It must still PUBLISH its verdict, though: the banner has to be right
+      // the moment the user returns.
+      final container = harness();
+      container.read(locationAccessProvider.notifier).suspend();
+
+      service.serviceEnabled = false;
+      unawaited(container.read(locationAccessProvider.notifier).refresh());
+      async.flushMicrotasks();
+      expect(
+        container.read(locationAccessProvider),
+        LocationAccessStatus.serviceDisabled,
+        reason: 'the verdict is still published while suspended',
+      );
+
+      final checksAfterRefresh = service.serviceChecks;
+      _settle(async);
+      _settle(async);
+      expect(
+        service.serviceChecks,
+        checksAfterRefresh,
+        reason: 'but it armed nothing — many probe intervals have elapsed',
+      );
+    });
+
+    _timedTest('a stream error after suspend() arms nothing', (async) {
+      // The revoked-permission-while-away case, arriving the other way: the
+      // platform faults the stream rather than the watchdog noticing silence.
+      final container = harness();
+      service.controller.add(_position());
+      _settle(async);
+      container.read(locationAccessProvider.notifier).suspend();
+
+      service.serviceEnabled = false;
+      service.controller.addError(
+        StateError('location service disabled'),
+        StackTrace.empty,
+      );
+      async.flushMicrotasks();
+      expect(
+        container.read(locationAccessProvider),
+        LocationAccessStatus.serviceDisabled,
+        reason: 'the one refresh the error triggers still publishes',
+      );
+
+      final checksAfterError = service.serviceChecks;
+      _settle(async);
+      _settle(async);
+      expect(
+        service.serviceChecks,
+        checksAfterError,
+        reason: 'and no probe loop was opened behind it',
+      );
+    });
+
+    _timedTest('a recovery edge while suspended does not touch the stream',
+        (async) {
+      // `_apply`'s recovery edge invalidates `locationStreamProvider`. While
+      // the app is paused that cancels the running subscription synchronously
+      // and defers the rebuild to a frame — so on iOS it would withdraw the
+      // background session keeping the process executable and restore it only
+      // at the next resume, and with sharing off it would also throw away the
+      // cached fix the publish path serves from.
+      final container = harness();
+      service.serviceEnabled = false;
+      _settle(async);
+      expect(container.read(locationAccessProvider),
+          LocationAccessStatus.serviceDisabled);
+
+      container.read(locationAccessProvider.notifier).suspend();
+      final subscriptionsAtSuspend = service.streamSubscriptions;
+      final cancellationsAtSuspend = service.streamCancellations;
+
+      // The user fixes it while away, and something drives one refresh.
+      service.serviceEnabled = true;
+      unawaited(container.read(locationAccessProvider.notifier).refresh());
+      async.flushMicrotasks();
+      expect(
+        container.read(locationAccessProvider),
+        LocationAccessStatus.available,
+        reason: 'anti-vacuity: the recovery edge must really have been taken, '
+            'or there was no invalidate to suppress',
+      );
+
+      expect(
+        service.streamCancellations,
+        cancellationsAtSuspend,
+        reason: 'the running platform subscription must survive the pause',
+      );
+      expect(
+        service.streamSubscriptions,
+        subscriptionsAtSuspend,
+        reason: 'and nothing may re-subscribe from the background',
+      );
+    });
+
+    _timedTest('resume() then refresh() leaves exactly one armed timer',
+        (async) {
+      final container = harness();
+      final notifier = container.read(locationAccessProvider.notifier)
+        ..suspend();
+      expect(
+        async.nonPeriodicTimerCount,
+        0,
+        reason: 'suspend() cancels the armed timer, it does not merely make '
+            'the next arm inert',
+      );
+
+      notifier.resume();
+      unawaited(notifier.refresh());
+      async.flushMicrotasks();
+      expect(
+        async.nonPeriodicTimerCount,
+        1,
+        reason: 'one watchdog, never two racing ones',
+      );
+    });
+
+    _timedTest('per-fix delivery touches a timestamp instead of re-creating '
+        'the timer', (async) {
+      // C12b. Android delivers a fix every second, and every one of them used
+      // to cancel and re-create the watchdog Timer. The probe cadence is
+      // identical either way — which is the point, and also why the arm count
+      // is the only thing that can hold this.
+      final container = harness();
+      final notifier = container.read(locationAccessProvider.notifier);
+      service.controller.add(_position());
+      _settle(async);
+      final armsBefore = notifier.watchdogArmsForTest;
+
+      // Twenty fixes inside two probe intervals — the shape Android produces
+      // at 1 Hz against a 30 s cadence.
+      const fixes = 20;
+      const step = Duration(milliseconds: 1);
+      for (var i = 0; i < fixes; i++) {
+        async.elapse(step);
+        service.controller.add(_position());
+        async.flushMicrotasks();
+      }
+
+      // The count follows ELAPSED TIME, not the fix rate: the timer re-arms
+      // itself for the remainder when it fires, at most once per interval.
+      final intervalsElapsed =
+          (step * fixes).inMicroseconds ~/ _probeInterval.inMicroseconds;
+      expect(
+        notifier.watchdogArmsForTest - armsBefore,
+        lessThanOrEqualTo(intervalsElapsed + 1),
+        reason: 'cancelling and re-creating the timer per fix would have cost '
+            '$fixes new timers here, and one per second in production',
+      );
+      expect(
+        async.nonPeriodicTimerCount,
+        1,
+        reason: 'and exactly one is still armed',
+      );
+      expect(
+        container.read(locationAccessProvider),
+        LocationAccessStatus.available,
+        reason: 'a live stream must not raise the surface',
+      );
+
+      // The cadence is unchanged: once the fixes stop, a probe still lands
+      // within one interval of the LAST one.
+      final checksBeforeSilence = service.serviceChecks;
+      service.serviceEnabled = false;
+      async.elapse(_probeInterval);
+      async.flushMicrotasks();
+      expect(
+        service.serviceChecks,
+        greaterThan(checksBeforeSilence),
+        reason: 'silence for one interval must still be probed — a watchdog '
+            'that only measures time since it was armed would sleep through '
+            'it',
+      );
     });
   });
 

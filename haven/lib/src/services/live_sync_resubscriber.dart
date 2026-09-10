@@ -340,7 +340,9 @@ class LiveSyncResubscriber {
   /// after teardown. On success, adopts [Delta.nextRunning] as the new running
   /// set. On ANY failure — a delta op is best-effort against a possibly-gone
   /// session — falls back to the whole-set stop+start ([_fullRestart]) so this
-  /// can never leave the app worse off than the old stop+start behaviour.
+  /// can never leave the app worse off than the old stop+start behaviour, with
+  /// the one exception [_fullRestart] documents: a PAUSED engine is left
+  /// paused.
   ///
   /// If the session is ALREADY not running (stopped between scenarios /
   /// backgrounded / torn down elsewhere), a delta op is guaranteed to fail
@@ -503,8 +505,29 @@ class LiveSyncResubscriber {
   /// than the pre-delta behaviour. Re-checks [_disposed] between every await
   /// (no start-after-dispose; a session started after [dispose] is torn down
   /// rather than orphaned).
+  ///
+  /// Declines outright while the engine is PAUSED. A pause is the state
+  /// between background bursts — no standing REQ, no socket — and `start()`
+  /// knows nothing about it: it connects the pool and issues every standing
+  /// REQ. Restarting from here would therefore put the always-on background
+  /// socket back, and nothing would take it away again until some later
+  /// burst's `finally` paused it. This is the only re-anchor path with that
+  /// reach: [ensureRunning] reads `isRunning`, which stays TRUE across a
+  /// pause, so it already does nothing.
+  ///
+  /// The deferral loses no work. A delta op issued while paused updates the
+  /// engine's MODEL only (there is no socket to touch), and the running set is
+  /// deliberately left un-adopted, so the same snapshot still reads as changed
+  /// and the next apply — or the next burst's own re-anchor — carries it.
   Future<void> _fullRestart(List<FfiGroupSpec> groups) async {
     if (_disposed) return;
+    if (_engine.isPaused) {
+      debugPrint(
+        '[LiveSyncResubscriber] engine paused — deferring full restart to the '
+        'next burst',
+      );
+      return;
+    }
     if (kDebugMode) {
       debugPrint(
         '[LiveSyncResubscriber] full restart → ${groups.length} group(s)',

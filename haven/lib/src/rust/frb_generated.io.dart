@@ -215,6 +215,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   AddMembersResultFfi dco_decode_add_members_result_ffi(dynamic raw);
 
   @protected
+  BacklogOutcomeFfi dco_decode_backlog_outcome_ffi(dynamic raw);
+
+  @protected
   bool dco_decode_bool(dynamic raw);
 
   @protected
@@ -807,6 +810,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   AddMembersResultFfi sse_decode_add_members_result_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  BacklogOutcomeFfi sse_decode_backlog_outcome_ffi(
     SseDeserializer deserializer,
   );
 
@@ -1543,6 +1551,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_add_members_result_ffi(
     AddMembersResultFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_backlog_outcome_ffi(
+    BacklogOutcomeFfi self,
     SseSerializer serializer,
   );
 
