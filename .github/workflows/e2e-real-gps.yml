@@ -49,11 +49,16 @@ jobs:
   e2e_real_gps:
     name: e2e_real_gps
     runs-on: ubuntu-latest
-    # One APK build (<=30m) + boot + a bounded drive (<=18m of step deadline).
-    # The step-level timeout-minutes below bound a hung phase so GitHub kills
-    # the STEP rather than the runner, letting the if: always() artifact upload
-    # still run; this job-level cap is the outer envelope over both.
-    timeout-minutes: 60
+    # One APK build + boot + a bounded drive (<=19m of step deadline). The job
+    # cap must clear the SUM of the step caps: below it, a run whose every step
+    # is still inside its own cap can die here, and a job-cap death skips every
+    # `if: failure()` step (e2e-android.yml states the rule). So: Build
+    # real-GPS test APK 30 + Create AVD snapshot (on an AVD-cache miss) 15 +
+    # the drive step 30 (derived there) + the most the work no step cap bounds
+    # has taken, 2.9 min over 33 runs of this job (ci.yml, 2026-07-29..09-10;
+    # 1.3 of it Free disk space, run 32661622879), taken as 3 = 78 -> 80.
+    # job-uncapped-minutes: 2.9 (33 runs, worst 32661622879)
+    timeout-minutes: 80
     env:
       HAVEN_E2E_RELAY: ws://10.0.2.2:7777
 
@@ -191,12 +196,32 @@ jobs:
       # BOUNDS. Three of them, innermost first:
       #   12m  the `flutter drive` (the orchestrator's own default; kept in
       #        the script rather than declared here so the two cannot drift).
-      #   18m  this step's inner deadline (run-with-deadline.sh below) —
-      #        covers the drive PLUS install/verified-grants/GPS-seed/oracle,
-      #        none of which the per-drive timeout bounds, and is the bound
-      #        that actually reaps (CI_HARDENING_BACKLOG.md A8).
-      #   30m  this step's timeout-minutes = 18 + 1 (kill grace) + 7
-      #        (emulator-boot-timeout) + margin, a belt over the deadline.
+      #   19m  this step's inner deadline (run-with-deadline.sh below) —
+      #        covers the drive PLUS the relay restart, the install and its
+      #        broadcast barrier, the verified grants, the GPS seed and the
+      #        oracle, none of which the per-drive timeout bounds, and is the
+      #        bound that actually reaps (CI_HARDENING_BACKLOG.md A8).
+      #   30m  this step's timeout-minutes >= 19 + 1 (kill grace) + 7
+      #        (emulator-boot-timeout) + 2 (the action's own setup and
+      #        teardown, outside both: 38-102 s across the eight
+      #        own-installer lanes over twelve runs, 2026-08/09), a belt over
+      #        the deadline.
+      #
+      # DEADLINE, from run-b3-real-gps.sh's bounded waits at their bounds, in
+      # seconds:
+      #   start-strfry.sh READY_TIMEOUT, the ready loop's last 1 s tick
+      #     and READY_CONFIRM_SECS                             60 + 1 + 2 =   63
+      #   app-install-lib.sh INSTALL_BARRIER_SECS                            120
+      #   DRIVE_TIMEOUT (B3_DRIVE_TIMEOUT) + DRIVE_KILL_AFTER_SECS 720 + 30 = 750
+      #                                                       = 933 s = 15m33s
+      #   + the unbounded relay, adb, install, grant, scan and oracle work,
+      #     ~3 min: e2e-android.yml's allowance, kept because the sick device
+      #     that pushes the waits above to their bounds is the one that slows
+      #     adb (the own-installer lanes spent under 40 s on it in run
+      #     34511084722)
+      #                                                       = 18m33s -> 19m.
+      # It was 18m — the drive plus 6 for everything else, which held until
+      # the install barrier.
       # Sizing evidence: the drive target's own worst case is ~7 min (arming
       # + a 150s fix wait + circle setup + a 120s peer-decrypt wait) under an
       # 8-minute in-test Timeout; revise against p95 once this lane has green
@@ -222,7 +247,7 @@ jobs:
             -noaudio -no-boot-anim -camera-back none -memory 6144
           disable-animations: true
           emulator-boot-timeout: 420
-          script: bash tooling/e2e/ci/run-with-deadline.sh 18m "e2e-real-gps drive" -- bash tooling/e2e/ci/run-b3-real-gps.sh /tmp/integration-apks/b3_real_gps_test.apk integration_test/b3_real_gps_test.dart
+          script: bash tooling/e2e/ci/run-with-deadline.sh 19m "e2e-real-gps drive" -- bash tooling/e2e/ci/run-b3-real-gps.sh /tmp/integration-apks/b3_real_gps_test.apk integration_test/b3_real_gps_test.dart
 
       - name: Capture host + emulator diagnostics
         if: failure()

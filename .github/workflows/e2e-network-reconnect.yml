@@ -79,12 +79,18 @@ jobs:
   e2e_network_reconnect:
     name: e2e_network_reconnect
     runs-on: ubuntu-latest
-    # One APK build (<=30m) + boot + a drive that internally holds a 75 s
-    # blackout and up to a 330 s recovery window (<=27m of step deadline).
-    # The step-level timeout-minutes below bound a hung phase so GitHub kills
-    # the STEP rather than the runner, letting the if: always() artifact
-    # upload still run; this job-level cap is the outer envelope over both.
-    timeout-minutes: 70
+    # One APK build + boot + a drive that internally holds a 75 s blackout and
+    # up to a 330 s recovery window (<=28m of step deadline). The job cap must
+    # clear the SUM of the step caps: below it, a run whose every step is still
+    # inside its own cap can die here, and a job-cap death skips every
+    # `if: failure()` step (e2e-android.yml states the rule). So: Build
+    # network-reconnect test APK 30 + Create AVD snapshot (on an AVD-cache
+    # miss) 15 + the drive step 38 (derived there) + the most the work no step
+    # cap bounds has taken, 2.9 min over 33 runs of this job (ci.yml,
+    # 2026-07-29..09-10; 1.0 of it Free disk space, run 32784223261), taken as
+    # 3 = 86 -> 90.
+    # job-uncapped-minutes: 2.9 (33 runs, worst 32784223261)
+    timeout-minutes: 90
     env:
       HAVEN_E2E_RELAY: ws://10.0.2.2:7777
 
@@ -202,12 +208,37 @@ jobs:
       #   20m  the `flutter drive` (the orchestrator's own B9_DRIVE_TIMEOUT
       #        default; kept in the script rather than declared here so the
       #        two cannot drift).
-      #   27m  this step's inner deadline (run-with-deadline.sh below) —
-      #        covers the drive PLUS install/grants/both network toggles/the
-      #        oracle, none of which the per-drive timeout bounds, and is the
-      #        bound that actually reaps (CI_HARDENING_BACKLOG.md A8).
-      #   36m  this step's timeout-minutes = 27 + 1 (kill grace) + 7
-      #        (emulator-boot-timeout) + margin, a belt over the deadline.
+      #   28m  this step's inner deadline (run-with-deadline.sh below) —
+      #        covers the drive PLUS the relay restart, the install and its
+      #        broadcast barrier, grants, both network toggles, the backlog
+      #        import and the oracle, none of which the per-drive timeout
+      #        bounds, and is the bound that actually reaps
+      #        (CI_HARDENING_BACKLOG.md A8).
+      #   38m  this step's timeout-minutes = 28 + 1 (kill grace) + 7
+      #        (emulator-boot-timeout) + 2 (the action's own setup and
+      #        teardown, outside both: 38-102 s across the eight own-installer
+      #        lanes over twelve runs, 2026-08/09), a belt over the deadline.
+      #
+      # DEADLINE, from run-b9-network-reconnect.sh's bounded waits at their
+      # bounds, in seconds:
+      #   start-strfry.sh READY_TIMEOUT, the ready loop's last 1 s tick
+      #     and READY_CONFIRM_SECS                             60 + 1 + 2 =   63
+      #   app-install-lib.sh INSTALL_BARRIER_SECS                            120
+      #   set_airplane's read-back before the drive, AIRPLANE_READBACK_SECS   10
+      #   DRIVE_TIMEOUT (B9_DRIVE_TIMEOUT) + DRIVE_KILL_AFTER_SECS 1200+30 = 1230
+      #   ...and what can still run once the drive has ended: a cue noticed
+      #     MARKER_POLL_SECS late, then the drop's and the restore's
+      #     read-backs                                         2 + 2 x 10 =   22
+      #     (the toggles and marker waits otherwise run under the drive)
+      #                                                      = 1445 s = 24m05s
+      #   + the unbounded relay, adb, install, iptables, backlog import, scan
+      #     and oracle work, ~3 min: e2e-android.yml's allowance, kept because
+      #     the sick device that pushes the waits above to their bounds is the
+      #     one that slows adb (the own-installer lanes spent under 40 s on it in
+      #     run 34511084722)
+      #                                                      = 27m05s -> 28m.
+      # It was 27m — the drive plus 7 for everything else, which the install
+      # barrier overran by 5 s.
       # Sizing evidence: the drive target's own worst case is ~13 min (arming
       # + a 75s baseline receive + a 120s wait for the drop + the 75s outage
       # hold + a 120s wait for the restore + a 330s recovery budget sized to
@@ -218,7 +249,7 @@ jobs:
       # -memory 6144 matches the sibling Android lanes: RustLib + SQLCipher
       # floods `mlock() -1 ENOMEM` under pressure.
       - name: Run the network-reconnect proof on the emulator
-        timeout-minutes: 36
+        timeout-minutes: 38
         uses: reactivecircus/android-emulator-runner@v2
         env:
           STRFRY_IMAGE: ${{ vars.STRFRY_IMAGE || 'dockurr/strfry@sha256:545555da5dd2c2b502f2c0d159f4dc4996d0e488e3bf25905ce881722d63d2c5' }}
@@ -233,7 +264,7 @@ jobs:
             -noaudio -no-boot-anim -camera-back none -memory 6144
           disable-animations: true
           emulator-boot-timeout: 420
-          script: bash tooling/e2e/ci/run-with-deadline.sh 27m "e2e-network-reconnect drive" -- bash tooling/e2e/ci/run-b9-network-reconnect.sh /tmp/integration-apks/b9_network_reconnect_test.apk integration_test/b9_network_reconnect_test.dart
+          script: bash tooling/e2e/ci/run-with-deadline.sh 28m "e2e-network-reconnect drive" -- bash tooling/e2e/ci/run-b9-network-reconnect.sh /tmp/integration-apks/b9_network_reconnect_test.apk integration_test/b9_network_reconnect_test.dart
 
       # Belt for the case the orchestrator's own EXIT trap never ran (a step
       # cap SIGKILL). Leaving the guest in airplane mode or the host chain

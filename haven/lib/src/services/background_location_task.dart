@@ -1648,7 +1648,10 @@ class BackgroundLocationTaskHandler extends TaskHandler {
       for (var i = 0; i < dueKeys.length; i++) {
         final key = dueKeys[i];
         final slot = nextBackgroundPublishSlot(
-          dueAt: _dueTracker.dueAt(key),
+          // Never before `planStart`: an overdue circle publishes when this
+          // cycle can, and planning it at its past due-time aims the request
+          // for it that much early — down to the platform floor.
+          dueAt: _laterOf(_dueTracker.dueAt(key), planStart),
           lastPublishStartedAt: plannedSlot,
           gap: gaps[i],
           phaseStart: planStart,
@@ -1699,7 +1702,10 @@ class BackgroundLocationTaskHandler extends TaskHandler {
       if (earliestDue != null) {
         await _ensureRegistration(
           earliestDue: earliestDue,
-          now: DateTime.now(),
+          // The plan's own instant: a later read takes the planning time off
+          // the interval, and at the shortest draw the platform — handed
+          // whole milliseconds — then gets 61 999 ms against a 62 s floor.
+          now: planStart,
           plannedPublishStart: firstPlannedSlot ?? planStart,
         );
       }
@@ -1780,10 +1786,11 @@ class BackgroundLocationTaskHandler extends TaskHandler {
           ),
         );
         if (notBefore == null) {
-          // NOT a failure: a deferred circle stays overdue, so the planning
-          // pass above already folded its own past due-time into the aim —
-          // the request is pointed at the platform floor, which is as soon as
-          // a fix can be had.
+          // NOT a failure: a deferred circle stays overdue. One the planning
+          // pass deferred as well is already in the aim, at the platform
+          // floor; one only this loop deferred — the burst overran the gaps
+          // it was planned with — waits for the watchdog's next tick, which
+          // finds it due.
           debugPrint(
             '[BackgroundTask] Stagger budget spent — deferring the remaining '
             'due circle(s) to the next cycle.',
@@ -1954,11 +1961,11 @@ class BackgroundLocationTaskHandler extends TaskHandler {
       // a foreground reclaim would otherwise re-arm the very request the
       // stand-down just released.
       if (publishFailed && !yieldedToForeground) {
-        final retryAt = DateTime.now().add(kBackgroundRepeatInterval);
+        final now = DateTime.now();
         await _ensureRegistration(
-          earliestDue: retryAt,
-          now: DateTime.now(),
-          plannedPublishStart: DateTime.now(),
+          earliestDue: now.add(kBackgroundRepeatInterval),
+          now: now,
+          plannedPublishStart: now,
         );
       }
 

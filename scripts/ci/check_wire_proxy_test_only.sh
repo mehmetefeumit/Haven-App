@@ -75,6 +75,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 readonly CRATE_DIR='tooling/e2e/local-relay'
 readonly JOURNAL_RS='tooling/e2e/local-relay/src/journal.rs'
 readonly SUMMARIZE_SH='tooling/e2e/ci/summarize-wire-journal.sh'
+readonly SELF_TEST_FIXTURES=34
 
 # Trees that ship. `haven/integration_test` is deliberately absent: that is the
 # harness, and it is where the sentinel emitter belongs.
@@ -248,7 +249,9 @@ check_raw_journal_not_uploaded() {
 check_summary_is_scanned() {
   local root="$1" f="${root}/${SUMMARIZE_SH}"
   [[ -f "${f}" ]] || { fail "${SUMMARIZE_SH} not found — nothing produces the upload-safe form of the journal"; return 1; }
-  if ! grep -vE '^[[:space:]]*#' "${f}" | grep -qF 'scan-logs-for-secrets.sh'; then
+  # Matched from a capture, never a pipe: a `grep -q` that stops at the call
+  # SIGPIPEs a writer with text left to send, and pipefail reads that as a miss.
+  if ! grep -qF 'scan-logs-for-secrets.sh' <<<"$(grep -vE '^[[:space:]]*#' "${f}")"; then
     fail "${SUMMARIZE_SH} no longer runs its output through scan-logs-for-secrets.sh. The redaction is an allow-list and should hold on its own; this is the belt that catches it when it does not, BEFORE the file becomes a 14-day artifact."
     return 1
   fi
@@ -328,13 +331,14 @@ run_all() {
 # would sit green forever if their extractor stopped matching.
 # ---------------------------------------------------------------------------
 self_test() {
-  local tmp fails=0
+  local tmp fails=0 checked=0
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
   trap "rm -rf '${tmp}'" RETURN
 
   _case() { # _case <label> <want-rc> <fn> <root>
     local label="$1" want="$2" fn="$3" root="$4" got=0
+    checked=$(( checked + 1 ))
     ( FAILED=0; "${fn}" "${root}" >/dev/null 2>&1 ) || got=1
     if [[ "${got}" -eq "${want}" ]]; then
       printf '  \033[1;32mPASS\033[0m %s (rc=%d)\n' "${label}" "${got}"
@@ -669,6 +673,13 @@ YAML
   printf '#!/usr/bin/env bash\n# we used to call scan-logs-for-secrets.sh here\ntrue\n' \
     > "${doconly}/${SUMMARIZE_SH}"
   _case "a comment mentioning the scanner does not count" 1 check_summary_is_scanned "${doconly}"
+  # The call FIRST in a script far past a pipe's 64 KiB: a reader that stops at
+  # it must not let the rest of the file turn it into a miss.
+  local bigsum="${tmp}/bigsum"; _mk "${bigsum}"
+  { printf '#!/usr/bin/env bash\nbash tooling/e2e/ci/scan-logs-for-secrets.sh "${OUT}"\n'
+    awk 'BEGIN { for (i = 0; i < 40000; i++) printf "printf \"%%s\\n\" filler-%05d\n", i }'
+  } > "${bigsum}/${SUMMARIZE_SH}"
+  _case "a scanner call ahead of a 1 MiB script still counts" 0 check_summary_is_scanned "${bigsum}"
 
   echo "self-test: check 5 — recording cannot break traffic"
   _case "healthy recorder passes" 0 check_recorder_cannot_break_traffic "${ok}"
@@ -741,7 +752,11 @@ RS
     echo "self-test: FAILED" >&2
     return 1
   fi
-  echo "self-test: OK"
+  if (( checked != SELF_TEST_FIXTURES )); then
+    echo "self-test: ran ${checked} fixture(s), expected exactly ${SELF_TEST_FIXTURES}. A fixture was added or removed without moving the pin — the one way a deleted fixture reports success." >&2
+    return 1
+  fi
+  echo "self-test: OK (${checked}/${SELF_TEST_FIXTURES} fixtures)"
   return 0
 }
 

@@ -1527,7 +1527,9 @@ expect_msg() {
   local out
   CASES_RUN=$(( CASES_RUN + 1 ))
   out="$(bash "${SELF_PATH}" "$@" 2>&1 || true)"
-  if ! printf '%s' "${out}" | grep -qF -- "${needle}"; then
+  # Here-strings, here and below: piped from printf, a `grep -q` that matches
+  # early SIGPIPEs the writer, and pipefail reads that 141 as "no match".
+  if ! grep -qF -- "${needle}" <<<"${out}"; then
     echo "SELF-TEST FAIL: ${desc} — verdict did not contain: ${needle}" >&2
     return 1
   fi
@@ -1553,12 +1555,12 @@ expect_no_msg() {
   local out
   CASES_RUN=$(( CASES_RUN + 1 ))
   out="$(bash "${SELF_PATH}" "$@" 2>&1 || true)"
-  if ! printf '%s' "${out}" | grep -qF -- "wire-correlation summary:"; then
+  if ! grep -qF -- "wire-correlation summary:" <<<"${out}"; then
     echo "SELF-TEST FAIL: ${desc} — the oracle never reached evaluate(), so the" >&2
     echo "  absence of \"${needle}\" proves nothing." >&2
     return 1
   fi
-  if printf '%s' "${out}" | grep -qF -- "${needle}"; then
+  if grep -qF -- "${needle}" <<<"${out}"; then
     echo "SELF-TEST FAIL: ${desc} — verdict contained what it must not: ${needle}" >&2
     return 1
   fi
@@ -3000,7 +3002,7 @@ self_test() {
     --discovery-relay "${DISCOVERY}" \
     --identity-pubkey "${PK_A}" --mls-group-id "${MLS1}" || fail=1
 
-  # A floor on the fixture COUNT, not just on their verdicts. Every assertion
+  # A pin on the fixture COUNT, not just on their verdicts. Every assertion
   # here is a set operation that passes over an empty input, and the self-test
   # is no exception: deleting cases would leave it green while the thing it
   # certifies stopped being certified. If a case is genuinely retired, lower
@@ -3015,10 +3017,10 @@ self_test() {
   # section. An exact pin means retiring a case is a two-line diff that has to
   # say why, which is the reviewable act the slack was quietly avoiding.
   readonly MIN_CASES=157
-  if (( CASES_RUN < MIN_CASES )); then
-    echo "SELF-TEST FAIL: only ${CASES_RUN} fixture(s) ran; at least ${MIN_CASES} expected." >&2
-    echo "  Cases have been removed without lowering MIN_CASES — the self-test is" >&2
-    echo "  now certifying less than it claims." >&2
+  if (( CASES_RUN != MIN_CASES )); then
+    echo "SELF-TEST FAIL: ${CASES_RUN} fixture(s) ran; exactly ${MIN_CASES} expected." >&2
+    echo "  A case was added or removed without moving MIN_CASES — the self-test" >&2
+    echo "  no longer certifies what it claims." >&2
     fail=1
   fi
 

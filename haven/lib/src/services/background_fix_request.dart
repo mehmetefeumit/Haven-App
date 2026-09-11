@@ -28,8 +28,12 @@ import 'package:haven/src/constants/location.dart';
 ///
 /// [now] is the instant the registration is issued — early in the cycle, ahead
 /// of its publishes. [plannedPublishStart] is when this cycle's first publish
-/// is planned for, or [now] when nothing is due; it anchors the ceiling, so a
-/// capped request still leaves the lead intact for the publish that follows it.
+/// is planned for, or [now] when nothing is due, and is never earlier than
+/// [now]: the caller clamps an overdue circle's past due-time up to the
+/// planning instant. That clamp is what keeps the 62 s steady state below true
+/// for an overdue circle — without it the fix is aimed early by the overdue
+/// amount and reaches the floor. It anchors the ceiling, so a capped request
+/// still leaves the lead intact for the publish that follows it.
 ///
 /// The result is bounded on both sides, and the two bounds mean different
 /// things:

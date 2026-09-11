@@ -58,8 +58,12 @@
 # The kill grace (SIGTERM -> SIGKILL) defaults to 60s and is overridable via
 # HAVEN_DEADLINE_KILL_GRACE. `flutter drive` and adb need a moment to flush
 # their logs after SIGTERM; those logs are the evidence, so the grace is
-# deliberately generous rather than instant. Budget it: the true worst case of
-# a step is <deadline> + <grace>, which is what must sit under the step cap.
+# deliberately generous rather than instant. Budget it: THIS script's worst
+# case is <deadline> + <grace>, but a step that also boots an AVD adds the boot
+# (7 min) and the action's own setup and teardown (up to 2 min: 38-102 s across
+# the Android lanes over twelve runs, 2026-08/09), and the step cap must cover
+# the whole sum — scripts/ci/check_e2e_step_timeout_ordering.sh enforces the
+# deadline, grace and boot terms.
 #
 # macOS note: GNU coreutils `timeout` is NOT present on the macos-* runners,
 # which is why the iOS lanes bound their drives with `nick-fields/retry`'s

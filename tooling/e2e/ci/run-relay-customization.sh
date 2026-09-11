@@ -124,7 +124,8 @@ set -euo pipefail
 # the emulator step ran p95 6.5 min but MAX 25.8 min, on a GREEN run where one
 # target wedged on cold attach, burned the full 20m, and then passed on the
 # retry below. At 20m that shape could not fit under any step deadline that
-# also fits under the job cap; at 10m the same shape costs ~16 min, so the
+# also fits under the job cap; at 10m the same shape costs ~16 min (plus up to
+# the 120 s install-broadcast barrier per install since 2026-09-10), so the
 # retry — which exists precisely for that attach flake — can actually complete
 # inside the lane's bounds instead of being SIGKILLed mid-recovery.
 # CI_HARDENING_BACKLOG.md A8.

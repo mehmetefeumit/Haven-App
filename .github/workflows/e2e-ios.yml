@@ -85,35 +85,38 @@ jobs:
   e2e_ios:
     name: e2e_ios
     runs-on: macos-latest # Apple Silicon; arm64 simulator (no Linux Docker).
-    # Envelope sized for a COLD first run. Poll path: setup (~10-15m) + the
-    # e2e_combined step's 65m ceiling (2 × 30m) + the background-mirror step's
-    # 45m ceiling — a loose backstop below that naive sum (the two steps rarely
-    # both hit their ceilings). FLAG-ON widens the e2e_combined step to 95m
-    # (2 × 45m, see below), so the flag-on envelope grows to 155 to cover the
-    # PASSING serial case setup (~15) + e2e_combined (95) + the mirror (45)
-    # — the mirror step is skipped when e2e_combined FAILS (no `if:`; default
-    # step-on-failure semantics), so the failing path self-truncates well below
-    # this. A flag-on run that burned its full drive budget must fail through
-    # the step timeout with its diagnostics, never a blind outer-envelope
-    # SIGKILL. Cached/typical runs finish in a fraction of this (macos-latest
-    # allows up to 6h).
-    #
-    # The wire recorder adds a step with its OWN 20m ceiling (release cargo
-    # build of the proxy + on-runner preflight), so the flag-on envelope is
-    # resized to keep the rule above true rather than nudged by the recorder's
-    # typical cost. Flag-on ceilings now sum to 15 (relay build) + 15 (boot) +
-    # 20 (proxy) + 95 (e2e_combined) + 45 (mirror) = 190, so the envelope is
-    # 195. Two earlier revisions got this wrong in the same direction: one
-    # moved it 155->160 while inserting a 20m step, and one omitted the relay
-    # build from the sum ENTIRELY because that step carried no ceiling at all.
-    # Both left the admitted worst case ABOVE the envelope — the exact
-    # blind-SIGKILL failure the paragraph above exists to prevent. Every step
-    # in the sum is now bounded, which is what makes the sum checkable.
-    #
-    # The per-attempt restart inside the retry command is NOT in this sum: it
-    # reuses the same warm target dir, so it is a cargo fingerprint check plus
-    # the binary's own loopback preflight, and the setup term absorbs it.
-    timeout-minutes: ${{ inputs.live_sync && 195 || 130 }}
+    # This job cap sits above every step cap, and it must clear their SUM: a
+    # job cap below it can SIGKILL a run whose every step is still inside its
+    # own cap, and a job-cap death skips every `if: failure()` step, so the
+    # lane dies anonymous (e2e-android.yml states the rule). The mirror step
+    # has no `if:`, so it follows any e2e_combined that passes, however close
+    # to its cap. It is therefore every step cap this job can run, plus the
+    # most the work no step cap bounds has taken:
+    #                                                          poll / flag-on
+    #   Build and start host-native relay                        15
+    #   Build and start recording wire proxy                     20
+    #   Boot iOS simulator                                       15
+    #   Run e2e_combined on the simulator (2 x 30m / 2 x 45m
+    #     attempts, each restarting the relay and the recorder;
+    #     derived there)                                         65 / 95
+    #   Run iOS background-mirror scenario on the simulator      45
+    #   everything no step cap bounds (setup, diagnostics, the
+    #     post-job tail), measured to the job's COMPLETION time:
+    #     at most 5.4 min over 210 runs of both paths (ci.yml and
+    #     e2e-live-sync.yml, 2026-06-24..09-10). Worst is flag-on
+    #     run 29548776682, whose Setup Flutter failed and which
+    #     then sat 125 s past "Complete job" (unique in 5,131
+    #     jobs); poll's worst is 4.733 (29367847488)              6
+    #                                          = 166 / 196 -> 170 / 200
+    # Measured to completion, not to the last step: which one GitHub's job
+    # timer counts is not certain, and the stricter reading can only remove a
+    # false result. It was 4.7 to the last step; that figure would leave a
+    # healthy slow run exposed to an anonymous kill by the cap.
+    # Re-sum this whenever a step or its cap changes: two revisions left the
+    # flag-on sum above this cap, and the poll cap sat at 130 against its own
+    # 160.
+    # job-uncapped-minutes: 5.4 (210 runs, worst 29548776682)
+    timeout-minutes: ${{ inputs.live_sync && 200 || 170 }}
     env:
       # 7788 is the RECORDING PROXY, not the relay. The relay stays on 7777 and
       # the proxy forwards to it, so this one line is what puts every byte the

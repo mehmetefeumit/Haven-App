@@ -43,11 +43,17 @@ jobs:
   e2e_background_catchup:
     name: e2e_background_catchup
     runs-on: ubuntu-latest
-    # Three APK builds + boot + four phases including a guest reboot. 60 minutes
-    # is a comfortable envelope; the emulator step's own timeout-minutes bounds a
-    # hung phase so GitHub kills the step (not the runner), letting the
-    # if: always() artifact upload run.
-    timeout-minutes: 60
+    # Three APK builds + boot + four phases including a guest reboot. The job
+    # cap must clear the SUM of the step caps: below it, a run whose every step
+    # is still inside its own cap can die here, and a job-cap death skips every
+    # `if: failure()` step (e2e-android.yml states the rule). So: Build
+    # background-worker test APKs 30 + Create AVD snapshot (on an AVD-cache
+    # miss) 15 + the emulator step 40 (derived there) + the most the work no
+    # step cap bounds has taken, 3.6 min over 52 runs of this job (ci.yml,
+    # 2026-07-29..09-10; 2.3 of it Free disk space, run 34488512808), taken as
+    # 4 = 89 -> 90.
+    # job-uncapped-minutes: 3.6 (52 runs, worst 34488512808)
+    timeout-minutes: 90
     env:
       HAVEN_E2E_RELAY: ws://10.0.2.2:7777
       # Receive path, DECLARED — not inherited. `liveSyncEnabled` defaults to
@@ -193,11 +199,23 @@ jobs:
       #        gap is why this lane needed an aggregate deadline and not just
       #        the per-drive one (CI_HARDENING_BACKLOG.md A8).
       #   40m  this step's timeout-minutes = 30 + 1 (kill grace) + 7
-      #        (emulator-boot-timeout) + margin, a belt over the deadline.
+      #        (emulator-boot-timeout) + 2 (the action's own setup and
+      #        teardown, outside both: 38-102 s across the eight own-installer
+      #        lanes over twelve runs, 2026-08/09, 85 s at most for this one), a
+      #        belt over the deadline.
       # Sizing evidence: 33 successful runs (ci.yml, 2026-07/08) put the whole
       # step at p50 5.5 / p95 6.8 / max 7.2 min. 30m is ~4x the observed max,
       # which leaves room for the guest reboot to run long without cutting a
-      # healthy run.
+      # healthy run. The install broadcast barrier (app-install-lib.sh) adds
+      # at most INSTALL_BARRIER_SECS, 120 s, and only once: Phase A is this
+      # lane's one fresh install, and C1/C2 install over its package with
+      # install_app, a replace that takes no barrier. That moves the observed
+      # ceiling to ~9.2 min, still ~3x inside 30m.
+      # This deadline is the lane's reaper, not a cover for every wait at its
+      # bound: three drives at HAVEN_DRIVE_TIMEOUT + DRIVE_KILL_AFTER_SECS are
+      # 31.5 min on their own, before BOOT_TIMEOUT, the MARKER_TIMEOUT waits
+      # and three relay restarts. Like e2e-integration's, it is sized from
+      # measurement and names the lane when it fires.
       - name: Run background catch-up phases on the emulator
         timeout-minutes: 40
         uses: reactivecircus/android-emulator-runner@v2

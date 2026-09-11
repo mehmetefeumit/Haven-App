@@ -153,6 +153,7 @@
 set -euo pipefail
 
 SCRIPT_NAME="check_coverage_floors"
+readonly SELF_TEST_FIXTURES=30
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 DEFAULT_MANIFEST="${REPO_ROOT}/scripts/ci/coverage_floors.txt"
 
@@ -819,7 +820,7 @@ run_repin() { # <stack> <lcov-file>
 # way an individual entry becomes a false green.
 # ---------------------------------------------------------------------------
 self_test() {
-  local tmp fails=0
+  local tmp fails=0 checked=0
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
   trap "rm -rf '${tmp}'" RETURN
@@ -868,6 +869,7 @@ EOF
 
   _case() { # _case <label> <expect-rc> <manifest> <report>
     local label="$1" want="$2" man="$3" report="$4" got=0
+    checked=$(( checked + 1 ))
     # SUBSHELL, not a bare call: run_check exits on failure, which would abort
     # the self-test at its first negative fixture and leave every later one
     # silently unrun — a self-test that only ever proves the happy path.
@@ -908,9 +910,12 @@ EOF
   # …and the message must actually carry the number to write down, or the
   # failure is a puzzle rather than an instruction.
   local msg
+  checked=$(( checked + 1 ))
   msg="$( ( HAVEN_COVERAGE_FLOORS="${tmp}/manifest.ok" run_check selftest "${tmp}/report.ratchet.lcov" ) 2>&1 || true )"
   # 191/200 = 95.50%: the pin rule says 93, and 95 (int) would fail --lint.
-  if printf '%s' "${msg}" | grep -q 'Raise the floor to 93 '; then
+  # Here-strings, not pipes: a `grep -q` that matches early SIGPIPEs a piped
+  # printf still writing, and pipefail reads that 141 as "not found".
+  if grep -q 'Raise the floor to 93 ' <<<"${msg}"; then
     printf '  %sPASS%s ratchet message names the pin-rule floor\n' "${GREEN}" "${RESET}"
   else
     printf '  %sFAIL%s ratchet message did not name the pin-rule floor (93)\n' "${RED}" "${RESET}" >&2
@@ -993,6 +998,7 @@ EOF
 
   _lint() { # _lint <label> <expect-rc> <manifest>
     local label="$1" want="$2" man="$3" got=0
+    checked=$(( checked + 1 ))
     ( HAVEN_COVERAGE_FLOORS="${man}" run_lint ) >/dev/null 2>&1 || got=$?
     if [ "${got}" -eq "${want}" ]; then
       printf '  %sPASS%s %s (rc=%d)\n' "${GREEN}" "${RESET}" "${label}" "${got}"
@@ -1021,8 +1027,9 @@ EOF
 
   # …and the message must name the value to write down, or the failure is a
   # puzzle rather than an instruction.
+  checked=$(( checked + 1 ))
   msg="$( ( HAVEN_COVERAGE_FLOORS="${tmp}/lint.tight" run_lint ) 2>&1 || true )"
-  if printf '%s' "${msg}" | grep -q 'set the floor to 49'; then
+  if grep -q 'set the floor to 49' <<<"${msg}"; then
     printf '  %sPASS%s lint names the corrected floor\n' "${GREEN}" "${RESET}"
   else
     printf '  %sFAIL%s lint did not name the corrected floor (49)\n' "${RED}" "${RESET}" >&2
@@ -1033,6 +1040,7 @@ EOF
   #      row — the margin override, the provenance comment, the alignment —
   #      untouched. A fixer that reformatted the file would hide the change it
   #      made inside a whitespace diff.
+  checked=$(( checked + 1 ))
   printf 'selftest|src/relay/gate.rs|94|10     # measured 95.00%% (19/20)\n' >"${tmp}/lint.fix"
   ( HAVEN_COVERAGE_FLOORS="${tmp}/lint.fix" run_lint --fix ) >/dev/null 2>&1 || true
   if grep -qF 'selftest|src/relay/gate.rs|93|10     # measured 95.00% (19/20)' "${tmp}/lint.fix"; then
@@ -1053,6 +1061,7 @@ EOF
   printf 'selftest|src/nostr/mls/|91\n' >"${tmp}/lint.noprov"
   _lint "row without provenance fails" 1 "${tmp}/lint.noprov"
   local frc=0
+  checked=$(( checked + 1 ))
   ( HAVEN_COVERAGE_FLOORS="${tmp}/lint.noprov" run_lint --fix ) >/dev/null 2>&1 || frc=$?
   if [ "${frc}" -ne 0 ]; then
     printf '  %sPASS%s --fix still fails on an unfixable row (rc=%d)\n' "${GREEN}" "${RESET}" "${frc}"
@@ -1073,6 +1082,7 @@ EOF
   # (21) A floor the code has outgrown must be RAISED and its provenance
   #      refreshed. giftwrap.rs measures 87.00 in the fixture report, so a floor
   #      of 80 becomes 85.
+  checked=$(( checked + 1 ))
   printf 'selftest|src/nostr/giftwrap.rs|80    # measured 82.00%% (164/200)\n' >"${tmp}/repin.up"
   ( HAVEN_COVERAGE_FLOORS="${tmp}/repin.up" run_repin selftest "${tmp}/report.lcov" ) >/dev/null 2>&1 || true
   if grep -qF 'selftest|src/nostr/giftwrap.rs|85    # measured 87.00% (174/200)' "${tmp}/repin.up"; then
@@ -1087,6 +1097,7 @@ EOF
   #      down, or `--repin` becomes the one-command way to launder a measured
   #      regression into a permitted one.
   local before after
+  checked=$(( checked + 1 ))
   printf 'selftest|src/nostr/giftwrap.rs|89    # measured 91.50%% (183/200)\n' >"${tmp}/repin.down"
   before="$(cat "${tmp}/repin.down")"
   ( HAVEN_COVERAGE_FLOORS="${tmp}/repin.down" run_repin selftest "${tmp}/report.lcov" ) >/dev/null 2>&1 || true
@@ -1106,6 +1117,7 @@ EOF
   #      that turns the whole lint into a standing invariant rather than a
   #      facility nobody points at the real file.
   local lrc=0
+  checked=$(( checked + 1 ))
   ( run_lint ) >/dev/null 2>&1 || lrc=$?
   if [ "${lrc}" -eq 0 ]; then
     printf '  %sPASS%s checked-in manifest obeys the pin rule\n' "${GREEN}" "${RESET}"
@@ -1118,6 +1130,7 @@ EOF
   #      checked-in row would otherwise only surface in the coverage workflow,
   #      an hour of test runtime later.
   local rc=0
+  checked=$(( checked + 1 ))
   ( read_manifest rust ) >/dev/null 2>&1 || rc=$?
   if [ "${rc}" -eq 0 ]; then
     printf '  %sPASS%s checked-in manifest parses (stack rust)\n' "${GREEN}" "${RESET}"
@@ -1126,6 +1139,7 @@ EOF
     fails=1
   fi
   rc=0
+  checked=$(( checked + 1 ))
   ( read_manifest flutter ) >/dev/null 2>&1 || rc=$?
   if [ "${rc}" -eq 0 ]; then
     printf '  %sPASS%s checked-in manifest parses (stack flutter)\n' "${GREEN}" "${RESET}"
@@ -1138,7 +1152,10 @@ EOF
   if [ "${fails}" -ne 0 ]; then
     fail "self-test failed — this guard cannot be trusted until it is fixed"
   fi
-  printf '%sOK: self-test passed (31 fixtures).%s\n' "${GREEN}" "${RESET}"
+  if [ "${checked}" -ne "${SELF_TEST_FIXTURES}" ]; then
+    fail "self-test ran ${checked} fixture(s), expected exactly ${SELF_TEST_FIXTURES}. A fixture was added or removed without moving the pin — the one way a deleted fixture reports success."
+  fi
+  printf '%sOK: self-test passed (%d/%d fixtures).%s\n' "${GREEN}" "${checked}" "${SELF_TEST_FIXTURES}" "${RESET}"
 }
 
 main() {

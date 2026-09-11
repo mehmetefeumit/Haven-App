@@ -127,6 +127,9 @@ readonly SCRIPT_DIR="${script_dir}"
 # hermetic self-test runs against a fully-wired script.
 # shellcheck source=tooling/e2e/ci/drive-log-lib.sh
 source "${SCRIPT_DIR}/drive-log-lib.sh"
+# The shared fresh-install step: install_fresh and its broadcast barrier.
+# shellcheck source=tooling/e2e/ci/app-install-lib.sh
+source "${SCRIPT_DIR}/app-install-lib.sh"
 
 # ---------------------------------------------------------------------------
 # VERBATIM markers. MUST match the `k*Marker` constants in
@@ -733,6 +736,10 @@ readonly TARGET="${2:-integration_test/b6_location_provider_toggle_test.dart}"
 # cold start without letting a wedge run anonymously to the outer deadline.
 readonly DRIVE_TIMEOUT="${B6_DRIVE_TIMEOUT:-16m}"
 
+# How long SIGKILL follows the drive's SIGTERM at DRIVE_TIMEOUT: a term in
+# this lane's worst case, which its workflow derives at the drive step.
+readonly DRIVE_KILL_AFTER_SECS=30
+
 # `adb emu geo fix` re-issue period. The injection is one-shot into the
 # goldfish GNSS HAL (trap 2), so it must be re-issued for the life of the
 # lane — INCLUDING through the disabled window, on purpose.
@@ -764,6 +771,12 @@ fi
 # destroys the run.
 readonly ARM_MARKER_TIMEOUT="${B6_ARM_MARKER_TIMEOUT:-420}"
 readonly DISABLED_MARKER_TIMEOUT="${B6_DISABLED_MARKER_TIMEOUT:-480}"
+# wait_for_marker's poll period, so also how late it can notice the drive has
+# died — a term in this lane's worst case.
+readonly MARKER_POLL_SECS=2
+# set_provider's read-back: one read per second for this long. A term in this
+# lane's worst case, once before the drive and up to twice after it.
+readonly PROVIDER_READBACK_SECS=10
 
 readonly REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 readonly HAVEN_DIR="${REPO_ROOT}/haven"
@@ -895,7 +908,7 @@ set_provider() {
   adb -s "${DEVICE}" shell cmd location set-location-enabled "${want}" \
     >/dev/null 2>&1 || true
   local i
-  for i in 1 2 3 4 5 6 7 8 9 10; do
+  for (( i = 0; i < PROVIDER_READBACK_SECS; i++ )); do
     got="$(provider_state)"
     [[ "${got}" == "${want}" ]] && break
     sleep 1
@@ -928,8 +941,8 @@ wait_for_marker() {
       echo "  the drive exited before '${marker}' appeared (after ${waited}s)" >&2
       return 1
     fi
-    sleep 2
-    waited=$(( waited + 2 ))
+    sleep "${MARKER_POLL_SECS}"
+    waited=$(( waited + MARKER_POLL_SECS ))
   done
   echo "  timed out after ${timeout_s}s waiting for '${marker}'" >&2
   return 1
@@ -945,13 +958,13 @@ echo "Phase 0/6 — device ready."
 
 # ---------------------------------------------------------------------------
 # Phase 1 — clean install. Force-stop + uninstall FIRST so no sticky state
-# from a prior target survives into this run.
+# from a prior target survives into this run, and flush the fresh install's
+# broadcasts before anything launches the app (app-install-lib.sh).
 # ---------------------------------------------------------------------------
 echo "Phase 1/6 — installing ${APK}..."
 [[ -f "${APK}" ]] || fail "APK not found: ${APK} (was the build step skipped?)"
-adb -s "${DEVICE}" shell am force-stop "${PKG}" || true
-adb -s "${DEVICE}" uninstall "${PKG}" >/dev/null 2>&1 || true
-adb -s "${DEVICE}" install -r "${APK}"
+install_fresh "${DEVICE}" "${APK}" \
+  || fail "the fresh install of ${APK} did not complete (see the ERROR above)."
 
 # ---------------------------------------------------------------------------
 # Phase 2 — runtime permissions, VERIFIED.
@@ -1040,7 +1053,7 @@ LOGCAT_PID=$!
 
 : > "${DRIVE_LOG}"
 (
-  cd "${HAVEN_DIR}" && timeout --kill-after=30s "${DRIVE_TIMEOUT}" flutter drive \
+  cd "${HAVEN_DIR}" && timeout --kill-after="${DRIVE_KILL_AFTER_SECS}s" "${DRIVE_TIMEOUT}" flutter drive \
     --no-pub \
     --device-id "${DEVICE}" \
     --use-application-binary "${APK}" \

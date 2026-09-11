@@ -1252,8 +1252,10 @@ suite `e2e-android.yml` explicitly widens to `HAVEN_DRIVE_TIMEOUT=28m` under a
 ... an MLS session is already open on this database (Rule 14)`; the schedule was
 red on 8 of the last 12 nights. It is now `false` — the value its own design
 document asks for. No coverage moves: the live suite is a required PR gate in its
-own right, sized for itself, and stressing the live path at 28 min × 10
-iterations does not fit this job's 330-minute envelope anyway.
+own right, sized for itself, and stressing the live path does not fit this job
+anyway: at the live drive's 28 minutes one iteration's worst case is 47m10s (the
+workflow states the sum), so ten are ~472 minutes, and the job cap is already
+GitHub's 360-minute ceiling on a hosted job.
 
 *One lane ran two modes at once.* `e2e-profile` built its Android job from Dart's
 default (live) and its iOS job from `run-ios-sim-scenario.sh`'s default (poll) —
@@ -1362,7 +1364,8 @@ is an aggregate deadline between them, which is what the wrapper now is.
    cap on a run that went *green*. The 40-minute run is explained by the 25.8m
    step outlier above: one target wedged on cold attach, burned the full 20m
    per-drive default it inherited from `run-single-avd-scenario.sh`, and passed
-   on the retry the lane is designed to make. Job cap now 60 (1.5x observed max),
+   on the retry the lane is designed to make. Job cap raised to 60 (1.5x observed
+   max; since re-derived from its step caps, see the table below),
    and the per-drive default is now 10m in `run-relay-customization.sh`, matching
    its structural sibling `run-integration-tests.sh` — at 20m that retry could
    not complete inside any deadline that also fits under the job cap.
@@ -1383,9 +1386,19 @@ was unreachable and every poll hang surfaced as a bare rc=124. Worse, the
 harness's own documented retry budget — `(DRIVE_MAX_ATTEMPTS-1) x
 CONNECT_WATCHDOG + DRIVE_TIMEOUT + overhead = 2x5 + 20 + 3 = 33 min` — did not
 fit under 16 minutes either, so a run that hit the connect watchdog twice and
-then recovered was killed mid-recovery. Both are now 12m inner / 26m wrapper
-(budget 2x5 + 12 + 3 = 25), which fits. Net effect on a plain hang: it now dies
-at ~13 min **named** instead of at 16 min anonymous.
+then recovered was killed mid-recovery. Both became 12m inner / 26m wrapper
+(~~budget 2x5 + 12 + 3 = 25, which fits~~ — **it did not fit, corrected
+2026-09-10**: that sum left out the route wait (120 s), the Wi-Fi wait (20 s),
+the guard's two probe waits (30 s), 10 s of kill grace and settle per retry and
+the drive's 30 s kill-after, i.e. 3m40s against 1 minute of slack, so the true
+worst case was 28m40s inside a 26m wrapper before any barrier existed. The
+install-broadcast barrier added that day (up to 120 s, for the `app_test.dart`
+relaunch hang in CI run 34511084722) makes it 30m40s, and both wrappers became
+**31m** with a **40** step cap — then **35m** / **45**, and a 65 job cap,
+once the connect-flake retry's restore of the app was counted the same day; see
+"CI run 34511084722" below. The job cap has since been re-derived from the sum
+of the job's step caps, at e2e-android.yml's `timeout-minutes`). Net effect on
+a plain hang: it dies at ~13 min **named** instead of at 16 min anonymous.
 
 *What landed.* `tooling/e2e/ci/run-with-deadline.sh` is the shared inner bound —
 a coreutils `timeout` plus a banner naming the lane, because a raw `timeout`
@@ -1402,17 +1415,22 @@ the time — every lane added since inherits the same shape):
 
 | Lane | per-drive | deadline | step cap | job cap |
 |---|---|---|---|---|
-| `e2e-android` (poll) | 12m | 26m | 35 | 60 |
-| `e2e-android` (live-sync) | 28m | 45m | 55 | 90 |
-| `e2e-profile` (Android) | 12m | 26m | 35 | 60 |
-| `e2e-integration` | 10m | 25m | 35 | 45 |
-| `e2e-relay-customization` | 10m | 25m | 35 | 60 |
-| `e2e-background-catchup` | 10m | 30m | 40 | 60 |
-| `e2e-fgs-publish` | 18m | 25m | 35 | 70 |
-| `e2e-flakiness-stress` | 20m | 310m | 320 | 330 |
-| `e2e-ios` `e2e_combined` | 30m x2 / 45m x2 | (retry action) | 65 / 95 | 90 / 155 |
-| `e2e-ios` bg-mirror | 20m x2 | (retry action) | 45 | 90 / 155 |
+| `e2e-android` (poll) | 12m | ~~26m~~ ~~31m~~ **35m** | ~~35~~ ~~40~~ **45** | ~~60~~ ~~65~~ **120** |
+| `e2e-android` (live-sync) | 28m | ~~45m~~ ~~47m~~ **51m** | ~~55~~ ~~56~~ **61** | ~~90~~ **135** |
+| `e2e-profile` (Android) | 12m | ~~26m~~ ~~31m~~ **35m** | ~~35~~ ~~40~~ **45** | ~~60~~ ~~65~~ **100** |
+| `e2e-integration` | 10m | 25m | 35 | ~~45~~ ~~74~~ **90** |
+| `e2e-relay-customization` | 10m | 25m | 35 | ~~60~~ **95** |
+| `e2e-background-catchup` | 10m | 30m | 40 | ~~60~~ **90** |
+| `e2e-fgs-publish` | ~~18m~~ **20m** | ~~25m~~ **28m** | ~~35~~ **38** | ~~70~~ **90** |
+| `e2e-flakiness-stress` | 20m | 310m | 320 | ~~330~~ **360** |
+| `e2e-ios` `e2e_combined` | 30m x2 / 45m x2 | (retry action) | 65 / 95 | ~~90 / 155~~ **165 / 195** |
+| `e2e-ios` bg-mirror | 20m x2 | (retry action) | 45 | ~~90 / 155~~ **165 / 195** |
 | `e2e-profile` (iOS) | 30m x2 | (retry action) | 65 | 90 |
+
+The job-cap column moved last: each cap now clears the sum of every step cap its
+job can run plus the most its uncapped work has taken (C6 below). Each
+workflow's derivation above its job `timeout-minutes` is the source of truth;
+this column only records where the ladder ended.
 
 Step caps must CLEAR `deadline + 1m kill grace + 7m emulator boot`, which is the
 arithmetic `e2e-android.yml` already did by hand; the guard now enforces it as a
@@ -1423,9 +1441,12 @@ above the sum, e.g. 26+1+7=34 against a 35 cap).
 which fails on: a drive step with no inner deadline (C1); an inner budget at or
 above the step cap (C2); any step cap at or above its job cap (C3); a per-drive
 timeout at or above the deadline that would preempt it (C4); an
-emulator/simulator step with no cap or no boot timeout (C5). Both branches of
-every `${{ inputs.live_sync && A || B }}` are checked, so a lane cannot be
-correct in one variant and broken in the other.
+emulator/simulator step with no cap or no boot timeout (C5); a job cap below the
+sum of its step caps plus its declared uncapped minutes, or a job with no such
+declaration (C6 — the rule, the declaration's form and what it cannot verify
+are in the guard's header). Both branches of every
+`${{ inputs.live_sync && A || B }}` are checked, so a lane cannot be correct in
+one variant and broken in the other.
 
 **A10 — the anti-vacuity floor was itself vacuous, FIXED 2026-08-09.** The guard
 refused to pass on fewer than 10 emulator/simulator steps or 8 drives. That is
@@ -3987,6 +4008,254 @@ verified only by a dry run against this incident's real run with the mutating
 call intercepted — the listing, the log fetch and the classification are proven
 against live data; the POST is not.
 
+## CI run 34511084722 — the fresh-install relaunch race, one barrier for every Android lane — 2026-09-10
+
+`app_test.dart` hung ten minutes to its cap and reported only `rc=124`: the
+fresh install's `PACKAGE_ADDED` reached the overlay manager after MainActivity
+was on screen and relaunched it under the driver (docs/E2E_TROUBLESHOOTING.md
+failure mode 11). The first fix flushed the install's broadcasts in
+`run-single-avd-scenario.sh` alone; the lanes with their own orchestrator kept
+the race.
+
+*What landed.* `tooling/e2e/ci/app-install-lib.sh` is now the only place an
+Android lane installs the app. `install_fresh` clears any prior install,
+`install_app` installs over what is there, and after any install that was fresh
+(the package absent beforehand) both check that it landed and then block on
+`cmd package wait-for-handler` and
+`am wait-for-broadcast-barrier --flush-broadcast-loopers`, together under
+`INSTALL_BARRIER_SECS` = 120 — a constant rather than an argument, so no lane
+can tighten it. The handler drain was added after review: PackageManagerService
+posts the `PACKAGE_ADDED` send to its handler before answering the installer,
+and the loopers flag only covers that handler once it has sent a broadcast
+before (android-14.0.0_r1 registers loopers lazily). A failed install, one adb
+reports as a success that did not land, a device that cannot run the barrier
+and a queue that does not drain each fail the lane by name. An install over an
+installed package is a replace, which cannot relaunch anything, and takes no
+barrier — so the barrier runs exactly where a fresh install happened.
+
+*The lane list, verified rather than inherited.* The earlier list named seven
+lanes; the pin's first run over the unchanged tree found the install sites
+directly: `run-b1-fgs-publish.sh`, `run-b3-real-gps.sh`,
+`run-b5-permission-revocation.sh` (twice), `run-b6-location-provider-toggle.sh`,
+`run-b8-clock-skew.sh`, `run-b9-network-reconnect.sh`, `run-kp-rotation.sh` and
+`run-m7-background-catchup.sh` (twice), plus the runner's own copy. Three
+corrections came out of it. B5's Phase 6 reinstall is a second FRESH install
+the list had missed — ACT 1's drive teardown uninstalls the package, so the
+restore before ACT 2 starts from nothing. M7's C1/C2 installs are replaces over
+Phase A's package, and correctly take no barrier. And B1 needed the pre-launch
+barrier as well as its own: its Phase-4 barrier runs after `flutter drive` has
+launched the app, for the drive's force-stop and replace broadcasts, by which
+time MainActivity is already up. The independent review then found a fourth
+place no install line names: `run-single-avd-scenario.sh`'s connect-flake
+retry. A failed attempt's `flutter drive` teardown stops and uninstalls the app
+(flutter_tools `drive_service.dart` `stop()`), so every retried attempt ran on
+a fresh, unflushed and ungranted install — in all five lanes that runner
+drives. The retry now restores the app through `install_app` and re-grants.
+
+*Kept true by* two repo-guards steps. `--self-test` (its fixture count pinned by
+equality as `APP_INSTALL_SELF_TEST_FIXTURES`) drives the library against a stub
+`adb` and `timeout`;
+`--check-installs` fails when any lane installs the app another way (R1),
+redefines the library's functions (R2), or talks to adb and launches the app
+with `flutter drive`, `flutter test` or `flutter run` without also installing
+through it (R3) — the case where the launcher's own install would be the
+unflushed fresh one. Shell is read through a small lexer that tracks `$( … )`
+inside double quotes, because drive-log-lib.sh's string stripper does not and
+would have read `out="$(adb -s "${d}" install -r "${a}")"` as two strings.
+Mutations confirmed: re-adding a bare install to B3 or B9, removing B8's
+install, or installing inline in a workflow reds the pin; making the barrier
+best-effort, dropping `--flush-broadcast-loopers`, removing or tightening the
+bound, barriering a replace, trusting an unchecked install, disabling R2 or R3,
+or deleting a fixture reds named fixtures. The pin is lexical, and the library
+lists what it cannot see. The runner's own `--self-test` reads its retry
+branch the same way and fails if the restore or the re-grant is removed.
+
+*Budgets, re-derived* at each workflow's drive step with every bounded wait
+named, plus the ~3 min allowance e2e-android carries for unbounded adb work
+(these lanes spent under 40 s on it in run 34511084722). Step caps now add 2
+minutes for the emulator action's own setup and teardown: it measured 38-102 s
+across the eight own-installer lanes over twelve runs (96 lane-runs; a third
+over a minute) and 42-79 s across the single-AVD lanes, so the 1 minute
+measured on run 34488512808 alone would not have held.
+
+| Lane | bounded waits | deadline | step cap | job cap |
+|---|---|---|---|---|
+| `e2e-real-gps` (B3) | 933 s | ~~18m~~ **19m** | 30 | ~~60~~ **80** |
+| `e2e-fgs-publish` (B1) | 1428 s | 28m | 38 | ~~70~~ **90** |
+| `e2e-permission-revocation` (B5) | 2313 s | ~~34m~~ **42m** | ~~43~~ **52** | ~~85~~ **105** |
+| `e2e-location-provider-toggle` (B6) | 1239 s | 24m | 34 | ~~70~~ **85** |
+| `e2e-clock-skew` (B8) | 1413 s | ~~25m~~ **27m** | ~~35~~ **37** | ~~70~~ **90** |
+| `e2e-network-reconnect` (B9) | 1445 s | ~~27m~~ **28m** | ~~36~~ **38** | ~~70~~ **90** |
+| `e2e-kp-rotation` | 1737 s | ~~30m~~ **32m** | ~~39~~ **42** | ~~75~~ **90** |
+| `e2e-background-catchup` (M7) | reaper by design | 30m | 40 | ~~60~~ **90** |
+| `e2e-android` (poll) | 1904 s | ~~26m~~ **35m** | ~~35~~ **45** | ~~60~~ **120** |
+| `e2e-android` (live-sync) | 2864 s | ~~45m~~ **51m** | ~~55~~ **61** | ~~90~~ **135** |
+| `e2e-profile` (Android) | 1904 s | ~~26m~~ **35m** | ~~35~~ **45** | ~~60~~ **100** |
+
+Struck values are the last commit's. The sums are the check's (next section);
+the hand derivations first written for this table missed terms it found. The
+egress guard's two probe waits are wall-clock loops that can each run one 1 s
+tick past `PROBE_TIMEOUT`, and each probe's `nc -w 1` fallback went uncounted:
+4 s on the three guarded lanes. strfry's ready loop is a wall-clock loop too,
+and can start one more 1 s tick just before `READY_TIMEOUT`: 1 s on every lane
+that starts strfry inside its deadline, 2 s on KeyPackage rotation, which
+starts two. Every deadline covers the corrected sum.
+
+B5's old 34m was short before any barrier: it counted 2 x 14 for the drives and
+6 for everything else, omitting the relay restart, the app-op hold that can
+outlive ACT 1's drive, the settle and the relay polls. M7's deadline is a reaper
+sized from measurement, not a cover — its three drives alone are 31.5 minutes
+at their bounds — and the barrier adds at most 120 s to it, once. The single-AVD
+rows moved with the retry's restore: each of the runner's two retries can now
+spend `INSTALL_BARRIER_SECS`, so its bounded terms are `DRIVE_TIMEOUT` + 1150 s,
+not + 910; the multi-target lanes' per-target sums say so at their deadlines,
+which stay reapers by design. Job caps were first checked against measured time
+before and after the drive step (12 runs), which put e2e-android's poll and
+e2e-profile's at 65. Measured time alone was the wrong rule: a job cap must clear
+the sum of every step cap its job can run, plus the most its uncapped work has
+taken, or a run whose every step is inside its own cap dies at the job cap. The
+job caps in the table are sized that way, and the ordering guard's C6 enforces
+it.
+
+*CLOSED 2026-09-10 — two lines of prose in a file this change did not own:*
+`scripts/ci/check_e2e_step_timeout_ordering.sh`'s header quoted e2e-android.yml's
+arithmetic with superseded deadlines and a 1-minute setup term, and cited
+"run-b1-fgs-publish.sh's 18m" (the default is 20m). Both passages now say what
+the guard checks without restating numbers a later change would stale: the C2
+note names the action's setup/teardown term as measured and unenforced, and the
+scope note hands script-side defaults to check_e2e_lane_budget.sh.
+
+*What only a real emulator run can confirm*: that the api-34 image answers
+`cmd package wait-for-handler` and
+`am wait-for-broadcast-barrier --flush-broadcast-loopers` with success (both
+are in android-14.0.0_r1's source with no permission check, and B1's barrier,
+without the flag, logs `flushed` in CI), how long they take on a freshly booted
+guest, and that no lane now reds on them. The self-tests prove the library's
+decisions, the retry's restore and the pin's reach; stubbed full runs of the
+runner, B3 and M7 (not checked in) showed the sequences end to end. None of it
+proves the device.
+
+## E2E lane budgets, computed from the code — 2026-09-10
+
+`check_e2e_step_timeout_ordering.sh` enforces deadline < step cap < job cap;
+nothing enforced that the deadline covers the harness's own worst case. Every
+false sum in the two rounds above — the poll lane's 25 min that left out the
+route and Wi-Fi waits, the guard's probes, the kill-afters; B5's 34 min that
+left out its tail, settle and polls — was found by a person reading the
+arithmetic.
+
+*What landed.* `scripts/ci/check_e2e_lane_budget.sh`, with
+`scripts/ci/e2e_lane_budget.manifest`, wired into repo-guards.yml as the check
+and its `--self-test` (case count pinned by equality). An awk analyzer reads
+each script a lane's deadline runs and turns every wait it can reach into a
+site; the manifest must claim each with a charge written in the script's own
+`readonly` constants; the check evaluates those from their definitions and
+from the env the workflow passes, sums the charges, adds the one
+`UNBOUNDED_WORK_ALLOWANCE_SECS` (180 s, declared in the check, not per lane),
+and requires the sum to fit the deadline — both sides of a `live_sync`
+expression. What counts as a wait, what makes a claim acceptable, how reaper
+and macOS lanes are declared, and what it cannot see are stated once, in the
+check's header. A second reading of every reachable line (app-install-lib.sh's
+lexer, with its own command recognition) must not see more waits than the
+analyzer read, and the lane set must match the ordering guard's count.
+
+*Independent reviews* shaped it. The first two found it too trusting in
+ways that could pass a short lane — a loop's charge checked for naming its
+bound rather than covering it, constants read without proof nothing reassigns
+them, input defaults read as exact, `within` able to hide any wait, a `poll`
+watching a job nobody charged. The third reproduced 30 more inputs with a
+wrong verdict, none present in the tree: waits the analyzer dropped (a script
+run by its path, a library sourced through a variable, a function with a
+subshell body or defined inside another, EXIT traps written as strings, a
+backslashed or flag-prefixed command, `adb shell sleep`, `bash <<EOF`), loops
+it misread (an `||` header, a deadline variable set twice, a counter moved by
+two steps or both counted and clocked, a `shift` before an alias), values it
+misread (a readonly built from a mutable name, a default overridden only on a
+later line, word splitting in target counts, `timeout 0`), workflow env it
+dropped (an `env:` with a comment, deeper keys, job env after the steps,
+`NAME<<EOF` in GITHUB_ENV, a falsy middle value in `c && '' || B`), joins it
+missed (`wait %1`, a copied PID), a too-broad `--self-test` exclusion, a
+retry site counted as a second drive, and a second reading that compared
+lines, not counts. The same review found one in the ordering guard: its
+case-sensitive match on the emulator action's owner would have dropped a lane
+written `ReactiveCircus/…` (the action's own spelling) out of both guards — six
+false-green classes in all, five here and one there. Each is now a rule with a
+fixture; a library function calling another library's waiting function, and a
+wait at a library's top level, are refused rather than modelled. The self-test's lane sums are
+computed from the fixture's constants and the allowance, and its case count is
+pinned by equality in the check (`LB_SELF_TEST_CASES`). Rules were
+mutation-tested one at a time, each removal turning its own fixture red.
+
+*The numbers, as computed on 2026-09-10* (bounded waits + 180 s allowance):
+
+| Lane | bounded | worst | deadline | headroom |
+|---|---|---|---|---|
+| B3 real GPS | 933 s | 1113 s | 19m | 27 s |
+| B1 FGS publish | 1428 s | 1608 s | 28m | 72 s |
+| B5 permission revocation | 2313 s | 2493 s | 42m | 27 s |
+| B6 provider toggle | 1239 s | 1419 s | 24m | 21 s |
+| B8 clock skew | 1413 s | 1593 s | 27m | 27 s |
+| B9 network reconnect | 1445 s | 1625 s | 28m | 55 s |
+| KeyPackage rotation | 1737 s | 1917 s | 32m | 3 s |
+| e2e-android poll / live-sync | 1904 / 2864 s | 2084 / 3044 s | 35m / 51m | 16 s |
+| e2e-profile (Android) | 1904 s | 2084 s | 35m | 16 s |
+
+No lane is too short; KeyPackage rotation's 3 s is the thinnest margin, and any
+wait it gains will red it here. The derivations at the drive steps carry the
+same numbers. The four aggregate lanes are declared `reaper` and accepted only
+because what makes them so is still true: each runs several drives, counted as
+unconditional drive sites per target (integration 7, relay customization 4 —
+its rc-124 retry is not a target — flakiness-stress 10 at its default
+iterations, M7 3), its full worst case exceeds its deadline (10351 s, 14684 s,
+24310 s and 4729 s against 25m, 25m, 310m and 30m), and one drive's bound
+(630 s; 1230 s for flakiness-stress) stays below it, so a per-drive timeout can
+fire before the aggregate one. The six macOS retry steps are declared
+`unbudgeted`, accepted only while they run on a macOS runner and their harness
+launches `flutter test` with no bound of its own.
+
+*Mutations on the real tree*, each red and each restored byte-identically
+(`sha256sum -c`): B3's `DRIVE_KILL_AFTER_SECS` 30 -> 60 reds e2e-real-gps
+(1143 s > 1140 s); a bare `sleep 60` in run-b8-clock-skew.sh and a `sleep 5` in
+run-b9's EXIT trap each red as an unclaimed wait; e2e-kp-rotation's deadline
+32m -> 31m reds (1917 s > 1860 s) while the ordering guard stays green on the
+same change; strfry's ready charge without its last tick reds (the loop can
+spend 61 s); run-b9's `AIRPLANE_READBACK_SECS` without `readonly` reds;
+`B3_DRIVE_TIMEOUT` from an input's default reds; e2e-android's
+`HAVEN_DRIVE_TIMEOUT` on a second condition reds; a flow-style `env:` stops the
+check (rc 2).
+
+*What it cannot see* is listed in the check's header (a wait behind `eval` or a
+`bash -c` string, a command in a variable, `coproc`, `set -a`, multiplicities a
+claim asserts, a counted loop's body paths, a `timeout` child ignoring
+SIGTERM); the manifest names two more: a tag-valued `vars.STRFRY_IMAGE`
+(strfry's pull inside a deadline is excluded because a digest-pinned local
+image skips it) and the xtables lock (the guard's `iptables -w` waits only on
+another holder, and none runs while it installs). The step cap's term for the
+action's own setup and teardown is measured, not bounded, and the ordering
+guard says so. The allowance is an estimate. mawk was not run locally: the awk
+is written to POSIX and verified with `gawk --posix` and plain gawk, also under
+a comma-decimal locale; the check logs which awk ran, so CI's first run shows
+whether its awk is mawk.
+
+*The SIGPIPE flake this work tripped over* — `run-single-avd-scenario.sh
+--self-test` dying with rc 141 when its fixture 8 read a pipe with an `awk` that
+`exit`ed early — is fixed there: the reader drains. None of this check's
+pipelines ends in an early-exiting reader, and the ordering guard's two
+(`… | grep -qv -- --self-test`, which a SIGPIPE turned into a silently skipped
+workflow) now read their input to the end.
+
+**CLOSED** (both were open when this section was written):
+- `setup-network-guard.sh`'s probe wait read
+  `read_dmesg | grep -aF <prefix> | grep -qaF <needle>` under `pipefail`, where
+  the middle `grep` could die of SIGPIPE after the last one found the needle,
+  and `start-strfry.sh`'s `docker logs … | grep -q '^strfry error'` had the
+  same shape the other way. Both now search a captured string instead of a
+  pipe; each script says why at the site.
+- e2e-android.yml's poll cap was sized from measured time below its own step
+  caps. Every lane's job cap now clears the sum of its step caps plus its
+  measured uncapped time, derived at the job cap, and the ordering guard's C6
+  fails a job that does not — or that does not declare that time.
+
 ## Power-efficiency P1 review pass, 2026-09-03 — four items carried here
 
 Four independent reviews of `docs/POWER_EFFICIENCY_PLAN.md` §5.1 (Phase P1) as
@@ -4142,7 +4411,7 @@ moved the lane's timeouts out from under a citation elsewhere.
 |---|---|---|
 | CI-R17 | `kMinFixRequestInterval` (31 s) sits below AOSP's `NO_FIX_TIMEOUT` (60 s), so at the floor the framework arms no give-up alarm and an indoor search is bounded only by Haven's ≤ 72 s watchdog re-aim. D3 (vii)'s "≈ 60 s per interval" residual is optimistic there, and the floor is reachable in ordinary operation | **OPEN** |
 | CI-R18 | `PublishWakeLock` is a Kotlin `object` holding one process-wide, non-reference-counted lock, while the plugin destroys and recreates the task engine with the dying isolate's teardown drain still running — so that drain's `release()` can drop the new cycle's hold | **OPEN** |
-| CI-R19 | `check_e2e_step_timeout_ordering.sh:73` cites B1's per-drive default as 18 m; it is 20 m after the forced-idle phase landed. Comment-only — the guard is GREEN either way, because it deliberately reads workflow-declared values and not script defaults | **OPEN** (cosmetic; verified green) |
+| CI-R19 | `check_e2e_step_timeout_ordering.sh:73` cites B1's per-drive default as 18 m; it is 20 m after the forced-idle phase landed. Comment-only — the guard is GREEN either way, because it deliberately reads workflow-declared values and not script defaults | **CLOSED 2026-09-10** (see its section) |
 
 **CI-R17 — the floor is under the timeout, and the plan's own §2.2 says what
 that costs.** `kMinFixRequestInterval` is 31 s (declared in
@@ -4169,7 +4438,15 @@ treats a percentage beside a unit of time as an energy claim needing attribution
 and a definitional statement is what earns the exemption rather than a tag.
 
 **It is reachable in ordinary operation, which is why it is a backlog item and
-not a footnote.** The floor binds when
+not a footnote.** There were TWO routes to it; this row originally named only
+the multi-circle one below. The second was a single-circle defect, found and
+CLOSED on 2026-09-10 (CI run 34511084722): for a circle already OVERDUE the
+planner took its past due-time as the planned publish, aiming the next fix early
+by the overdue amount — about 25 s, clamped up to the 31 s floor — so a circle
+published 4 s later sat on a request well under the 62 s the P2a contract
+requires. `background_location_task.dart` now never plans a publish before the
+instant it plans it, and two host tests pin that. The multi-circle route
+remains, and is what keeps this row OPEN. It binds when
 `earliestDue - now <= kMinFixRequestInterval + kBackgroundFixLeadTime` = 41 s,
 and a sibling due within `kBackgroundFixHorizon` (30 s) is published by the same
 cycle rather than waited for — so the band that actually produces a 31 s request
@@ -4234,7 +4511,13 @@ two `Haven:publish` rows exist, since it asserts an `ACQ=` age per row rather
 than a count. A guard fixture that reds a `lock` field on the `object` itself is
 what keeps the shape from coming back.
 
-### CI-R19 — a stale harness-default citation in `check_e2e_step_timeout_ordering.sh` (recorded 2026-09-04)
+### CI-R19 — a stale harness-default citation in `check_e2e_step_timeout_ordering.sh` (recorded 2026-09-04) — CLOSED 2026-09-10
+
+*Closed by the durable version below:* the comment no longer cites script
+defaults by value at all, and `scripts/ci/check_e2e_lane_budget.sh` now reads
+every script's `*_DRIVE_TIMEOUT:-` default (and every other wait constant) from
+its definition as a term of the lane's worst case, so a changed default changes
+a verdict rather than a comment. Original entry:
 
 `scripts/ci/check_e2e_step_timeout_ordering.sh:73` names B1's per-drive default
 as `run-b1-fgs-publish.sh's 18m`. It is **20 m**

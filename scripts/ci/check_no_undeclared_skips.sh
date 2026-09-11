@@ -85,6 +85,7 @@
 set -euo pipefail
 
 SCRIPT_NAME="check_no_undeclared_skips"
+readonly SELF_TEST_FIXTURES=16
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 DEFAULT_MANIFEST="${REPO_ROOT}/scripts/ci/expected_test_skips.txt"
 
@@ -242,8 +243,11 @@ extract_dart_skips() {
 
   # Self-diagnosis: a run killed mid-flight emits no terminal `done` event, and
   # its truncated skip list would look like a clean set of stale entries.
+  # A here-string, not a pipe: `#done` is the first line, so awk exits while a
+  # piped printf is still writing the rest, and pipefail reads that SIGPIPE as
+  # rc 141 (fatal wherever errexit is live, e.g. `--list`).
   local done_count
-  done_count="$(printf '%s\n' "${out}" | awk -F'\t' '$1 == "#done" { print $2; exit }')"
+  done_count="$(awk -F'\t' '$1 == "#done" { print $2; exit }' <<<"${out}")"
   if [[ "${done_count:-0}" -lt 1 ]]; then
     misconfig "no terminal 'done' event in ${reportfile} — the test run did not finish, so its skip set is not trustworthy"
   fi
@@ -417,7 +421,7 @@ run_check() {
 # test: those are the two directions in which a proof silently evaporates.
 # ---------------------------------------------------------------------------
 self_test() {
-  local tmp fails=0
+  local tmp fails=0 checked=0
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
   trap "rm -rf '${tmp}'" RETURN
@@ -461,6 +465,7 @@ EOF
 
   _case() { # _case <label> <expect-rc> <manifest> <kind> <input>
     local label="$1" want="$2" man="$3" kind="$4" input="$5" got=0
+    checked=$(( checked + 1 ))
     # SUBSHELL, not a bare call: run_check exits on failure, which would abort
     # the self-test after its first negative fixture and leave the rest silently
     # unrun — a self-test that only ever proves the happy path.
@@ -509,6 +514,7 @@ EOF
   #     skip — fixture (1) already contains two, and (5) proves the count is
   #     cross-checked, so this asserts the specific miscount directly.
   local miscounted
+  checked=$(( checked + 1 ))
   miscounted="$(extract_cargo_skips "${tmp}/cargo.ok.log" | grep -c 'relay_tag_malformed_single_element_ignored' || true)"
   if [[ "${miscounted}" -eq 0 ]]; then
     printf '  \033[1;32mPASS\033[0m a passing test named *_ignored is not read as a skip\n'
@@ -609,10 +615,38 @@ EOF
   printf 'selftest|test/l10n/sweep_test.dart::sweep *|arb absent\n' > "${tmp}/manifest.uncounted"
   _case "uncounted glob is a manifest error" 2 "${tmp}/manifest.uncounted" dart "${tmp}/dart.ok.json"
 
+  # (15) A skip list far past the pipe's 64 KiB, `#done` first, through the
+  #      REAL main in a child: errexit is live there, as it is for any caller
+  #      that is not itself errexit-exempt. The done-count read has to take all
+  #      of it: piped into a reader that exits at `#done`, the writer is
+  #      SIGPIPEd here every time — rc 141 and an empty list.
+  checked=$(( checked + 1 ))
+  awk 'BEGIN {
+    print "{\"type\":\"suite\",\"suite\":{\"id\":2,\"platform\":\"vm\",\"path\":\"/x/haven/test/l10n/sweep_test.dart\"},\"time\":1}"
+    pad = sprintf("%1000s", ""); gsub(/ /, "x", pad)
+    for (i = 1; i <= 1100; i++) {
+      printf "{\"type\":\"testStart\",\"test\":{\"id\":%d,\"name\":\"sweep Page%d %s\",\"suiteID\":2,\"groupIDs\":[],\"metadata\":{\"skip\":true,\"skipReason\":\"arb absent\"},\"line\":1,\"column\":1},\"time\":2}\n", 100 + i, i, pad
+      printf "{\"type\":\"testDone\",\"testID\":%d,\"result\":\"success\",\"skipped\":true,\"hidden\":false,\"time\":3}\n", 100 + i
+    }
+    print "{\"type\":\"done\",\"success\":true,\"time\":4}"
+  }' > "${tmp}/dart.big.json"
+  local big_rc=0 big_n
+  bash "${BASH_SOURCE[0]}" --list dart "${tmp}/dart.big.json" > "${tmp}/big.list" 2>/dev/null || big_rc=$?
+  big_n="$(awk '/::sweep Page/ { n++ } END { print n + 0 }' "${tmp}/big.list")"
+  if [[ "${big_rc}" -eq 0 && "${big_n}" -eq 1100 ]]; then
+    printf '  \033[1;32mPASS\033[0m a 1 MiB skip list is read in full (1100 skips)\n'
+  else
+    printf '  \033[1;31mFAIL\033[0m a 1 MiB skip list was cut short (rc=%d, %s of 1100 skips listed)\n' "${big_rc}" "${big_n}" >&2
+    fails=1
+  fi
+
   if [[ "${fails}" -ne 0 ]]; then
     fail "self-test failed — this guard cannot be trusted until it is fixed"
   fi
-  log "OK: self-test passed (14 fixtures)."
+  if (( checked != SELF_TEST_FIXTURES )); then
+    fail "self-test ran ${checked} fixture(s), expected exactly ${SELF_TEST_FIXTURES}. A fixture was added or removed without moving the pin — the one way a deleted fixture reports success."
+  fi
+  log "OK: self-test passed (${checked}/${SELF_TEST_FIXTURES} fixtures)."
 }
 
 main() {

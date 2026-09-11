@@ -75,6 +75,9 @@ readonly SCRIPT_DIR="${script_dir}"
 
 # shellcheck source=tooling/e2e/ci/drive-log-lib.sh
 source "${SCRIPT_DIR}/drive-log-lib.sh"
+# The shared fresh-install step: install_fresh and its broadcast barrier.
+# shellcheck source=tooling/e2e/ci/app-install-lib.sh
+source "${SCRIPT_DIR}/app-install-lib.sh"
 
 # ---------------------------------------------------------------------------
 # Oracle predicates — pure text, no device. Everything the lane's verdict
@@ -118,7 +121,9 @@ b3_published_count() {
 b3_permission_granted() {
   local dump="${1:-}" perm="${2:-}"
   [[ -f "${dump}" ]] || return 1
-  tr -d '\r' < "${dump}" | grep -aqE "${perm}: granted=true"
+  # Not `tr | grep -q`: tr writes a real dump in chunks, and a grep that exits
+  # on an early match SIGPIPEs it into rc 141, which pipefail reads as denied.
+  grep -aqE "${perm}: granted=true" <<<"$(tr -d '\r' < "${dump}")"
 }
 
 # ---------------------------------------------------------------------------
@@ -128,13 +133,15 @@ b3_permission_granted() {
 # permission) are the ways these would silently start passing.
 # ---------------------------------------------------------------------------
 run_self_test() {
-  local tmp fails=0
+  local tmp fails=0 checked=0
+  local -r SELF_TEST_FIXTURES=13
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
   trap "rm -rf '${tmp}'" RETURN
 
   _case() { # _case <label> <expected 0|1> <actual-rc>
     local label="$1" want="$2" got="$3"
+    checked=$((checked + 1))
     if [[ "${got}" -eq "${want}" ]]; then
       printf '  \033[1;32mPASS\033[0m %s\n' "${label}"
     else
@@ -146,6 +153,7 @@ run_self_test() {
 
   _eq_case() { # _eq_case <label> <expected> <actual>
     local label="$1" want="$2" got="$3"
+    checked=$((checked + 1))
     if [[ "${got}" == "${want}" ]]; then
       printf '  \033[1;32mPASS\033[0m %s\n' "${label}"
     else
@@ -235,17 +243,32 @@ run_self_test() {
   b3_permission_granted "${tmp}/g3.txt" 'android.permission.ACCESS_FINE_LOCATION' || rc=1
   _case "granted neighbour does not answer for us" 1 "${rc}"
 
-  # (12) The drive-log failure predicate this lane leans on is exercised by
+  # (12) Granted on the FIRST line of a >1 MiB dump. Piped into `grep -q`, the
+  #      writer still has most of the dump to write when the match exits the
+  #      reader, so this is the deterministic SIGPIPE shape, not a lucky race.
+  { printf '    android.permission.ACCESS_FINE_LOCATION: granted=true\r\n'
+    awk 'BEGIN { for (i = 0; i < 24576; i++)
+      printf "    android.permission.FILLER_%05d: granted=false\r\n", i }'
+  } > "${tmp}/g4.txt"
+  rc=0
+  b3_permission_granted "${tmp}/g4.txt" 'android.permission.ACCESS_FINE_LOCATION' || rc=1
+  _case "granted at the head of a >1 MiB dump" 0 "${rc}"
+
+  # (13) The drive-log failure predicate this lane leans on is exercised by
   #      its own self-test; assert only that sourcing it worked, so a
   #      refactor that drops the `source` fails here rather than at 3am.
   rc=0; declare -F drive_log_reports_test_failure >/dev/null || rc=1
   _case "drive-log failure predicate is in scope" 0 "${rc}"
 
+  if (( checked != SELF_TEST_FIXTURES )); then
+    echo "SELF-TEST FAIL: ran ${checked} fixture(s), expected ${SELF_TEST_FIXTURES}" >&2
+    fails=1
+  fi
   if (( fails )); then
     echo "run-b3-real-gps.sh --self-test: FAILURES (see above)" >&2
     return 1
   fi
-  echo "run-b3-real-gps.sh --self-test: all 12 fixtures passed"
+  echo "run-b3-real-gps.sh --self-test: all ${checked} fixtures passed"
   return 0
 }
 
@@ -265,7 +288,8 @@ readonly APK="${1:-/tmp/integration-apks/b3_real_gps_test.apk}"
 readonly TARGET="${2:-integration_test/b3_real_gps_test.dart}"
 
 # Bounds the drive only. The step's `run-with-deadline.sh` wrapper bounds
-# install + grants + GPS seeding + the oracle on top; see
+# install (and its broadcast barrier) + grants + GPS seeding + the oracle on
+# top; the sum is derived at e2e-real-gps.yml's drive step, and see
 # scripts/ci/check_e2e_step_timeout_ordering.sh for the ordering invariant.
 #
 # Sizing: the target's own budget is arming (~60s under emulator mlock
@@ -274,6 +298,10 @@ readonly TARGET="${2:-integration_test/b3_real_gps_test.dart}"
 # against an 8-minute in-test `Timeout`. 12m leaves headroom for a slow cold
 # start without letting a wedge run to the outer deadline anonymously.
 readonly DRIVE_TIMEOUT="${B3_DRIVE_TIMEOUT:-12m}"
+
+# How long SIGKILL follows the drive's SIGTERM at DRIVE_TIMEOUT: a term in
+# this lane's worst case, which its workflow derives at the drive step.
+readonly DRIVE_KILL_AFTER_SECS=30
 
 # `adb emu geo fix` re-issue period (trap 1 in the header). Short enough that
 # a one-shot `getCurrentPosition()` never waits long for a fresh fix, long
@@ -381,13 +409,13 @@ echo "Phase 0/5 — device ready."
 
 # ---------------------------------------------------------------------------
 # Phase 1 — clean install. Force-stop + uninstall FIRST so no sticky state
-# from a prior target survives into this run.
+# from a prior target survives into this run, and flush the fresh install's
+# broadcasts before anything launches the app (app-install-lib.sh).
 # ---------------------------------------------------------------------------
 echo "Phase 1/5 — installing ${APK}..."
 [[ -f "${APK}" ]] || fail "APK not found: ${APK} (was the build step skipped?)"
-adb -s "${DEVICE}" shell am force-stop "${PKG}" || true
-adb -s "${DEVICE}" uninstall "${PKG}" >/dev/null 2>&1 || true
-adb -s "${DEVICE}" install -r "${APK}"
+install_fresh "${DEVICE}" "${APK}" \
+  || fail "the fresh install of ${APK} did not complete (see the ERROR above)."
 
 # ---------------------------------------------------------------------------
 # Phase 2 — runtime permissions, VERIFIED.
@@ -471,7 +499,7 @@ adb -s "${DEVICE}" logcat -v threadtime > "${LOGCAT_FILE}" 2>&1 &
 LOGCAT_PID=$!
 
 drc=0
-( cd "${HAVEN_DIR}" && timeout --kill-after=30s "${DRIVE_TIMEOUT}" flutter drive \
+( cd "${HAVEN_DIR}" && timeout --kill-after="${DRIVE_KILL_AFTER_SECS}s" "${DRIVE_TIMEOUT}" flutter drive \
     --no-pub \
     --device-id "${DEVICE}" \
     --use-application-binary "${APK}" \

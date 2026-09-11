@@ -433,6 +433,17 @@
 #     The guard also fails an inoperative bound — a step cap equal to its job
 #     cap, or a per-drive timeout set above the wrapper that would preempt it.
 #
+#   E2E lane budgets                  scripts/ci/check_e2e_lane_budget.sh
+#     The link below the ordering: each lane's inner deadline must cover the
+#     worst case of the scripts it runs, every wait at its bound plus one
+#     allowance for unbounded adb work. The waits are found in the code and
+#     must each be claimed in scripts/ci/e2e_lane_budget.manifest, charged by
+#     the scripts' own constants, so a raised constant, an omitted wait or a
+#     shortened deadline all fail here instead of in a person's arithmetic.
+#     Multi-target lanes that reap by design, and the macOS lanes whose
+#     `flutter test` has no bound of its own, are accepted only by declaration
+#     and only while what makes them so stays true.
+#
 #   Skip-manifest self-test           scripts/ci/check_no_undeclared_skips.sh
 #     The guard that fails a run when a test SKIPS without being declared in
 #     scripts/ci/expected_test_skips.txt. THIS gate must parse real test
@@ -456,6 +467,21 @@
 #     also rejects any static `skip:` there, because the ABSENCE of one is the
 #     premise that lets a lane read a non-zero `~N` column as a lost proof —
 #     asserted here rather than argued in prose.
+#
+#   Fresh-install broadcast barrier   tooling/e2e/ci/app-install-lib.sh
+#     A fresh install's PACKAGE_ADDED can relaunch MainActivity under
+#     `flutter drive` when it lands late, destroying the isolate the driver is
+#     attached to: the lane hangs to its cap and reports only rc=124 (CI run
+#     34511084722, docs/E2E_TROUBLESHOOTING.md failure mode 11). The library
+#     is the one place an Android lane installs the app, and it flushes a
+#     fresh install's broadcasts before returning — fail-closed, bounded.
+#     Two steps: --self-test drives it against a stub device (handler drain,
+#     loopers flag, bound, fail-closed paths, and no barrier on a replace),
+#     and --check-installs is ENFORCING: nothing else installs the app,
+#     nothing redefines the library's functions, and every adb-using lane
+#     that launches the app (`flutter drive`, `test` or `run`) installs
+#     through it — so a lane written the ordinary way cannot miss the
+#     barrier. What a lexical check cannot see is listed in the library.
 #
 #   Coverage-floors self-test         scripts/ci/check_coverage_floors.sh
 #     The guard that enforces a MINIMUM COVERAGE PER PATH, plus a ratchet that
@@ -1246,7 +1272,11 @@ jobs:
       # the secret scan and the artifact upload — slow, and with no evidence.
       # Four lanes were in that state (CI_HARDENING_BACKLOG.md A8), and two
       # more carried bounds that could never fire: a per-drive timeout ABOVE
-      # its own wrapper, and a step cap EQUAL to its job cap.
+      # its own wrapper, and a step cap EQUAL to its job cap. C6 adds the rule
+      # that a JOB cap covers every step cap it can run plus that job's
+      # declared `# job-uncapped-minutes:` (with its run count and worst run):
+      # below it, a healthy slow run is reaped anonymously — fourteen workflows
+      # were, until 2026-09-11.
       - name: E2E timeout ordering (inner < step < job)
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_e2e_step_timeout_ordering.sh
@@ -1262,6 +1292,26 @@ jobs:
       - name: E2E timeout-ordering guard self-test
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_e2e_step_timeout_ordering.sh --self-test
+
+      # The missing link under the ordering: a deadline at least the harness's
+      # worst case. Every hand-written sum it replaces left a wait out — a
+      # route or Wi-Fi wait, the guard's probes, a kill-after, a lane's
+      # post-drive tail — and was found only by someone reading the arithmetic.
+      - name: E2E lane budgets (deadline covers every wait)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_e2e_lane_budget.sh
+
+      # Every rule has a fixture that fails when the rule is broken. The sound
+      # lane passes at its computed sum, with waits that must not count after a
+      # `;` in a comment or a string, in a heredoc, in the --self-test branches
+      # and in uncalled code; so do the forms a rule must accept (a poll
+      # released by a charged job or a stop file, once, within, excluded, a
+      # reaper, a macOS lane, a caller's argument, an export, a forwarded
+      # "$@"). Input the check cannot read is rc 2, never a pass. Its case
+      # count is pinned by equality.
+      - name: E2E lane-budget guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_e2e_lane_budget.sh --self-test
 
       # The inner deadline itself. Its critical fixture is exit-code
       # PASS-THROUGH: if a genuine test failure were ever reported as 124,
@@ -1282,6 +1332,27 @@ jobs:
       - name: Build-retry predicate self-test
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/build_apk_with_retry.sh --self-test
+
+      # The fresh-install broadcast barrier every Android lane installs through.
+      # Against a stub device: a fresh install is checked, then followed by a
+      # drained package-manager handler and a loopers-flushing barrier under the
+      # full 120 s bound; a device that cannot run it, a queue that never
+      # drains and a failed install each fail by name; and an
+      # install over an installed package — a replace, which cannot relaunch
+      # anything — takes no barrier, so a sound lane never reds on one. Its
+      # fixture count is pinned by equality.
+      - name: E2E harness self-test (fresh-install broadcast barrier)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/app-install-lib.sh --self-test
+
+      # The ENFORCING half: no lane installs the app except through that
+      # library, none redefines it, and every adb-using run-*.sh that launches
+      # the app also installs through it. Comments, messages and fixtures that
+      # merely NAME an install are text and never fire; `flutter drive`'s own
+      # replace is not an install.
+      - name: Android lanes install only through the flushed fresh-install step
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/app-install-lib.sh --check-installs
 
       # Guards the predicate that catches `flutter drive` exiting 0 on a FAILED
       # test. Its critical fixture is the verbatim run-30753193231 log in which

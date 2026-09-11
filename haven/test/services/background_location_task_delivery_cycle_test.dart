@@ -19,7 +19,9 @@
 ///    driving the cycle, through the very one-shot this phase retires;
 ///  * the aim is the earliest PRE-SAMPLED due minus the fix lead, so the fix
 ///    arrives just before the circle needs it and the realized inter-publish
-///    gap stays inside the kind-445 retention;
+///    gap stays inside the kind-445 retention — and for a circle about to
+///    publish, overdue or not, it is never closer than
+///    `kLocationPublishMinInterval − kBackgroundFixLeadTime`;
 ///  * a re-registration's historical re-delivery of the fix just consumed
 ///    starts no second cycle, and an aligned aim is never re-registered — the
 ///    two halves of the loop breaker;
@@ -316,6 +318,53 @@ void main() {
       expectAimedAt(harness, 0, dueIn: const Duration(seconds: 100));
     });
 
+    test('a circle published overdue is aimed from its publish, never from '
+        'its past due-time', () async {
+      // CI run 34511084722: the registration went silent, the watchdog found
+      // the circle overdue, and planning its publish AT that past due-time
+      // aimed the request for it that much early — down to the 31 s floor.
+      // The fix it bought arrived with nothing due: one acquisition and one
+      // wake for nothing, then a second, shorter registration.
+      final harness = await deliveringHarness();
+      final base = DateTime.now();
+      await harness.tick(base);
+
+      harness.handler.dueTrackerForTest.markBurstPublished(
+        [scheduleKeyOf(circleFixture(seed: 1))],
+        DateTime.now().subtract(kBackgroundRepeatInterval),
+      );
+      final silent = base.add(kStreamPositionMaxAge * 2);
+      harness.location.clock = () => silent;
+      await harness.tick(silent);
+
+      expect(harness.manager.encryptCalls, hasLength(2));
+      expectAimedAt(harness, 1, dueIn: const Duration(seconds: 100));
+    });
+
+    test('the shortest sampled interval is aimed no closer than '
+        'kLocationPublishMinInterval − kBackgroundFixLeadTime', () async {
+      // The platform is handed whole milliseconds (`inMilliseconds`
+      // truncates), so an aim even microseconds short of J − lead — planned
+      // from a due-time the cycle has already passed, or measured from a
+      // clock read later than the plan's — reaches it as 61 999 ms at J = 72:
+      // under the floor promised for a circle just published, and under the
+      // B1 lane's oracle.
+      final harness = await deliveringHarness(
+        jitteredSecs: kLocationPublishMinInterval.inSeconds,
+      );
+
+      await harness.tick(DateTime.now());
+
+      expect(harness.manager.encryptCalls, hasLength(1));
+      expect(
+        registeredInterval(harness, 0),
+        greaterThanOrEqualTo(
+          kLocationPublishMinInterval - kBackgroundFixLeadTime,
+        ),
+        reason: 'INV-L-ANDROID-BACKGROUND-SINGLE-GNSS-REQUEST',
+      );
+    });
+
     test('a tick with nothing due from Idle registers for the earliest due '
         'and never one-shots', () async {
       final harness = await deliveringHarness();
@@ -397,6 +446,13 @@ void main() {
         harness,
         1,
         dueIn: kBackgroundRepeatInterval,
+      );
+      expect(
+        registeredInterval(harness, 1),
+        kBackgroundRepeatInterval - kBackgroundFixLeadTime,
+        reason: 'exactly, not a millisecond under: the platform receives '
+            'whole milliseconds, and the B1 lane bounds every registration '
+            'after the first publish at this value',
       );
     });
 

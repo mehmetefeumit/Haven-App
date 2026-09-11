@@ -51,13 +51,17 @@ jobs:
   e2e_integration:
     name: e2e_integration
     runs-on: ubuntu-latest
-    # Six targets (smoke pre-flight + five), each: relay reset + install
-    # + grant + drive. Each individual target is far cheaper than the full
-    # e2e_combined flow (no 5-phase scenario), but six of them plus per-target relay
-    # resets add up — 45 minutes is a comfortable envelope. The
-    # per-target drive is bounded by the emulator step's own
-    # timeout-minutes below.
-    timeout-minutes: 45
+    # Seven targets (smoke pre-flight + six), each: relay reset + install +
+    # grant + drive. The job cap must clear the SUM of the step caps: below it,
+    # a run whose every step is still inside its own cap can die here, and a
+    # job-cap death skips every `if: failure()` step (e2e-android.yml states
+    # the rule). So: Build integration test APKs 35 + Create AVD snapshot (on
+    # an AVD-cache miss) 15 + the drive step 35 (derived there) + the most the
+    # work no step cap bounds has taken, 3.6 min over 96 runs of this job
+    # (ci.yml and e2e-nightly.yml, 2026-07-29..09-10; 2.1 of it Free disk
+    # space, run 34488512808), taken as 4 = 89 -> 90.
+    # job-uncapped-minutes: 3.6 (96 runs, worst 34488512808)
+    timeout-minutes: 90
     env:
       HAVEN_E2E_RELAY: ws://10.0.2.2:7777
       # Receive path, DECLARED — not inherited. `liveSyncEnabled` is
@@ -136,8 +140,9 @@ jobs:
         # no diagnostics at all (CI_HARDENING_BACKLOG.md A8; the guard's C3).
         # Re-derived from 27 successful runs (ci.yml, 2026-07/08): this step
         # builds seven APKs in p95 14.7 / max 15.4 min. 35 is ~2.3x the
-        # observed max and now sits strictly under the 45-minute job cap, so it
-        # can actually fire.
+        # observed max and sits strictly under the job cap, which is sized to
+        # clear it plus the drive step (see the job header), so it can actually
+        # fire.
         timeout-minutes: 35
         run: bash ../tooling/e2e/ci/build-integration-apks.sh
 
@@ -212,12 +217,20 @@ jobs:
       #        HAVEN_DRIVE_TIMEOUT) — names the target that hung.
       #   25m  this step's inner deadline (run-with-deadline.sh below) — the
       #        AGGREGATE bound across all seven targets, and the one that
-      #        actually reaps. Seven targets x 10m = a 70-minute inner budget,
-      #        so without an aggregate bound a degraded run could not finish
+      #        actually reaps. Each target's own worst case is
+      #        run-single-avd-scenario.sh's sum (stated at its
+      #        CONNECT_WATCHDOG_SECS) at this lane's 10m drive and 120 s
+      #        watchdog, each retry restoring the app its failed attempt's
+      #        teardown uninstalled: 2 x (120 + 5 + 120 + 5) + 600 + 30 + 120
+      #        barrier + 20 Wi-Fi + 120 route = 1390 s = 23m10s, so seven are
+      #        ~162 minutes of bounded waits before any relay reset or adb
+      #        work. Without an aggregate bound a degraded run could not finish
       #        before the step cap killed it anonymously; that was the real
       #        shape of CI_HARDENING_BACKLOG.md A8's "35m vs ~84m" note.
       #   35m  this step's timeout-minutes = 25 + 1 (kill grace) + 7
-      #        (emulator-boot-timeout), a belt over the deadline.
+      #        (emulator-boot-timeout) + 2 (the action's own setup and
+      #        teardown, outside both: 58 s on run 34488512808), a belt over
+      #        the deadline.
       # Sizing evidence: 31 successful runs (ci.yml, 2026-07/08) put the whole
       # step at p50 4.3 / p95 4.8 / max 4.9 min. 25m is ~5x the observed max —
       # it cannot cut a healthy run, and it still leaves room for one target to

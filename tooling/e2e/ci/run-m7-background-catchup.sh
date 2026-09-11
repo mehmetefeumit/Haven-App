@@ -114,6 +114,10 @@ set -Eeuo pipefail
 # test (see drive-log-lib.sh).
 # shellcheck source=tooling/e2e/ci/drive-log-lib.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/drive-log-lib.sh"
+# The shared install step: install_fresh / install_app and their broadcast
+# barrier.
+# shellcheck source=tooling/e2e/ci/app-install-lib.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/app-install-lib.sh"
 
 # ---------------------------------------------------------------------------
 # Config
@@ -134,6 +138,8 @@ readonly SYSTEMJOB_MATCH="${PKG}/androidx.work"
 readonly REBOOT_RECEIVER="com.pravera.flutter_foreground_task.service.RebootReceiver"
 
 readonly DRIVE_TIMEOUT="${HAVEN_DRIVE_TIMEOUT:-10m}"
+# How long SIGKILL follows a drive's SIGTERM at DRIVE_TIMEOUT.
+readonly DRIVE_KILL_AFTER_SECS=30
 readonly BOOT_TIMEOUT="${M7_BOOT_TIMEOUT:-300}"
 readonly JOB_REARM_TIMEOUT="${M7_JOB_REARM_TIMEOUT:-60}"
 # Fresh-registration → JobScheduler visibility is async (like the reboot re-arm),
@@ -417,7 +423,10 @@ run_one_job() {
   # 'could not find' matches AOSP's CMD_ERR_NO_JOB ("Could not find job to run")
   # — note that string has "not find", not "not found", so it is listed
   # explicitly (relevant only under a future WorkManager namespace drift).
-  if printf '%s' "${out}" | grep -qiE 'error|unknown option|invalid|no such|not found|could not find'; then
+  # A here-string, not `printf | grep -q`: printf writes a multi-line value in
+  # several writes, and a grep that exits on its match SIGPIPEs the rest into
+  # rc 141, which pipefail hands the `if` as "no match".
+  if grep -qiE 'error|unknown option|invalid|no such|not found|could not find' <<<"${out}"; then
     out="$(adb -s "${DEVICE}" shell cmd jobscheduler run -f "${PKG}" "${id}" 2>&1 || true)"
     echo "  [run fallback] id=${id}: ${out:-<no output>}"
   fi
@@ -588,7 +597,7 @@ drive_target() {
   # job, but the drive's own teardown force-stopped it first. Keeping the app
   # running leaves the job in JobScheduler for the discovery poll; go_cold then
   # OOM-style-kills the process without stripping the job.
-  ( cd "${HAVEN_DIR}" && timeout --kill-after=30s "${DRIVE_TIMEOUT}" flutter drive \
+  ( cd "${HAVEN_DIR}" && timeout --kill-after="${DRIVE_KILL_AFTER_SECS}s" "${DRIVE_TIMEOUT}" flutter drive \
       --no-pub \
       --keep-app-running \
       --device-id "${DEVICE}" \
@@ -670,9 +679,11 @@ phase_a() {
   echo "============================================================"
   reset_strfry "phase A"
 
+  # The one fresh install in this lane, so the one whose broadcasts can relaunch
+  # MainActivity under the drive if they land late (app-install-lib.sh).
   echo "[install] fresh install of setup APK"
-  adb -s "${DEVICE}" uninstall "${PKG}" >/dev/null 2>&1 || true
-  adb -s "${DEVICE}" install -r "${APK_SETUP}"
+  install_fresh "${DEVICE}" "${APK_SETUP}" \
+    || fail "the fresh install of the setup APK did not complete (see the ERROR above)."
   grant_perms
 
   # Capture logcat for the WHOLE phase (started BEFORE the drive), so the one-off
@@ -825,13 +836,15 @@ phase_b() {
 assert_reboot_receiver_resolvable() {
   local out
   out="$(adb -s "${DEVICE}" shell cmd package query-receivers --components -a android.intent.action.BOOT_COMPLETED 2>/dev/null || true)"
-  if printf '%s' "${out}" | grep -qF "${REBOOT_RECEIVER}"; then
+  # Here-strings, as in run_one_job: piped from printf, a whole receiver list or
+  # package dump SIGPIPEs on an early match and reads as "not resolvable".
+  if grep -qF "${REBOOT_RECEIVER}" <<<"${out}"; then
     echo "[phase-b] RebootReceiver resolvable for BOOT_COMPLETED (enabled=true + intent-filter intact)."
     return 0
   fi
   # Fallback for images whose `cmd package query-receivers` syntax differs.
   out="$(adb -s "${DEVICE}" shell dumpsys package "${PKG}" 2>/dev/null || true)"
-  if printf '%s' "${out}" | grep -qF "${REBOOT_RECEIVER}"; then
+  if grep -qF "${REBOOT_RECEIVER}" <<<"${out}"; then
     echo "[phase-b] RebootReceiver present in dumpsys package (fallback resolution check)."
     return 0
   fi
@@ -859,8 +872,11 @@ run_negative_phase() {
   echo "============================================================"
   reset_strfry "phase ${name}"
 
+  # Over Phase A's package, which --keep-app-running and the reboot both leave
+  # installed: a replace, which keeps the data and needs no barrier.
   echo "[install] install -r ${target} (data preserved)"
-  adb -s "${DEVICE}" install -r "${apk}"
+  install_app "${DEVICE}" "${apk}" \
+    || fail "phase ${name}: installing ${target} did not complete (see the ERROR above)."
   grant_perms
 
   # Capture logcat for the whole phase (before the drive) — see Phase A: the

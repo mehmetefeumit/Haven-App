@@ -39,12 +39,16 @@ jobs:
   e2e_ios_auth_tier:
     name: e2e_ios_auth_tier
     runs-on: macos-latest # Apple Silicon; arm64 simulator (no Linux Docker).
-    # Envelope sized for a COLD first run: setup (~10-15m) + the drive step's
-    # 95m ceiling (2 x 45m retry + slack). The drive step itself is the real
-    # bound; this is the outer backstop that must never fire first (a job-cap
-    # SIGKILL skips every `if: always()` diagnostic, which is the worst red
-    # there is — see scripts/ci/check_e2e_step_timeout_ordering.sh).
-    timeout-minutes: 115
+    # The job cap must clear the SUM of the step caps: below it, a run whose
+    # every step is still inside its own cap can die here, and a job-cap death
+    # skips every `if: always()` diagnostic (e2e-android.yml states the rule).
+    # So: Boot iOS simulator 15 + the drive step 95 (2 x 45m retry + slack,
+    # derived there) + the most the work no step cap bounds has taken (the
+    # host-native relay build included), 6.35 min over 33 runs of this job
+    # (ci.yml, 2026-08-04..09-10; 1.7 of it Setup Flutter, run 33182048610)
+    # = 116.35 -> 120. At 115 that sum did not fit.
+    # job-uncapped-minutes: 6.35 (33 runs, worst 33182048610)
+    timeout-minutes: 120
     env:
       HAVEN_E2E_RELAY: ws://localhost:7777
       FLUTTER_SUPPRESS_ANALYTICS: "true"

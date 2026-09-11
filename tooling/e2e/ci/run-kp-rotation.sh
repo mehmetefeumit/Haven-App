@@ -123,6 +123,9 @@ readonly SCRIPT_DIR="${script_dir}"
 
 # shellcheck source=tooling/e2e/ci/drive-log-lib.sh
 source "${SCRIPT_DIR}/drive-log-lib.sh"
+# The shared fresh-install step: install_fresh and its broadcast barrier.
+# shellcheck source=tooling/e2e/ci/app-install-lib.sh
+source "${SCRIPT_DIR}/app-install-lib.sh"
 
 # ---------------------------------------------------------------------------
 # VERBATIM markers. MUST match the `k*Marker` constants in
@@ -1192,8 +1195,11 @@ run_self_test() {
     grep -qE "^adb -s .*settings put global ${g} 0" "${self}" || restore_rc=1
     [[ "${restore_list}" == *"settings put global ${g} 1"* ]] || restore_rc=1
   done
-  sed -n '/^cleanup()/,/^}/p' "${self}" \
-    | grep -qE '^[[:space:]]+restore_auto_time_pin$' || restore_rc=1
+  # Matched against captures, here and in (38)/(48), never piped: a `grep -q`
+  # that stops early SIGPIPEs a writer with text left to send, and pipefail
+  # reads that 141 as a miss once the text outgrows one pipe write.
+  grep -qE '^[[:space:]]+restore_auto_time_pin$' \
+    <<<"$(sed -n '/^cleanup()/,/^}/p' "${self}")" || restore_rc=1
   _case "every pinned clock global is applied AND restored by cleanup()" 0 \
     "${restore_rc}"
 
@@ -1273,10 +1279,10 @@ run_self_test() {
   #      of the pair is deleted.
   local wifi_rc=0
   grep -qE '^adb -s .*shell svc wifi disable' "${self}" || wifi_rc=1
-  sed -n '/^restore_wifi_radio()/,/^}/p' "${self}" \
-    | grep -qE 'svc wifi enable' || wifi_rc=1
-  sed -n '/^cleanup()/,/^}/p' "${self}" \
-    | grep -qE '^[[:space:]]+restore_wifi_radio$' || wifi_rc=1
+  grep -qE 'svc wifi enable' \
+    <<<"$(sed -n '/^restore_wifi_radio()/,/^}/p' "${self}")" || wifi_rc=1
+  grep -qE '^[[:space:]]+restore_wifi_radio$' \
+    <<<"$(sed -n '/^cleanup()/,/^}/p' "${self}")" || wifi_rc=1
   _case "the Wi-Fi radio is disabled AND restored by cleanup()" 0 "${wifi_rc}"
 
   # (39) THE HANDOVER COUNTER. Counts default-network switches only AFTER the
@@ -1505,9 +1511,8 @@ run_self_test() {
   #      on. Checked against the script's own text, comments excluded, because
   #      the launch happens once in the real run and never in a fixture.
   local epitaph_rc=0
-  grep -vE '^[[:space:]]*#' "${self}" \
-    | grep -qE "^\( *trap - EXIT; *trap 'servo_epitaph' EXIT; *clock_servo *\) *&\$" \
-    || epitaph_rc=1
+  grep -qE "^\( *trap - EXIT; *trap 'servo_epitaph' EXIT; *clock_servo *\) *&\$" \
+    <<<"$(grep -vE '^[[:space:]]*#' "${self}")" || epitaph_rc=1
   _case "the servo is launched under its epitaph trap" 0 "${epitaph_rc}"
 
   # (49) The epitaph is INERT to both servo-log parsers: it must add no applied
@@ -1659,7 +1664,6 @@ fi
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-readonly PKG="com.oblivioustech.haven"
 readonly DEVICE="emulator-5554"
 readonly DRIVER_FILE="test_driver/integration_test.dart"
 readonly LOG_DIR="/tmp/kpr-logs"
@@ -1678,6 +1682,10 @@ readonly TARGET="${2:-integration_test/kp_rotation_wire_test.dart}"
 # Timeout so a genuine overrun fails with a named test rather than an anonymous
 # kill, and BELOW the step deadline so the attributable message is reachable.
 readonly DRIVE_TIMEOUT="${KPR_DRIVE_TIMEOUT:-24m}"
+
+# How long SIGKILL follows the drive's SIGTERM at DRIVE_TIMEOUT: a term in
+# this lane's worst case, which its workflow derives at the drive step.
+readonly DRIVE_KILL_AFTER_SECS=30
 
 # How often the servo re-reads logcat for a new request.
 readonly SERVO_POLL_SECS="${KPR_SERVO_POLL_SECS:-1}"
@@ -1898,13 +1906,13 @@ echo "Phase 0/4 — relays up, device ready."
 # Phase 1 — clean install. Force-stop + uninstall FIRST so no sticky state from
 # a prior target survives into this run — a stale SQLCipher DB would carry a
 # tracked KeyPackage row minted at true time and the backdate would prove
-# nothing.
+# nothing. The fresh install's broadcasts are flushed before anything launches
+# the app (app-install-lib.sh).
 # ---------------------------------------------------------------------------
 echo "Phase 1/4 — installing ${APK}..."
 [[ -f "${APK}" ]] || fail "APK not found: ${APK} (was the build step skipped?)"
-adb -s "${DEVICE}" shell am force-stop "${PKG}" || true
-adb -s "${DEVICE}" uninstall "${PKG}" >/dev/null 2>&1 || true
-adb -s "${DEVICE}" install -r "${APK}"
+install_fresh "${DEVICE}" "${APK}" \
+  || fail "the fresh install of ${APK} did not complete (see the ERROR above)."
 
 # ---------------------------------------------------------------------------
 # Phase 2 — a WRITABLE clock, pinned, then BACKDATED before the first mint.
@@ -2009,7 +2017,7 @@ SERVO_PID=$!
 
 echo "Phase 3/4 — driving ${TARGET}..."
 drc=0
-( cd "${HAVEN_DIR}" && timeout --kill-after=30s "${DRIVE_TIMEOUT}" flutter drive \
+( cd "${HAVEN_DIR}" && timeout --kill-after="${DRIVE_KILL_AFTER_SECS}s" "${DRIVE_TIMEOUT}" flutter drive \
     --no-pub \
     --device-id "${DEVICE}" \
     --use-application-binary "${APK}" \

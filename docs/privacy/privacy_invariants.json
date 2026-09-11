@@ -820,6 +820,14 @@
         {
           "file": "haven/test/services/background_fix_request_test.dart",
           "name": "never requests an interval at or below MIN_REQUEST_DELAY_MS (30 s) — the floor is kMinFixRequestInterval"
+        },
+        {
+          "file": "haven/test/services/background_location_task_delivery_cycle_test.dart",
+          "name": "a circle published overdue is aimed from its publish, never from its past due-time"
+        },
+        {
+          "file": "haven/test/services/background_location_task_delivery_cycle_test.dart",
+          "name": "the shortest sampled interval is aimed no closer than kLocationPublishMinInterval − kBackgroundFixLeadTime"
         }
       ],
       "guards": [

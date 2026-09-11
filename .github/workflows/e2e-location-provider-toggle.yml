@@ -66,12 +66,18 @@ jobs:
   e2e_location_provider_toggle:
     name: e2e_location_provider_toggle
     runs-on: ubuntu-latest
-    # One APK build (<=30m) + boot + a drive that internally holds the
-    # 168-second stale-fix window plus both toggles (<=24m of step deadline).
-    # The step-level timeout-minutes below bound a hung phase so GitHub kills
-    # the STEP rather than the runner, letting the if: always() artifact
-    # upload still run; this job-level cap is the outer envelope over both.
-    timeout-minutes: 70
+    # One APK build + boot + a drive that internally holds the 168-second
+    # stale-fix window plus both toggles (<=24m of step deadline). The job cap
+    # must clear the SUM of the step caps: below it, a run whose every step is
+    # still inside its own cap can die here, and a job-cap death skips every
+    # `if: failure()` step (e2e-android.yml states the rule). So: Build
+    # provider-toggle test APK 30 + Create AVD snapshot (on an AVD-cache miss)
+    # 15 + the drive step 34 (derived there) + the most the work no step cap
+    # bounds has taken, 4.4 min over 32 runs of this job (ci.yml,
+    # 2026-07-29..09-10; 2.7 of it Free disk space, run 31507917222), taken as
+    # 5 = 84 -> 85.
+    # job-uncapped-minutes: 4.4 (32 runs, worst 31507917222)
+    timeout-minutes: 85
     env:
       HAVEN_E2E_RELAY: ws://10.0.2.2:7777
 
@@ -192,12 +198,41 @@ jobs:
       #        B6_DRIVE_TIMEOUT default; kept in the script rather than
       #        declared here so the two cannot drift).
       #   24m  this step's inner deadline (run-with-deadline.sh below) —
-      #        covers the drive PLUS install/verified-grants/GPS-seed/both
-      #        toggles/oracle, none of which the per-drive timeout bounds,
-      #        and is the bound that actually reaps
+      #        covers the drive PLUS the egress guard, the relay restart, the
+      #        install and its broadcast barrier, verified grants, GPS seed,
+      #        both toggles and the oracle, none of which the per-drive
+      #        timeout bounds, and is the bound that actually reaps
       #        (CI_HARDENING_BACKLOG.md A8).
       #   34m  this step's timeout-minutes = 24 + 1 (kill grace) + 7
-      #        (emulator-boot-timeout) + margin, a belt over the deadline.
+      #        (emulator-boot-timeout) + 2 (the action's own setup and
+      #        teardown, outside both: 38-102 s across the eight own-installer
+      #        lanes over twelve runs, 2026-08/09), a belt over the deadline.
+      #
+      # DEADLINE, from the bounded waits at their bounds, in seconds:
+      #   setup-network-guard.sh's G2 + G3 probe waits, each a wall-clock
+      #     loop that can run one 1 s tick past PROBE_TIMEOUT, with each
+      #     probe's `nc -w 1` fallback, 2 x (PROBE_TIMEOUT + 1 + 1)          34
+      #     (its `iptables -w 5` calls wait only on another xtables-lock
+      #     holder, and nothing holds the lock while it runs: docker, the
+      #     step's only other iptables writer, starts strfry after it)
+      #   start-strfry.sh READY_TIMEOUT, the ready loop's last 1 s tick
+      #     and READY_CONFIRM_SECS                             60 + 1 + 2 =   63
+      #   app-install-lib.sh INSTALL_BARRIER_SECS                            120
+      #   set_provider's read-back before the drive, PROVIDER_READBACK_SECS   10
+      #   DRIVE_TIMEOUT (B6_DRIVE_TIMEOUT) + DRIVE_KILL_AFTER_SECS 960 + 30 = 990
+      #   ...and what can still run once the drive has ended: a cue noticed
+      #     MARKER_POLL_SECS late, then both toggles' read-backs
+      #                                                        2 + 2 x 10 =   22
+      #     (the toggles and marker waits otherwise run under the drive)
+      #                                                      = 1239 s = 20m39s
+      #   + the unbounded relay, adb, install, grant, scan and oracle work,
+      #     ~3 min: e2e-android.yml's allowance, kept because the sick device
+      #     that pushes the waits above to their bounds is the one that slows
+      #     adb (the own-installer lanes spent under 40 s on it in run
+      #     34511084722)
+      #                                                      = 23m39s, in 24m.
+      # scripts/ci/check_e2e_lane_budget.sh derives this sum from the scripts'
+      # constants on every push (`--explain` prints it).
       # Sizing evidence: the drive target's own worst case is ~13 min (arming
       # + a 150s baseline wait + a 90s disable wait + the 168s stale-fix
       # window with sustained checks + a 90s re-enable wait + a 150s recovery

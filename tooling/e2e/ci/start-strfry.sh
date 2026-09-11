@@ -51,6 +51,10 @@ readonly DATA_DIR="${STRFRY_DATA_DIR:-/tmp/strfry-data}"
 readonly CONTAINER="${STRFRY_CONTAINER:-strfry}"
 readonly PORT="${STRFRY_PORT:-7777}"
 readonly READY_TIMEOUT="${STRFRY_READY_TIMEOUT:-60}"
+# The re-check after the port first opens (see the wait below). With
+# READY_TIMEOUT, the bound a lane that restarts the relay inside its deadline
+# carries in its worst case.
+readonly READY_CONFIRM_SECS=2
 readonly PULL_ATTEMPTS="${STRFRY_PULL_ATTEMPTS:-5}"
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -106,16 +110,37 @@ image_is_pinned_and_local() {
   docker image inspect "${ref}" >/dev/null 2>&1
 }
 
-# --self-test — pin the pull-skip decision hermetically, with `docker` stubbed.
+# confirm_no_fatal_error — 0 when strfry's log is readable and holds no fatal
+# `strfry error` line. The log is captured whole before it is matched: piped
+# into `grep -q`, a match quits early and SIGPIPEs `docker logs`, and pipefail
+# reads that 141 as "no fatal line" — a relay that failed would pass as
+# healthy. A log that cannot be read confirms nothing, so it fails as well.
+confirm_no_fatal_error() {
+  local logs
+  if ! logs="$(docker logs "${CONTAINER}" 2>&1)"; then
+    echo "ERROR: could not read strfry's logs, so a clean start is unconfirmed:" >&2
+    printf '%s\n' "${logs}" >&2
+    return 1
+  fi
+  if grep -q '^strfry error' <<<"${logs}"; then
+    echo "ERROR: strfry logged a fatal error after startup:" >&2
+    printf '%s\n' "${logs}" >&2
+    return 1
+  fi
+}
+
+# --self-test — pin the pull-skip decision and the fatal-line check
+# hermetically, with `docker` stubbed.
 #
 # One line of shell that can strand a lane in either direction: skip too eagerly
 # and a stale tag silently changes what is tested; skip too rarely and a lane
 # behind the egress guard dies on a pull it never needed. Neither shows up until
 # CI, which is where both have now been paid for.
 run_self_test() {
-  local fail=0
+  local fail=0 ran=0
   _c() { # _c <label> <SKIP|PULL> <ref> <docker-inspect-rc>
     local label="$1" want="$2" ref="$3" rc="$4" got
+    ran=$((ran + 1))
     docker() { [[ "${1:-}" == "image" ]] && return "${rc}"; return 0; }
     if image_is_pinned_and_local "${ref}"; then got=SKIP; else got=PULL; fi
     unset -f docker
@@ -149,6 +174,7 @@ run_self_test() {
   # MENTIONS the call cannot satisfy it.
   local body
   body="$(grep -v '^[[:space:]]*#' "${BASH_SOURCE[0]}")"
+  ran=$((ran + 1))
   if ! grep -qE '^if image_is_pinned_and_local; then' <<<"${body}"; then
     printf '  \033[1;31mFAIL\033[0m %s\n' \
       'the pull is no longer guarded by the skip predicate — a lane behind the egress guard will die on a pull it does not need' >&2
@@ -157,11 +183,59 @@ run_self_test() {
     printf '  \033[1;32mPASS\033[0m the pull path actually consults the predicate\n'
   fi
 
+  # The fatal-line check, through the real function with `docker` stubbed. The
+  # fatal line comes FIRST in ~1.5 MB of log, so under the piped shape the
+  # reader quits with more than a pipe's worth still to write: that SIGPIPE is
+  # certain, not a race, and the failed relay reads as healthy.
+  local tmp
+  tmp="$(mktemp -d)"
+  # shellcheck disable=SC2064
+  trap "rm -rf '${tmp}'" RETURN
+  awk 'BEGIN { for (i = 0; i < 30000; i++) print "2026-09-11 00:00:00.000 (   1) INFO| filler " i }' \
+    > "${tmp}/clean.log"
+  { echo 'strfry error: mdb_env_open() failed: No such file or directory'
+    cat "${tmp}/clean.log"; } > "${tmp}/fatal.log"
+  _f() { # _f <label> <HEALTHY|FAILED> <log> <docker-logs-rc>
+    local label="$1" want="$2" log="$3" rc="$4" got
+    ran=$((ran + 1))
+    # A writer killed by SIGPIPE must report it, as the real CLI's 141 does.
+    docker() { [[ "${1:-}" == "logs" ]] || return 1; cat "${log}" && return "${rc}"; }
+    if confirm_no_fatal_error 2>/dev/null; then got=HEALTHY; else got=FAILED; fi
+    unset -f docker
+    if [[ "${got}" == "${want}" ]]; then
+      printf '  \033[1;32mPASS\033[0m %s\n' "${label}"
+    else
+      printf '  \033[1;31mFAIL\033[0m %s (want %s, got %s)\n' \
+        "${label}" "${want}" "${got}" >&2
+      fail=1
+    fi
+  }
+  _f "a fatal line ahead of megabytes of log is caught" FAILED "${tmp}/fatal.log" 0
+  _f "a clean log of the same size passes" HEALTHY "${tmp}/clean.log" 0
+  _f "a log that cannot be read is not clean" FAILED "${tmp}/clean.log" 1
+
+  # …and the startup wait consults it, by the same comment-stripped read.
+  ran=$((ran + 1))
+  if ! grep -qE '^[[:space:]]+confirm_no_fatal_error \|\| exit 1$' <<<"${body}"; then
+    printf '  \033[1;31mFAIL\033[0m %s\n' \
+      'the startup wait no longer consults confirm_no_fatal_error — a relay that logged a fatal error can be declared healthy' >&2
+    fail=1
+  else
+    printf '  \033[1;32mPASS\033[0m the startup wait actually consults the fatal-line check\n'
+  fi
+
+  local -r expected=9
+  if (( ran != expected )); then
+    printf '  \033[1;31mFAIL\033[0m ran %s fixtures, expected exactly %s\n' \
+      "${ran}" "${expected}" >&2
+    fail=1
+  fi
+
   if (( fail )); then
     echo "start-strfry.sh --self-test: FAILED" >&2
     return 1
   fi
-  echo "start-strfry.sh --self-test: all 5 fixtures passed"
+  echo "start-strfry.sh --self-test: all ${ran} fixtures passed"
   return 0
 }
 
@@ -258,18 +332,14 @@ while (( SECONDS < deadline )); do
     # listener briefly before mdb_env_open(), so confirm after a
     # short delay that the container is still up AND no fatal
     # `strfry error` line has appeared in the logs.
-    sleep 2
+    sleep "${READY_CONFIRM_SECS}"
     if ! docker inspect -f '{{.State.Running}}' "${CONTAINER}" 2>/dev/null \
          | grep -q true; then
       echo "ERROR: strfry exited shortly after opening port. Logs:" >&2
       docker logs "${CONTAINER}" >&2 || true
       exit 1
     fi
-    if docker logs "${CONTAINER}" 2>&1 | grep -q '^strfry error'; then
-      echo "ERROR: strfry logged a fatal error after startup:" >&2
-      docker logs "${CONTAINER}" >&2 || true
-      exit 1
-    fi
+    confirm_no_fatal_error || exit 1
     echo "strfry healthy: container running, port ${PORT} listening, no errors in logs."
     exit 0
   fi

@@ -233,6 +233,10 @@ readonly SCRIPT_DIR="${script_dir}"
 # hermetic self-test runs against a fully-wired script.
 # shellcheck source=tooling/e2e/ci/drive-log-lib.sh
 source "${SCRIPT_DIR}/drive-log-lib.sh"
+# The shared install step: install_fresh / install_app and their broadcast
+# barrier.
+# shellcheck source=tooling/e2e/ci/app-install-lib.sh
+source "${SCRIPT_DIR}/app-install-lib.sh"
 
 # Shared `detect_strfry_bin`. The candidate path list is a property of the
 # pinned relay IMAGE, not of this lane, and B9 probes the same one — sourced
@@ -1867,11 +1871,17 @@ readonly STRFRY_CONTAINER="${STRFRY_CONTAINER:-strfry}"
 # fails with an attributable message rather than an anonymous 124.
 readonly DRIVE1_TIMEOUT="${B5_DRIVE1_TIMEOUT:-14m}"
 readonly DRIVE2_TIMEOUT="${B5_DRIVE2_TIMEOUT:-14m}"
+# How long SIGKILL follows either drive's SIGTERM at its timeout: a term in
+# this lane's worst case, which its workflow derives at the drive step.
+readonly DRIVE_KILL_AFTER_SECS=30
 
 # ACT 1 has to boot RustLib + SQLCipher, mount the app, create a circle and
 # land a publish before it prints its cue. Generous: a late marker is still
 # usable evidence, while a marker wait that fires early destroys the run.
 readonly ARM_MARKER_TIMEOUT="${B5_ARM_MARKER_TIMEOUT:-480}"
+# wait_for_marker's poll period, so also how late it can notice the drive has
+# died — a term in this lane's worst case.
+readonly MARKER_POLL_SECS=2
 
 # Absorbed into the relay baseline after the revoke. This lane deliberately
 # makes NO claim about a publish already in flight at the instant the
@@ -2254,8 +2264,8 @@ wait_for_marker() {
       echo "  the drive exited before '${marker}' appeared (after ${waited}s)" >&2
       return 1
     fi
-    sleep 2
-    waited=$(( waited + 2 ))
+    sleep "${MARKER_POLL_SECS}"
+    waited=$(( waited + MARKER_POLL_SECS ))
   done
   echo "  timed out after ${timeout_s}s waiting for '${marker}'" >&2
   return 1
@@ -2353,13 +2363,13 @@ echo "Phase 0/7 — device ready."
 
 # ---------------------------------------------------------------------------
 # Phase 1 — clean install. Force-stop + uninstall FIRST so no sticky state
-# from a prior target survives into this run.
+# from a prior target survives into this run, and flush the fresh install's
+# broadcasts before ACT 1 launches the app (app-install-lib.sh).
 # ---------------------------------------------------------------------------
 echo "Phase 1/7 — installing ${APK}..."
 [[ -f "${APK}" ]] || fail "APK not found: ${APK} (was the build step skipped?)"
-adb -s "${DEVICE}" shell am force-stop "${PKG}" || true
-adb -s "${DEVICE}" uninstall "${PKG}" >/dev/null 2>&1 || true
-adb -s "${DEVICE}" install -r "${APK}"
+install_fresh "${DEVICE}" "${APK}" \
+  || fail "the fresh install of ${APK} did not complete (see the ERROR above)."
 
 # ---------------------------------------------------------------------------
 # Phase 2 — grant the permission this lane is about to take away, VERIFIED.
@@ -2467,7 +2477,7 @@ LOGCAT_PID=$!
 
 : > "${DRIVE1_LOG}"
 (
-  cd "${HAVEN_DIR}" && timeout --kill-after=30s "${DRIVE1_TIMEOUT}" \
+  cd "${HAVEN_DIR}" && timeout --kill-after="${DRIVE_KILL_AFTER_SECS}s" "${DRIVE1_TIMEOUT}" \
     flutter drive \
       --no-pub \
       --device-id "${DEVICE}" \
@@ -2733,25 +2743,30 @@ echo "Phase 6/7 — clearing app state and re-asserting the revocation..."
 # exist, which is why ACT 2 met the system permission dialog instead of a
 # USER_FIXED denial.
 #
-# `install -r` puts the package back. Being precise about what that buys, because
-# the obvious reading is wrong: the uninstall already deleted the data directory,
-# so there is no ACT 1 state left to preserve and the `pm clear` below is a
-# no-op in the ordinary case — a fresh install has an empty data dir and default
-# (ungranted, unflagged) permissions, which is the state this phase wanted
-# anyway. The load-bearing calls are the `pm revoke` + `pm set-permission-flags
-# user-fixed` pair further down, which need a package that EXISTS to act on;
-# without this reinstall they were writing into the void, which is why ACT 2 met
-# the system permission dialog instead of a USER_FIXED denial.
+# `install_app` puts the package back. Being precise about what that buys,
+# because the obvious reading is wrong: the uninstall already deleted the data
+# directory, so there is no ACT 1 state left to preserve and the `pm clear`
+# below is a no-op in the ordinary case — a fresh install has an empty data dir
+# and default (ungranted, unflagged) permissions, which is the state this phase
+# wanted anyway. The load-bearing calls are the `pm revoke` +
+# `pm set-permission-flags user-fixed` pair further down, which need a package
+# that EXISTS to act on; without this reinstall they were writing into the
+# void, which is why ACT 2 met the system permission dialog instead of a
+# USER_FIXED denial. Being FRESH, that install is also the one that can relaunch
+# ACT 2's MainActivity under the driver if its broadcasts land late, so
+# install_app flushes them before returning (app-install-lib.sh).
 #
 # `pm clear` and its Success gate are kept rather than dropped because they still
 # matter on the one path where the teardown did NOT run: the `timeout
 # --kill-after` above can kill the ACT 1 drive before `flutter drive` reaches
-# its stop/uninstall, leaving the package installed WITH ACT 1's data. That is
-# the case the gate's failure text describes, and it is the case that must not
-# proceed silently.
+# its stop/uninstall, leaving the package installed WITH ACT 1's data. There the
+# install is a replace — install_app keeps the data and takes no barrier, since
+# the overlay manager ignores a replace — and that is the case the gate's
+# failure text describes, and the case that must not proceed silently.
 echo "  restoring the package ACT 1's drive teardown uninstalled..."
-if ! adb -s "${DEVICE}" install -r "${APK}" 2>&1 | sed 's/^/    /'; then
-  fail "could not reinstall ${APK} before \`pm clear\`. ACT 1's drive teardown" \
+if ! install_app "${DEVICE}" "${APK}"; then
+  fail "could not reinstall ${APK} (and, being fresh, flush its broadcasts)" \
+       "before \`pm clear\` — see the ERROR above. ACT 1's drive teardown" \
        "uninstalls the package (flutter_tools drive_service.dart: stopApp then" \
        "uninstallApp), so this reinstall is what gives Phase 6 something to" \
        "clear; without it every step below operates on a package that is not" \
@@ -2826,7 +2841,7 @@ echo "  both location permissions verified revoked for ACT 2."
 echo "Phase 6/7 — driving ACT 2 (permission revoked) and watching the relay..."
 : > "${DRIVE2_LOG}"
 (
-  cd "${HAVEN_DIR}" && timeout --kill-after=30s "${DRIVE2_TIMEOUT}" \
+  cd "${HAVEN_DIR}" && timeout --kill-after="${DRIVE_KILL_AFTER_SECS}s" "${DRIVE2_TIMEOUT}" \
     flutter drive \
       --no-pub \
       --device-id "${DEVICE}" \

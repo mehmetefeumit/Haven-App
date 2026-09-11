@@ -61,20 +61,17 @@ jobs:
   e2e_relay_customization:
     name: e2e_relay_customization
     runs-on: ubuntu-latest
-    # Four targets, each: reset BOTH relays + install + grant + drive.
-    # Each target is far cheaper than the full e2e_combined flow, but
-    # four of them plus per-target double-relay resets add up.
-    #
-    # Was 45, and that was the thinnest job envelope in the repo: across 26
-    # successful runs (ci.yml, 2026-07/08) this job ran p95 21 min but MAX 40
-    # min — 89% of its own cap on a run that went GREEN. (The 40-minute run is
-    # explained: one target's cold-attach wedged until it hit the per-drive
-    # timeout, and run-relay-customization.sh retried it, as designed.) A cap
-    # 12% above the observed green worst case is a false-red waiting to
-    # happen, so this is 60 — 1.5x the observed max. Raising it costs nothing
-    # on a green run (jobs bill actual time) and the drive step's own 25m
-    # deadline below is what now bounds a hang, at less than half this number.
-    timeout-minutes: 60
+    # Four targets, each: reset BOTH relays + install + grant + drive. The job
+    # cap must clear the SUM of the step caps: below it, a run whose every step
+    # is still inside its own cap can die here, and a job-cap death skips every
+    # `if: failure()` step (e2e-android.yml states the rule). So: Build
+    # relay-customization test APKs 40 + Create AVD snapshot (on an AVD-cache
+    # miss) 15 + the drive step 35 (derived there) + the most the work no step
+    # cap bounds has taken, 4.4 min over all 259 runs of this job (ci.yml and
+    # e2e-nightly.yml, 2026-06-09..09-11; 2.8 of it Free disk space, run
+    # 28105109440), taken as 5 = 95.
+    # job-uncapped-minutes: 4.4 (259 runs, worst 28105109440)
+    timeout-minutes: 95
     env:
       HAVEN_E2E_RELAY: ws://10.0.2.2:7777
       HAVEN_E2E_RELAY_2: ws://10.0.2.2:7778
@@ -285,15 +282,23 @@ jobs:
       #        AGGREGATE bound across all four targets, and the one that
       #        actually reaps.
       #   35m  this step's timeout-minutes = 25 + 1 (kill grace) + 7
-      #        (emulator-boot-timeout), a belt over the deadline.
+      #        (emulator-boot-timeout) + 2 (the action's own setup and
+      #        teardown, outside both: 45 s on run 34488512808), a belt over
+      #        the deadline.
       # Sizing evidence: 34 successful runs (ci.yml, 2026-07/08) put the whole
       # step at p50 5.8 / p95 6.5 min. The MAX was 25.8 min — a green run in
       # which one target wedged on cold attach, burned the then-20m per-drive
       # default, and passed on the designed retry. That single number is why
       # the per-drive bound moved to 10m in run-relay-customization.sh: at 20m
       # the lane's own retry could not complete inside any deadline that also
-      # sits under the step cap. With 10m the same shape costs ~16 min, which
-      # fits under 25 comfortably.
+      # sits under the step cap. With 10m the same shape costs ~16 min, plus
+      # the Phase-2 install barrier's wait on each of its five installs (2.8 s
+      # and 13.6 s observed in this harness, 34 s the longest recorded), so
+      # ~19 min at that longest wait, which fits under 25 comfortably. It is
+      # not a worst case: one invocation's own is 1750 s = 29m10s
+      # (run-single-avd-scenario.sh's sum at this lane's 10m drive and the
+      # default 300 s watchdog), already over this deadline, which reaps by
+      # design.
       - name: Run relay-customization tests on the emulator
         timeout-minutes: 35
         uses: reactivecircus/android-emulator-runner@v2

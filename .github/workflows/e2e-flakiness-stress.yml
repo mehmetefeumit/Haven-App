@@ -49,16 +49,34 @@ jobs:
   flake_stress:
     name: flake_stress
     runs-on: ubuntu-latest
-    # The loop is N x the ~12-minute e2e_combined ceiling plus a relay
-    # reset per iteration. 330 minutes comfortably covers the default
-    # N=10 (worst case ~120 min of driving) with slack for boot, the
-    # build, and resets; it stays under GitHub's 360-minute job ceiling.
-    # A very large dispatch `iterations` may exceed this envelope — bump
-    # this value (and the emulator step's timeout-minutes below) for
-    # those one-off large runs. The inner Dart test still self-bounds
-    # each iteration at 12 minutes, so a single hung iteration can't run
-    # away.
-    timeout-minutes: 330
+    # The loop is N x one e2e_combined drive (the ~12-minute e2e_combined
+    # ceiling bounds its main scenario) plus a relay reset per iteration.
+    # Healthy that is ~6 min an iteration (the stress step's sizing evidence
+    # below), so the default N=10 fits with slack for boot, the build, and
+    # resets. It does not cover the worst case, and no job GitHub allows could:
+    # an iteration's own is run-single-avd-scenario.sh's sum (stated at its
+    # CONNECT_WATCHDOG_SECS) at this lane's 20m drive, 2 x (300 + 5 + 120 + 5)
+    # + 1200 + 30 + 120 barrier + 20 Wi-Fi + 120 route = 2350 s = 39m10s (each
+    # retry restores the app its failed attempt's teardown uninstalled), so ten
+    # are ~392 minutes of bounded waits — past 360 before the 11.0-13.7 minutes
+    # of steps ahead of the loop (8 nightly runs, 2026-09). The stress step's
+    # 310m deadline is what reaps a degraded loop, or a dispatch with too many
+    # `iterations`, by name.
+    #
+    # The job cap must clear the SUM of the step caps: below it, a run whose
+    # every step is still inside its own cap can die here, and a job-cap death
+    # skips every `if: failure()` step (e2e-android.yml states the rule). That
+    # sum is Build E2E test APK 22 + Create AVD snapshot (on an AVD-cache miss)
+    # 15 + the stress step 320 (derived there) + the most the work no step cap
+    # bounds has taken, 2.2 min over all 96 runs of this job (2026-06-08..
+    # 09-11; 1.0 of it Setup Flutter, run 32446197604) = 359.2 -> 360, which
+    # is also GitHub's ceiling on a hosted job: this cap cannot rise, so a step
+    # cap raised here must come off another. The build step gave the 3 minutes
+    # that took (sized there), not the stress step, whose every minute is
+    # stress coverage; the snapshot step has never run in this job (96 of 96
+    # runs restored the AVD cache), so there is no measurement to trim it by.
+    # job-uncapped-minutes: 2.2 (96 runs, worst 32446197604)
+    timeout-minutes: 360
     env:
       HAVEN_E2E_RELAY: ws://10.0.2.2:7777
       # Receive path, DECLARED — and this lane is the one where the inherited
@@ -69,9 +87,9 @@ jobs:
       # M11 Phase-B flip it silently compiled the LIVE build and ran the ten
       # M11 live-sync scenarios on top of the main + FE-2 flow — while every
       # number in this file is derived from the POLL path: the job envelope
-      # cites "the ~12-minute e2e_combined ceiling", and each iteration is
-      # bounded by run-single-avd-scenario.sh's default DRIVE_TIMEOUT of 20m.
-      # e2e-android.yml's flag-on lane needs HAVEN_DRIVE_TIMEOUT=28m and a 45m
+      # cites "the ~12-minute e2e_combined ceiling", and each iteration's drive
+      # is bounded by run-single-avd-scenario.sh's default DRIVE_TIMEOUT of 20m.
+      # e2e-android.yml's flag-on lane needs HAVEN_DRIVE_TIMEOUT=28m and a 51m
       # outer wrapper for exactly that suite, so the budget here was ~8 minutes
       # short of the work being asked for, ten times a night. Nightly evidence
       # (run 30733446211): iterations report "+15 -1"/"+14 -2" — the LIVE test
@@ -85,8 +103,10 @@ jobs:
       # e2e-nightly.yml call with no `with:` — is live_sync=false. No coverage
       # is lost: the live suite is a required PR gate in its own right
       # (ci.yml's "E2E Core Flow (Android, live-sync)"), sized for it. Stressing
-      # the live path is a separate lane, not a silent default: at 28m per
-      # iteration × 10 it does not fit this job's 330-minute envelope.
+      # the live path is a separate lane, not a silent default: at its 28m drive
+      # one iteration's worst case is 1150 + 1680 = 2830 s = 47m10s
+      # (run-single-avd-scenario.sh's sum), and ten of those (~472 min) do not
+      # fit this job's 360-minute envelope.
       HAVEN_LIVE_SYNC: "false"
       FLUTTER_SUPPRESS_ANALYTICS: "true"
       # workflow_dispatch supplies inputs.iterations; schedule does not,
@@ -143,7 +163,12 @@ jobs:
       # relay URL the drive step uses (value is compiled into the APK).
       - name: Build E2E test APK
         working-directory: haven
-        timeout-minutes: 25
+        # 22, where e2e-android.yml's identical build has 25: this job's cap is
+        # GitHub's ceiling, so the 3 minutes its sum needed came from here
+        # (derived at the job cap). Across all 96 runs of this job the build
+        # took at most 16.9 min (run 27185662815, June) and nothing since July
+        # over 12.8, so 22 is 5 minutes over the worst it has ever taken.
+        timeout-minutes: 22
         run: |
           # --target-platform android-x64: the AVD is x86_64 (see arch below), so
           # x64 is the only ABI it runs. Matches every other E2E lane; omitting it
@@ -222,7 +247,7 @@ jobs:
       #        AGGREGATE bound over the whole iteration loop, and the only one
       #        that reliably reaps (CI_HARDENING_BACKLOG.md A8).
       #  320m  this step's timeout-minutes = 310 + 1 (kill grace) + 7
-      #        (emulator-boot-timeout) + margin; 330m job cap above.
+      #        (emulator-boot-timeout) + margin; 360m job cap above.
       # Sizing evidence: 8 successful nightly runs put the DEFAULT 10-iteration
       # loop at p50 43.7 / max 59.4 min (~6 min/iteration). 310m is ~5x that.
       # NOTE the iteration count is a workflow input (default 10, script cap

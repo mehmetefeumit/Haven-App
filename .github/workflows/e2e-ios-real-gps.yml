@@ -56,6 +56,7 @@ jobs:
     # bound; this is the outer backstop that must never fire first, because a
     # job-cap SIGKILL skips every `if: always()` diagnostic — the worst red
     # there is (scripts/ci/check_e2e_step_timeout_ordering.sh).
+    # job-uncapped-minutes: 5.5 (33 runs, worst 32553078705)
     timeout-minutes: 105
     env:
       HAVEN_E2E_RELAY: ws://localhost:7777

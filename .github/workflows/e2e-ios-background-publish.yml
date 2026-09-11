@@ -326,8 +326,8 @@ jobs:
     # under it — including the steps that carry no cap of their own — because
     # a job-cap SIGKILL skips every `if: always()` step, which here is the
     # simulator diagnostics and the artifact upload: the worst red there is
-    # (scripts/ci/check_e2e_step_timeout_ordering.sh, whose C3 compares one
-    # step to the job and can never see this sum).
+    # (scripts/ci/check_e2e_step_timeout_ordering.sh's C6 holds this cap to
+    # its step caps plus the measured uncapped figure declared below).
     #   setup, UNCAPPED: checkout, Rust + Flutter toolchains, the cargo
     #     cache restore, `flutter pub get`, and a cold `cargo build` of
     #     the host-native relay                                      <= 15m
@@ -347,6 +347,7 @@ jobs:
     # the larger: a cap sized for the expensive leg is a cap the cheap leg's
     # own inner bounds can never reach, which is the inoperative-bound shape C3
     # exists to name.
+    # job-uncapped-minutes: 6.7 (19 runs, worst 34488512808)
     timeout-minutes: ${{ matrix.live_sync == 'true' && 175 || 169 }}
     env:
       HAVEN_E2E_RELAY: ws://localhost:7777

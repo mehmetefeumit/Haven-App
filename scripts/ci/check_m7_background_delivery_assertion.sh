@@ -56,6 +56,8 @@ readonly TARGETS=(
 readonly WAKE_FN='runBackgroundCatchupWake'
 readonly OPTIN_FN='allowWsLoopbackForTest'
 
+readonly SELF_TEST_FIXTURES=19
+
 FAILED=0
 fail() {
   echo "FAIL: $*" >&2
@@ -79,14 +81,17 @@ sh_code() { grep -vE '^[[:space:]]*#' "$1"; }
 check_workflow_sets_flag() {
   local root="$1" f="$1/${WORKFLOW}"
   [[ -f "${f}" ]] || { fail "${WORKFLOW} not found — the delivery lane is gone; update or delete this guard"; return 1; }
-  local decl
-  decl="$(grep -vE '^[[:space:]]*#' "${f}" | grep -cE '^[[:space:]]*M7_REQUIRE_DECRYPT:[[:space:]]*"?1"?[[:space:]]*$')"
+  # Matched from a capture, never a pipe: a `grep -q` that finds the "0" early
+  # SIGPIPEs the writer, and pipefail turns that into "no match" — a pass.
+  local decl code
+  code="$(sh_code "${f}")"
+  decl="$(grep -cE '^[[:space:]]*M7_REQUIRE_DECRYPT:[[:space:]]*"?1"?[[:space:]]*$' <<<"${code}")"
   if (( decl < 1 )); then
     fail "${WORKFLOW} does not set M7_REQUIRE_DECRYPT: \"1\" — Phase A falls back to asserting bootstrap only, which is exactly the B2 regression (a lane proving less than its name)."
     return 1
   fi
   # A "0" anywhere would win depending on scope; refuse the ambiguity.
-  if grep -vE '^[[:space:]]*#' "${f}" | grep -qE '^[[:space:]]*M7_REQUIRE_DECRYPT:[[:space:]]*"?0"?[[:space:]]*$'; then
+  if grep -qE '^[[:space:]]*M7_REQUIRE_DECRYPT:[[:space:]]*"?0"?[[:space:]]*$' <<<"${code}"; then
     fail "${WORKFLOW} sets M7_REQUIRE_DECRYPT to 0 somewhere — the delivery assertion is disabled."
     return 1
   fi
@@ -139,9 +144,10 @@ check_dispatcher_shape() {
 check_targets_register() {
   local root="$1" rc=0 t
   for t in "${TARGETS[@]}"; do
-    local f="${root}/${t}"
+    local f="${root}/${t}" code
     [[ -f "${f}" ]] || { fail "${t} not found"; rc=1; continue; }
-    dart_code "${f}" | grep -qF 'registerM7CiOneOffCatchup(' || {
+    code="$(dart_code "${f}")"
+    grep -qF 'registerM7CiOneOffCatchup(' <<<"${code}" || {
       fail "${t}: does not call registerM7CiOneOffCatchup() — its wake runs the production dispatcher, the relay is unreachable, and that phase's proof collapses."
       rc=1
     }
@@ -183,13 +189,14 @@ run_all() {
 # precisely the kind that sits green forever.
 # ---------------------------------------------------------------------------
 self_test() {
-  local tmp fails=0
+  local tmp fails=0 checked=0
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
   trap "rm -rf '${tmp}'" RETURN
 
   _case() { # _case <label> <want-rc> <fn> <root>
     local label="$1" want="$2" fn="$3" root="$4" got=0
+    checked=$(( checked + 1 ))
     ( FAILED=0; "${fn}" "${root}" >/dev/null 2>&1 ) || got=1
     if [[ "${got}" -eq "${want}" ]]; then
       printf '  \033[1;32mPASS\033[0m %s (rc=%d)\n' "${label}" "${got}"
@@ -272,6 +279,16 @@ jobs:
 YAML
   _case "explicit 0 fails" 1 check_workflow_sets_flag "${zeroed}"
 
+  # The same "0", first, in a workflow far past the pipe's 64 KiB: a reader
+  # that stops at it must not let the rest of the file turn it into a pass.
+  local zeroed_big="${tmp}/zeroed_big"; _mk "${zeroed_big}"
+  {
+    printf 'jobs:\n  e2e_background_catchup:\n    env:\n'
+    printf '      M7_REQUIRE_DECRYPT: "0"\n      M7_REQUIRE_DECRYPT: "1"\n'
+    awk 'BEGIN { for (i = 0; i < 21000; i++) printf "      HAVEN_FILLER_%05d: \"padding padding padding\"\n", i }'
+  } > "${zeroed_big}/${WORKFLOW}"
+  _case "explicit 0 in a 1 MiB workflow still fails" 1 check_workflow_sets_flag "${zeroed_big}"
+
   echo "self-test: check 2 — runner still hard-fails"
   _case "healthy runner passes" 0 check_runner_still_asserts "${ok}"
   local defaulted0="${tmp}/default0"; _mk "${defaulted0}"
@@ -328,6 +345,12 @@ DART
   local onemissing="${tmp}/onemissing"; _mk "${onemissing}"
   printf '// forgot to register\n' > "${onemissing}/${TARGETS[2]}"
   _case "one target forgetting to register fails" 1 check_targets_register "${onemissing}"
+  local bigtarget="${tmp}/bigtarget"; _mk "${bigtarget}"
+  {
+    printf 'await registerM7CiOneOffCatchup();\n'
+    awk 'BEGIN { for (i = 0; i < 24000; i++) printf "final padding%05d = \"padding padding padding\";\n", i }'
+  } > "${bigtarget}/${TARGETS[0]}"
+  _case "a call at the top of a 1 MiB target still counts" 0 check_targets_register "${bigtarget}"
 
   echo "self-test: check 5 — no test hook in production"
   _case "clean production worker passes" 0 check_no_prod_test_hook "${ok}"
@@ -347,7 +370,11 @@ DART
     echo "self-test: FAILED" >&2
     return 1
   fi
-  echo "self-test: OK"
+  if (( checked != SELF_TEST_FIXTURES )); then
+    echo "self-test: ran ${checked} fixture(s), expected exactly ${SELF_TEST_FIXTURES}. A fixture was added or removed without moving the pin — the one way a deleted fixture reports success." >&2
+    return 1
+  fi
+  echo "self-test: OK (${checked}/${SELF_TEST_FIXTURES} fixtures)"
   return 0
 }
 

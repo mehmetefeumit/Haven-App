@@ -59,12 +59,17 @@ jobs:
   e2e_permission_revocation:
     name: e2e_permission_revocation
     runs-on: ubuntu-latest
-    # One APK build (<=30m) + boot + a step that runs TWO drives back to back
-    # (<=34m of step deadline). The step-level timeout-minutes below bound a
-    # hung phase so GitHub kills the STEP rather than the runner, letting the
-    # if: always() artifact upload still run; this job-level cap is the outer
-    # envelope over both.
-    timeout-minutes: 85
+    # One APK build + boot + a step that runs TWO drives back to back (<=42m of
+    # step deadline). The job cap must clear the SUM of the step caps: below
+    # it, a run whose every step is still inside its own cap can die here, and
+    # a job-cap death skips every `if: failure()` step (e2e-android.yml states
+    # the rule). So: Build permission-revocation test APK 30 + Create AVD
+    # snapshot (on an AVD-cache miss) 15 + the drive step 52 (derived there) +
+    # the most the work no step cap bounds has taken, 4.1 min over 33 runs of
+    # this job (ci.yml, 2026-07-29..09-10; 1.5 of it Free disk space, run
+    # 32646436116), taken as 5 = 102 -> 105.
+    # job-uncapped-minutes: 4.1 (33 runs, worst 32646436116)
+    timeout-minutes: 105
     env:
       HAVEN_E2E_RELAY: ws://10.0.2.2:7777
 
@@ -186,13 +191,45 @@ jobs:
       #   14m  EACH `flutter drive` (the orchestrator's own B5_DRIVE1_TIMEOUT
       #        / B5_DRIVE2_TIMEOUT defaults; kept in the script rather than
       #        declared here so the two cannot drift).
-      #   34m  this step's inner deadline (run-with-deadline.sh below) —
-      #        covers BOTH drives plus install/verified-grants/GPS-seed/
-      #        revoke/`pm clear`/relay polling/oracle, none of which the
-      #        per-drive timeouts bound, and is the bound that actually reaps
-      #        (CI_HARDENING_BACKLOG.md A8).
-      #   43m  this step's timeout-minutes = 34 + 1 (kill grace) + 7
-      #        (emulator-boot-timeout) + margin, a belt over the deadline.
+      #   42m  this step's inner deadline (run-with-deadline.sh below) —
+      #        covers BOTH drives plus the relay restart, both installs and
+      #        their broadcast barriers, verified grants, GPS seed, the
+      #        app-op window, revoke, `pm clear`, relay polling and the oracle,
+      #        none of which the per-drive timeouts bound, and is the bound
+      #        that actually reaps (CI_HARDENING_BACKLOG.md A8).
+      #   52m  this step's timeout-minutes = 42 + 1 (kill grace) + 7
+      #        (emulator-boot-timeout) + 2 (the action's own setup and
+      #        teardown, outside both: 38-102 s across the eight own-installer
+      #        lanes over twelve runs, 2026-08/09, 88 s at most for this one), a
+      #        belt over the deadline.
+      #
+      # DEADLINE, from run-b5-permission-revocation.sh's bounded waits at their
+      # bounds, in seconds:
+      #   start-strfry.sh READY_TIMEOUT, the ready loop's last 1 s tick
+      #     and READY_CONFIRM_SECS                             60 + 1 + 2 =   63
+      #   app-install-lib.sh INSTALL_BARRIER_SECS (Phase 1 install)          120
+      #   ACT 1: DRIVE1_TIMEOUT + DRIVE_KILL_AFTER_SECS            840 + 30 = 870
+      #   ...and what can still run once ACT 1's drive has ended: a denial
+      #     noticed MARKER_POLL_SECS late at its very end, then the rest of
+      #     the app-op hold, APPOPS_MIN_DENY_SECS + one RELAY_POLL_SECS of
+      #     overshoot (the deny read-back and APPOPS_SETTLE fall inside it),
+      #     then the restore read-back, APPOPS_VERIFY_TIMEOUT
+      #                                                2 + 168 + 20 + 40 =   230
+      #   Phase 5: REVOKE_SETTLE                                              20
+      #   Phase 6: INSTALL_BARRIER_SECS (the restore is FRESH: ACT 1's drive
+      #     teardown uninstalled the package)                                120
+      #   ACT 2: DRIVE2_TIMEOUT + DRIVE_KILL_AFTER_SECS, then the relay poll's
+      #     last RELAY_POLL_SECS sleep                          840 + 30 + 20 = 890
+      #                                                      = 2313 s = 38m33s
+      #   + the unbounded relay, adb, install, grant, scan and oracle work,
+      #     ~3 min: e2e-android.yml's allowance, kept because the sick device
+      #     that pushes the waits above to their bounds is the one that slows
+      #     adb (the own-installer lanes spent under 40 s on it in run
+      #     34511084722)
+      #                                                      = 41m33s -> 42m.
+      # It was 34m — 2 x 14 for the drives and 6 for everything else, which
+      # was already short of the ACT 1 tail, the settle and the polls before
+      # two install barriers were added.
       # Sizing evidence: each act self-bounds at a 13-minute in-test Timeout
       # (ACT 1: arming + a 150s baseline wait + the APP-OP window — a 60s arm,
       # a 150s observation, a 75s probe and a 90s absence window — + a 120s
@@ -213,7 +250,7 @@ jobs:
       # -memory 6144 matches the sibling Android lanes: RustLib + SQLCipher
       # floods `mlock() -1 ENOMEM` under pressure.
       - name: Run the permission-revocation proof on the emulator
-        timeout-minutes: 43
+        timeout-minutes: 52
         uses: reactivecircus/android-emulator-runner@v2
         env:
           STRFRY_IMAGE: ${{ vars.STRFRY_IMAGE || 'dockurr/strfry@sha256:545555da5dd2c2b502f2c0d159f4dc4996d0e488e3bf25905ce881722d63d2c5' }}
@@ -228,7 +265,7 @@ jobs:
             -noaudio -no-boot-anim -camera-back none -memory 6144
           disable-animations: true
           emulator-boot-timeout: 420
-          script: bash tooling/e2e/ci/run-with-deadline.sh 34m "e2e-permission-revocation drive" -- bash tooling/e2e/ci/run-b5-permission-revocation.sh /tmp/integration-apks/b5_permission_revocation_test.apk integration_test/b5_permission_revocation_test.dart
+          script: bash tooling/e2e/ci/run-with-deadline.sh 42m "e2e-permission-revocation drive" -- bash tooling/e2e/ci/run-b5-permission-revocation.sh /tmp/integration-apks/b5_permission_revocation_test.apk integration_test/b5_permission_revocation_test.dart
 
       - name: Capture host + emulator diagnostics
         if: failure()

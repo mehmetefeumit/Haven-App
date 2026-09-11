@@ -1,0 +1,217 @@
+# What every wait on an E2E lane's path costs. Read by
+# scripts/ci/check_e2e_lane_budget.sh, which finds the waits in the code and
+# refuses a lane unless each is claimed here, and the lane's deadline covers
+# the sum plus the one unbounded-work allowance the check itself declares. The
+# rules a claim must meet are stated once, in that script's header.
+#
+# Bounds are never restated here: a charge names the script's own constants
+# (a bare integer only for a literal wait or tick), and the check evaluates
+# them from their definitions and the env the workflow passes, so changing a
+# constant changes the lane's sum.
+#
+#   unit <path>        a script, analysed from its top level
+#   lib  <path>        a sourced library; paths start at the called function
+#
+#   <label> <pattern> charge <expr> [times <expr>] [once <why>]
+#   <label> <pattern> poll [times <expr>] [once <why>]
+#   <label> <pattern> within <label> <why>
+#   <label> <pattern> concurrent | allowance
+#   <label> <pattern> excluded <why>
+#
+#   reaper <workflow>::<job> <why>
+#   unbudgeted <workflow>::<job> <why>
+#
+# <pattern> is a bash glob over a wait's path, as
+# `check_e2e_lane_budget.sh --sites <script>` prints it; the first matching
+# claim wins. <expr> is constants, integers, `@` (the called script's or
+# function's own budget), + - * ( ). Comments are full lines only.
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+unit tooling/e2e/ci/start-strfry.sh
+# The pull runs only when the image is not digest-pinned AND local. Every lane
+# starts strfry in an earlier step of its job, which pulls the pinned image, so
+# the restarts inside a deadline skip it. A tag in vars.STRFRY_IMAGE would pull
+# here, unbudgeted: a known gap, not a claim.
+pull-retry pull_image#*/sleep:backoff#* excluded the pull is skipped inside every lane deadline, see above
+# A wall-clock loop (SECONDS < deadline) can start one more 1 s tick just
+# before its bound. The confirm branch ends the script either way.
+ready sleep:1#1 charge READY_TIMEOUT + 1
+confirm sleep:READY_CONFIRM_SECS#1 charge READY_CONFIRM_SECS once the confirm branch exits the script, pass or fail
+
+unit tooling/e2e/ci/setup-network-guard.sh
+# `-w` waits only while another process holds the xtables lock. Every deadline
+# that installs the guard runs it first, and docker, the job's only other
+# iptables writer, runs in an earlier step or after it in the same shell.
+xtables-lock */iptables-w:5#* excluded nothing else holds the xtables lock while the guard runs, see above
+xtables-lock6 */ip6tables-w:5#* excluded nothing else holds the xtables lock while the guard runs, see above
+# A wall-clock loop (SECONDS < deadline) can run one tick past its bound.
+probe-wait main#1/do_install#1/await_log#*/sleep:1#1 charge PROBE_TIMEOUT + 1
+probe-send main#1/do_install#1/send_probe#*/nc-w:1#1 charge 1
+
+lib tooling/e2e/ci/app-install-lib.sh
+barrier */timeout:INSTALL_BARRIER_SECS#1 charge INSTALL_BARRIER_SECS
+
+# ---------------------------------------------------------------------------
+# Single-target lanes
+# ---------------------------------------------------------------------------
+
+unit tooling/e2e/ci/run-single-avd-scenario.sh
+install lib:install_fresh#1 charge @
+wifi-off sleep:2#1 charge WIFI_OFF_TIMEOUT_SECS
+route sleep:2#2 charge GUEST_NET_TIMEOUT_SECS
+# Only the last attempt can reach DRIVE_TIMEOUT: an attempt is retried after a
+# pre-connect stall the watchdog ended or a connect flake, never after a hang.
+drive drive_with_connect_watchdog#1/spawn_flutter_drive#1/timeout:DRIVE_TIMEOUT#1 charge DRIVE_TIMEOUT + DRIVE_KILL_AFTER_SECS once a retried attempt ends at the connect watchdog, charged below
+# Each retried attempt: the watchdog's deadline, its TERM grace, the restore of
+# an app the failed attempt's teardown uninstalled (a fresh, flushed install),
+# and the settle. In the last attempt the watchdog runs inside the drive.
+watchdog drive_with_connect_watchdog#1/sleep:WATCHDOG_POLL_SECS#1 charge CONNECT_WATCHDOG_SECS times DRIVE_MAX_ATTEMPTS - 1
+watchdog-grace drive_with_connect_watchdog#1/sleep:WATCHDOG_KILL_GRACE_SECS#1 charge WATCHDOG_KILL_GRACE_SECS times DRIVE_MAX_ATTEMPTS - 1
+restore lib:install_app#1 charge @ times DRIVE_MAX_ATTEMPTS - 1
+settle sleep:DRIVE_RETRY_SETTLE_SECS#1 charge DRIVE_RETRY_SETTLE_SECS times DRIVE_MAX_ATTEMPTS - 1
+
+unit tooling/e2e/ci/run-b3-real-gps.sh
+strfry bash:start-strfry.sh#1 charge @
+device wait-for-device#1 allowance
+install lib:install_fresh#1 charge @
+geo-drip sleep:GEO_REISSUE_SECS#1 concurrent
+drive timeout:DRIVE_TIMEOUT#1 charge DRIVE_TIMEOUT + DRIVE_KILL_AFTER_SECS
+
+unit tooling/e2e/ci/run-b1-fgs-publish.sh
+strfry bash:start-strfry.sh#1 charge @
+device wait-for-device#1 allowance
+install lib:install_fresh#1 charge @
+geo-drip sleep:10#1 concurrent
+idle-driver sleep:2#1 concurrent
+barrier-cue sleep:1#1 concurrent
+barrier-wait timeout:BARRIER_TIMEOUT_SECS#1 concurrent
+drive timeout:DRIVE_TIMEOUT#1 charge DRIVE_TIMEOUT + DRIVE_KILL_AFTER_SECS
+# After the drive the sampler is joined only through this bounded loop, which
+# kills it if it is still running at the end.
+sampler-stop sleep:1#2 charge 3 * SAMPLE_PERIOD_SECS
+sampler sleep:SAMPLE_PERIOD_SECS#1 within sampler-stop the sampler is joined only after sampler-stop, which kills it if still running
+
+unit tooling/e2e/ci/run-b5-permission-revocation.sh
+strfry bash:start-strfry.sh#1 charge @
+device wait-for-device#1 allowance
+install lib:install_fresh#1 charge @
+geo-drip sleep:GEO_REISSUE_SECS#* concurrent
+act1 timeout:DRIVE1_TIMEOUT#1 charge DRIVE1_TIMEOUT + DRIVE_KILL_AFTER_SECS
+# ACT 1's harness side runs while its drive does. What can outlast the drive
+# is the app-op tail: the denial is held APPOPS_MIN_DENY_SECS of wall clock
+# from the moment it lands (overshooting by one relay poll), then restored and
+# read back, then the revoke cue is polled once more.
+appop-hold sleep:RELAY_POLL_SECS#1 charge APPOPS_MIN_DENY_SECS + RELAY_POLL_SECS
+appop-denied wait_for_appops_mode#1/sleep:2#1 within appop-hold the hold is measured from the denial, so this read-back is inside it
+appop-settle sleep:APPOPS_SETTLE#1 within appop-hold the hold is measured from the denial, so this settle is inside it
+appop-window wait_for_marker_polling_relay#1/sleep:RELAY_POLL_SECS#1 within appop-hold the hold is measured from the denial, so this window is inside it
+appop-restored wait_for_appops_mode#2/sleep:2#1 charge APPOPS_VERIFY_TIMEOUT
+revoke-cue wait_for_marker#2/sleep:MARKER_POLL_SECS#1 poll
+arm-cue wait_for_marker#1/sleep:MARKER_POLL_SECS#1 within revoke-cue after the drive exits only one cue wait polls: a dead drive skips the app-op branch and ends the revoke-cue wait at once
+revoke-settle sleep:REVOKE_SETTLE#1 charge REVOKE_SETTLE
+reinstall lib:install_app#1 charge @
+act2 timeout:DRIVE2_TIMEOUT#1 charge DRIVE2_TIMEOUT + DRIVE_KILL_AFTER_SECS
+act2-relay sleep:RELAY_POLL_SECS#2 poll
+
+unit tooling/e2e/ci/run-b6-location-provider-toggle.sh
+strfry bash:start-strfry.sh#1 charge @
+device wait-for-device#1 allowance
+install lib:install_fresh#1 charge @
+provider-on set_provider#1/sleep:1#1 charge PROVIDER_READBACK_SECS
+geo-drip sleep:GEO_REISSUE_SECS#1 concurrent
+drive timeout:DRIVE_TIMEOUT#1 charge DRIVE_TIMEOUT + DRIVE_KILL_AFTER_SECS
+# The toggles run while the drive does; after it exits, one cue wait polls,
+# the OFF toggle may still read back, and one of the two restores runs.
+disable-cue wait_for_marker#1/sleep:MARKER_POLL_SECS#1 poll
+provider-off set_provider#2/sleep:1#1 charge PROVIDER_READBACK_SECS
+reenable-cue wait_for_marker#2/sleep:MARKER_POLL_SECS#1 within disable-cue after the drive exits only one cue wait polls: the second returns at once on a dead drive
+provider-restore set_provider#3/sleep:1#1 charge PROVIDER_READBACK_SECS
+provider-restore-else set_provider#4/sleep:1#1 within provider-restore the if and else restores are exclusive: exactly one runs
+
+unit tooling/e2e/ci/run-b8-clock-skew.sh
+strfry bash:start-strfry.sh#1 charge @
+device wait-for-device#* allowance
+install lib:install_fresh#1 charge @
+clock-servo clock_servo#1/sleep:SERVO_POLL_SECS#1 concurrent
+drive timeout:DRIVE_TIMEOUT#1 charge DRIVE_TIMEOUT + DRIVE_KILL_AFTER_SECS
+
+unit tooling/e2e/ci/run-b9-network-reconnect.sh
+strfry bash:start-strfry.sh#1 charge @
+device wait-for-device#1 allowance
+install lib:install_fresh#1 charge @
+airplane-check set_airplane#1/sleep:1#1 charge AIRPLANE_READBACK_SECS
+drive timeout:DRIVE_TIMEOUT#1 charge DRIVE_TIMEOUT + DRIVE_KILL_AFTER_SECS
+# After the drive exits: one cue wait polls, then airplane mode is set and
+# cleared in turn, each read back.
+down-cue wait_for_marker#1/sleep:MARKER_POLL_SECS#1 poll
+airplane-on set_airplane#2/sleep:1#1 charge AIRPLANE_READBACK_SECS
+up-cue wait_for_marker#2/sleep:MARKER_POLL_SECS#1 within down-cue after the drive exits only one cue wait polls: the second returns at once on a dead drive
+airplane-off set_airplane#3/sleep:1#1 charge AIRPLANE_READBACK_SECS
+
+unit tooling/e2e/ci/run-kp-rotation.sh
+strfry bash:start-strfry.sh#* charge @
+device wait-for-device#* allowance
+install lib:install_fresh#1 charge @
+wifi-off sleep:2#1 charge WIFI_OFF_TIMEOUT_SECS
+# Joined by stop_servo after the drive: the loop sees SERVO_STOP within a poll.
+clock-servo clock_servo#1/sleep:SERVO_POLL_SECS#1 poll
+drive timeout:DRIVE_TIMEOUT#1 charge DRIVE_TIMEOUT + DRIVE_KILL_AFTER_SECS
+
+# ---------------------------------------------------------------------------
+# Aggregate lanes: reaped by design. Budgeted in full all the same — the check
+# accepts the declaration only while the sum really exceeds the deadline, the
+# lane runs several drives, and one drive's bound is below the deadline.
+# ---------------------------------------------------------------------------
+
+reaper e2e-integration.yml::e2e_integration seven targets, each a full run-single-avd-scenario.sh; the deadline reaps a degraded run, the per-target drive timeout names a hung target
+reaper e2e-relay-customization.yml::e2e_relay_customization four targets, each up to two run-single-avd-scenario.sh runs; the deadline reaps a degraded run, the per-target drive timeout names a hung target
+reaper e2e-flakiness-stress.yml::flake_stress FLAKE_ITERATIONS runs of e2e_combined; the deadline reaps a degraded loop, each run's drive timeout names a hung iteration
+reaper e2e-background-catchup.yml::e2e_background_catchup three phase drives, a guest reboot and marker waits; sized from measurement, the per-phase drive timeout names a hung phase
+
+unit tooling/e2e/ci/run-integration-tests.sh
+strfry run_one#1/bash:start-strfry.sh#1 charge @ times ARGC
+target run_one#1/bash:run-single-avd-scenario.sh#1 charge @ times ARGC
+
+unit tooling/e2e/ci/run-relay-customization.sh
+relays run_one#1/reset_relays#1/*/bash:start-strfry.sh#1 charge @ times ARGC
+# The second run is the designed retry of a target whose first ended in 124.
+target run_one#1/bash:run-single-avd-scenario.sh#* charge @ times ARGC
+
+unit tooling/e2e/ci/run-flake-stress.sh
+strfry bash:start-strfry.sh#1 charge @ times ITERATIONS
+iteration bash:run-single-avd-scenario.sh#1 charge @ times ITERATIONS
+
+unit tooling/e2e/ci/run-m7-background-catchup.sh
+strfry */reset_strfry#1/bash:start-strfry.sh#1 charge @
+install */lib:install_*#1 charge @
+drive */drive_target#1/timeout:DRIVE_TIMEOUT#1 charge DRIVE_TIMEOUT + DRIVE_KILL_AFTER_SECS
+device */wait-for-device#* allowance
+# Recovery runs inside wall-clock loops (register, force-run): its time falls
+# inside their window, and only their last iteration can run into one more.
+recover */ensure_device_online#1/sleep:3#1 charge DEVICE_ONLINE_TIMEOUT + 3 once the enclosing loops are wall-clock windows, so only their last pass adds a recovery
+cold-home */go_cold#1/sleep:3#1 charge 3
+cold-kill */go_cold#1/sleep:2#1 charge 2
+# Wall-clock loops (SECONDS < deadline) can run one tick past their bound.
+register main#1/phase_a#1/sleep:3#1 charge JOB_REGISTER_TIMEOUT + 3
+register-negative main#1/run_negative_phase#?/sleep:3#1 charge JOB_REGISTER_TIMEOUT + 3
+force-run */force_run_until_marker#1/sleep:1#1 charge MARKER_TIMEOUT + FORCE_RUN_ROUND_POLL
+force-run-tail */force_run_until_marker#1/wait_for_marker#1/sleep:2#1 within force-run it waits only what is left of force-run's own deadline
+setup-marker main#1/phase_a#1/wait_for_marker#1/sleep:2#1 charge MARKER_TIMEOUT + 2
+boot main#1/phase_b#1/wait_for_boot#1/sleep:2#1 charge BOOT_TIMEOUT + 2
+rearm-marker main#1/phase_b#1/wait_for_marker#1/sleep:2#1 charge JOB_REARM_TIMEOUT + 2
+negative-settle main#1/run_negative_phase#?/sleep:5#1 charge 5
+
+# ---------------------------------------------------------------------------
+# macOS lanes: `nick-fields/retry` bounds each attempt, and `flutter test`
+# builds and runs the suite with no bound of its own, so there is no finite
+# worst case to compare. The check verifies both facts on every run.
+# ---------------------------------------------------------------------------
+
+unbudgeted e2e-ios.yml::e2e_ios the attempt timeout is the only bound on flutter test's build and run
+unbudgeted e2e-ios-auth-tier.yml::e2e_ios_auth_tier the attempt timeout is the only bound on flutter test's build and run
+unbudgeted e2e-ios-background-publish.yml::e2e_ios_bg_publish the attempt timeout is the only bound on flutter test's build and run
+unbudgeted e2e-ios-real-gps.yml::e2e_ios_real_gps the attempt timeout is the only bound on flutter test's build and run
+unbudgeted e2e-profile.yml::e2e_profile_ios the attempt timeout is the only bound on flutter test's build and run

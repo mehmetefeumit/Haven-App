@@ -230,7 +230,9 @@ misconfig() { printf '\033[1;31m[%s] ERROR:\033[0m %s\n' "${SCRIPT_NAME}" "$*" >
 # re-pin. Four of the six floors were short — invariants 81, guards 19, tests
 # 257 and doc refs 26 against measured 92/24/316/30, the test floor at 81% with
 # 59 citations of slack. All six are now `floor(0.9 x measured)` against the
-# counts rule 14 printed at the END of that session: 92/65/15/24/316/30. Do not
+# counts rule 14 printed at the END of that session: 92/65/15/24/316/30, and
+# the test floor again on 2026-09-10 (316 -> 318 once the two tests pinning the
+# 62 s GNSS floor were cited, FLOOR_TESTS 284 -> 286). Do not
 # read the percentages in the paragraphs above as current; each described the
 # manifest of its own day, which is exactly why the rule is to re-measure rather
 # than to trust a number written down.
@@ -238,7 +240,7 @@ FLOOR_INVARIANTS=82
 FLOOR_ARB_KEYS=58
 FLOOR_EVENT_KINDS=13
 FLOOR_GUARDS=21
-FLOOR_TESTS=284
+FLOOR_TESTS=286
 FLOOR_DOC_REFS=27
 
 # Rule 12's value sweep. A key whose English value contains one of these

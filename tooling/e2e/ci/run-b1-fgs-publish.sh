@@ -119,6 +119,9 @@ set -Eeuo pipefail
 # hermetic self-test runs against a fully-wired script.
 # shellcheck source=tooling/e2e/ci/drive-log-lib.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/drive-log-lib.sh"
+# The shared fresh-install step: install_fresh and its broadcast barrier.
+# shellcheck source=tooling/e2e/ci/app-install-lib.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/app-install-lib.sh"
 
 # ---------------------------------------------------------------------------
 # Paths, package identity, and the power-oracle constants.
@@ -195,13 +198,15 @@ readonly ONE_SHOT_TIMEOUT_SECS
 
 # The floor on the FGS's registered interval once it has published.
 #
-# `_ensureRegistration` aims at `earliestDue - kBackgroundFixLeadTime`, and for
-# the circle that just published `earliestDue = publishStart + J` with the
+# `_ensureRegistration` aims at `earliestDue - kBackgroundFixLeadTime`, measured
+# from the instant the burst was planned, and for the circle about to publish
+# `earliestDue` is its planned start — never before that instant — plus the
 # CSPRNG draw J in [kLocationPublishMinInterval, kLocationPublishMaxInterval].
-# So the interval it asks for is `J - lead - delta` — [62, 158] s here, and a
-# RETRY registration after a failed publish is `kBackgroundRepeatInterval -
-# lead` = 62 s exactly. 72 would therefore red a CORRECT implementation on
-# every draw below 82 s, about one in ten.
+# So the interval it asks for is at least `J - lead`, 62 s at the shortest draw,
+# and a RETRY registration after a failed publish is `kBackgroundRepeatInterval
+# - lead` = 62 s exactly; both are pinned to the millisecond by
+# background_location_task_delivery_cycle_test.dart. 72 would therefore red a
+# CORRECT implementation on every draw below 82 s, about one in ten.
 readonly MIN_FIX_INTERVAL_SECS=$((PUBLISH_MIN_INTERVAL_SECS - FIX_LEAD_SECS))
 
 # The floor on the spacing between two delivery-driven publishes: 90 % of the
@@ -740,18 +745,35 @@ successful_publish_count() {
 # 90 % floor allows and red a correct run under emulator load. The arm is also
 # the honest subject — the interval is what the platform was ASKED for.
 #
+# Paired against the capture, not the window alone. The first delivery in the
+# window answers the HANDOFF cycle's registration, and that cycle arms about a
+# second after the pause — which beats the drive's 1 s poll to
+# `[b1] HANDOFF_CONFIRMED`: 81 ms before it in run 34511084722, 84 ms in
+# 34488512808. Read from the window alone that pair does not exist, and run
+# 34511084722 went red on a healthy delivery 99 s after a 98 s registration. So
+# <capture>, up to the window's opening marker, supplies the registration live
+# when the window opened — and every `[BackgroundTask] onStart` clears it: a
+# registration dies with its FGS instance, and pairing across one would let a
+# publish with no interval of its own pass.
+#
 # A delivery that did not lead to a publish is not a cadence point, and neither
 # is any other trigger (`watchdog`, `paused-signal`, `pending-delivery`) — the
 # whole claim is about the delivery-driven path. A delivery-driven publish with
-# NO registration before it in the window is emitted as `NOARM`: unmeasurable,
-# which the caller FAILS rather than skips.
+# NO registration before it in its own FGS instance is emitted as `NOARM`:
+# unmeasurable, which the caller FAILS rather than skips.
+#
+# Usage: delivery_gaps_after_registration <window> <capture>
 delivery_gaps_after_registration() {
-  awk '
-    function ts(dm, hms,   md, t, mo, dy, cum, i) {
-      split(dm, md, "-"); split(hms, t, ":")
+  local windowfile="$1" logfile="$2"
+  awk -v open="${MARK_HANDOFF_OK}" '
+    function ts(dm, hms,   md, t, sec, mo, dy, cum, i) {
+      # The fraction split off by hand: a POSIX awk reads `16.091` through the
+      # locale, and a comma-decimal one makes it 16.
+      split(dm, md, "-"); split(hms, t, ":"); split(t[3], sec, ".")
       mo = md[1] + 0; dy = md[2] + 0; cum = 0
       for (i = 1; i < mo; i++) cum += mlen[i]
-      return (cum + dy) * 86400 + t[1] * 3600 + t[2] * 60 + t[3]
+      return (cum + dy) * 86400 + t[1] * 3600 + t[2] * 60 \
+        + sec[1] + sec[2] / 10 ^ length(sec[2])
     }
     BEGIN {
       # Day lengths only ever resolve a midnight rollover inside one ~20-minute
@@ -761,7 +783,12 @@ delivery_gaps_after_registration() {
       split("31 28 31 30 31 30 31 31 30 31 30 31", mlen, " ")
       armed = -1; pending = -1; pending_arm = -1
     }
+    # The capture contributes its registrations up to the window, nothing else.
+    FILENAME == ARGV[1] && index($0, open) { opened = 1 }
+    FILENAME == ARGV[1] && opened { next }
+    index($0, "[BackgroundTask] onStart") { armed = -1; next }
     index($0, "[BackgroundTask] registration armed (") { armed = ts($1, $2); next }
+    FILENAME == ARGV[1] { next }
     index($0, "[BackgroundTask] cycle trigger=") {
       if (index($0, "trigger=delivery") > 0) {
         pending = ts($1, $2); pending_arm = armed
@@ -779,7 +806,7 @@ delivery_gaps_after_registration() {
       else printf "%d\n", int((pending - pending_arm) * 1000 + 0.5)
       pending = -1
     }
-  ' "$1" 2>/dev/null || true
+  ' "${logfile}" "${windowfile}" 2>/dev/null || true
 }
 
 # Why no sample could be placed after a marker. Samples on disk with no stamp
@@ -1030,7 +1057,7 @@ ${publish_seen} sample(s), none older than ${WAKE_LOCK_MAX_AGE_SECS} s."
 # Oracle step 7 — the cadence is delivery-driven, and spaced.
 # ---------------------------------------------------------------------------
 assert_cadence_oracle() {
-  local windowfile="$1" rc=0 publishes gap measured=0
+  local windowfile="$1" logfile="$2" rc=0 publishes gap measured=0
   publishes="$(successful_publish_count "${windowfile}")"
   if (( publishes < 2 )); then
     echo "FAIL: only ${publishes} successful publish(es) in the proof window. The hold \
@@ -1044,8 +1071,8 @@ and never again."
     measured=$((measured + 1))
     if [[ "${gap}" == "NOARM" ]]; then
       echo "FAIL: a delivery-driven publish in the window had no \
-'${MARK_REG_ARMED}' line before it, so the interval that was supposed to space it \
-cannot be read from this capture at all."
+'${MARK_REG_ARMED}' line before it in its own FGS instance, so the interval that was \
+supposed to space it cannot be read from this capture at all."
       rc=1
     elif (( gap < 0 )); then
       echo "FAIL: a delivery landed ${gap} ms after the registration that asked for it \
@@ -1059,7 +1086,7 @@ ${MIN_FIX_INTERVAL_SECS} s). The FGS is being woken by something other than its 
 registered interval."
       rc=1
     fi
-  done < <(delivery_gaps_after_registration "${windowfile}")
+  done < <(delivery_gaps_after_registration "${windowfile}" "${logfile}")
   # The anti-vacuity half, and the reason this oracle is anchored on the
   # registration at all: with nothing measured there is no spacing claim, only
   # a loop that did not run.
@@ -1105,11 +1132,14 @@ assert_no_fix_chain_oracle() {
   local logfile="$1" verdict state elapsed
   verdict="$(awk -v forced="${MARK_IDLE_FORCED}" -v endm="${MARK_IDLE_END}" \
                  -v wd="${MARK_TRIGGER_WATCHDOG}" '
-    function ts(dm, hms,   md, t, mo, dy, cum, i) {
-      split(dm, md, "-"); split(hms, t, ":")
+    function ts(dm, hms,   md, t, sec, mo, dy, cum, i) {
+      # The fraction split off by hand: a POSIX awk reads `16.091` through the
+      # locale, and a comma-decimal one makes it 16.
+      split(dm, md, "-"); split(hms, t, ":"); split(t[3], sec, ".")
       mo = md[1] + 0; dy = md[2] + 0; cum = 0
       for (i = 1; i < mo; i++) cum += mlen[i]
-      return (cum + dy) * 86400 + t[1] * 3600 + t[2] * 60 + t[3]
+      return (cum + dy) * 86400 + t[1] * 3600 + t[2] * 60 \
+        + sec[1] + sec[2] / 10 ^ length(sec[2])
     }
     BEGIN {
       split("31 28 31 30 31 30 31 31 30 31 30 31", mlen, " ")
@@ -1290,7 +1320,9 @@ _fixture_delivery_cycle() {
 #
 # The paused-signal cycle arms at 04:40:08 and publishes at 04:40:09, so the
 # first delivery's spacing is measured from 04:40:08 and the second's from one
-# second after the first delivery.
+# second after the first delivery. It arms AFTER `[b1] HANDOFF_CONFIRMED` here,
+# the order a slow handoff produces; both real runs so far armed before it, and
+# the run-34511084722 fixtures pin that order in the device's own lines.
 #
 # Sample stamps and drive markers share ONE ordered capture — that, not any
 # host-side clock arithmetic, is what puts a sample before or after the handoff.
@@ -1346,7 +1378,7 @@ run_self_test() {
   # Pinned by EQUALITY, never by a floor: the run used to end with a hard-coded
   # "all N fixtures passed" and no counter, so deleting a case left the message
   # — and the exit code — untouched. Mirrors check_android_location_power.sh.
-  local -r SELF_TEST_FIXTURES=65
+  local -r SELF_TEST_FIXTURES=71
   local tmp fail=0 checked=0 got
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
@@ -1811,16 +1843,18 @@ ${WAKE_LOCK_MAX_AGE_SECS} s ceiling" >&2
   #      delivery's cycle armed). ${MIN_DELIVERY_GAP_SECS} s is a correct run;
   #      one second under it is a real regression.
   _case
-  if ! assert_cadence_oracle "${tmp}/power.ok.window" >/dev/null; then
+  if ! assert_cadence_oracle "${tmp}/power.ok.window" \
+       "${tmp}/power.ok.log" >/dev/null; then
     echo "SELF-TEST FAIL (41): a ${MIN_DELIVERY_GAP_SECS} s delivery gap was rejected" >&2
-    assert_cadence_oracle "${tmp}/power.ok.window" >&2 || true
+    assert_cadence_oracle "${tmp}/power.ok.window" "${tmp}/power.ok.log" >&2 || true
     fail=1
   fi
   build_fixture_logcat "${tmp}/power.tight.log" 2 "${d1_ok}" "${d2_tight}" '04:42:45'
   window_between_markers "${tmp}/power.tight.log" "${MARK_HANDOFF_OK}" "${MARK_HOLD_DONE}" \
     > "${tmp}/power.tight.window"
   _case
-  if assert_cadence_oracle "${tmp}/power.tight.window" >/dev/null 2>&1; then
+  if assert_cadence_oracle "${tmp}/power.tight.window" \
+       "${tmp}/power.tight.log" >/dev/null 2>&1; then
     echo "SELF-TEST FAIL (42): a $((MIN_DELIVERY_GAP_SECS - 1)) s delivery gap passed" >&2
     fail=1
   fi
@@ -1832,7 +1866,8 @@ ${WAKE_LOCK_MAX_AGE_SECS} s ceiling" >&2
   window_between_markers "${tmp}/power.none.log" "${MARK_HANDOFF_OK}" "${MARK_HOLD_DONE}" \
     > "${tmp}/power.none.window"
   _case
-  if assert_cadence_oracle "${tmp}/power.none.window" >/dev/null 2>&1; then
+  if assert_cadence_oracle "${tmp}/power.none.window" \
+       "${tmp}/power.none.log" >/dev/null 2>&1; then
     echo "SELF-TEST FAIL (43): a window with a single publish passed the cadence oracle" >&2
     fail=1
   fi
@@ -1847,10 +1882,12 @@ ${WAKE_LOCK_MAX_AGE_SECS} s ceiling" >&2
   window_between_markers "${tmp}/power.barren.log" "${MARK_HANDOFF_OK}" "${MARK_HOLD_DONE}" \
     > "${tmp}/power.barren.window"
   _case
-  if ! assert_cadence_oracle "${tmp}/power.barren.window" >/dev/null; then
+  if ! assert_cadence_oracle "${tmp}/power.barren.window" \
+       "${tmp}/power.barren.log" >/dev/null; then
     echo "SELF-TEST FAIL (44): a delivery that produced no publish was counted as a \
 cadence point" >&2
-    assert_cadence_oracle "${tmp}/power.barren.window" >&2 || true
+    assert_cadence_oracle "${tmp}/power.barren.window" \
+      "${tmp}/power.barren.log" >&2 || true
     fail=1
   fi
 
@@ -1869,17 +1906,20 @@ cadence point" >&2
   window_between_markers "${tmp}/power.single.log" "${MARK_HANDOFF_OK}" \
     "${MARK_HOLD_DONE}" > "${tmp}/power.single.window"
   _case
-  if ! assert_cadence_oracle "${tmp}/power.single.window" >/dev/null; then
+  if ! assert_cadence_oracle "${tmp}/power.single.window" \
+       "${tmp}/power.single.log" >/dev/null; then
     echo "SELF-TEST FAIL (45): the one-delivery window a healthy 200 s hold actually \
 produces was rejected at exactly the ${MIN_DELIVERY_GAP_SECS} s floor" >&2
-    assert_cadence_oracle "${tmp}/power.single.window" >&2 || true
+    assert_cadence_oracle "${tmp}/power.single.window" \
+      "${tmp}/power.single.log" >&2 || true
     fail=1
   fi
   build_fixture_logcat "${tmp}/power.singletight.log" 1 "${d1_tight}" "${d2_ok}" '04:42:45'
   window_between_markers "${tmp}/power.singletight.log" "${MARK_HANDOFF_OK}" \
     "${MARK_HOLD_DONE}" > "${tmp}/power.singletight.window"
   _case
-  if assert_cadence_oracle "${tmp}/power.singletight.window" >/dev/null 2>&1; then
+  if assert_cadence_oracle "${tmp}/power.singletight.window" \
+       "${tmp}/power.singletight.log" >/dev/null 2>&1; then
     echo "SELF-TEST FAIL (46): a one-delivery window \
 $((MIN_DELIVERY_GAP_SECS - 1)) s after its registration passed — the oracle is silent \
 on the window a healthy run actually produces" >&2
@@ -1888,10 +1928,13 @@ on the window a healthy run actually produces" >&2
 
   # (47) Two publishes, neither of them delivery-driven. Nothing is measurable,
   #      and "nothing measurable" must never read as "every pair was fine".
-  sed 's/trigger=delivery/trigger=watchdog/' "${tmp}/power.single.window" \
-    > "${tmp}/power.nodelivery.window"
+  sed 's/trigger=delivery/trigger=watchdog/' "${tmp}/power.single.log" \
+    > "${tmp}/power.nodelivery.log"
+  window_between_markers "${tmp}/power.nodelivery.log" "${MARK_HANDOFF_OK}" \
+    "${MARK_HOLD_DONE}" > "${tmp}/power.nodelivery.window"
   _case
-  if assert_cadence_oracle "${tmp}/power.nodelivery.window" >/dev/null 2>&1; then
+  if assert_cadence_oracle "${tmp}/power.nodelivery.window" \
+       "${tmp}/power.nodelivery.log" >/dev/null 2>&1; then
     echo "SELF-TEST FAIL (47): a window with no delivery-driven publish at all passed \
 the cadence oracle" >&2
     fail=1
@@ -1899,11 +1942,140 @@ the cadence oracle" >&2
 
   # (48) A delivery-driven publish with no registration before it. Unmeasurable
   #      for a different reason, and equally not a pass.
-  grep -vF -- "${MARK_REG_ARMED}" "${tmp}/power.single.window" \
-    > "${tmp}/power.noarm.window" || true
+  grep -vF -- "${MARK_REG_ARMED}" "${tmp}/power.single.log" \
+    > "${tmp}/power.noarm.log" || true
+  window_between_markers "${tmp}/power.noarm.log" "${MARK_HANDOFF_OK}" \
+    "${MARK_HOLD_DONE}" > "${tmp}/power.noarm.window"
   _case
-  if assert_cadence_oracle "${tmp}/power.noarm.window" >/dev/null 2>&1; then
+  if assert_cadence_oracle "${tmp}/power.noarm.window" \
+       "${tmp}/power.noarm.log" >/dev/null 2>&1; then
     echo "SELF-TEST FAIL (48): a delivery with no '${MARK_REG_ARMED}' before it passed" >&2
+    fail=1
+  fi
+
+  # --- step 7 on run 34511084722's own lines -------------------------------
+  # Verbatim, in the order the device logged them. The handoff cycle armed 81 ms
+  # BEFORE `[b1] HANDOFF_CONFIRMED`, so the registration behind the window's
+  # first delivery lies outside the window — the order no synthetic fixture
+  # above has, and the one that reddened that run.
+  local -r R_ONSTART='09-10 18:23:12.318  4032  4032 I flutter : [BackgroundTask] onStart (starter=TaskStarter.developer)'
+  local -r R_PAUSE='09-10 18:23:15.055  4032  4032 I flutter : [b1] PAUSE_DELIVERED pid=4032'
+  local -r R_TRIG_PAUSED='09-10 18:23:15.138  4032  4032 I flutter : [BackgroundTask] cycle trigger=paused-signal'
+  local -r R_ACQUIRED='09-10 18:23:15.980  4032  4032 I flutter : [BackgroundTask] session acquired'
+  local -r R_ARM_98='09-10 18:23:16.091  4032  4032 I flutter : [BackgroundTask] registration armed (98s)'
+  local -r R_HANDOFF='09-10 18:23:16.172  4032  4032 I flutter : [b1] HANDOFF_CONFIRMED'
+  local -r R_PUB_HANDOFF='09-10 18:23:16.957  4032  4032 I flutter : [BackgroundTask] Published to 1/1 due circle(s) (1 eligible), fetched 1/1 circle(s).'
+  local -r R_TRIG_D1='09-10 18:24:55.341  4032  4032 I flutter : [BackgroundTask] cycle trigger=delivery'
+  local -r R_ARM_128='09-10 18:24:55.356  4032  4032 I flutter : [BackgroundTask] registration armed (128s)'
+  local -r R_PUB_D1='09-10 18:25:06.374  4032  4032 I flutter : [BackgroundTask] Published to 1/1 due circle(s) (1 eligible), fetched 0/1 circle(s).'
+  local -r R_HOLD='09-10 18:26:36.205  4032  4032 I flutter : [b1] HOLD_COMPLETE'
+  # The same run's forced-idle phase, after R_HOLD: the 31 s arm at the floor,
+  # a delivery with nothing due, the 40 s re-aim, and the publish it drove.
+  local -r R_TRIG_WD='09-10 18:28:01.064  4032  4032 I flutter : [BackgroundTask] cycle trigger=watchdog'
+  local -r R_ARM_31='09-10 18:28:01.076  4032  4032 I flutter : [BackgroundTask] registration armed (31s)'
+  local -r R_PUB_WD='09-10 18:28:06.023  4032  4032 I flutter : [BackgroundTask] Published to 1/1 due circle(s) (1 eligible), fetched 1/1 circle(s).'
+  local -r R_TRIG_D2='09-10 18:28:37.362  4032  4032 I flutter : [BackgroundTask] cycle trigger=delivery'
+  local -r R_ARM_40='09-10 18:28:37.373  4032  4032 I flutter : [BackgroundTask] registration armed (40s)'
+  local -r R_TRIG_D3='09-10 18:29:22.367  4032  4032 I flutter : [BackgroundTask] cycle trigger=delivery'
+  local -r R_ARM_116='09-10 18:29:22.378  4032  4032 I flutter : [BackgroundTask] registration armed (116s)'
+  local -r R_PUB_D3='09-10 18:29:29.088  4032  4032 I flutter : [BackgroundTask] Published to 1/1 due circle(s) (1 eligible), fetched 0/1 circle(s).'
+  # Run 34488512808's handoff registration, from an earlier app process.
+  local -r R_ARM_PREV_PROC='09-10 14:54:58.153  4190  4190 I flutter : [BackgroundTask] registration armed (144s)'
+
+  # Writes <name>.log from the remaining arguments and cuts <name>.window from it.
+  _real_capture() {
+    local name="$1"; shift
+    printf '%s\n' "$@" > "${tmp}/${name}.log"
+    window_between_markers "${tmp}/${name}.log" "${MARK_HANDOFF_OK}" \
+      "${MARK_HOLD_DONE}" > "${tmp}/${name}.window"
+  }
+  _real_capture real.ok "${R_ONSTART}" "${R_PAUSE}" "${R_TRIG_PAUSED}" \
+    "${R_ACQUIRED}" "${R_ARM_98}" "${R_HANDOFF}" "${R_PUB_HANDOFF}" \
+    "${R_TRIG_D1}" "${R_ARM_128}" "${R_PUB_D1}" "${R_HOLD}"
+
+  # (66) The delivery pairs with the 98 s registration logged before the window
+  #      opened: 18:23:16.091 -> 18:24:55.341.
+  _case
+  got="$(delivery_gaps_after_registration "${tmp}/real.ok.window" "${tmp}/real.ok.log")"
+  if [[ "${got}" != "99250" ]]; then
+    echo "SELF-TEST FAIL (66): run 34511084722's first delivery paired as '${got}', \
+expected 99250 ms after the registration armed before '${MARK_HANDOFF_OK}'" >&2
+    fail=1
+  fi
+
+  # (67) …so step 7 passes the window that run actually produced.
+  _case
+  if ! assert_cadence_oracle "${tmp}/real.ok.window" "${tmp}/real.ok.log" >/dev/null; then
+    echo "SELF-TEST FAIL (67): step 7 failed run 34511084722's healthy window" >&2
+    assert_cadence_oracle "${tmp}/real.ok.window" "${tmp}/real.ok.log" >&2 || true
+    fail=1
+  fi
+
+  # (68) Without that registration the delivery has no interval behind it at
+  #      all, and reading the capture as well as the window must not find one.
+  _real_capture real.noarm "${R_ONSTART}" "${R_PAUSE}" "${R_TRIG_PAUSED}" \
+    "${R_ACQUIRED}" "${R_HANDOFF}" "${R_PUB_HANDOFF}" \
+    "${R_TRIG_D1}" "${R_ARM_128}" "${R_PUB_D1}" "${R_HOLD}"
+  _case
+  got="$(delivery_gaps_after_registration "${tmp}/real.noarm.window" \
+    "${tmp}/real.noarm.log")"
+  if [[ "${got}" != "NOARM" ]] \
+     || assert_cadence_oracle "${tmp}/real.noarm.window" "${tmp}/real.noarm.log" \
+          >/dev/null 2>&1; then
+    echo "SELF-TEST FAIL (68): a delivery with no registration anywhere before it \
+paired as '${got}' instead of failing as NOARM" >&2
+    fail=1
+  fi
+
+  # (69) A registration from a process that has since died is not this
+  #      instance's. Paired across the onStart it would read as a 3.5 h gap and
+  #      pass, for a delivery that had no interval of its own.
+  _real_capture real.prevproc "${R_ARM_PREV_PROC}" "${R_ONSTART}" "${R_PAUSE}" \
+    "${R_TRIG_PAUSED}" "${R_ACQUIRED}" "${R_HANDOFF}" "${R_PUB_HANDOFF}" \
+    "${R_TRIG_D1}" "${R_ARM_128}" "${R_PUB_D1}" "${R_HOLD}"
+  _case
+  got="$(delivery_gaps_after_registration "${tmp}/real.prevproc.window" \
+    "${tmp}/real.prevproc.log")"
+  if [[ "${got}" != "NOARM" ]] \
+     || assert_cadence_oracle "${tmp}/real.prevproc.window" \
+          "${tmp}/real.prevproc.log" >/dev/null 2>&1; then
+    echo "SELF-TEST FAIL (69): a delivery paired with a registration from before \
+'[BackgroundTask] onStart' (got '${got}')" >&2
+    fail=1
+  fi
+
+  # (70) The forced-idle sequence, had it happened inside the proof window: the
+  #      publish at 18:29:29 rode a delivery 44 994 ms after the 40 s re-aim that
+  #      produced it, under the floor. (The barren 18:28:37 delivery in between
+  #      is, as in (44), no cadence point.) R_HOLD's stamp is never read.
+  _real_capture real.floor "${R_ONSTART}" "${R_PAUSE}" "${R_TRIG_PAUSED}" \
+    "${R_ACQUIRED}" "${R_ARM_98}" "${R_HANDOFF}" "${R_PUB_HANDOFF}" \
+    "${R_TRIG_WD}" "${R_ARM_31}" "${R_PUB_WD}" "${R_TRIG_D2}" "${R_ARM_40}" \
+    "${R_TRIG_D3}" "${R_ARM_116}" "${R_PUB_D3}" "${R_HOLD}"
+  _case
+  got="$(delivery_gaps_after_registration "${tmp}/real.floor.window" \
+    "${tmp}/real.floor.log")"
+  if [[ "${got}" != "44994" ]] \
+     || assert_cadence_oracle "${tmp}/real.floor.window" "${tmp}/real.floor.log" \
+          >/dev/null 2>&1; then
+    echo "SELF-TEST FAIL (70): run 34511084722's 45 s delivery-driven publish was \
+not failed under the ${MIN_DELIVERY_GAP_SECS} s floor (paired as '${got}')" >&2
+    fail=1
+  fi
+
+  # (71) The capture is context, never claims: widening what step 7 MEASURES
+  #      past the window is the one thing reading it must not do. The same real
+  #      lines reordered (stamps unread) so a delivery-driven publish precedes
+  #      the handoff and the window holds two publishes, neither of them one.
+  _real_capture real.prewindow "${R_ONSTART}" "${R_PAUSE}" "${R_ARM_98}" \
+    "${R_TRIG_D1}" "${R_ARM_128}" "${R_PUB_D1}" "${R_HANDOFF}" \
+    "${R_TRIG_PAUSED}" "${R_ACQUIRED}" "${R_PUB_HANDOFF}" "${R_TRIG_WD}" \
+    "${R_ARM_31}" "${R_PUB_WD}" "${R_HOLD}"
+  _case
+  if assert_cadence_oracle "${tmp}/real.prewindow.window" \
+       "${tmp}/real.prewindow.log" >/dev/null 2>&1; then
+    echo "SELF-TEST FAIL (71): a delivery-driven publish from before \
+'${MARK_HANDOFF_OK}' was credited to the proof window" >&2
     fail=1
   fi
 
@@ -2191,6 +2363,10 @@ readonly TARGET="${2:-integration_test/b1_fgs_live_foreground_test.dart}"
 # than live polls.
 readonly DRIVE_TIMEOUT="${B1_DRIVE_TIMEOUT:-20m}"
 
+# How long SIGKILL follows the drive's SIGTERM at DRIVE_TIMEOUT: a term in
+# this lane's worst case, which its workflow derives at the drive step.
+readonly DRIVE_KILL_AFTER_SECS=30
+
 # The bound on `am wait-for-broadcast-barrier` (Phase 4): ~3.5x the 34 s the
 # install broadcasts took to reach LocationManagerService in run 34488512808.
 # The drive's own wait (`_broadcastBarrierWait`, 150 s) outlasts it, so a
@@ -2343,13 +2519,22 @@ echo "Phase 0/5 — device ready."
 
 # ---------------------------------------------------------------------------
 # Phase 1 — clean install. Force-stop + uninstall FIRST so no sticky FGS from a
-# prior target survives into this run (see run-single-avd-scenario.sh Phase 2).
+# prior target survives into this run (see run-single-avd-scenario.sh Phase 2),
+# and flush the fresh install's broadcasts before anything launches the app.
+#
+# That is not Phase 4's broadcast barrier, and neither covers the other. Phase
+# 4's runs after `flutter drive` has launched the app, for the drive's OWN
+# force-stop and replace broadcasts, which reset LocationManagerService's
+# registrations; the replace is a no-op to the overlay manager. This one keeps
+# the fresh install's PACKAGE_ADDED from reaching the overlay manager while
+# MainActivity is on screen, which would relaunch it under the driver
+# (app-install-lib.sh) — and by the time Phase 4's barrier runs, MainActivity is
+# already up. Draining the queue here only shortens Phase 4's wait.
 # ---------------------------------------------------------------------------
 echo "Phase 1/5 — installing ${APK}..."
 [[ -f "${APK}" ]] || fail "APK not found: ${APK} (was the build step skipped?)"
-adb -s "${DEVICE}" shell am force-stop "${PKG}" || true
-adb -s "${DEVICE}" uninstall "${PKG}" >/dev/null 2>&1 || true
-adb -s "${DEVICE}" install -r "${APK}"
+install_fresh "${DEVICE}" "${APK}" \
+  || fail "the fresh install of ${APK} did not complete (see the ERROR above)."
 
 # ---------------------------------------------------------------------------
 # Phase 2 — runtime permissions, plus the ACCESS_BACKGROUND_LOCATION PROBE.
@@ -2589,7 +2774,7 @@ IDLE_PID=$!
 BARRIER_PID=$!
 
 drc=0
-( cd "${HAVEN_DIR}" && timeout --kill-after=30s "${DRIVE_TIMEOUT}" flutter drive \
+( cd "${HAVEN_DIR}" && timeout --kill-after="${DRIVE_KILL_AFTER_SECS}s" "${DRIVE_TIMEOUT}" flutter drive \
     --no-pub \
     --keep-app-running \
     --device-id "${DEVICE}" \
@@ -2836,7 +3021,7 @@ echo "${oracle_out}"
 echo "  [6/8] Wake locks bounded: the plugin's permanent lock held throughout (P2a keeps \
 it), 'Haven:publish' never past its ${WAKE_LOCK_MAX_AGE_SECS} s ceiling."
 
-if ! oracle_out="$(assert_cadence_oracle "${WINDOW}")"; then
+if ! oracle_out="$(assert_cadence_oracle "${WINDOW}" "${LOGCAT_FILE}")"; then
   echo "${oracle_out}" >&2
   fail "the background publish cadence does not match the P2a contract (above).\
 ${window_note}"

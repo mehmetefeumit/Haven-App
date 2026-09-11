@@ -74,11 +74,16 @@ jobs:
   e2e_clock_skew:
     name: e2e_clock_skew
     runs-on: ubuntu-latest
-    # One APK build (<=30m) + boot + a bounded drive (<=25m of step deadline).
-    # The step-level timeout-minutes below bound a hung phase so GitHub kills
-    # the STEP rather than the runner, letting the if: always() artifact upload
-    # still run; this job-level cap is the outer envelope over both.
-    timeout-minutes: 70
+    # One APK build + boot + a bounded drive (<=27m of step deadline). The job
+    # cap must clear the SUM of the step caps: below it, a run whose every step
+    # is still inside its own cap can die here, and a job-cap death skips every
+    # `if: failure()` step (e2e-android.yml states the rule). So: Build
+    # clock-skew test APK 30 + Create AVD snapshot (on an AVD-cache miss) 15 +
+    # the drive step 37 (derived there) + the most the work no step cap bounds
+    # has taken, 3.1 min over 33 runs of this job (ci.yml, 2026-07-29..09-10;
+    # 1.6 of it Free disk space, run 31507917222), taken as 4 = 86 -> 90.
+    # job-uncapped-minutes: 3.1 (33 runs, worst 31507917222)
+    timeout-minutes: 90
     env:
       HAVEN_E2E_RELAY: ws://10.0.2.2:7777
 
@@ -207,13 +212,33 @@ jobs:
       #        drift). Above the drive target's own 17-minute in-test Timeout,
       #        so an overrun fails as a NAMED test rather than an anonymous
       #        kill.
-      #   25m  this step's inner deadline (run-with-deadline.sh below) — covers
-      #        the drive PLUS install, `adb root`, the auto_time pin, the four
-      #        clock jumps and the oracle, none of which the per-drive timeout
-      #        bounds, and is the bound that actually reaps
-      #        (CI_HARDENING_BACKLOG.md A8).
-      #   35m  this step's timeout-minutes = 25 + 1 (kill grace) + 7
-      #        (emulator-boot-timeout) + margin, a belt over the deadline.
+      #   27m  this step's inner deadline (run-with-deadline.sh below) — covers
+      #        the drive PLUS the relay restart, `adb root`, the auto_time pin,
+      #        the install and its broadcast barrier, the four clock jumps and
+      #        the oracle, none of which the per-drive timeout bounds, and is
+      #        the bound that actually reaps (CI_HARDENING_BACKLOG.md A8).
+      #   37m  this step's timeout-minutes = 27 + 1 (kill grace) + 7
+      #        (emulator-boot-timeout) + 2 (the action's own setup and
+      #        teardown, outside both: 38-102 s across the eight own-installer
+      #        lanes over twelve runs, 2026-08/09), a belt over the deadline.
+      #
+      # DEADLINE, from run-b8-clock-skew.sh's bounded waits at their bounds, in
+      # seconds:
+      #   start-strfry.sh READY_TIMEOUT, the ready loop's last 1 s tick
+      #     and READY_CONFIRM_SECS                             60 + 1 + 2 =   63
+      #   app-install-lib.sh INSTALL_BARRIER_SECS                            120
+      #     (taken before any clock jump; its bound runs on the host's clock)
+      #   DRIVE_TIMEOUT (B8_DRIVE_TIMEOUT) + DRIVE_KILL_AFTER_SECS 1200+30 = 1230
+      #     (the clock servo runs under the drive and is not waited for)
+      #                                                      = 1413 s = 23m33s
+      #   + the unbounded relay, `adb root` restart, adb, install, clock
+      #     restore, scan and oracle work, ~3 min: e2e-android.yml's allowance,
+      #     kept because the sick device that pushes the waits above to their
+      #     bounds is the one that slows adb (this lane spent under 40 s on
+      #     it in run 34511084722, 16 s of that on the final clock restore)
+      #                                                      = 26m33s -> 27m.
+      # It was 25m — the drive plus 5 for everything else, which held until
+      # the install barrier.
       # Sizing evidence: the drive's own worst case is a 3-member circle setup
       # + seven publishes + four catch-up sweeps (30s each) + two banner pumps
       # + four clock rendezvous (150s each, bounded in-Dart) under a 17-minute
@@ -224,7 +249,7 @@ jobs:
       # floods `mlock() -1 ENOMEM` under pressure, and this lane holds three
       # MLS sessions at once (the publisher's and both synthetic peers').
       - name: Run the clock-skew proof on the emulator
-        timeout-minutes: 35
+        timeout-minutes: 37
         uses: reactivecircus/android-emulator-runner@v2
         env:
           STRFRY_IMAGE: ${{ vars.STRFRY_IMAGE || 'dockurr/strfry@sha256:545555da5dd2c2b502f2c0d159f4dc4996d0e488e3bf25905ce881722d63d2c5' }}
@@ -239,7 +264,7 @@ jobs:
             -noaudio -no-boot-anim -camera-back none -memory 6144
           disable-animations: true
           emulator-boot-timeout: 420
-          script: bash tooling/e2e/ci/run-with-deadline.sh 25m "e2e-clock-skew drive" -- bash tooling/e2e/ci/run-b8-clock-skew.sh /tmp/integration-apks/b8_clock_skew_test.apk integration_test/b8_clock_skew_test.dart
+          script: bash tooling/e2e/ci/run-with-deadline.sh 27m "e2e-clock-skew drive" -- bash tooling/e2e/ci/run-b8-clock-skew.sh /tmp/integration-apks/b8_clock_skew_test.apk integration_test/b8_clock_skew_test.dart
 
       - name: Capture host + emulator diagnostics
         if: failure()

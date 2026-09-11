@@ -120,6 +120,9 @@ set -Eeuo pipefail
 # against a fully-wired script.
 # shellcheck source=tooling/e2e/ci/drive-log-lib.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/drive-log-lib.sh"
+# The shared fresh-install step: install_fresh and its broadcast barrier.
+# shellcheck source=tooling/e2e/ci/app-install-lib.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/app-install-lib.sh"
 
 # ---------------------------------------------------------------------------
 # VERBATIM markers (haven/integration_test/b8_clock_skew_test.dart).
@@ -255,6 +258,17 @@ jump_record() {
   { grep -aE "^seq=${seq} " "${jumpfile}" 2>/dev/null | tail -1; } || true
 }
 
+# Whether <seq> is a word of <list> (newline-separated, word-split on purpose).
+# Captured before matching: printf writes one word per write, so piped into
+# `grep -q` a match before the last word SIGPIPEs it, and pipefail's 141 would
+# report a landed jump as missing.
+seq_listed() { # seq_listed <seq> <list>
+  local words
+  # shellcheck disable=SC2086  # deliberate word-split of a newline-separated list
+  words="$(printf '%s\n' $2)"
+  grep -qx -- "$1" <<<"${words}"
+}
+
 # The `settings put` commands that UNDO phase 0's clock pin, one per line.
 #
 # A list rather than two inline `adb` calls so --self-test can assert (a) that
@@ -284,7 +298,12 @@ auto_time_restore_cmds() {
 # touch.
 # ---------------------------------------------------------------------------
 run_self_test() {
-  local tmp fail=0 got
+  # Pinned by EQUALITY, never printed as prose: this used to end with a
+  # hard-coded "all 18 fixture groups passed" while 17 ran. Each numbered
+  # group counts itself.
+  local -r SELF_TEST_GROUPS=18
+  local tmp fail=0 got checked=0
+  _group() { checked=$(( checked + 1 )); }
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
   trap "rm -rf '${tmp}'" RETURN
@@ -320,6 +339,7 @@ run_self_test() {
     > "${tmp}/green.log"
 
   # (1) All four requests are seen, in order, exactly once.
+  _group
   got="$(req_clock_seqs "${tmp}/green.log" | tr '\n' ',')"
   if [[ "${got}" != "1,2,3,4," ]]; then
     echo "SELF-TEST FAIL (1): expected '1,2,3,4,', got '${got}'" >&2
@@ -329,6 +349,7 @@ run_self_test() {
   # (2) Offsets are read back per seq, INCLUDING the negative one. A parser
   #     that dropped the sign would make the backward-skew phase silently run
   #     forward, i.e. the lane would test one direction twice.
+  _group
   got="$(req_clock_offset "${tmp}/green.log" 3)"
   if [[ "${got}" != "-21600" ]]; then
     echo "SELF-TEST FAIL (2): expected offset -21600 for seq 3, got '${got}'" >&2
@@ -336,6 +357,7 @@ run_self_test() {
   fi
 
   # (3) Observations pair up with requests.
+  _group
   got="$(observed_clock_seqs "${tmp}/green.log" | tr '\n' ',')"
   if [[ "${got}" != "1,2,3,4," ]]; then
     echo "SELF-TEST FAIL (3): expected observations '1,2,3,4,', got '${got}'" >&2
@@ -346,6 +368,7 @@ run_self_test() {
   #     log must not be mistaken for any. This is the whole risk of the
   #     evidence convention: an evidence line read as a finding would fail the
   #     lane for a defect that is deliberately out of scope.
+  _group
   got="$(finding_lines "${tmp}/green.log" | wc -l | tr -d ' ')"
   if [[ "${got}" != "0" ]]; then
     echo "SELF-TEST FAIL (4): a clean log must yield 0 findings, got ${got}" >&2
@@ -379,6 +402,7 @@ run_self_test() {
 
   # (5) Both findings are extracted, and the logcat prefix is stripped so the
   #     step log shows the message rather than the timestamp columns.
+  _group
   got="$(finding_lines "${tmp}/red.log" | wc -l | tr -d ' ')"
   if [[ "${got}" != "2" ]]; then
     echo "SELF-TEST FAIL (5): expected 2 findings, got ${got}" >&2
@@ -396,6 +420,7 @@ run_self_test() {
   # (6) A request with NO observation must be detectable — the drive never saw
   #     the jump. Without this the lane could pass while the clock stayed put
   #     inside the app process.
+  _group
   printf '%s\n' \
     '08-03 04:41:03.001  1234  1300 I flutter : [b8] REQ_CLOCK 1 21600' \
     '08-03 04:43:33.001  1234  1300 I flutter : [b8] CLOCK_TIMEOUT 1' \
@@ -412,6 +437,7 @@ run_self_test() {
   # (7) A truncated run (no terminal marker) must be distinguishable from a
   #     clean one. This is what stops "the body died at phase 2" from reading
   #     as "phases 3 and 4 found nothing".
+  _group
   if grep -aqF -- "${MARK_ALL_PHASES}" "${tmp}/unobserved.log"; then
     echo "SELF-TEST FAIL (7): a truncated log claimed all phases completed" >&2
     fail=1
@@ -427,6 +453,7 @@ run_self_test() {
   # (8) Only the jumps that actually LANDED count. seq 3's device clock never
   #     moved (drift == the full requested magnitude), which is exactly the
   #     vacuity mode this lane must never pass on.
+  _group
   got="$(jump_ok_seqs "${tmp}/jumps.log" | tr '\n' ',')"
   if [[ "${got}" != "1,2," ]]; then
     echo "SELF-TEST FAIL (8): expected ok seqs '1,2,', got '${got}'" >&2
@@ -435,6 +462,7 @@ run_self_test() {
 
   # (9) The failing record is retrievable for the failure message — a bare
   #     "seq 3 did not apply" with no read-back is untriageable.
+  _group
   got="$(jump_record "${tmp}/jumps.log" 3)"
   if [[ "${got}" != *"status=drift"* || "${got}" != *"drift=21600"* ]]; then
     echo "SELF-TEST FAIL (9): expected seq 3's drift record, got '${got}'" >&2
@@ -444,6 +472,7 @@ run_self_test() {
   # (10) An empty / absent servo log must yield NO ok seqs, never a silent
   #      pass. `set -e` plus a grep that matches nothing is the classic way a
   #      guard turns into a no-op.
+  _group
   : > "${tmp}/empty.log"
   if [[ -n "$(jump_ok_seqs "${tmp}/empty.log")" ]]; then
     echo "SELF-TEST FAIL (10): an empty servo log reported applied jumps" >&2
@@ -457,6 +486,7 @@ run_self_test() {
   # (11) The drift gate itself, as arithmetic rather than as a grep: the
   #       tolerance must reject a jump that did not move the clock and accept
   #       one that did.
+  _group
   if (( 21600 <= JUMP_DRIFT_TOLERANCE_SECS )); then
     echo "SELF-TEST FAIL (11): the tolerance is wide enough to accept a" \
          "clock that never moved" >&2
@@ -471,6 +501,7 @@ run_self_test() {
   #       through the host's own parser, or every jump silently no-ops.
   #       Rendered and re-read here so a format typo fails hermetically
   #       instead of on an emulator 20 minutes into a lane.
+  _group
   local stamp back
   stamp="$(date -u -d "@1785000000" +%m%d%H%M%Y.%S)"
   if [[ ! "${stamp}" =~ ^[0-9]{12}\.[0-9]{2}$ ]]; then
@@ -491,6 +522,7 @@ run_self_test() {
   #       mutation this lane hands to its neighbours. Asserted structurally
   #       (each pin has a matching restore, and the trap issues them) rather
   #       than by re-running adb, which a hermetic self-test cannot do.
+  _group
   local self="${BASH_SOURCE[0]}" restore_list key
   restore_list="$(auto_time_restore_cmds)"
 
@@ -519,9 +551,10 @@ run_self_test() {
 
   # (13c) The restore is WIRED. An unreferenced restore helper restores
   #       nothing, and the EXIT trap is the only path that runs on every exit
-  #       route (phase-0 failure, a `fail`, a leak, or success).
-  if ! awk '/^cleanup\(\) \{/,/^\}/' "${self}" \
-       | grep -qE '^[[:space:]]+restore_auto_time_pin$'; then
+  #       route (phase-0 failure, a `fail`, a leak, or success). Captured, not
+  #       piped: past 4 KiB of cleanup() an early match SIGPIPEs awk (seq_listed).
+  if ! grep -qE '^[[:space:]]+restore_auto_time_pin$' \
+       <<<"$(awk '/^cleanup\(\) \{/,/^\}/' "${self}")"; then
     echo "SELF-TEST FAIL (13c): cleanup() does not call restore_auto_time_pin," \
          "so the pin survives the lane on every exit route" >&2
     fail=1
@@ -536,6 +569,7 @@ run_self_test() {
   # never from prose — a comment quoting a marker name must not be able to
   # satisfy this check (this repo has shipped a guard that matched its own
   # documentation before).
+  _group
   local target repo dart_missing=""
   repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
   target="${repo}/haven/integration_test/b8_clock_skew_test.dart"
@@ -581,6 +615,7 @@ run_self_test() {
   # Both directions, because both are silent. An EVIDENCE line read as a
   # finding fails the lane for a defect that is out of scope; a FINDING read
   # as evidence un-gates the fix and the lane goes permanently green.
+  _group
   printf '%s\n' \
     '08-03 04:41:40.001  1234  1300 I flutter : [b8] EVIDENCE backward-skew-catchup: the window skipped backlog' \
     '08-03 04:41:41.001  1234  1300 I flutter : [b8] EVIDENCE backward-skew-retention: the relay dropped it' \
@@ -606,6 +641,7 @@ run_self_test() {
   # would emit if that piece were reverted, and each must be reported BY NAME.
   # These are what make "the lane fails if the fix is reverted" a tested claim
   # rather than an assertion in a comment.
+  _group
 
   # (16a) `publish_with_retry` collapses a fully-unacknowledged publish back
   #       into `RelayError::AllRelaysFailed` (the pre-fix behaviour). The
@@ -729,6 +765,7 @@ run_self_test() {
   # A drive that never started, a logcat capture that never attached, or a
   # marker rename all produce a log with no OK lines at all. That must read as
   # "every oracle missing", never as "nothing wrong here".
+  _group
   local expected_all
   expected_all="$(required_ok_markers | tr '\n' ',')"
   got="$(missing_ok_markers "${tmp}/empty.log" | tr '\n' ',')"
@@ -744,11 +781,44 @@ run_self_test() {
     fail=1
   fi
 
+  # --- (18) Membership reads the WHOLE list. --------------------------------
+  #
+  # The seq FIRST in a >1 MiB list: piped into `grep -q`, the match exits the
+  # reader while printf still has most of the list to write — the
+  # deterministic SIGPIPE shape, not a lucky race.
+  _group
+  local big_list
+  big_list="$(awk 'BEGIN { print 7; for (i = 1000000; i < 1140000; i++) print i }')"
+  if ! seq_listed 7 "${big_list}"; then
+    echo "SELF-TEST FAIL (18): seq 7, first in a >1 MiB list, read as missing" >&2
+    fail=1
+  fi
+  # 100 is only a PREFIX of listed seqs: a match that is not whole-line would
+  # credit a jump that never landed.
+  if seq_listed 100 "${big_list}"; then
+    echo "SELF-TEST FAIL (18b): seq 100, absent (only a prefix of listed" \
+         "seqs), read as listed" >&2
+    fail=1
+  fi
+  # …and checks 2 and 3 both ask it, rather than an inline pipe that (18)
+  # cannot see. Comment lines are skipped so a mention cannot stand in.
+  got="$(awk '!/^[[:space:]]*#/ && /^  if ! seq_listed "\$\{seq\}" "\$\{(applied|observed)\}"; then$/ { n++ }
+    END { print n + 0 }' "${BASH_SOURCE[0]}")"
+  if [[ "${got}" != "2" ]]; then
+    echo "SELF-TEST FAIL (18c): expected checks 2 and 3 to call seq_listed," \
+         "found ${got} call(s)" >&2
+    fail=1
+  fi
+
+  if (( checked != SELF_TEST_GROUPS )); then
+    echo "SELF-TEST FAIL: ran ${checked} fixture group(s), expected ${SELF_TEST_GROUPS}" >&2
+    fail=1
+  fi
   if (( fail != 0 )); then
     echo "run-b8-clock-skew.sh --self-test: FAILED" >&2
     return 1
   fi
-  echo "run-b8-clock-skew.sh --self-test: all 18 fixture groups passed"
+  echo "run-b8-clock-skew.sh --self-test: all ${checked} fixture groups passed"
   return 0
 }
 
@@ -760,7 +830,6 @@ fi
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-readonly PKG="com.oblivioustech.haven"
 readonly DEVICE="emulator-5554"
 readonly DRIVER_FILE="test_driver/integration_test.dart"
 readonly LOG_DIR="/tmp/b8-logs"
@@ -776,6 +845,10 @@ readonly TARGET="${2:-integration_test/b8_clock_skew_test.dart}"
 # reachable (backlog A8 / guard C4) and an in-test overrun fails with a named
 # test rather than an anonymous kill.
 readonly DRIVE_TIMEOUT="${B8_DRIVE_TIMEOUT:-20m}"
+
+# How long SIGKILL follows the drive's SIGTERM at DRIVE_TIMEOUT: a term in
+# this lane's worst case, which its workflow derives at the drive step.
+readonly DRIVE_KILL_AFTER_SECS=30
 
 # How often the servo re-reads logcat for a new request.
 readonly SERVO_POLL_SECS="${B8_SERVO_POLL_SECS:-1}"
@@ -1021,7 +1094,8 @@ echo "Phase 0/5 — device ready, clock is writable and pinned."
 
 # ---------------------------------------------------------------------------
 # Phase 1 — clean install. Force-stop + uninstall FIRST so no sticky state
-# from a prior target survives into this run.
+# from a prior target survives into this run, and flush the fresh install's
+# broadcasts before anything launches the app (app-install-lib.sh).
 #
 # No runtime permissions are granted, deliberately: this target drives the FFI
 # and the relay directly and never touches the platform location plugin, so a
@@ -1029,9 +1103,8 @@ echo "Phase 0/5 — device ready, clock is writable and pinned."
 # ---------------------------------------------------------------------------
 echo "Phase 1/5 — installing ${APK}..."
 [[ -f "${APK}" ]] || fail "APK not found: ${APK} (was the build step skipped?)"
-adb -s "${DEVICE}" shell am force-stop "${PKG}" || true
-adb -s "${DEVICE}" uninstall "${PKG}" >/dev/null 2>&1 || true
-adb -s "${DEVICE}" install -r "${APK}"
+install_fresh "${DEVICE}" "${APK}" \
+  || fail "the fresh install of ${APK} did not complete (see the ERROR above)."
 
 # ---------------------------------------------------------------------------
 # Phase 2 — start the capture and the clock servo.
@@ -1058,7 +1131,7 @@ SERVO_PID=$!
 # ---------------------------------------------------------------------------
 echo "Phase 3/5 — driving ${TARGET}..."
 drc=0
-( cd "${HAVEN_DIR}" && timeout --kill-after=30s "${DRIVE_TIMEOUT}" flutter drive \
+( cd "${HAVEN_DIR}" && timeout --kill-after="${DRIVE_KILL_AFTER_SECS}s" "${DRIVE_TIMEOUT}" flutter drive \
     --no-pub \
     --device-id "${DEVICE}" \
     --use-application-binary "${APK}" \
@@ -1147,8 +1220,7 @@ fi
 applied="$(jump_ok_seqs "${JUMP_LOG}")"
 missing=""
 for seq in ${requested}; do
-  # shellcheck disable=SC2086  # deliberate word-split of a newline-separated list
-  if ! printf '%s\n' ${applied} | grep -qx -- "${seq}"; then
+  if ! seq_listed "${seq}" "${applied}"; then
     record="$(jump_record "${JUMP_LOG}" "${seq}")"
     missing+="    seq ${seq}: ${record:-(no servo record at all — the request was never fulfilled)}"$'\n'
   fi
@@ -1173,8 +1245,7 @@ failure — the process is not seeing CLOCK_REALTIME move."
 fi
 observed="$(observed_clock_seqs "${LOGCAT_FILE}")"
 for seq in ${requested}; do
-  # shellcheck disable=SC2086  # deliberate word-split of a newline-separated list
-  if ! printf '%s\n' ${observed} | grep -qx -- "${seq}"; then
+  if ! seq_listed "${seq}" "${observed}"; then
     fail "the drive never observed jump seq ${seq} on its own clock (servo record: \
 $(jump_record "${JUMP_LOG}" "${seq}")). The skew did not reach the process under test."
   fi

@@ -7,13 +7,14 @@ unhealthy emulator/simulator routinely masquerades as a functional failure.**
 
 ## The lanes
 
-These are the lanes this guide has failure modes for — the core-flow pair plus
-the two that share their harness. They are **not** the full E2E fleet: the
-scenario lanes (`e2e-ios-background-publish`, `e2e-fgs-publish`, `e2e-profile`,
-`e2e-relay-customization`, `e2e-clock-skew`, `e2e-kp-rotation`,
-`e2e-network-reconnect`, the real-GPS and auth-tier lanes) are inventoried in
-CLAUDE.md's "CI Pipeline" section and each carries its own header. A symptom
-below is worth reading against any of them; a lane-specific oracle is not.
+These are the lanes this guide has failure modes for — the core-flow pair, the
+two that share their harness, and the integration lane. They are **not** the
+full E2E fleet: the scenario lanes (`e2e-ios-background-publish`,
+`e2e-fgs-publish`, `e2e-profile`, `e2e-relay-customization`, `e2e-clock-skew`,
+`e2e-kp-rotation`, `e2e-network-reconnect`, the real-GPS and auth-tier lanes)
+are inventoried in CLAUDE.md's "CI Pipeline" section and each carries its own
+header. A symptom below is worth reading against any of them; a lane-specific
+oracle is not.
 
 | Workflow | What it runs | How | Relay |
 |---|---|---|---|
@@ -21,6 +22,7 @@ below is worth reading against any of them; a lane-specific oracle is not.
 | `e2e-ios.yml` | `e2e_combined.dart` + `ios_bg_mirror_test.dart` | `flutter test -d <udid>` on a booted simulator | host-native relay, `ws://localhost:7777` |
 | `e2e-background-catchup.yml` | M7 background catch-up runtime proof (4 phases + a guest reboot) | `run-m7-background-catchup.sh` under `reactivecircus/android-emulator-runner` | strfry container, `ws://10.0.2.2:7777` |
 | `e2e-live-sync.yml` | The SAME two lanes, flag-ON (`HAVEN_LIVE_SYNC=true`) — a manual re-run of what `ci.yml` already gates on | `workflow_dispatch` only | — |
+| `e2e-integration.yml` | seven component targets (`smoke_test`, `app_test`, `keyring_test`, …), one after another | `run-integration-tests.sh` → `run-single-avd-scenario.sh` per target, on one AVD | strfry container reset per target, `ws://10.0.2.2:7777` |
 
 `e2e-android.yml` / `e2e-ios.yml` take a `live_sync` boolean input (default
 **false**) and always pass `--dart-define=HAVEN_LIVE_SYNC=<input>`, so a lane
@@ -517,6 +519,119 @@ passed in the same run — so the build profile is not the differentiator. Re-ru
 the lane. If it recurs on the same lane across runs, the resource peak is the
 first thing to measure (see failure mode 2's `free -h` / `df -h` diagnostics and
 the build-before-boot discipline every Android lane already follows).
+
+## Failure mode 11 — rc=124 after `All tests passed!`: MainActivity relaunched under the driver
+
+**Symptom** (as seen through `run-single-avd-scenario.sh`; a lane with its own
+orchestrator hangs the same way, to its own drive timeout). A target is
+killed at its per-target cap (`exceeded 10m and was killed (rc=124)`) although
+its drive log contains `All tests passed!`. Read the PIDs, not just the lines:
+
+- the drive log carries **two** `00:00 +0: (setUpAll)` lines from the **same**
+  pid, with `Detaching Geolocator from activity` and a
+  `FlutterActivityAndFragmentDelegate` line between them (the first engine's
+  own delegate line is printed before the drive starts reading the device log);
+- the target's logcat has `W System: ClassLoader referenced unknown path:` in
+  the app pid, then `WindowManager: finishDrawing of relaunch: … MainActivity`.
+
+Anything the app logs after that `All tests passed!` — in run 34511084722 a
+burst of `StateError`s from MapShell's startup reading the test's disposed
+`ProviderScope` — is the orphaned second engine outliving its suite; a healthy
+drive force-stops the app a fraction of a second after that line. It is a
+consequence of the hang, not its cause. Unlike failure mode 1, the second
+engine here is not the foreground service's: it is the relaunched activity's
+replacement for the first. Its pre-connect form is the `[Sentinel kind:
+Collected]` from `GetHealth` that `is_connect_flake` retries; run 29218745757
+shows the same relaunch signature, though its surviving logs cannot show the
+trigger (and it also carries failure mode 1's `There is still another flutter
+engine connected`).
+
+**Root cause.** Android relaunched MainActivity mid-drive. A FRESH install's
+`PACKAGE_ADDED` makes OverlayManagerService recompute the new package's overlay
+paths (always, for a newly added package) and — because they change on a fresh
+install, from none to the framework overlays — call
+`scheduleApplicationInfoChanged`, which bumps the asset sequence of the
+package's visible activities: a configuration change no `android:configChanges`
+can absorb, so the activity is relaunched. `FlutterActivity` destroys its
+engine with it, taking the isolate `flutter drive` is attached to; the new
+activity boots a second engine that runs the whole suite again from `main()`
+(the driver's connect had already turned off pause-on-start for the whole VM).
+Its results go nowhere, and the driver's pending `requestData` is never
+answered — the host only logs a warning when its timeout passes, so the
+harness cap is what ends it.
+
+It is a race against the broadcast queue, which a freshly booted emulator backs
+up behind post-boot churn. In run 34511084722 (`app_test`, the second target)
+system_server's receivers got the Phase-2 install's `PACKAGE_ADDED` 13.6 s after
+the install — 0.5 s after MainActivity was first displayed. In the green run
+34488512808 the same broadcast landed 2.8 s after the install, 0.4 s before
+`am start`. The commit between those two runs touched neither the app nor the
+test.
+
+**Fix.** Every Android lane installs the app through one library,
+`tooling/e2e/ci/app-install-lib.sh`: `install_fresh` clears any prior install
+first, `install_app` installs over whatever is there, and after any install
+that was FRESH — the package absent beforehand — both check it landed and then
+block on `cmd package wait-for-handler` followed by
+`am wait-for-broadcast-barrier --flush-broadcast-loopers`, so the broadcast is
+delivered before anything launches the app. PackageManagerService posts the
+send to its own handler and only then answers the installer
+(`android-14.0.0_r1`, `InstallPackageHelper.handlePackagePostInstall`), so a
+bare barrier taken as `adb install` returns can pass before the broadcast is
+enqueued. Draining that handler is what closes the gap: the loopers flag alone
+covers it only once it has sent some broadcast before (`BroadcastLoopers`
+registers loopers lazily), which on a freshly booted guest it may not have.
+Both commands are in that release's source. `flutter drive`'s own reinstall
+(it always reinstalls) is a REPLACE, as is any install over an installed
+package, and the overlay manager ignores a replace for a package that neither
+declares nor is targeted by an overlay. So a replace takes no barrier, and a
+sound lane never reds on a wait that could not have mattered.
+What the barrier cannot reach are the in-process hops after hand-over
+(FgThread, the overlay manager's thread, FgThread again) — a margin of
+everything before the drive's launch, not a barrier. A queue that does not
+drain within `INSTALL_BARRIER_SECS` (120 s, a library constant no lane can
+tighten), a device that cannot run the barrier, and a failed install each fail
+the lane by name rather than driving into the race.
+
+Where each lane installs: `run-single-avd-scenario.sh` Phase 2 (and through it
+e2e-android, e2e-profile, e2e-integration, e2e-relay-customization and
+e2e-flakiness-stress); Phase 1 of `run-b1-fgs-publish.sh`,
+`run-b3-real-gps.sh`, `run-b5-permission-revocation.sh`,
+`run-b6-location-provider-toggle.sh`, `run-b8-clock-skew.sh`,
+`run-b9-network-reconnect.sh` and `run-kp-rotation.sh`; B5's Phase 6 restore,
+which is fresh because ACT 1's drive teardown uninstalled the package; and M7's
+Phase A (its C1 and C2 install over Phase A's package — replaces, no barrier).
+The runner's connect-flake retry restores the app the same way: a failed
+attempt's `flutter drive` teardown stops and uninstalls it
+(`drive_service.dart` `stop()`), so the next attempt's own install would be a
+fresh, unflushed one, and the Phase-3 grants would be gone with the package.
+B1 keeps its own Phase-4 barrier as well: that one runs after launch, for the
+drive's force-stop and replace broadcasts that reset LocationManagerService's
+registrations, and neither barrier covers the other's broadcast.
+
+Two repo-guards steps keep it that way. `app-install-lib.sh --self-test` pins
+the order, the handler drain and the loopers flag, the bound, the check that a
+fresh install landed, the fail-closed paths and the no-barrier-on-a-replace
+rule against a stub device. `app-install-lib.sh
+--check-installs` fails if any lane installs the app another way, redefines
+those functions, or talks to adb and launches the app with `flutter drive`,
+`flutter test` or `flutter run` without also installing through them — so a new
+lane written the ordinary way cannot miss the barrier.
+
+**Not covered.**
+
+- The pin is lexical, and says what it cannot see: an install behind `eval`,
+  `bash -c` or a variable, a path, or a function standing in for `adb`; one
+  inside `$( … )` in an unquoted heredoc body, or in a heredoc fed to `bash`
+  or `adb shell`; a device-side `pm install` quoted into one `adb shell "…"`
+  argument; and a few constructs its lexer misreads (listed in the library).
+  R3 checks that the install call is present, not that it runs first.
+- If `flutter drive`'s reinstall FAILS, flutter_tools falls back to uninstall
+  plus a fresh install — unflushed.
+- A post-boot change to a framework overlay relaunches every visible activity
+  and is not a broadcast at all. Run 34511084722 switched the navigation-mode
+  overlay at 18:23:44 and relaunched the launcher, 23 s before its first target
+  launched; a faster first target would have been exposed.
 
 ## What these lanes do NOT cover
 

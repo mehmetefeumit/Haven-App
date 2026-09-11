@@ -12,7 +12,9 @@
 # Phase 1 — obtain the test APK (use the workflow's pre-built
 #                                /tmp/scenario.apk if present, else
 #                                `flutter build apk` for local runs)
-# Phase 2 — `adb install`           (install on the device)
+# Phase 2 — `adb install`           (install_fresh: install on the device,
+#                                   then flush its broadcasts — see
+#                                   app-install-lib.sh)
 # Phase 3 — `adb shell pm grant`    (pre-grant runtime permissions)
 # Phase 4 — `flutter drive --use-application-binary`
 #                                   (no Gradle, runs the test)
@@ -63,6 +65,9 @@ set -euo pipefail
 # wired exactly like the real one.
 # shellcheck source=tooling/e2e/ci/drive-log-lib.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/drive-log-lib.sh"
+# The shared fresh-install step: install_fresh and its broadcast barrier.
+# shellcheck source=tooling/e2e/ci/app-install-lib.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/app-install-lib.sh"
 
 # attempt_slice_after <accumulated-log> <byte-offset> — emit only the bytes
 # appended after <byte-offset>, i.e. the LAST drive attempt's slice.
@@ -231,10 +236,12 @@ relay_host_ipv4() {
 # Observed instance (CI run 29218745757, smoke_test on the cold first target):
 #   "DriverError: Failed to fulfill GetHealth ... [Sentinel kind: Collected]"
 #   from VMServiceFlutterDriver.connect — the app isolate was GC'd while
-#   checkHealth's single (non-retried) RPC was in flight, because the Android
-#   activity/engine was recreated mid-handshake on cold boot. This is a known
-#   flutter_driver connect race (flutter/flutter#68334, #95063), not an app
-#   bug: `connect()` health-checks exactly once with no retry surface.
+#   checkHealth's single (non-retried) RPC was in flight, because Android
+#   relaunched MainActivity mid-handshake (`ClassLoader referenced unknown
+#   path:`, then a fresh FlutterActivityAndFragmentDelegate in the same pid) —
+#   the relaunch install_fresh's barrier exists for, though that run's
+#   surviving logs cannot show which broadcast set it off. Not an app bug, and
+#   `connect()` health-checks exactly once with no retry surface.
 #
 # Caveat: a RARE intermittent app crash DURING startup (pre-connect) is
 # indistinguishable from this race and would also be retried. A DETERMINISTIC
@@ -540,11 +547,45 @@ wlan0	0002000A	00000000	0000	0	0	0	00FFFFFF	0	0	0" 10.0.2.2; then
     fail=1
   fi
 
+  # ---------------------------------------------------------------
+  # (8) A retry restores the app. A failed attempt's `flutter drive` teardown
+  # uninstalls it, so a retry that did not put it back — flushed, and granted —
+  # would run on the unflushed fresh install the next drive makes. The loop
+  # needs a device, so this reads it: the retry branch, from the condition that
+  # asks is_connect_flake to its `continue`, must call both. Read through the
+  # install library's lexer, so a comment or a message naming them is not a
+  # call, and a branch that can no longer be found fails rather than passes.
+  # ---------------------------------------------------------------
+  local branch
+  # The reader DRAINS rather than `exit`s: an early exit leaves the writer
+  # blocked on a closed pipe, and SIGPIPE under pipefail + errexit kills the
+  # whole self-test with rc 141 and no message (23 of 40 back-to-back runs).
+  branch="$(_app_install_code "${BASH_SOURCE[0]}" | awk -F'\t' '
+    done { next }
+    !on && /DRIVE_MAX_ATTEMPTS/ && /is_connect_flake/ { on = 1; next }
+    on && $2 ~ /^[[:space:]]*continue[[:space:]]*$/ { on = 0; done = 1; next }
+    on { print $2 }')"
+  if [[ -z "${branch}" ]]; then
+    echo "SELF-TEST FAIL (8): cannot find the connect-flake retry branch" >&2
+    fail=1
+  fi
+  if ! grep -qE '(^|[^[:alnum:]_])install_app[[:space:]]' <<<"${branch}"; then
+    echo "SELF-TEST FAIL (8a): the retry no longer restores the app through" \
+         "install_app" >&2
+    fail=1
+  fi
+  if ! grep -qE '(^|[^[:alnum:]_])grant_runtime_permissions([[:space:]]|$)' \
+       <<<"${branch}"; then
+    echo "SELF-TEST FAIL (8b): the retry no longer re-grants the runtime" \
+         "permissions" >&2
+    fail=1
+  fi
+
   if (( fail )); then
     echo "run-single-avd-scenario: SELF-TEST FAILED" >&2
     return 1
   fi
-  echo "run-single-avd-scenario: self-test passed (connect flake caught; clean pass, real post-connect failure, and non-connect failure all correctly NOT retried; app-failure check scoped to the final attempt; the network gate admits a guest whose on-link routes cover the relay, still rejects one with no route to it, and is satisfied by neither loopback, a foreign subnet, a downed interface, nor adb noise; the Wi-Fi read-back accepts only a literal 0, never 'null' or adb noise)."
+  echo "run-single-avd-scenario: self-test passed (connect flake caught; clean pass, real post-connect failure, and non-connect failure all correctly NOT retried; app-failure check scoped to the final attempt; the network gate admits a guest whose on-link routes cover the relay, still rejects one with no route to it, and is satisfied by neither loopback, a foreign subnet, a downed interface, nor adb noise; the Wi-Fi read-back accepts only a literal 0, never 'null' or adb noise; a connect-flake retry restores the app through install_app and re-grants. Phase 2's install barrier is app-install-lib.sh's, and its own --self-test pins it)."
   return 0
 }
 
@@ -682,12 +723,14 @@ fi
 # Harmless for the single-target e2e_combined run (guarantees a fresh
 # install). The leading force-stop/uninstall are best-effort: a missing
 # package makes them exit non-zero, which `|| true` swallows.
+#
+# A fresh install is exactly what can relaunch MainActivity under the driver
+# once its broadcast lands late, so nothing proceeds until the install's
+# broadcasts are flushed — see install_fresh in app-install-lib.sh, which
+# also owns the bound on that wait (INSTALL_BARRIER_SECS).
 # -----------------------------------------------------------------
-echo "Phase 2/4 — Clearing any prior install on ${DEVICE}..."
-adb -s "${DEVICE}" shell am force-stop com.oblivioustech.haven || true
-adb -s "${DEVICE}" uninstall com.oblivioustech.haven >/dev/null 2>&1 || true
 echo "Phase 2/4 — Installing APK on ${DEVICE}..."
-adb -s "${DEVICE}" install -r "${APK}"
+install_fresh "${DEVICE}" "${APK}" || exit 1
 echo "Phase 2/4 — Installed."
 
 # -----------------------------------------------------------------
@@ -716,18 +759,23 @@ echo "Phase 2/4 — Installed."
 # `e2e-fgs-publish` lane carries a probe that records the empirical
 # read-back on every run.)
 # -----------------------------------------------------------------
+# A function because a retried drive (Phase 4) has to put the grants back.
+grant_runtime_permissions() {
+  local perm
+  for perm in \
+    android.permission.ACCESS_FINE_LOCATION \
+    android.permission.ACCESS_COARSE_LOCATION \
+    android.permission.POST_NOTIFICATIONS
+  do
+    if adb -s "${DEVICE}" shell pm grant com.oblivioustech.haven "${perm}"; then
+      echo "  granted ${perm}"
+    else
+      echo "  WARN: failed to grant ${perm} (continuing)"
+    fi
+  done
+}
 echo "Phase 3/4 — Granting runtime permissions on ${DEVICE}..."
-for perm in \
-  android.permission.ACCESS_FINE_LOCATION \
-  android.permission.ACCESS_COARSE_LOCATION \
-  android.permission.POST_NOTIFICATIONS
-do
-  if adb -s "${DEVICE}" shell pm grant com.oblivioustech.haven "${perm}"; then
-    echo "  granted ${perm}"
-  else
-    echo "  WARN: failed to grant ${perm} (continuing)"
-  fi
-done
+grant_runtime_permissions
 echo "Phase 3/4 — Permissions ready."
 
 # -----------------------------------------------------------------
@@ -882,16 +930,20 @@ fi
 # default protects the long e2e_combined flow; the multi-target integration
 # lane overrides it tighter via HAVEN_DRIVE_TIMEOUT (run-integration-tests.sh).
 readonly DRIVE_TIMEOUT="${HAVEN_DRIVE_TIMEOUT:-20m}"
+# How long SIGKILL follows the drive's SIGTERM at DRIVE_TIMEOUT.
+readonly DRIVE_KILL_AFTER_SECS=30
 # Bounded retry for flutter_driver CONNECT-phase flakes (see is_connect_flake).
 # The cold-boot activity/engine recreate that GCs the app isolate mid-connect
-# is transient and app-state-independent, so a force-stop + relaunch of the
-# SAME installed APK reliably clears it (a fresh reinstall is strictly colder,
-# i.e. more exposed to the race). 3 total attempts mirrors flutter_tools' own
+# is transient and app-state-independent, so a relaunch clears it. Not of the
+# same install, though: a failed attempt's `flutter drive` teardown uninstalls
+# the app, so the retry restores it through install_app — a fresh install
+# flushed as Phase 2's is, not the unflushed one the next drive would make —
+# and puts the grants back. 3 total attempts mirrors flutter_tools' own
 # driver-launch retry (flutter/flutter#68334) and issue #95063's N=2-3. ONLY a
 # pure connect flake is retried — a genuine test failure fails the predicate,
-# and a hang (rc 124/137) is excluded — so this can never mask a bug, and the
-# worst case adds retries that each fail in seconds (a Collected isolate fails
-# fast), never a full DRIVE_TIMEOUT.
+# and a hang (rc 124/137) is excluded — so this can never mask a bug, and a
+# retried attempt ends in seconds (a Collected isolate fails fast) or at the
+# connect watchdog below, never at DRIVE_TIMEOUT.
 readonly DRIVE_MAX_ATTEMPTS="${HAVEN_DRIVE_MAX_ATTEMPTS:-3}"
 readonly DRIVE_RETRY_SETTLE_SECS="${HAVEN_DRIVE_RETRY_SETTLE_SECS:-5}"
 # Validate the attempt count as a positive integer (mirrors run-flake-stress.sh).
@@ -917,16 +969,37 @@ fi
 # normal cold connect completes in << 2 min, so 5 min is generous headroom that
 # never trips a healthy (if slow) launch, while sitting well under DRIVE_TIMEOUT
 # so a genuine post-connect test hang is unaffected (it only fires pre-connect).
-# It is ALSO bounded by the lane's outer job `timeout` (35 min for live_sync,
-# which also wraps setup-network-guard + install/grant + the post-drive secret
-# scan): the worst case is `(DRIVE_MAX_ATTEMPTS-1) × CONNECT_WATCHDOG +
-# DRIVE_TIMEOUT + (guard+install+grant+scan overhead)`, i.e.
-# `2×5 + 20 + ~3 = 33 min < 35 min`, so even a run that stalls then recovers on
-# a full retry stays clean inside the envelope rather than tripping a blind
-# outer SIGKILL that would lose the failure diagnostics. (Hangs are rc 124/137,
-# excluded from retry, so there is at most ONE full-DRIVE_TIMEOUT attempt.)
+# THE WORST CASE of one invocation, every bounded wait at its bound, in seconds:
+#
+#     (DRIVE_MAX_ATTEMPTS-1) x (CONNECT_WATCHDOG_SECS + WATCHDOG_KILL_GRACE_SECS
+#                               + INSTALL_BARRIER_SECS + DRIVE_RETRY_SETTLE_SECS)
+#   + DRIVE_TIMEOUT + DRIVE_KILL_AFTER_SECS
+#   + INSTALL_BARRIER_SECS + WIFI_OFF_TIMEOUT_SECS + GUEST_NET_TIMEOUT_SECS
+#   + the unbounded adb and scan work
+#
+# A retried attempt is a pre-connect stall: the watchdog's deadline, 5 s for its
+# TERM to take, the app's restore (a flushed fresh install when the failed
+# attempt's teardown removed it), then the settle. Hangs are rc 124/137 and never
+# retried, so the one attempt that can reach DRIVE_TIMEOUT is the last, plus its
+# 30 s `--kill-after`. The install barrier (INSTALL_BARRIER_SECS, app-install-lib.sh)
+# fails the run rather than driving when it reaches its bound, but one that
+# drains just inside it does not. The Wi-Fi and route bounds count their sleeps,
+# so those loops' adb reads join the unbounded work (clear, installed-package
+# probe, install, grants, secret scan, and a retry's restore): 15-28 s in run
+# 34488512808's three single-target lanes. At the defaults the bounded terms are
+# DRIVE_TIMEOUT + 1150 s.
+#
+# A single-target lane's wrapper must cover this sum plus whatever else it runs
+# inside its deadline, or a run that stalls and then recovers on a full retry
+# trips a blind outer SIGKILL that loses the failure diagnostics; e2e-android and
+# e2e-profile substitute their values into it at their drive steps. A
+# multi-target lane runs it once per target and cannot cover N of them, so its
+# aggregate deadline is the reaper by design (e2e-integration,
+# e2e-relay-customization and e2e-flakiness-stress say so at theirs).
 readonly CONNECT_WATCHDOG_SECS="${HAVEN_DRIVE_CONNECT_WATCHDOG_SECS:-300}"
 readonly WATCHDOG_POLL_SECS="${HAVEN_DRIVE_WATCHDOG_POLL_SECS:-5}"
+# How long the watchdog's SIGTERM gets before its SIGKILL.
+readonly WATCHDOG_KILL_GRACE_SECS=5
 if ! [[ "${CONNECT_WATCHDOG_SECS}" =~ ^[1-9][0-9]*$ ]]; then
   echo "ERROR: HAVEN_DRIVE_CONNECT_WATCHDOG_SECS must be a positive integer," \
        "got '${CONNECT_WATCHDOG_SECS}'" >&2
@@ -948,7 +1021,7 @@ readonly CONNECT_MARKER='Connected to Flutter application.'
 # watchdog control flow is currently validated by an external stubbed-drive
 # simulation (pass / real-failure / stall / stall-then-recover).
 spawn_flutter_drive() {
-  timeout --kill-after=30s "${DRIVE_TIMEOUT}" flutter drive \
+  timeout --kill-after="${DRIVE_KILL_AFTER_SECS}s" "${DRIVE_TIMEOUT}" flutter drive \
     --no-pub \
     --device-id "${DEVICE}" \
     --use-application-binary "${APK}" \
@@ -1002,7 +1075,7 @@ drive_with_connect_watchdog() {
     echo "WATCHDOG: 'Connected to Flutter application.' not reached within" \
          "${CONNECT_WATCHDOG_SECS}s — killing a pre-connect stall." >> "${log}"
     kill -TERM "${drive_pid}" 2>/dev/null || true
-    sleep 5
+    sleep "${WATCHDOG_KILL_GRACE_SECS}"
     kill -KILL "${drive_pid}" 2>/dev/null || true
   ) &
   local watchdog_pid=$!
@@ -1109,17 +1182,29 @@ while (( attempt <= DRIVE_MAX_ATTEMPTS )); do
            "(attempt ${attempt}/${DRIVE_MAX_ATTEMPTS}, rc=${drive_rc}) — the" \
            "app isolate never reached 'Connected to Flutter application.'" \
            "within ${CONNECT_WATCHDOG_SECS}s and no on-device test ran (likely" \
-           "a cold-emulator startup-capacity stall); force-stopping and" \
-           "retrying with a fresh launch." >&2
+           "a cold-emulator startup-capacity stall); force-stopping," \
+           "restoring the app if its teardown removed it, and retrying with a" \
+           "fresh launch." >&2
     else
       echo "WARN: flutter drive for ${SCENARIO_FILE} hit a flutter_driver" \
            "CONNECT-phase flake (attempt ${attempt}/${DRIVE_MAX_ATTEMPTS}," \
            "rc=${drive_rc}) — the app never reached 'Connected to Flutter" \
-           "application.' and no on-device test ran; force-stopping and" \
-           "retrying the same installed APK." >&2
+           "application.' and no on-device test ran; force-stopping," \
+           "restoring the app its teardown removed, and retrying." >&2
     fi
     rm -f "${attempt_log}"
     adb -s "${DEVICE}" shell am force-stop com.oblivioustech.haven || true
+    # A failed attempt's `flutter drive` teardown stops AND uninstalls the app
+    # (flutter_tools drive_service.dart stop(): stopApp, then uninstallApp), so
+    # the next drive's own install would be a fresh one — unflushed, and without
+    # the grants, which went with the package. After a watchdog kill the
+    # teardown may not have run, and install_app then only replaces.
+    if ! install_app "${DEVICE}" "${APK}"; then
+      echo "ERROR: could not restore ${APK} before attempt $(( attempt + 1 ))" \
+           "(see the ERROR above), so not retrying on an unflushed install." >&2
+      break
+    fi
+    grant_runtime_permissions
     sleep "${DRIVE_RETRY_SETTLE_SECS}"
     attempt=$(( attempt + 1 ))
     continue
@@ -1132,8 +1217,8 @@ cat /tmp/flutter-drive.log || true
 
 if (( preconnect_stall == 1 )); then
   echo "ERROR: flutter drive for ${SCENARIO_FILE} never connected within" \
-       "${CONNECT_WATCHDOG_SECS}s on the final attempt (pre-connect stall," \
-       "rc=${drive_rc}); treating as a target failure." >&2
+       "${CONNECT_WATCHDOG_SECS}s on the last attempt that ran (pre-connect" \
+       "stall, rc=${drive_rc}); treating as a target failure." >&2
 elif (( drive_rc == 124 || drive_rc == 137 )); then
   echo "ERROR: flutter drive for ${SCENARIO_FILE} exceeded ${DRIVE_TIMEOUT}" \
        "and was killed (rc=${drive_rc}); treating as a target failure." >&2

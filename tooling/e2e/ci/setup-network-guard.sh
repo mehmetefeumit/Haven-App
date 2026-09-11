@@ -584,10 +584,14 @@ send_probe() {
 }
 
 # await_log <prefix> <needle> — poll the kernel log for a matching line.
+#
+# The needle is matched against the captured lines, never piped into `grep -q`:
+# quitting on the match SIGPIPEs a writer with lines still to send, and pipefail
+# reads that 141 as "not found" — a healthy guard failing its own probe gate.
 await_log() {
   local prefix="$1" needle="$2" deadline=$(( SECONDS + PROBE_TIMEOUT ))
   while (( SECONDS < deadline )); do
-    if read_dmesg | grep -aF -- "${prefix}" | grep -qaF -- "${needle}"; then
+    if grep -qaF -- "${needle}" <<<"$(read_dmesg | grep -aF -- "${prefix}")"; then
       return 0
     fi
     sleep 1
@@ -1055,9 +1059,9 @@ do_teardown() {
 # self-test.
 #
 # It exercises the parts that decide a VERDICT: the allow-list parser, the CIDR
-# matcher, the kernel-line parser, and the report's exit codes. The kernel-side
-# machinery (rules, probes) is proven at install time by G1-G3 on the real
-# runner, which is the only place it can be proven.
+# matcher, the kernel-line parser, the probe wait's match, and the report's exit
+# codes. The kernel-side machinery (rules, probes) is proven at install time by
+# G1-G3 on the real runner, which is the only place it can be proven.
 # ---------------------------------------------------------------------------
 expect_rc() {
   local want="$1" desc="$2"
@@ -1152,6 +1156,24 @@ self_test() {
   [[ "$(wc -l <<< "${parsed}")" == "4" ]] \
     || { echo "SELF-TEST FAIL: parser produced $(wc -l <<< "${parsed}") records, want 4" >&2; fail=1; }
 
+  # ---- probe wait, against a ring far larger than a pipe ----
+  # The needle is the FIRST of ~1.2 MB of prefix lines, so a reader that quits
+  # on it leaves the writer more than a pipe's worth to send: that SIGPIPE is
+  # certain, not a race. Each case runs the real await_log in a child with a
+  # 1 s PROBE_TIMEOUT (readonly here), so the miss costs one poll.
+  local ring="${tmp}/ring.log"
+  awk -v p="${LOG_PREFIX_EXT}" \
+    'BEGIN { print p "needle"; for (i = 0; i < 40000; i++) print p "filler " i }' > "${ring}"
+  _await_case() { # _await_case <needle>
+    bash -c "set -euo pipefail; $(declare -f await_log)
+      read_dmesg() { cat '${ring}'; }; PROBE_TIMEOUT=1
+      await_log '${LOG_PREFIX_EXT}' '$1'"
+  }
+  _await_case needle \
+    || { echo "SELF-TEST FAIL: the probe wait missed its needle among megabytes of prefix lines" >&2; fail=1; }
+  ! _await_case absent \
+    || { echo "SELF-TEST FAIL: the probe wait reported a needle the ring does not hold" >&2; fail=1; }
+
   # ---- report verdicts, end to end, through the real do_report ----
   # Each case gets its own EGRESS_DIR so state cannot leak between them.
   # Each case runs the REAL `main` in a child shell, like scan-logs-for-secrets.sh
@@ -1241,7 +1263,8 @@ self_test() {
     return 1
   fi
   echo "setup-network-guard: self-test passed (CIDR matcher, allow-list refusals," \
-       "kernel-line parser, and all four report verdicts: unobservable/observe/enforce)."
+       "kernel-line parser, the probe wait over a ring larger than a pipe, and all" \
+       "four report verdicts: unobservable/observe/enforce)."
   return 0
 }
 
