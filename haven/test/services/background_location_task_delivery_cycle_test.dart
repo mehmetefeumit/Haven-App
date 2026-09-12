@@ -41,11 +41,14 @@ library;
 import 'dart:async';
 import 'dart:math';
 
+import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/services/background_location_manager.dart';
 import 'package:haven/src/services/background_location_task.dart';
 import 'package:haven/src/services/geolocator_location_service.dart';
+import 'package:haven/src/services/location_service.dart'
+    show LocationServiceException;
 import 'package:haven/src/services/publish_stagger.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -108,6 +111,26 @@ class _SwitchableStagger extends PublishStagger {
 
   @override
   Duration sampleGap({int totalPublishes = 2}) => gap;
+}
+
+/// The markers `_publishCycle` prints around a platform read, VERBATIM.
+///
+/// `tooling/e2e/ci/run-b1-fgs-publish.sh` times the gap between them to tell a
+/// one-shot that was ANSWERED from one that ran out into
+/// `getLastKnownPosition()` — the only difference between background sharing
+/// surviving with no fix available and only looking as if it does. A silent
+/// re-wording here takes that oracle's evidence away, so the text is pinned.
+const String _coldAsk = '[BackgroundTask] cold fix: asking the platform';
+const String _coldInHand = '[BackgroundTask] cold fix: in hand';
+
+/// Captures `debugPrint` output for the current test, restoring the original
+/// in a tear-down. Returns the live log list.
+List<String?> _captureDebugPrint() {
+  final log = <String?>[];
+  final original = debugPrint;
+  debugPrint = (String? message, {int? wrapWidth}) => log.add(message);
+  addTearDown(() => debugPrint = original);
+  return log;
 }
 
 void main() {
@@ -1281,6 +1304,81 @@ void main() {
             'closes on the way out or the presence claim has a hole exactly '
             'where the user came back',
       );
+    });
+  });
+
+  group('the cold-fix markers say which fix was published', () {
+    test('a cycle with no fresh fix brackets the platform read with them',
+        () async {
+      final harness = await deliveringHarness();
+      final base = DateTime.now();
+      await harness.tick(base);
+
+      // The circle comes due during the silence and the cached fix ages out,
+      // so this cycle has to ask the platform — the state the no-fix chain
+      // runs in.
+      harness.handler.dueTrackerForTest.markBurstPublished(
+        [scheduleKeyOf(circleFixture(seed: 1))],
+        DateTime.now(),
+      );
+      final silent = base.add(kStreamPositionMaxAge * 2);
+      harness.location.clock = () => silent;
+      final logs = _captureDebugPrint();
+      List<String?>? atRead;
+      harness.location.onGetCurrentLocation = () => atRead = List.of(logs);
+
+      await harness.tick(silent);
+
+      expect(harness.location.oneShotRequests, 1);
+      expect(
+        atRead,
+        contains(_coldAsk),
+        reason: 'the ask marker has to precede the platform read: the lane '
+            'times the one-shot from it, and a marker printed afterwards '
+            'would time something else',
+      );
+      expect(
+        atRead,
+        isNot(contains(_coldInHand)),
+        reason: 'a fix is only in hand once the read has returned one',
+      );
+      expect(logs.where((l) => l == _coldAsk), hasLength(1));
+      expect(logs.where((l) => l == _coldInHand), hasLength(1));
+      expect(logs.indexOf(_coldAsk), lessThan(logs.indexOf(_coldInHand)));
+    });
+
+    test('a cycle served from a delivered fix prints neither', () async {
+      // The steady state must stay silent, or every delivery-driven publish
+      // reads as one the platform was asked for.
+      final logs = _captureDebugPrint();
+      final harness = await deliveringHarness();
+
+      await harness.tick(DateTime.now());
+
+      expect(harness.location.oneShotRequests, 0);
+      expect(logs, isNot(contains(_coldAsk)));
+      expect(logs, isNot(contains(_coldInHand)));
+    });
+
+    test('a platform read that produces nothing prints no in-hand marker',
+        () async {
+      // The chain's last link failing — the one-shot runs out AND
+      // `getLastKnownPosition()` is empty — is background sharing stopping.
+      // An in-hand marker there would report a publish that never happened.
+      final logs = _captureDebugPrint();
+      final harness = await BackgroundTaskHarness.start(
+        circles: [circleFixture(seed: 1)],
+        events: FakeLocationEventService(jitteredSecs: 100),
+        location: FakeLocationService(
+          fix: () async => throw LocationServiceException('no fix'),
+        ),
+      );
+
+      await harness.tick(DateTime.now());
+
+      expect(harness.manager.encryptCalls, isEmpty);
+      expect(logs, contains(_coldAsk));
+      expect(logs, isNot(contains(_coldInHand)));
     });
   });
 }

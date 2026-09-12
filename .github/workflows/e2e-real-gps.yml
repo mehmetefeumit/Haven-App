@@ -30,8 +30,10 @@
 # The lane needs three things run-integration-tests.sh does not do and should
 # not learn: a VERIFIED `pm grant` (`pm grant` exits 0 even when it refuses,
 # so `dumpsys package` is the gate), a continuously re-issued `adb emu geo
-# fix` (the injection is one-shot into the HAL — there is no stream between
-# calls), and an APK built with the injected coordinates baked in as
+# fix` (a RETRY for an injection that failed to land — `geo fix` SETS the
+# emulated position and the emulator streams it at 1 Hz for as long as the
+# platform runs a GNSS session, CI run 34642726338), and an APK built with
+# the injected coordinates baked in as
 # `--dart-define`s so the drive target can assert against them.
 #
 # # Architecture mirrors e2e-fgs-publish.yml

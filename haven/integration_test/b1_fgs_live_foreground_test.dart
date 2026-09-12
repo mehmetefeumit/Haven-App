@@ -118,9 +118,11 @@
 ///      so the FGS's own publish cycles happen while the contention is
 ///      real;
 ///   8. closes the P2a proof window and then holds a SECOND time, for
-///      [_forcedIdleHoldDuration], during which the shell stops the
-///      emulator's `geo fix` drip and forces the device into deep idle —
-///      so the no-fix chain (stale stream fix -> one-shot timeout ->
+///      [_forcedIdleHoldDuration], during which the shell replaces the
+///      platform's `fused` provider — the one this app's registration AND
+///      its one-shot both use — with a test provider nothing ever gives a
+///      location to, and forces the device into deep idle, so the no-fix
+///      chain (stale stream fix -> one-shot timeout ->
 ///      `getLastKnownPosition()`) has to carry publishing on its own,
 ///      before returning and letting the framework's own
 ///      `runApp(Container(...))` unmount everything.
@@ -209,8 +211,9 @@
 /// tree does NOT reach it. This target therefore does not override
 /// `locationServiceProvider` at all: the foreground ALSO uses the real
 /// `GeolocatorLocationService`, so there is only one location code path in
-/// play, and the emulator GPS fix the shell seeds via `adb emu geo fix` is
-/// what both isolates read.
+/// play, and the emulator GPS fix the shell seeds via `adb emu geo fix` —
+/// which the emulator then streams to the guest once a second for as long as
+/// the platform runs GNSS — is what both isolates read.
 ///
 /// ## Markers
 ///
@@ -252,9 +255,9 @@
 ///     stops it again. An oracle windowed to EOF reads those as the service
 ///     dying mid-proof.
 ///   * [kIdlePhaseBeginMarker] (`[b1] IDLE_PHASE_BEGIN`) — printed AFTER
-///     [kHoldCompleteMarker], and the shell's cue to stop the `geo fix` drip
-///     and force the device into deep idle. The lifecycle is still `paused`
-///     throughout, so the FGS still owns publishing.
+///     [kHoldCompleteMarker], and the shell's cue to silence the platform's
+///     `fused` provider and force the device into deep idle. The lifecycle is
+///     still `paused` throughout, so the FGS still owns publishing.
 ///   * [kIdlePhaseEndMarker] (`[b1] IDLE_PHASE_END`) — closes the forced-idle
 ///     window, immediately before the lifecycle is restored to `resumed`.
 library;
@@ -274,7 +277,7 @@ import 'package:haven/src/constants/location.dart'
         kForegroundActiveAtMsKey,
         kLocationPublishMaxInterval,
         kOneShotLocationTimeout,
-        kStreamPositionMaxAge;
+        kPublishWakeLockTimeout;
 import 'package:haven/src/pages/map_shell.dart';
 import 'package:haven/src/providers/background_location_provider.dart'
     show backgroundSharingProvider;
@@ -365,8 +368,10 @@ const String kHandoffConfirmedMarker = '[b1] HANDOFF_CONFIRMED';
 /// service dying inside the window it was supposed to publish in.
 const String kHoldCompleteMarker = '[b1] HOLD_COMPLETE';
 
-/// Verbatim marker opening the forced-idle phase: the shell's cue to stop the
-/// emulator's `geo fix` drip and put the device into deep idle.
+/// Verbatim marker opening the forced-idle phase: the shell's cue to take the
+/// platform's ability to answer with a fix away — it replaces the `fused`
+/// provider with a test provider nothing ever gives a location to — and then
+/// put the device into deep idle.
 ///
 /// Printed AFTER [kHoldCompleteMarker] on purpose. The P2a steady-state
 /// oracles are bounded by that marker, so everything the forced-idle phase
@@ -397,22 +402,44 @@ final Duration _postPauseHoldDuration =
     kLocationPublishMaxInterval + const Duration(seconds: 32);
 
 /// How long this drive holds AFTER [kHoldCompleteMarker], with the shell having
-/// stopped the emulator's `geo fix` drip and forced the device into deep idle.
+/// silenced the platform's `fused` provider and forced the device into deep
+/// idle.
 ///
 /// Sized off the chain it has to contain, term by term:
-/// [kStreamPositionMaxAge] (the cached stream fix must age out before a cycle
-/// stops being served from it) + [kBackgroundRepeatInterval] (the watchdog can
-/// only start a cycle on a tick) + [kFirstDeliveryWait] (the cold-cache wait
-/// for a platform answer that will not come) + [kOneShotLocationTimeout] (the
-/// one-shot that cannot succeed, before `getLastKnownPosition()` answers), plus
-/// 60 s for the publish, the relay ack and the shell's own force-idle round
-/// trip. The shell asserts the same sum with a 30 s margin instead of this
-/// one's 60, so the publish it is looking for always falls inside this hold.
+/// [kLocationPublishMaxInterval] (the longest a circle can be scheduled after
+/// its last publish, i.e. the latest the watchdog has anything to do) +
+/// [kBackgroundRepeatInterval] (with nothing deliverable, a cycle can only
+/// start on a tick) + [kFirstDeliveryWait] (the cold-cache wait for a platform
+/// answer that will not come) + [kOneShotLocationTimeout] (the one-shot that
+/// cannot succeed, before `getLastKnownPosition()` answers).
+///
+/// Then the two terms that make this window OUTLAST that chain instead of
+/// merely equalling it. The shell asserts the same four links at a 30 s margin
+/// instead of this one's 60, and measures them from the PUBLISH BEFORE the
+/// chain — a publish that can land well after this hold has opened:
+///
+///   * [kPublishWakeLockTimeout], the app's own bound on one cycle's
+///     fix -> encrypt -> publish -> ack -> fetch. A delivery that arrived
+///     before the shell replaced the provider is still entitled to publish,
+///     and THAT publish is what the shell's window is then measured from. Run
+///     34642726338's first such cycle spent 21.6 s of the 30.
+///   * 60 s: the shell's own 30 s slack (its bound is that much longer than
+///     the four links), plus 30 s for everything between
+///     [kIdlePhaseBeginMarker] and the provider actually being replaced — the
+///     shell watcher's 2 s log poll and `arm_no_fix`'s adb round trips (1.5 s
+///     in that same run).
+///
+/// Sized this way the hold provably covers a full chain recovery measured from
+/// the LATEST publish the shell can anchor on. The previous 332 s did not: a
+/// pre-arm cycle publishing 27 s into the window left ~3 s of margin, and the
+/// lane went red on the oracle's "NOT A PRODUCT FINDING — lengthen the drive's
+/// forced-idle hold" note instead of on anything about the product.
 final Duration _forcedIdleHoldDuration =
-    kStreamPositionMaxAge +
+    kLocationPublishMaxInterval +
     kBackgroundRepeatInterval +
     kFirstDeliveryWait +
     kOneShotLocationTimeout +
+    kPublishWakeLockTimeout +
     const Duration(seconds: 60);
 
 void main() {
@@ -767,6 +794,10 @@ void main() {
           await Future<void>.delayed(const Duration(seconds: 10));
           elapsedHeartbeats += 1;
           if (elapsedHeartbeats.isEven) {
+            // `readLastPublishTime` reloads, and has to: the stamp is written
+            // by the FGS isolate, so a cached read reports "none yet" for a
+            // service that is publishing — which is exactly what every
+            // heartbeat of runs 34511084722 and 34642726338 printed.
             final lastPublish =
                 await BackgroundLocationManager.readLastPublishTime();
             debugPrint(
@@ -820,9 +851,12 @@ void main() {
 
         // --- PHASE 2: the no-fix chain (POWER_EFFICIENCY_PLAN.md 5.2 step 8,
         // the Doze-policy half). The lifecycle stays `paused`, so the FGS still
-        // owns publishing; the shell, on seeing this marker, kills the
-        // emulator's `geo fix` drip and forces the device into deep idle. From
-        // here on the delivery-driven path has nothing to run on, and the only
+        // owns publishing; the shell, on seeing this marker, replaces the
+        // platform's `fused` provider with a test provider it never gives a
+        // location to and forces the device into deep idle. From here on the
+        // delivery-driven path has nothing to run on — stopping the emulator's
+        // `geo fix` drip never achieved that, because the emulator streams the
+        // seeded position at 1 Hz whichever way the drip goes — and the only
         // way another location reaches the relay is the watchdog noticing the
         // silence, spending `kOneShotLocationTimeout` on a one-shot that cannot
         // be answered, and falling back to `getLastKnownPosition()`.
@@ -886,12 +920,15 @@ void main() {
       }
     },
     // Two holds now, not one: _postPauseHoldDuration (200 s) +
-    // _forcedIdleHoldDuration (332 s) = 532 s (8.9 min) of deliberate waiting,
-    // plus at most _broadcastBarrierWait (150 s) before either, leaves 158 s
+    // _forcedIdleHoldDuration (362 s) = 562 s (9.4 min) of deliberate waiting,
+    // plus at most _broadcastBarrierWait (150 s) before either, leaves 188 s
     // for the bootstrap, the circle creation and Bob's join — 12 s in run
-    // 34488512808. It stays under the shell's own 20 m drive bound so a wedge
-    // is attributed HERE, by this test's own message, rather than by an
-    // anonymous outer 124.
-    timeout: const Timeout(Duration(minutes: 14)),
+    // 34488512808. 15 m rather than 14: the barrier's own bound is 150 s (the
+    // shell reports a barrier only once it EXCEEDS its 120 s), and at 14 m a
+    // slow barrier plus an ordinary bootstrap would end this test HERE, on a
+    // timeout, with the forced-idle hold's 30 s growth as the cause. It stays
+    // under the shell's own 20 m drive bound so a wedge is attributed HERE, by
+    // this test's own message, rather than by an anonymous outer 124.
+    timeout: const Timeout(Duration(minutes: 15)),
   );
 }

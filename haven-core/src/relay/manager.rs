@@ -19,6 +19,9 @@ use nostr::{
     ClientMessage, Event, EventId, Filter, Kind, PublicKey, RelayMessage, RelayUrl, SubscriptionId,
 };
 use nostr_sdk::pool::relay::{RelayNotification, ReqExitPolicy};
+// The pool's own per-socket status, aliased because `super::types` exports a
+// Haven `RelayStatus` of its own (the UI-facing one).
+use nostr_sdk::RelayStatus as PoolRelayStatus;
 use nostr_sdk::{Client, Relay, RelayOptions, SubscribeAutoCloseOptions, SubscribeOptions};
 
 use super::clock_skew;
@@ -241,6 +244,107 @@ fn publish_relay_options() -> RelayOptions {
         .reconnect(false)
         .sleep_when_idle(true)
         .idle_timeout(PUBLISH_POOL_IDLE_TIMEOUT)
+}
+
+/// Terminates ONE publish target's socket when it is **wedged** — it reports
+/// itself `Connected` while the message Haven handed it is still sitting unread
+/// in its outbound channel — and reports whether it did.
+///
+/// # The wedge
+///
+/// `nostr-relay-pool` loses a live socket when `Relay::try_connect` completes a
+/// handshake in the instant a terminating connection task has already announced
+/// its exit (`nostr-relay-pool-0.44.3 inner.rs:600`) but has not yet cleared the
+/// flag the spawn gates on (`:609`): `_try_connect` sets `Connected` (`:678`),
+/// then `spawn_connection_task` sees `is_running()` (`:510-513`), logs and
+/// returns — **dropping the stream it was handed**. The relay is left
+/// `Connected` with no task, and `Connected` is the one status the pool will
+/// never re-dial (`can_connect()`, `status.rs:120-122`) while
+/// `ensure_operational` (`:238-274`) still accepts sends. Every later publish
+/// then queues into a channel nobody reads: no bytes leave, no relay answers,
+/// no error surfaces, and nothing ever recovers it for the life of the process.
+/// Haven's own burst options widen the window — `sleep_when_idle` announces
+/// `Sleeping` before `post_connection` runs `close_ws` on the way out (`:788`),
+/// and `Relay::disconnect` opens it too.
+///
+/// # Why `unsent`, and not simply "this relay did not acknowledge"
+///
+/// Because a relay that is merely SLOW must keep its socket. This pool hands a
+/// relay exactly one message per attempt and this check runs only once that
+/// attempt's ack window has closed, so an unread message is not backpressure —
+/// it is a socket with no reader. A relay that took the bytes and answered late
+/// (or never) reads zero here and is left alone, which is the difference between
+/// recovering a wedge and re-handshaking the whole pool on every publish.
+///
+/// One residual: the fetch paths and any concurrent publish share this pool, so
+/// a message of THEIRS enqueued in the microseconds before this reading lands
+/// reads as a wedge, and it costs more than the re-dial. `disconnect` announces
+/// `Terminated` and broadcasts `Shutdown` (`inner.rs:1255-1271`), so a
+/// concurrent `wait_for_ok` on that relay ends as `NotConnected` (`:1383-1388`)
+/// — that relay refuses that publish — and a concurrent per-relay REQ scores
+/// not-drained, holding that circle's catch-up cursor for one round. Both
+/// recover on the next tick, and both are spent against a relay that otherwise
+/// swallows everything until the process restarts.
+///
+/// # Why only `Connected`
+///
+/// It is the only status that is both un-dialable and dead: `Pending` and
+/// `Connecting` still have a task that will reach a dialable status by itself,
+/// `Disconnected` belongs to a retrying task this pool never has
+/// (`reconnect(false)`), and `Sleeping` / `Terminated` are already dialable.
+/// Matched exhaustively so a crate bump that adds a status has to be decided
+/// rather than silently folded into "not wedged".
+fn terminate_wedged_socket(
+    status: PoolRelayStatus,
+    unsent: usize,
+    terminate: impl FnOnce(),
+) -> bool {
+    if unsent == 0 {
+        return false;
+    }
+    let wedged = match status {
+        PoolRelayStatus::Connected => true,
+        PoolRelayStatus::Initialized
+        | PoolRelayStatus::Pending
+        | PoolRelayStatus::Connecting
+        | PoolRelayStatus::Disconnected
+        | PoolRelayStatus::Terminated
+        | PoolRelayStatus::Banned
+        | PoolRelayStatus::Sleeping => false,
+    };
+    if wedged {
+        terminate();
+    }
+    wedged
+}
+
+/// Frees every wedged publish target, so the NEXT send dials a live socket
+/// instead of queueing into a channel nobody reads.
+///
+/// Runs at the tail of every publish attempt, including a successful one and
+/// including a failed one: a publish that landed on two relays of three leaves
+/// the third wedged for the life of the process, silently spending the
+/// redundancy a user's peers depend on. It reads the attempt's outcome nowhere
+/// and changes it in no way — which relays acknowledged is decided before this
+/// runs and is never revisited, so Security Rule 13's "acked means acked" is
+/// untouched.
+///
+/// `Relay::disconnect` is safe to call from any status and is a no-op once the
+/// relay is `Terminated` (`inner.rs:1255-1271`), so this is idempotent; it
+/// touches nothing but the publish pool's own sockets.
+async fn recover_wedged_publish_sockets(client: &Client, relay_urls: &[RelayUrl]) {
+    let mut freed: usize = 0;
+    for url in relay_urls {
+        if let Ok(relay) = client.relay(url.as_str()).await {
+            if terminate_wedged_socket(relay.status(), relay.queue(), || relay.disconnect()) {
+                freed += 1;
+            }
+        }
+    }
+    // A count only: which relay a device publishes to is linkable metadata.
+    if freed > 0 {
+        log::warn!("[RelayManager] freed {freed} wedged publish socket(s)");
+    }
 }
 
 /// Runs an idempotent publish `attempt` up to `max_attempts` times,
@@ -548,25 +652,32 @@ impl RelayManager {
         // Add relays, connect, and wait for WebSocket handshakes.
         Self::add_relays_and_connect(client, relay_urls).await;
 
-        let send_result = tokio::time::timeout(
+        let sent = tokio::time::timeout(
             DEFAULT_TIMEOUT,
             client.send_event_to(relay_urls.iter().map(RelayUrl::as_str), event),
         )
-        .await
-        .map_err(|_| {
-            log::warn!(
-                "[RelayManager] publish_event: timed out after {}s",
-                DEFAULT_TIMEOUT.as_secs()
-            );
-            RelayError::Timeout("Event publish timed out".to_string())
-        })?
-        .map_err(|e| {
-            log::debug!(
-                "[RelayManager] publish_event: send_event error: {}",
-                redact_hex_sequences(&e.to_string())
-            );
-            RelayError::Publish(e.to_string())
-        })?;
+        .await;
+
+        // Before either failure is propagated: a socket that swallowed this
+        // event is precisely why a send times out, and the ladder's next
+        // attempt is worth nothing unless it dials a live one.
+        recover_wedged_publish_sockets(client, relay_urls).await;
+
+        let send_result = sent
+            .map_err(|_| {
+                log::warn!(
+                    "[RelayManager] publish_event: timed out after {}s",
+                    DEFAULT_TIMEOUT.as_secs()
+                );
+                RelayError::Timeout("Event publish timed out".to_string())
+            })?
+            .map_err(|e| {
+                log::debug!(
+                    "[RelayManager] publish_event: send_event error: {}",
+                    redact_hex_sequences(&e.to_string())
+                );
+                RelayError::Publish(e.to_string())
+            })?;
         log::debug!(
             "[RelayManager] publish_event: success={}, failed={}",
             send_result.success.len(),
@@ -782,6 +893,10 @@ impl RelayManager {
             }
         }
 
+        // A silent relay is EITHER slow or holding this event unsent forever;
+        // only the second is freed here, and only after the ack window closed.
+        recover_wedged_publish_sockets(client, relay_urls).await;
+
         // Counts only: which relays a device publishes to is itself linkable
         // metadata and a refusal is remote prose (Rule 8), so neither a URL nor
         // a reason is logged here (matching the per-relay fetch probe).
@@ -853,6 +968,10 @@ impl RelayManager {
                     log::debug!("[RelayManager] background publish timed out");
                 }
             }
+
+            // This path has no retry of its own, so the wedge it would leave
+            // behind would be paid for by whatever publishes next.
+            recover_wedged_publish_sockets(&client, &relay_urls).await;
         });
 
         Ok(())
@@ -3089,14 +3208,9 @@ mod tests {
 
     /// A loopback port that was free at the instant it was returned.
     ///
-    /// The only way to learn a free port is to HOLD it, and `RelayBuilder`
-    /// takes a port number rather than a listener — so the probe socket is
-    /// released before anything can claim the port, and the answer is stale by
-    /// construction (TOCTOU). Callers that BIND it must therefore treat a lost
-    /// race as a retry, not as a failure: see [`relay_on_a_fixed_port`].
-    /// Callers that want a port with nothing listening on it take the same
-    /// staleness in the other direction — a foreign socket arriving there turns
-    /// an expected connection refusal into a live relay.
+    /// Stale by construction (TOCTOU): the probe socket is released before
+    /// returning, so a foreign socket arriving there turns an expected
+    /// connection refusal into a live relay.
     async fn ephemeral_port() -> u16 {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -3104,20 +3218,58 @@ mod tests {
         listener.local_addr().expect("local addr").port()
     }
 
-    /// Runs a `LocalRelay` on a KNOWN loopback port, retrying the whole
-    /// pick-then-bind if another socket took the port in between.
+    /// A loopback front door to a relay, on a port the TEST holds for its whole
+    /// life, whose open connections the test can cut.
     ///
-    /// Returns the relay and the port it took, so the caller can restart on the
-    /// same address later — the reason a fixed port is wanted at all.
-    async fn relay_on_a_fixed_port() -> (LocalRelay, u16) {
-        for _ in 0..8 {
-            let port = ephemeral_port().await;
-            let relay = LocalRelay::new(RelayBuilder::default().port(port));
-            if relay.run().await.is_ok() {
-                return (relay, port);
+    /// This is how a test drops the relay's side of a socket, because
+    /// `LocalRelay::shutdown` cannot promise to: it is a
+    /// `Notify::notify_waiters`, which stores no permit, so a relay connection
+    /// task that is not parked in its `select!` at that instant (still
+    /// finishing the EVENT it just acknowledged) never hears it and keeps the
+    /// socket open. It also returns before the relay's listener is released,
+    /// so re-binding that port races the relay's own task.
+    struct CuttableDoor {
+        url: String,
+        open: std::sync::Arc<std::sync::Mutex<tokio::task::JoinSet<()>>>,
+    }
+
+    impl CuttableDoor {
+        async fn in_front_of(relay: &LocalRelay) -> Self {
+            let target = relay
+                .url()
+                .await
+                .as_str_without_trailing_slash()
+                .trim_start_matches("ws://")
+                .to_string();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind the front door");
+            let url = format!("ws://{}", listener.local_addr().expect("local addr"));
+            let open = std::sync::Arc::new(std::sync::Mutex::new(tokio::task::JoinSet::new()));
+            let accepted = std::sync::Arc::clone(&open);
+            tokio::spawn(async move {
+                while let Ok((inbound, _)) = listener.accept().await {
+                    let splice = Self::splice(inbound, target.clone());
+                    accepted.lock().expect("door lock").spawn(splice);
+                }
+            });
+            Self { url, open }
+        }
+
+        /// Carries one accepted connection to the relay until either side
+        /// closes it — or until the test cuts the task holding both sockets.
+        async fn splice(mut inbound: tokio::net::TcpStream, target: String) {
+            if let Ok(mut outbound) = tokio::net::TcpStream::connect(target).await {
+                let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
             }
         }
-        panic!("no loopback port stayed free long enough for a relay to bind it");
+
+        /// Closes every connection accepted so far, returning once their
+        /// sockets are closed.
+        async fn cut(&self) {
+            let mut open = std::mem::take(&mut *self.open.lock().expect("door lock"));
+            open.shutdown().await;
+        }
     }
 
     /// Refuses every REQ that names `0` as an author, so ONE relay can serve
@@ -3180,6 +3332,13 @@ mod tests {
             .await
             .expect("the publish added the relay to the pool");
         let mut notifications = relay.notifications();
+        assert_eq!(
+            relay.queue(),
+            0,
+            "a finished burst leaves nothing unsent, so the wedge check cannot \
+             fire inside the burst model and never races the idle monitor for \
+             this socket",
+        );
 
         assert_eq!(
             next_relay_status(&mut notifications, wait_budget(180)).await,
@@ -3198,6 +3357,12 @@ mod tests {
              publish's own wake",
         );
         assert!(relay.is_connected(), "the woken relay is connected again");
+        assert_eq!(
+            relay.queue(),
+            0,
+            "the woken socket sent what it was given, so the wake costs one \
+             handshake and no teardown",
+        );
     }
 
     /// `reconnect(false)`: a dropped publish socket goes straight to
@@ -3209,11 +3374,32 @@ mod tests {
     /// strand a later publish (a commit, a welcome): every send path re-drives
     /// `add_relays_and_connect`, and `try_connect_relay` connects from
     /// `Terminated`.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    ///
+    /// Single-threaded on purpose, which HIDES an upstream defect rather than
+    /// fixing it. The pool announces `Terminated`
+    /// (`nostr-relay-pool-0.44.3 inner.rs:600`) BEFORE its connection task
+    /// clears the flag `spawn_connection_task` checks (`inner.rs:510-513` vs
+    /// `:609`), so a socket connected inside that window is silently dropped
+    /// and the relay left `Connected` with no task — every later send then
+    /// queues into a channel nobody reads. Nothing between those two lines
+    /// yields, so one thread cannot interleave them. A multi-threaded runtime
+    /// can: this body stranded ~2% of runs under CPU oversubscription (24-way,
+    /// 1127 runs), each one reporting `Connected` at the failed publish. Treat
+    /// that rate as harness-specific — a 16-worker run on 2 cores reproduced it
+    /// 0 times in 3000, which is consistent with a window of tens of ns rather
+    /// than evidence against it. The app's runtime IS multi-threaded
+    /// (`flutter_rust_bridge`'s `tokio::runtime::Runtime::new`), so this is a
+    /// product exposure, not a loopback artefact. It is mitigated on the
+    /// publish path by `terminate_wedged_socket`, which frees exactly that
+    /// socket at the tail of every attempt; this body is the ordering that
+    /// reaches it. The READ paths share the pool and are NOT mitigated.
+    #[tokio::test(flavor = "current_thread")]
     async fn a_dropped_publish_socket_does_not_reconnect_on_its_own() {
         let _ = allow_ws_loopback_for_test();
-        let (server, port) = relay_on_a_fixed_port().await;
-        let url = server.url().await.to_string();
+        let server = LocalRelay::new(RelayBuilder::default());
+        server.run().await.expect("local relay runs");
+        let door = CuttableDoor::in_front_of(&server).await;
+        let url = door.url.clone();
 
         let manager = RelayManager::new();
         assert!(manager
@@ -3231,7 +3417,7 @@ mod tests {
             .await
             .expect("the publish added the relay to the pool");
         let mut notifications = relay.notifications();
-        server.shutdown();
+        door.cut().await;
 
         assert_eq!(
             next_relay_status(&mut notifications, wait_budget(30)).await,
@@ -3241,11 +3427,6 @@ mod tests {
              publishing to",
         );
 
-        let restarted = LocalRelay::new(RelayBuilder::default().port(port));
-        restarted
-            .run()
-            .await
-            .expect("the relay comes back on its port");
         assert!(
             manager
                 .publish_event(&throwaway_note("after the drop"), &[url])
@@ -3254,6 +3435,941 @@ mod tests {
                 .is_success(),
             "reconnect(false) must never strand a later publish: the send path \
              reconnects from Terminated inside its own attempt",
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // The wedged publish socket.
+    //
+    // `nostr-relay-pool` drops a live socket when a handshake finishes in the
+    // instant a terminating connection task has announced its exit but not yet
+    // cleared the flag the spawn gates on, and leaves the relay `Connected`
+    // with no task: a status the pool will never re-dial, that accepts sends,
+    // and that writes none of them. One such relay in the publish pool swallows
+    // every location, commit and welcome aimed at it for the life of the
+    // process, with no error anywhere — see `terminate_wedged_socket`.
+    //
+    // The state CANNOT be built against a real pool in-process: it needs the
+    // pool's connection task interleaved between `inner.rs:600` (it announces
+    // `Terminated`) and `:609` (it clears the flag), and nothing between those
+    // two statements yields, so one thread cannot interleave them and a
+    // multi-threaded runtime cannot be made to on demand. So the recovery is
+    // driven through the real ladder against a modelled socket, the two
+    // readings the model stands on are measured separately on a real one
+    // (`a_real_publish_socket_reads_empty_until_nothing_is_reading_it`,
+    // `a_relay_that_took_the_publish_and_went_silent_keeps_its_socket`), and
+    // what the recovery DOES with those readings is measured on a real one too
+    // (`the_recovery_terminates_a_real_socket_that_holds_an_unread_message`).
+    //
+    // A proxy that stops READING client -> relay reaches the same two readings
+    // through TCP backpressure, and was rejected rather than written: pushing
+    // until `queue() > 0` proves nothing (the channel is 1024 deep and
+    // `batch_msg` is a `try_send`, so any push loop outruns a healthy writer),
+    // and the one shape that IS stable — a single message larger than every
+    // buffer between the pool and the proxy, which blocks the writer in
+    // `send_ws_msgs` — rests on this host's `tcp_wmem` ceiling and on
+    // tungstenite's unbounded write buffer, against `WEBSOCKET_TX_TIMEOUT`'s
+    // 10 s. It would observe the same status transition the test above already
+    // observes, on machine properties no test here can read.
+    // ------------------------------------------------------------------
+
+    /// Which sockets the wedge check touches, over every status the pool can
+    /// report. Both halves are promises, and they pull in opposite directions:
+    /// a wedged socket MUST be freed, or the pool swallows events until the
+    /// process restarts, and nothing else may be, because every needless
+    /// termination is a handshake the next publish pays for in radio time.
+    ///
+    /// The expectations are written out rather than recomputed from the
+    /// predicate, so the test states the intent instead of restating the code.
+    #[test]
+    fn only_a_connected_socket_holding_an_unread_message_is_freed() {
+        let cases = [
+            // The wedge: connected, and our bytes never left.
+            (PoolRelayStatus::Connected, 1usize, true),
+            (PoolRelayStatus::Connected, 9, true),
+            // Connected and empty — the shape of every healthy publish, and of
+            // a relay that took the event and answered slowly or not at all.
+            (PoolRelayStatus::Connected, 0, false),
+            // A task is still running towards a dialable status by itself.
+            (PoolRelayStatus::Pending, 1, false),
+            (PoolRelayStatus::Connecting, 1, false),
+            (PoolRelayStatus::Disconnected, 1, false),
+            // Already dialable: the next attempt reconnects without help.
+            (PoolRelayStatus::Initialized, 1, false),
+            (PoolRelayStatus::Terminated, 1, false),
+            (PoolRelayStatus::Sleeping, 1, false),
+            // Banned is the pool's refusal, never ours to overturn.
+            (PoolRelayStatus::Banned, 1, false),
+        ];
+
+        for (status, unsent, expected) in cases {
+            let terminated = std::cell::Cell::new(false);
+            let freed = terminate_wedged_socket(status, unsent, || terminated.set(true));
+            assert_eq!(
+                freed, expected,
+                "{status} with {unsent} unread message(s): freed={freed}, \
+                 expected={expected}",
+            );
+            assert_eq!(
+                terminated.get(),
+                expected,
+                "{status} with {unsent} unread message(s) must {} terminate \
+                 the socket",
+                if expected { "" } else { "not" },
+            );
+        }
+
+        let covered: std::collections::HashSet<PoolRelayStatus> =
+            cases.iter().map(|(status, ..)| *status).collect();
+        assert_eq!(
+            covered.len(),
+            8,
+            "every status the pool can report has to be decided here, or a \
+             status nobody thought about decides itself: {covered:?}",
+        );
+    }
+
+    /// One publish target's socket, modelling the three upstream rules that
+    /// decide whether a publish reaches a relay: the pool re-dials only from a
+    /// status `can_connect()` accepts (`status.rs:120-122`), a send is accepted
+    /// whenever the status is `Connected` (`ensure_operational`,
+    /// `inner.rs:238-274`), and a socket whose connection task was dropped
+    /// keeps what it is handed in its channel instead of writing it
+    /// (`inner.rs:74`, `:510-513`).
+    struct FakeSocket {
+        status: std::cell::Cell<PoolRelayStatus>,
+        /// Messages handed to the socket that nothing has read.
+        unsent: std::cell::Cell<usize>,
+        /// Whether a connection task is draining the outbound channel.
+        reading: std::cell::Cell<bool>,
+        /// Whether the relay behind the socket answers what it receives.
+        answers: std::cell::Cell<bool>,
+        dials: std::cell::Cell<u32>,
+        terminations: std::cell::Cell<u32>,
+    }
+
+    impl FakeSocket {
+        /// A socket the pool left `Connected` with no connection task.
+        fn wedged() -> Self {
+            Self {
+                status: std::cell::Cell::new(PoolRelayStatus::Connected),
+                unsent: std::cell::Cell::new(0),
+                reading: std::cell::Cell::new(false),
+                answers: std::cell::Cell::new(true),
+                dials: std::cell::Cell::new(0),
+                terminations: std::cell::Cell::new(0),
+            }
+        }
+
+        /// A live socket to a relay that never answers: it reads every byte
+        /// Haven hands it and returns no `OK` — a slow relay, or one whose
+        /// answer is lost on the way back.
+        fn silent() -> Self {
+            let socket = Self::wedged();
+            socket.reading.set(true);
+            socket.answers.set(false);
+            socket
+        }
+
+        /// What [`RelayManager::add_relays_and_connect`] does to this socket
+        /// before a send: a handshake, but only from a status the pool will
+        /// dial.
+        fn dial(&self) {
+            if matches!(
+                self.status.get(),
+                PoolRelayStatus::Initialized
+                    | PoolRelayStatus::Terminated
+                    | PoolRelayStatus::Sleeping
+            ) {
+                self.dials.set(self.dials.get() + 1);
+                self.status.set(PoolRelayStatus::Connected);
+                self.reading.set(true);
+            }
+        }
+
+        /// Offers one event; `true` when the relay acknowledged it. A reading
+        /// socket drains its whole backlog, which is what the pool's connection
+        /// task does with the channel it inherits.
+        fn offer_event(&self) -> bool {
+            if self.status.get() != PoolRelayStatus::Connected {
+                return false;
+            }
+            if self.reading.get() {
+                self.unsent.set(0);
+                return self.answers.get();
+            }
+            self.unsent.set(self.unsent.get() + 1);
+            false
+        }
+
+        /// `Relay::disconnect`: the socket goes, the channel's contents stay.
+        fn terminate(&self) {
+            self.terminations.set(self.terminations.get() + 1);
+            self.status.set(PoolRelayStatus::Terminated);
+            self.reading.set(false);
+        }
+
+        /// ONE publish attempt, in the order the production attempt runs it:
+        /// connect, send, then free the socket if it turned out to be wedged.
+        fn publish_attempt(&self) -> PublishResult {
+            self.dial();
+            let acked = self.offer_event();
+            terminate_wedged_socket(self.status.get(), self.unsent.get(), || self.terminate());
+            dummy_publish_result(acked)
+        }
+    }
+
+    /// A target wedged on the first attempt is freed, and the SAME publish
+    /// lands on the next one.
+    ///
+    /// This is the whole point of the mitigation: an MLS commit, a welcome or a
+    /// key package is lost for good if the ladder gives up (Security Rule 13),
+    /// and before this every attempt after the first queued into the same dead
+    /// channel — three attempts, ~49 s of timeouts, zero bytes sent.
+    #[tokio::test]
+    async fn a_wedged_publish_target_is_freed_so_the_next_attempt_lands() {
+        let socket = FakeSocket::wedged();
+
+        let result = publish_with_retry(MAX_PUBLISH_ATTEMPTS, Duration::ZERO, |_| {
+            let outcome = socket.publish_attempt();
+            async move { Ok(outcome) }
+        })
+        .await;
+
+        assert!(
+            result
+                .expect("the freed socket carries the retry")
+                .is_success(),
+            "a wedged relay must cost ONE publish attempt, not every publish \
+             for the life of the process",
+        );
+        assert_eq!(
+            socket.terminations.get(),
+            1,
+            "freed once, on the attempt that found it wedged",
+        );
+        assert_eq!(
+            socket.dials.get(),
+            1,
+            "the worst case is ONE extra handshake per wedged target per \
+             publish: the dial the freed socket needs to send at all",
+        );
+    }
+
+    /// A relay that TOOK the publish and stayed silent keeps its socket, for
+    /// the whole ladder.
+    ///
+    /// The power promise, and the reason the trigger reads the unsent count
+    /// rather than "this relay did not acknowledge": a slow relay is
+    /// indistinguishable from a silent one inside the ack window, and tearing
+    /// it down would buy a fresh handshake on every publish — exactly the radio
+    /// work `publish_relay_options` exists to remove.
+    #[tokio::test]
+    async fn a_silent_target_that_took_the_publish_keeps_its_socket() {
+        let socket = FakeSocket::silent();
+
+        let result = publish_with_retry(MAX_PUBLISH_ATTEMPTS, Duration::ZERO, |_| {
+            let outcome = socket.publish_attempt();
+            async move { Ok(outcome) }
+        })
+        .await;
+
+        assert!(
+            matches!(result, Err(RelayError::AllRelaysFailed)),
+            "nothing acknowledged, so the publish still fails: {result:?}",
+        );
+        assert_eq!(
+            socket.terminations.get(),
+            0,
+            "a socket that sent what it was given is never torn down, however \
+             the publish ended",
+        );
+        assert_eq!(
+            socket.dials.get(),
+            0,
+            "and not one extra handshake is paid for across the full ladder",
+        );
+    }
+
+    /// On the LOCATION path a wedged target costs exactly one sample, and the
+    /// next sample lands.
+    ///
+    /// [`LOCATION_PUBLISH_ATTEMPTS`] is 1, so the recovery has no attempt of
+    /// its own to be rescued by: the sample that met the wedge is gone, and
+    /// what the user is promised is that the wedge does not outlive it — the
+    /// difference between one missing fix and a peer who never moves again
+    /// until the app restarts. Two successive single-attempt publishes over one
+    /// socket are exactly that promise, and the only place it is observable.
+    #[tokio::test]
+    async fn a_wedged_location_target_costs_one_sample_and_the_next_lands() {
+        let socket = FakeSocket::wedged();
+        let sample = || {
+            publish_with_retry(LOCATION_PUBLISH_ATTEMPTS, Duration::ZERO, |_| {
+                let outcome = socket.publish_attempt();
+                async move { Ok(outcome) }
+            })
+        };
+
+        let lost = sample().await;
+        assert!(
+            matches!(lost, Err(RelayError::AllRelaysFailed)),
+            "the one attempt queued into the wedged socket, so this sample is \
+             lost whatever the recovery does: {lost:?}",
+        );
+
+        assert!(
+            sample()
+                .await
+                .expect("the freed socket carries the next sample")
+                .is_success(),
+            "the NEXT sample must land: with one attempt per publish, a wedge \
+             that survives the publish that found it swallows every location \
+             this device sends to that relay for the life of the process",
+        );
+        assert_eq!(
+            socket.terminations.get(),
+            1,
+            "freed once, by the sample that found it wedged",
+        );
+        assert_eq!(
+            socket.dials.get(),
+            1,
+            "and the second sample pays the one handshake that costs",
+        );
+    }
+
+    /// The two readings the wedge check is built on, taken from a REAL pool
+    /// socket in both directions.
+    ///
+    /// `Relay::queue()` counts the messages Haven handed the socket that its
+    /// connection task has not read (`inner.rs:102-104` over the channel at
+    /// `:74`), and the whole mitigation rests on that being zero exactly when
+    /// the bytes left. Measured here after a publish the relay acknowledged,
+    /// and after a send into a relay with no connection task at all — the
+    /// second being the reading a wedged socket gives, on a relay the pool
+    /// still accepts sends for.
+    ///
+    /// Single-threaded, and no await between the send and the reading, so no
+    /// other task can run in between: the count is what the pool holds rather
+    /// than a lucky sample.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_real_publish_socket_reads_empty_until_nothing_is_reading_it() {
+        let _ = allow_ws_loopback_for_test();
+        let server = LocalRelay::new(RelayBuilder::default());
+        server.run().await.expect("local relay runs");
+        let url = server.url().await.to_string();
+
+        let manager = RelayManager::new();
+        assert!(manager
+            .publish_event(&throwaway_note("acknowledged"), std::slice::from_ref(&url))
+            .await
+            .expect("the relay is up")
+            .is_success(),);
+
+        let relay = manager
+            .client
+            .relay(url.as_str())
+            .await
+            .expect("the publish added the relay to the pool");
+        assert_eq!(relay.status(), PoolRelayStatus::Connected);
+        assert_eq!(
+            relay.queue(),
+            0,
+            "a relay that acknowledged the publish read every byte of it",
+        );
+        assert!(
+            !terminate_wedged_socket(relay.status(), relay.queue(), || panic!(
+                "a socket that sent what it was given must never be terminated"
+            )),
+            "the shape every healthy publish leaves behind must not be read as \
+             a wedge, or the pool re-handshakes on every send",
+        );
+
+        // Take the connection task away, then hand the socket another event:
+        // `ensure_operational` still accepts it (it gates on a success rate,
+        // not on the status), and nothing is left to read it.
+        relay.disconnect();
+        relay
+            .batch_msg(vec![ClientMessage::event(throwaway_note("unread"))])
+            .expect("the pool accepts a send it has nobody to write");
+        assert_eq!(
+            relay.queue(),
+            1,
+            "an unread message is what a socket with no reader looks like",
+        );
+        assert!(
+            terminate_wedged_socket(PoolRelayStatus::Connected, relay.queue(), || {}),
+            "that reading, on the `Connected` status the upstream race leaves \
+             behind, is the wedge the check has to recognise",
+        );
+    }
+
+    /// What the recovery DOES to a real pool socket it finds `Connected`
+    /// holding an unread message: it terminates it, and the next publish dials
+    /// a live one.
+    ///
+    /// The predicate's table above says which readings mean "wedged"; this says
+    /// that `recover_wedged_publish_sockets` acts on them — the one link a
+    /// modelled socket cannot make, because the thing being pinned is that the
+    /// closure it hands the predicate really is the pool's `disconnect`. A
+    /// mitigation whose closure did nothing would leave every reading below
+    /// unchanged and every other test in this file green.
+    ///
+    /// Single-threaded, and the reading the recovery takes is the one the
+    /// `batch_msg` two lines above it created: `yield_now` hands the connection
+    /// task an empty channel and a fresh cooperative budget, and nothing
+    /// between there and the recovery's own `client.relay()` (one uncontended
+    /// read lock) can return `Pending`, so on one thread nothing else runs in
+    /// between. The message is therefore unread for the same reason a wedged
+    /// socket's is — nothing is reading it — rather than by a lucky sample.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_recovery_terminates_a_real_socket_that_holds_an_unread_message() {
+        let _ = allow_ws_loopback_for_test();
+        let server = LocalRelay::new(RelayBuilder::default());
+        server.run().await.expect("local relay runs");
+        let url = server.url().await.to_string();
+        let relay_urls = vec![RelayUrl::parse(&url).expect("loopback url")];
+
+        let manager = RelayManager::new();
+        assert!(manager
+            .publish_event(
+                &throwaway_note("before the wedge"),
+                std::slice::from_ref(&url)
+            )
+            .await
+            .expect("the relay is up")
+            .is_success(),);
+
+        let relay = manager
+            .client
+            .relay(url.as_str())
+            .await
+            .expect("the publish added the relay to the pool");
+        tokio::task::yield_now().await;
+        assert_eq!(relay.status(), PoolRelayStatus::Connected);
+        assert_eq!(relay.queue(), 0, "the finished publish left nothing unsent");
+
+        relay
+            .batch_msg(vec![ClientMessage::event(throwaway_note("unread"))])
+            .expect("the pool accepts the send");
+        assert_eq!(relay.queue(), 1);
+        recover_wedged_publish_sockets(&manager.client, &relay_urls).await;
+
+        assert_eq!(
+            relay.status(),
+            PoolRelayStatus::Terminated,
+            "the recovery has to FREE the socket, not merely recognise it: a \
+             relay left `Connected` here is one the pool will never re-dial and \
+             will keep accepting sends it cannot write",
+        );
+        assert_eq!(
+            relay.queue(),
+            1,
+            "what was already queued is not recovered — the event is lost and \
+             only the socket comes back, which is why the ladder's next attempt \
+             is what lands it",
+        );
+        assert!(
+            manager
+                .publish_event(&throwaway_note("after the wedge"), &[url])
+                .await
+                .expect("the next publish reconnects")
+                .is_success(),
+            "and freeing it must leave a target the very next publish reaches, \
+             or the recovery trades a silent wedge for a dead relay",
+        );
+    }
+
+    /// A loopback front door that can stop carrying what the relay SAYS while
+    /// still carrying everything the client sends.
+    ///
+    /// This is how a test gets a relay that took the publish and never
+    /// answered: `LocalRelay` has no hook for withholding an `OK`, and cutting
+    /// the socket answers a different question — a cut socket terminates, a
+    /// muted one stays `Connected` with an empty queue, which is the shape a
+    /// slow relay has.
+    struct MutingDoor {
+        url: String,
+        muted: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl MutingDoor {
+        async fn in_front_of(relay: &LocalRelay) -> Self {
+            let target = relay
+                .url()
+                .await
+                .as_str_without_trailing_slash()
+                .trim_start_matches("ws://")
+                .to_string();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind the front door");
+            let url = format!("ws://{}", listener.local_addr().expect("local addr"));
+            let muted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let accepted = std::sync::Arc::clone(&muted);
+            tokio::spawn(async move {
+                while let Ok((inbound, _)) = listener.accept().await {
+                    tokio::spawn(Self::splice(
+                        inbound,
+                        target.clone(),
+                        std::sync::Arc::clone(&accepted),
+                    ));
+                }
+            });
+            Self { url, muted }
+        }
+
+        /// Carries one accepted connection. The relay's side is always READ —
+        /// so the relay is never backpressured into looking slow — and only
+        /// forwarded while the door is unmuted.
+        async fn splice(
+            inbound: tokio::net::TcpStream,
+            target: String,
+            muted: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        ) {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+            let Ok(outbound) = tokio::net::TcpStream::connect(target).await else {
+                return;
+            };
+            let (mut from_client, mut to_client) = inbound.into_split();
+            let (mut from_relay, mut to_relay) = outbound.into_split();
+            let upstream = tokio::spawn(async move {
+                let _ = tokio::io::copy(&mut from_client, &mut to_relay).await;
+            });
+
+            let mut buf = [0u8; 8192];
+            loop {
+                match from_relay.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => {
+                        if !muted.load(std::sync::atomic::Ordering::SeqCst)
+                            && to_client.write_all(&buf[..read]).await.is_err()
+                        {
+                            break;
+                        }
+                    }
+                }
+            }
+            upstream.abort();
+        }
+
+        /// Drops everything the relay says from here on.
+        fn mute(&self) {
+            self.muted.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// A real relay that received the publish and answered nothing keeps its
+    /// socket, and pays no new handshake.
+    ///
+    /// The power promise on a real socket, and the one case that separates this
+    /// trigger from "terminate every target that did not acknowledge": the
+    /// bytes DID leave, so there is nothing to recover — the relay was slow, or
+    /// its answer was lost, and its socket is still the cheapest way to reach
+    /// it.
+    ///
+    /// Costs one [`LOCATION_ACK_WINDOW`] of wall clock by construction: the
+    /// answer is dropped on the floor, so the only way out is the window
+    /// closing. Deterministic for the same reason — no `OK` can arrive.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_relay_that_took_the_publish_and_went_silent_keeps_its_socket() {
+        let _ = allow_ws_loopback_for_test();
+        let server = LocalRelay::new(RelayBuilder::default());
+        server.run().await.expect("local relay runs");
+        let door = MutingDoor::in_front_of(&server).await;
+        let url = door.url.clone();
+
+        let manager = RelayManager::new();
+        assert!(manager
+            .publish_event(&throwaway_note("heard"), std::slice::from_ref(&url))
+            .await
+            .expect("the relay is up")
+            .is_success(),);
+
+        let relay = manager
+            .client
+            .relay(url.as_str())
+            .await
+            .expect("the publish added the relay to the pool");
+        let handshakes = relay.stats().attempts();
+        door.mute();
+
+        let silent = manager
+            .publish_location_event(&throwaway_note("unanswered"), &[url])
+            .await;
+        assert!(
+            matches!(silent, Err(RelayError::AllRelaysFailed)),
+            "the relay's OK never reaches us, so nothing acknowledged: \
+             {silent:?}",
+        );
+        assert_eq!(
+            relay.queue(),
+            0,
+            "the publish LEFT — the socket read every byte of it, and what \
+             went missing is the answer",
+        );
+        assert_eq!(
+            relay.status(),
+            PoolRelayStatus::Connected,
+            "so the socket must survive: terminating a silent relay would \
+             re-handshake it on every publish for as long as it stays slow",
+        );
+        assert_eq!(
+            relay.stats().attempts(),
+            handshakes,
+            "and not one new handshake was paid for",
+        );
+    }
+
+    /// The call every send path owes, and the three ways this file hands an
+    /// event to a relay: the pooled fan-out, the harvest's per-relay unit, and
+    /// the `Relay` handle's own send — which is what that unit uses, and what a
+    /// new function written against a relay handle directly would use.
+    const WEDGE_CHECK: &str = "recover_wedged_publish_sockets(";
+    const SENDS: [&str; 3] = [
+        "client.send_event_to(",
+        "send_to_one(client,",
+        "relay.send_event(",
+    ];
+
+    /// One production function, comment-free and whitespace-free.
+    struct ScannedFn {
+        name: String,
+        code: String,
+    }
+
+    impl ScannedFn {
+        /// Whether this body runs the wedge check after the LAST event it hands
+        /// a relay — the promise itself. A check that runs before the send
+        /// cannot observe the attempt it exists to repair, and reads as
+        /// compliant to anything that only looks for the call.
+        fn checks_after_sending(&self) -> bool {
+            let last_send = SENDS.iter().filter_map(|send| self.code.rfind(send)).max();
+            match (last_send, self.code.rfind(WEDGE_CHECK)) {
+                (Some(send), Some(check)) => check > send,
+                _ => false,
+            }
+        }
+
+        fn sends(&self) -> bool {
+            SENDS.iter().any(|send| self.code.contains(send))
+        }
+    }
+
+    /// `line` up to the `//` that starts a comment, string literals respected.
+    ///
+    /// Without the literal state a `wss://` URL truncates its own line; without
+    /// the strip, a commented-out call site counts as a call site.
+    fn code_before_comment(line: &str) -> &str {
+        let bytes = line.as_bytes();
+        let mut in_string = false;
+        let mut i = 0;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'\\' if in_string => i += 1,
+                b'"' => in_string = !in_string,
+                b'/' if !in_string && bytes.get(i + 1) == Some(&b'/') => return &line[..i],
+                _ => {}
+            }
+            i += 1;
+        }
+        line
+    }
+
+    /// The name a function-declaring line declares, if it is one.
+    ///
+    /// Every modifier Rust allows before `fn` has to be stripped, `pub(crate)`
+    /// included: a declaration this misses is not a function, so its body is
+    /// appended to the previous one and inherits whatever THAT one does.
+    fn declared_name(line: &str) -> Option<&str> {
+        let mut rest = line.trim_start();
+        loop {
+            if let Some(after_pub) = rest.strip_prefix("pub(") {
+                let close = after_pub.find(')')?;
+                rest = after_pub[close + 1..].trim_start();
+                continue;
+            }
+            match ["pub ", "async ", "const "]
+                .iter()
+                .find_map(|prefix| rest.strip_prefix(prefix))
+            {
+                Some(stripped) => rest = stripped.trim_start(),
+                None => break,
+            }
+        }
+        rest.strip_prefix("fn ")?.split(['(', '<', ' ']).next()
+    }
+
+    /// Every production function in `source`, in declaration order.
+    ///
+    /// Whitespace is squeezed out of each body so a call rustfmt broke over
+    /// three lines is still the same call: `self\n.client\n.send_event_to(`
+    /// matches nothing a line-at-a-time substring search looks for.
+    fn scan_production_functions(source: &str) -> Vec<ScannedFn> {
+        let production = &source[..source
+            .find("#[cfg(test)]")
+            .expect("this module's own tests are not production source")];
+        assert!(
+            !production.contains("/*"),
+            "this scan strips `//` comments only, so a block comment would be \
+             read back as code; teach `code_before_comment` about it rather \
+             than trusting what it says about this file",
+        );
+
+        let mut functions: Vec<ScannedFn> = Vec::new();
+        for line in production.lines() {
+            let code = code_before_comment(line);
+            if let Some(name) = declared_name(code) {
+                functions.push(ScannedFn {
+                    name: name.to_string(),
+                    code: String::new(),
+                });
+            }
+            if let Some(function) = functions.last_mut() {
+                function
+                    .code
+                    .extend(code.chars().filter(|c| !c.is_whitespace()));
+            }
+        }
+        functions
+    }
+
+    /// How a send path breaks the promise. Named rather than described, so a
+    /// fixture asserts the fault it means instead of counting faults — a
+    /// different fault arriving at the same count is how a blind spot hides.
+    #[derive(Debug, PartialEq, Eq)]
+    enum SendPathFault {
+        /// Hands an event to a relay and nothing recovers the socket after: one
+        /// left `Connected` with the event unsent swallows every later publish
+        /// to that relay for the life of the process.
+        NoWedgeCheck(String),
+        /// Checks before the send it exists to repair, so it can only ever see
+        /// the previous attempt's socket.
+        CheckBeforeSend(String),
+        /// A per-relay unit is covered by its callers — and this caller does
+        /// not run the check after calling it.
+        DelegatedToUnchecked { sender: String, caller: String },
+    }
+
+    /// Which functions hand an event to a relay, and which of them break the
+    /// promise that the wedge check runs after they do.
+    fn audit_send_paths(source: &str) -> (Vec<String>, Vec<SendPathFault>) {
+        let functions = scan_production_functions(source);
+        let mut senders = Vec::new();
+        let mut faults = Vec::new();
+
+        for function in functions.iter().filter(|f| f.sends()) {
+            senders.push(function.name.clone());
+            if function.checks_after_sending() {
+                continue;
+            }
+            if function.code.contains(WEDGE_CHECK) {
+                faults.push(SendPathFault::CheckBeforeSend(function.name.clone()));
+                continue;
+            }
+            // Or it delegates: a per-relay unit whose every caller runs the
+            // check after calling it is covered, and tearing the socket down
+            // inside the unit would do it once per relay per attempt.
+            let mut callers = functions
+                .iter()
+                .filter(|other| other.name != function.name)
+                .filter(|other| other.code.contains(&format!("{}(", function.name)))
+                .peekable();
+            if callers.peek().is_none() {
+                faults.push(SendPathFault::NoWedgeCheck(function.name.clone()));
+            } else if let Some(unchecked) = callers.find(|caller| !caller.checks_after_sending()) {
+                faults.push(SendPathFault::DelegatedToUnchecked {
+                    sender: function.name.clone(),
+                    caller: unchecked.name.clone(),
+                });
+            }
+        }
+        (senders, faults)
+    }
+
+    /// Every function that hands an event to a relay runs the wedge check
+    /// afterwards — including one written after this.
+    ///
+    /// Structural, and deliberately so for the ORDER: what the check does is
+    /// pinned against a real socket by
+    /// `the_recovery_terminates_a_real_socket_that_holds_an_unread_message`,
+    /// but that it runs after each production send cannot be, because a wedge
+    /// cannot be built against a real pool in-process (see this section's
+    /// header). A path that moved the call before its send, or stopped making
+    /// it, would look identical from outside until a relay went silent forever
+    /// in the field.
+    #[test]
+    fn every_function_that_sends_an_event_runs_the_wedge_check_after_sending() {
+        let (senders, faults) = audit_send_paths(include_str!("manager.rs"));
+        assert!(
+            faults.is_empty(),
+            "the publish paths have to recover a wedged socket AFTER handing it \
+             an event: {faults:?}",
+        );
+        for expected in [
+            "try_publish_once",
+            "try_publish_once_harvesting",
+            "publish_event_background",
+            "send_to_one",
+        ] {
+            assert!(
+                senders.iter().any(|name| name == expected),
+                "the scan has to reach `{expected}` or it is reading nothing: \
+                 {senders:?}",
+            );
+        }
+    }
+
+    /// Wraps a fixture as a whole production half, so the scan treats it the
+    /// way it treats this file.
+    fn fixture(production: &str) -> String {
+        format!("{production}\n#[cfg(test)]\nmod tests {{}}\n")
+    }
+
+    /// A commented-out call site is not a call site.
+    #[test]
+    fn the_scan_reads_code_and_not_comments() {
+        let (senders, faults) = audit_send_paths(&fixture(
+            "async fn publish(client: &Client) {
+                 client.send_event_to(urls, event).await;
+                 // recover_wedged_publish_sockets(client, urls).await;
+             }",
+        ));
+        assert_eq!(senders, ["publish"]);
+        assert_eq!(
+            faults,
+            [SendPathFault::NoWedgeCheck("publish".to_string())],
+            "a `//` in front of the call site is the whole of {WEDGE_CHECK}, \
+             and it cannot be allowed to read as a call",
+        );
+    }
+
+    /// A URL is not a comment: the literal that carries `wss://` keeps its
+    /// line, or every send written on one is invisible to this scan.
+    #[test]
+    fn the_scan_keeps_a_line_that_carries_a_url_literal() {
+        let (senders, faults) = audit_send_paths(&fixture(
+            "async fn publish(client: &Client) {
+                 let urls = [\"wss://relay.example.com\"]; client.send_event_to(urls, event).await;
+             }",
+        ));
+        assert_eq!(senders, ["publish"]);
+        assert_eq!(faults, [SendPathFault::NoWedgeCheck("publish".to_string())]);
+    }
+
+    /// A call rustfmt broke over lines is still that call.
+    #[test]
+    fn the_scan_follows_a_send_split_over_lines() {
+        let (senders, faults) = audit_send_paths(&fixture(
+            "async fn publish(&self) {
+                 let _sent = self
+                     .client
+                     .send_event_to(urls, event)
+                     .await;
+             }",
+        ));
+        assert_eq!(senders, ["publish"], "the split send has to be found");
+        assert_eq!(faults, [SendPathFault::NoWedgeCheck("publish".to_string())]);
+    }
+
+    /// A `pub(crate)` body belongs to itself, not to whatever came before it.
+    #[test]
+    fn the_scan_attributes_a_pub_crate_body_to_its_own_function() {
+        let (senders, faults) = audit_send_paths(&fixture(
+            "async fn checked(client: &Client) {
+                 client.send_event_to(urls, event).await;
+                 recover_wedged_publish_sockets(client, urls).await;
+             }
+
+             pub(crate) async fn unchecked(client: &Client) {
+                 client.send_event_to(urls, event).await;
+             }",
+        ));
+        assert_eq!(senders, ["checked", "unchecked"], "{senders:?}");
+        assert_eq!(
+            faults,
+            [SendPathFault::NoWedgeCheck("unchecked".to_string())],
+            "a declaration the scan misses appends its body to the function \
+             before it, where it inherits that one's check",
+        );
+    }
+
+    /// The `Relay` handle's own send counts as handing an event to a relay.
+    #[test]
+    fn the_scan_knows_the_relay_handles_own_send() {
+        let (senders, faults) = audit_send_paths(&fixture(
+            "async fn hand_it_over(relay: &Relay, event: &Event) {
+                 let _ = relay.send_event(event).await;
+             }",
+        ));
+        assert_eq!(senders, ["hand_it_over"], "{senders:?}");
+        assert_eq!(
+            faults,
+            [SendPathFault::NoWedgeCheck("hand_it_over".to_string())],
+        );
+    }
+
+    /// A check that runs before the send is not a check.
+    #[test]
+    fn the_scan_rejects_a_check_that_runs_before_the_send() {
+        let (_, faults) = audit_send_paths(&fixture(
+            "async fn publish(client: &Client) {
+                 recover_wedged_publish_sockets(client, urls).await;
+                 client.send_event_to(urls, event).await;
+             }",
+        ));
+        assert_eq!(
+            faults,
+            [SendPathFault::CheckBeforeSend("publish".to_string())],
+            "a check that runs first never sees the socket its own attempt \
+             wedged, and reads as compliant to anything that only looks for \
+             the call",
+        );
+    }
+
+    /// A per-relay unit is covered by its callers, and only while they cover
+    /// it.
+    #[test]
+    fn the_scan_accepts_a_send_unit_every_caller_checks_after() {
+        let delegating = "async fn send_to_one(client: &Client, url: &RelayUrl) {
+                 let _ = relay.send_event(event).await;
+             }";
+        let (senders, faults) = audit_send_paths(&fixture(&format!(
+            "{delegating}
+
+             async fn harvest(client: &Client) {{
+                 let _outcomes = urls.map(|url| send_to_one(client, url, event, bound));
+                 recover_wedged_publish_sockets(client, urls).await;
+             }}",
+        )));
+        assert_eq!(senders, ["send_to_one", "harvest"], "{senders:?}");
+        assert_eq!(
+            faults,
+            [],
+            "the caller checks after the call, so both are covered and the unit \
+             must not be asked to tear a socket down once per relay"
+        );
+
+        let (_, reversed) = audit_send_paths(&fixture(&format!(
+            "{delegating}
+
+             async fn harvest(client: &Client) {{
+                 recover_wedged_publish_sockets(client, urls).await;
+                 let _outcomes = urls.map(|url| send_to_one(client, url, event, bound));
+             }}",
+        )));
+        assert_eq!(
+            reversed,
+            [
+                SendPathFault::DelegatedToUnchecked {
+                    sender: "send_to_one".to_string(),
+                    caller: "harvest".to_string(),
+                },
+                SendPathFault::CheckBeforeSend("harvest".to_string()),
+            ],
+            "the delegation is good only while the caller's check follows the \
+             call",
         );
     }
 

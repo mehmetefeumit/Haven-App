@@ -25,9 +25,68 @@ import 'package:haven/src/services/ios_location_source.dart';
 import 'package:haven/src/services/location_service.dart';
 import 'package:mockito/annotations.dart';
 import 'package:mockito/mockito.dart';
+import 'package:plugin_platform_interface/plugin_platform_interface.dart';
 
 import '../mocks/fake_ios_location_source.dart';
 import 'geolocator_location_service_test.mocks.dart';
+
+/// A [geo.GeolocatorPlatform] that records which Android provider stack each
+/// last-known read asked for, and otherwise answers a granted, cold device.
+///
+/// [DefaultGeolocatorWrapper] supplies `forceLocationManager` itself, so a
+/// mocked [GeolocatorWrapper] structurally cannot observe the choice — only
+/// the platform underneath the real wrapper can.
+class _RoutingRecorderPlatform extends geo.GeolocatorPlatform
+    with MockPlatformInterfaceMixin {
+  _RoutingRecorderPlatform({this.lastKnown});
+
+  /// The `forceLocationManager` value of every last-known read, in order.
+  /// `true` is the platform `LocationManager`, `false` GMS's fused client.
+  final List<bool> lastKnownRoutes = <bool>[];
+
+  /// What the last-known read answers.
+  final geo.Position? lastKnown;
+
+  /// The plugin position stream, so a test can warm the service's cache.
+  ///
+  /// Broadcast so `close()` completes in the tests that never subscribe — a
+  /// single-subscription controller only delivers its done event to a
+  /// listener, so its teardown would hang instead of failing.
+  final StreamController<geo.Position> positions =
+      StreamController<geo.Position>.broadcast();
+
+  @override
+  Future<bool> isLocationServiceEnabled() async => true;
+
+  @override
+  Future<geo.LocationPermission> checkPermission() async =>
+      geo.LocationPermission.whileInUse;
+
+  @override
+  Future<geo.LocationAccuracyStatus> getLocationAccuracy() async =>
+      geo.LocationAccuracyStatus.precise;
+
+  @override
+  Future<geo.Position?> getLastKnownPosition({
+    bool forceLocationManager = false,
+  }) async {
+    lastKnownRoutes.add(forceLocationManager);
+    return lastKnown;
+  }
+
+  /// Always the cold device: the one-shot times out, which is what routes
+  /// [GeolocatorLocationService.getCurrentLocation] into its last-known
+  /// fallback — the second of the two call sites under test.
+  @override
+  Future<geo.Position> getCurrentPosition({
+    geo.LocationSettings? locationSettings,
+  }) async => throw TimeoutException('no cold fix', kOneShotLocationTimeout);
+
+  @override
+  Stream<geo.Position> getPositionStream({
+    geo.LocationSettings? locationSettings,
+  }) => positions.stream;
+}
 
 /// Generate mocks for GeolocatorWrapper.
 ///
@@ -3770,6 +3829,123 @@ void main() {
         final defaultService = GeolocatorLocationService();
         expect(defaultService, isNotNull);
       });
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // Which Android provider stack the last-known read goes to.
+  //
+  // geolocator defaults `getLastKnownPosition` to GMS's
+  // `FusedLocationProviderClient` wherever Play Services is present, while
+  // every other read this service makes carries `forceLocationManager: true`.
+  // That default is not a cosmetic inconsistency at either caller: the app-op
+  // `_platformStillPermitsLocation` exists to detect is applied by AOSP's
+  // `LocationProviderManager` and NOT by the cache inside Google's process, so
+  // on the GMS route the gate can certify access the OS already withdrew and
+  // the cold-chain fallback can publish a coordinate it no longer authorises —
+  // and asking GMS at all hands Google a location request the rest of this
+  // service deliberately never makes.
+  //
+  // These drive the REAL wrapper against a fake platform, because the wrapper
+  // is where the argument is supplied; a mocked wrapper cannot see it.
+  // -----------------------------------------------------------------------
+  group('the last-known read never routes through Play Services', () {
+    late geo.GeolocatorPlatform original;
+
+    geo.Position fixAt(double latitude) => geo.Position(
+      latitude: latitude,
+      longitude: 0,
+      timestamp: DateTime.now(),
+      accuracy: 5,
+      altitude: 0,
+      altitudeAccuracy: 1,
+      heading: 0,
+      headingAccuracy: 1,
+      speed: 0,
+      speedAccuracy: 1,
+    );
+
+    setUp(() => original = geo.GeolocatorPlatform.instance);
+    tearDown(() => geo.GeolocatorPlatform.instance = original);
+
+    /// Installs [platform] beneath the production wrapper — the service is
+    /// built with NO wrapper override, so the route under test is the one
+    /// production takes.
+    GeolocatorLocationService serviceOn(_RoutingRecorderPlatform platform) {
+      geo.GeolocatorPlatform.instance = platform;
+      addTearDown(platform.positions.close);
+      return GeolocatorLocationService(
+        isIOS: false,
+        iosSource: FakeIosLocationSource(),
+      );
+    }
+
+    test('the wrapper asks for the platform LocationManager', () async {
+      final platform = _RoutingRecorderPlatform(lastKnown: fixAt(51.5));
+      geo.GeolocatorPlatform.instance = platform;
+      addTearDown(platform.positions.close);
+
+      final position = await const DefaultGeolocatorWrapper()
+          .getLastKnownPosition();
+
+      expect(position?.latitude, 51.5);
+      expect(
+        platform.lastKnownRoutes,
+        [true],
+        reason: 'the last-known read went to the GMS fused client, whose '
+            'answer no app-op gates and whose cache nothing in this app '
+            'feeds',
+      );
+    });
+
+    test(
+      'the app-op corroboration behind the cached fix takes that route',
+      () async {
+        final platform = _RoutingRecorderPlatform(lastKnown: fixAt(30));
+        final service = serviceOn(platform);
+        final subscription = service.getLocationStream().listen((_) {});
+        addTearDown(subscription.cancel);
+        platform.positions.add(fixAt(51.5));
+        await Future<void>.delayed(Duration.zero);
+
+        final result = await service.getCurrentLocation();
+
+        expect(
+          result.latitude,
+          51.5,
+          reason: 'the CACHED fix, which is what makes the recorded read the '
+              'corroboration in _platformStillPermitsLocation rather than '
+              'the cold fallback',
+        );
+        expect(
+          platform.lastKnownRoutes,
+          [true],
+          reason: 'the gate corroborated a cached fix against GMS, so an '
+              'app-op denial would still read as "the platform still serves '
+              'this app" — the cache would go on being published',
+        );
+      },
+    );
+
+    test('the cold-chain fallback takes that route too', () async {
+      final platform = _RoutingRecorderPlatform(lastKnown: fixAt(30));
+      final service = serviceOn(platform);
+
+      final result = await service.getCurrentLocation();
+
+      expect(
+        result.latitude,
+        30,
+        reason: 'the one-shot timed out, so this is the last-known fallback '
+            'the background chain ends on',
+      );
+      expect(
+        platform.lastKnownRoutes,
+        [true],
+        reason: 'the fallback that keeps background sharing alive answered '
+            'from GMS, which would publish a coordinate after an app-op '
+            'denial had already withdrawn access',
+      );
     });
   });
 }

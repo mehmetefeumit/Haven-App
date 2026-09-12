@@ -1799,10 +1799,26 @@ independently requires three completion markers — `[b3] REAL_FIX_OBSERVED`
 reporting it published to nothing, which a presence check would read as a pass),
 and `[b3] PEER_DECRYPT_MATCH`.
 
-*Three traps it is built around.* `adb emu geo fix` is a ONE-SHOT injection into
-the goldfish GNSS HAL — it starts no stream and the HAL discards any requested
-interval — so the fix is re-issued on a loop for the life of the drive, or a
-one-shot `getCurrentPosition()` lands in a gap and times out. A REJECTED
+*Three traps it is built around.* ~~`adb emu geo fix` is a ONE-SHOT injection
+into the goldfish GNSS HAL — it starts no stream and the HAL discards any
+requested interval — so the fix is re-issued on a loop for the life of the
+drive, or a one-shot `getCurrentPosition()` lands in a gap and times out.~~
+**CORRECTED 2026-09-11 — the premise was false, the lane is not.** `adb emu geo
+fix` SETS the emulated position, and the emulator then streams it to the guest's
+GNSS HAL as NMEA once a second for as long as the platform runs a GNSS session,
+whether or not the injection is repeated. CI run 34642726338's FGS-lane capture
+shows both halves: the ranchu HAL logged `Gnss:onGnssLocationCb` once a second
+inside every GNSS session — 20:44:56–20:45:00, 20:47:40–20:47:44 and
+20:49:30–20:49:34, each ending 8 ms before one of Haven's deliveries — minutes
+after that lane had stopped its own `geo fix` drip, and the first session drained
+~239 NMEA sentences that had been buffered one per second since the seed. So the
+injection does not expire and stopping it creates no no-fix condition. B3's
+re-issue loop is therefore **REDUNDANT, not wrong** — it retries a console
+command that failed to land — and nothing about this lane's behaviour changes;
+what changes is what the loop may be read as. It is not a lever: a lane that
+needs a no-fix condition makes one at the platform instead
+(`run-b1-fgs-publish.sh`'s `arm_no_fix` replaces the `fused` provider with a test
+provider nothing ever gives a location to, and reads it back). A REJECTED
 `pm grant` still exits 0 (the hard-restricted gate is a bare `return` after a
 `Log.e`), so `dumpsys package` is the gate and the drive re-reads the permission
 through the plugin as an independent second check. And the `google_apis` AVDs
@@ -1838,8 +1854,11 @@ it:
   cannot erase the grant between the grant and first launch. Every alternative
   rests on a running CLLocationManager observing a live TCC change, which Apple
   documents nowhere.
-* **`simctl location set` needs no re-issue loop.** Unlike `adb emu geo fix`
-  (B3's one-shot HAL injection), it is persistent DEVICE state: it holds until
+* **`simctl location set` needs no re-issue loop.** ~~Unlike `adb emu geo fix`
+  (B3's one-shot HAL injection), it~~ **CORRECTED 2026-09-11: the contrast with
+  B3 was drawn against a premise that is false (see the B3 item above — `geo fix`
+  does not expire either). What stands is the property itself:** `simctl location
+  set` is persistent DEVICE state: it holds until
   `clear` or shutdown and is not app-scoped, so it survives the re-install the
   delegated `flutter test` performs. One call is correct, and a missing fix
   therefore means the simulator never delivered — never that a seed expired.
@@ -2517,9 +2536,17 @@ location ops — with no prior location access there is no entry to report — s
 the app-op half of the probe is uninformative as written and burns its full
 30s poll. `dumpsys package` is the authoritative signal and did answer.)
 
-**New, unrelated risk this surfaced for B3/B4:** `adb emu geo fix` is a one-shot
-injection into the goldfish GNSS HAL with no stream between injections (the HAL
-discards the requested interval), so any real-GPS scenario needs a re-issue loop.
+**New, unrelated risk this surfaced for B3/B4:** ~~`adb emu geo fix` is a
+one-shot injection into the goldfish GNSS HAL with no stream between injections
+(the HAL discards the requested interval), so any real-GPS scenario needs a
+re-issue loop.~~ **WITHDRAWN 2026-09-11 — this was never a risk, because the
+premise is false.** `adb emu geo fix` SETS the emulated position and the emulator
+streams it to the guest at 1 Hz for as long as the platform runs a GNSS session,
+whether or not the injection is repeated (CI run 34642726338; derivation on the
+B3 item above). No real-GPS scenario NEEDS a re-issue loop to keep a fix
+available — the loops B3/B5/B6 run are retries for an injection that failed to
+land, and they are harmless where they are. Read nothing else into them: in
+particular, stopping such a loop does not create a no-fix condition.
 Separately, the AVDs run `google_apis` images where geolocator may resolve to
 FUSED location while `geo fix` documents only the LocationManager provider —
 `forceLocationManager: true` is the diagnostic lever if the emulator goes dark.

@@ -403,11 +403,32 @@ class BackgroundLocationManager {
   /// Reads the last background publish timestamp from shared preferences.
   ///
   /// Returns `null` if no background publish has occurred this session.
+  ///
+  /// Reloaded, like every other cross-isolate read here. The writer is the FGS
+  /// isolate (`background_location_task.dart`), and `SharedPreferences` keeps
+  /// the whole store in a per-isolate memory cache populated at that isolate's
+  /// first `getInstance()` (`shared_preferences_legacy.dart:79-107`, pinned
+  /// 2.5.5) — so a UI-side reader that does not reload keeps answering from
+  /// the snapshot taken at launch: "never published" for a service that has
+  /// been publishing for hours.
+  ///
+  /// Fail-soft for the same reason [isForegroundActive] is: the caller reads
+  /// this mid-`_onResumed`, where a throw would abandon the rest of the
+  /// resume. A failed read reports "nothing recorded", which the caller
+  /// already handles.
   static Future<DateTime?> readLastPublishTime() async {
-    final prefs = await SharedPreferences.getInstance();
-    final ms = prefs.getInt(kBackgroundLastPublishMsKey);
-    if (ms == null) return null;
-    return DateTime.fromMillisecondsSinceEpoch(ms);
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.reload();
+      final ms = prefs.getInt(kBackgroundLastPublishMsKey);
+      if (ms == null) return null;
+      return DateTime.fromMillisecondsSinceEpoch(ms);
+    } on Object catch (e) {
+      debugPrint(
+        '[BackgroundManager] last-publish read failed: ${e.runtimeType}',
+      );
+      return null;
+    }
   }
 
   /// Writes the last publish timestamp to shared preferences.

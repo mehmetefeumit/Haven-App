@@ -1726,11 +1726,27 @@ class BackgroundLocationTaskHandler extends TaskHandler {
       //    Raced against teardown: a one-shot fix is the single longest step in
       //    this cycle and nothing has been encrypted yet, so a stopping service
       //    must not spend its window inside it.
-      if (!_locationService!.hasFreshStreamFix()) await _awaitFirstDelivery();
+      //
+      //    The two markers bracket the only calls that can reach the platform.
+      //    Nothing else distinguishes a fix the one-shot answered from one
+      //    `getLastKnownPosition()` produced after it ran out — which is the
+      //    difference between background sharing surviving indoors and only
+      //    looking as if it does, and is what `e2e-fgs-publish` step 8 times
+      //    between them. Debug-only: `backgroundCallback` silences
+      //    `debugPrint` in release.
+      var coldCache = !_locationService!.hasFreshStreamFix();
+      if (coldCache) {
+        await _awaitFirstDelivery();
+        coldCache = !_locationService!.hasFreshStreamFix();
+      }
+      if (coldCache) {
+        debugPrint('[BackgroundTask] cold fix: asking the platform');
+      }
       final position = await _unlessShuttingDown(
         _locationService!.getCurrentLocation(),
       );
       if (position == null) return;
+      if (coldCache) debugPrint('[BackgroundTask] cold fix: in hand');
 
       // 8. Encrypt and publish to each DUE circle, one at a time and MORE THAN
       //    A SECOND APART.

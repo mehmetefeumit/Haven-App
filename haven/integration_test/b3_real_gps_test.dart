@@ -171,10 +171,12 @@ const String _toleranceRaw = String.fromEnvironment(
 
 /// How long the OS is given to deliver the injected fix.
 ///
-/// `adb emu geo fix` is a ONE-SHOT injection into the goldfish GNSS HAL — it
-/// starts no stream — so the shell re-issues it on a short loop and this
-/// budget must span several of those re-issues plus geolocator's own 30 s
-/// one-shot `timeLimit`.
+/// `adb emu geo fix` SETS the emulated position, and the emulator then streams
+/// it to the guest's GNSS HAL at 1 Hz for as long as the platform runs a GNSS
+/// session — whether or not the shell re-issues it (CI run 34642726338), so
+/// the shell's loop is a retry for an injection that failed to land. What the
+/// budget must span is the platform starting that session, several times over,
+/// plus geolocator's own 30 s one-shot `timeLimit`.
 const Duration _fixWaitTimeout = Duration(seconds: 150);
 
 /// How long the peer is given to observe and decrypt Alice's kind-445.
@@ -320,11 +322,11 @@ void main() {
 
       // --- Checkpoint A4: the OS actually delivers the injected fix.
       //
-      // Bounded and polled rather than read once: the injection is one-shot
-      // (the HAL keeps no stream between `geo fix` calls), so the first read
-      // can legitimately land between re-issues. Failing HERE attributes the
-      // problem to the emulator/GPS half of the chain instead of surfacing
-      // it 60 s later as "the peer never saw a location".
+      // Bounded and polled rather than read once: the emulator streams the
+      // seeded position only while the platform is running a GNSS session, so
+      // the first read can legitimately precede the first delivery. Failing
+      // HERE attributes the problem to the emulator/GPS half of the chain
+      // instead of surfacing it 60 s later as "the peer never saw a location".
       Position? observed;
       await waitUntilAsync(
         () async {

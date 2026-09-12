@@ -97,10 +97,14 @@
 #      fail a correct app on timing; one that checked once, early, would
 #      still pass a broken one. The drive target therefore still requires
 #      FOUR consecutive zero-publish cycles inside that window.
-#   2. `adb emu geo fix` is a ONE-SHOT injection into the goldfish GNSS HAL.
-#      The re-issue loop keeps running THROUGH the disabled window on
-#      purpose: a publish that survived the toggle then proves the app
-#      ignored the provider state, not that its position source dried up.
+#   2. `adb emu geo fix` SETS the emulated position; the emulator streams it
+#      to the guest at 1 Hz for as long as the platform runs a GNSS session,
+#      whether or not the injection is repeated (CI run 34642726338), so the
+#      re-issue loop is a RETRY for an injection that failed to land, not a
+#      refresh for a feed that expires. It keeps running THROUGH the
+#      disabled window all the same, on purpose: nothing this lane does may
+#      leave "its position source dried up" available as an explanation for
+#      a silence the provider toggle is supposed to cause.
 #   3. `pm grant` exits 0 even when it refuses (the hard-restricted gate is
 #      a bare `return` after a `Log.e`), so `dumpsys package` is the gate —
 #      same posture as run-b3-real-gps.sh.
@@ -740,9 +744,9 @@ readonly DRIVE_TIMEOUT="${B6_DRIVE_TIMEOUT:-16m}"
 # this lane's worst case, which its workflow derives at the drive step.
 readonly DRIVE_KILL_AFTER_SECS=30
 
-# `adb emu geo fix` re-issue period. The injection is one-shot into the
-# goldfish GNSS HAL (trap 2), so it must be re-issued for the life of the
-# lane — INCLUDING through the disabled window, on purpose.
+# `adb emu geo fix` re-issue period. The seeded position does not expire
+# (trap 2), so this is a retry cadence rather than a refresh — and it runs for
+# the life of the lane, INCLUDING through the disabled window, on purpose.
 readonly GEO_REISSUE_SECS="${B6_GEO_REISSUE_SECS:-5}"
 
 # The injected point: Uluru, Australia — a public landmark, chosen precisely

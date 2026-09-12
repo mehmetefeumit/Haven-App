@@ -49,11 +49,12 @@
 /// [kLocationAuthMissingMarker] says so in the log so the failure is attributed
 /// to the install/grant ordering rather than to the app.
 ///
-/// ## Unlike Android, the fix is NOT one-shot
+/// ## Unlike Android, the fix needs no re-issue loop
 ///
-/// B3's `adb emu geo fix` injects a single sample into the goldfish GNSS HAL
-/// and starts no stream, so that lane needs a re-issue loop.
-/// `simctl location &lt;udid&gt; set` is device state that persists until
+/// B3 re-issues `adb emu geo fix` on a loop, but only as a retry: the
+/// injection SETS the emulated position and the emulator streams it at 1 Hz
+/// for as long as the platform runs a GNSS session (CI run 34642726338).
+/// `simctl location <udid> set` is device state that persists until
 /// `clear` (or shutdown), and it survives an app re-install because it is not
 /// app-scoped. The B4 runner
 /// therefore sets it once, and a missing fix here means the simulator never

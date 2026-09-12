@@ -62,7 +62,7 @@ jobs:
     name: e2e_fgs_publish
     runs-on: ubuntu-latest
     # One APK build + boot + a drive that internally holds ~200s of background
-    # publish cycles and then ~332s of forced-idle no-fix chain (<=20m of drive
+    # publish cycles and then ~362s of forced-idle no-fix chain (<=20m of drive
     # timeout). The job cap must clear the SUM of the step caps: below it, a
     # run whose every step is still inside its own cap can die here, and a
     # job-cap death skips every `if: failure()` step (e2e-android.yml states
@@ -190,8 +190,9 @@ jobs:
       # Both sessions are held simultaneously here by design, so the peak is at
       # least as high as that lane's.
       # BOUNDS. Four of them, innermost first:
-      #   14m  the drive target's own `Timeout` — the only one that fails with
-      #        an attributable, test-level message.
+      #   15m  the drive target's own `Timeout` — the only one that fails with
+      #        an attributable, test-level message (14m until the forced-idle
+      #        hold grew to 362 s; the drive derives the figure).
       #   20m  the `flutter drive` (run-b1-fgs-publish.sh's B1_DRIVE_TIMEOUT),
       #        covering install + VM-service connect on top of the test body.
       #   28m  this step's inner deadline (run-with-deadline.sh below) — covers
@@ -224,9 +225,9 @@ jobs:
       # Sizing evidence: this lane is new (2026-08-02) and has no green run
       # yet, so the base number came from the FAILED runs, where the step ran
       # 5.2-12.1 min (14 runs) — none of which reached the forced-idle phase.
-      # That phase adds 332 s (5.5 min) of hold, so a full green run should sit
-      # near 17-18 min and 28m is ~1.6x that. Revise against p95 once this lane
-      # has green history.
+      # That phase adds 362 s (6.0 min) of hold, so a full green run should sit
+      # near 17.5-18.5 min and 28m is ~1.5x that. Revise against p95 once this
+      # lane has green history.
       - name: Run the FGS publish proof on the emulator
         timeout-minutes: 38
         uses: reactivecircus/android-emulator-runner@v2

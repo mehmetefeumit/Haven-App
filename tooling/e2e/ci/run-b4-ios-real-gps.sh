@@ -56,10 +56,12 @@
 # observing a live TCC change (behaviour Apple documents nowhere and that
 # several community reports say needs a relaunch).
 #
-# # Unlike Android, the fix is NOT one-shot
+# # Unlike Android, the fix needs no re-issue loop
 #
-# `adb emu geo fix` injects a single sample into the goldfish GNSS HAL and
-# starts no stream, so B3 needs a re-issue loop. `simctl location <udid> set` is
+# B3 re-issues `adb emu geo fix` on a loop, but only as a retry: the injection
+# SETS the emulated position and the emulator streams it at 1 Hz for as long as
+# the platform runs a GNSS session (CI run 34642726338), so it does not expire
+# either. `simctl location <udid> set` is
 # DEVICE state that persists until `clear` or shutdown, and it is not
 # app-scoped, so it survives the re-install `flutter test` performs. One `set`
 # is therefore correct here, and a missing fix means the simulator never
@@ -536,8 +538,9 @@ fi
 echo "B4 — granted When-In-Use location to ${BUNDLE_ID}"
 
 # Device state, not app state: it persists until `clear`/shutdown and survives
-# the re-install the delegated `flutter test` performs, which is why (unlike
-# B3's `adb emu geo fix`) one call is enough and no re-issue loop exists here.
+# the re-install the delegated `flutter test` performs, which is why one call
+# is enough and no re-issue loop exists here (B3's loop is a retry for a
+# console command that failed to land, not a refresh).
 if ! xcrun simctl location "${SIM_UDID}" set "${GEO_LAT},${GEO_LON}"; then
   echo "ERROR: 'xcrun simctl location ${SIM_UDID} set <lat>,<lon>' failed, so" >&2
   echo "       the simulator has no simulated position and CoreLocation would" >&2

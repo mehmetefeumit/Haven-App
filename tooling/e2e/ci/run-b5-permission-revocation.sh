@@ -184,14 +184,18 @@
 #      lane sets `pm set-permission-flags ... user-fixed` to keep ACT 2
 #      deterministic, and RECORDS the read-back so a missing flag is
 #      attributable instead of presenting as a hang.
-#   4. `adb emu geo fix` is a ONE-SHOT injection into the goldfish GNSS HAL.
-#      The re-issue loop keeps running THROUGH ACT 2 on purpose: a publish
-#      that survived the revoke then proves the app ignored the permission,
-#      not that its position source dried up. It also has to MOVE the point
-#      between re-issues — the app's stream carries `distanceFilter: 1`, so
-#      re-issuing the same coordinates emits once and never again, and the
-#      cache the app-op window is about would age out on its own. See
-#      GEO_STEP_DEG.
+#   4. `adb emu geo fix` SETS the emulated position; the emulator streams it
+#      to the guest at 1 Hz for as long as the platform runs a GNSS session,
+#      whether or not the injection is repeated (CI run 34642726338). So the
+#      loop does not keep a fix ALIVE, and stopping it would not dry the
+#      position source up. What the loop is load-bearing for is MOVEMENT:
+#      the app's stream carries `distanceFilter: 1`, so a position that
+#      never changes is emitted once and never again however often it is
+#      re-seeded, and the cache the app-op window is about would then age
+#      out on its own. That is why it keeps stepping the point, and why it
+#      keeps running THROUGH ACT 2 — a publish that survived the revoke
+#      then proves the app ignored the permission, not that its stream had
+#      gone quiet. See GEO_STEP_DEG.
 #   5. `pm clear` between acts resets runtime permissions to their default,
 #      so the revoke MUST be re-applied and re-verified afterwards. It is
 #      used because ACT 2 needs a fresh MLS database: the E2E keyring is

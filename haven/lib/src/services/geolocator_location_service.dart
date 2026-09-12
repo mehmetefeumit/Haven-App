@@ -100,7 +100,9 @@ abstract class GeolocatorWrapper {
     required geo.LocationSettings locationSettings,
   });
 
-  /// Gets the last known position.
+  /// Gets the last known position — on Android from the platform
+  /// `LocationManager`, NEVER from Google Play Services. Both callers depend
+  /// on that route; see [DefaultGeolocatorWrapper.getLastKnownPosition].
   Future<geo.Position?> getLastKnownPosition();
 
   /// Gets a stream of position updates.
@@ -145,7 +147,19 @@ class DefaultGeolocatorWrapper implements GeolocatorWrapper {
 
   @override
   Future<geo.Position?> getLastKnownPosition() {
-    return geo.Geolocator.getLastKnownPosition();
+    // The same bypass the stream and the one-shot apply, and here it is load
+    // bearing twice over. Left at geolocator's default this read goes to GMS's
+    // `FusedLocationProviderClient`, answered from a cache inside Google's own
+    // process: it is not the read
+    // [GeolocatorLocationService._platformStillPermitsLocation] reasons about
+    // (only `LocationProviderManager` applies the app-op that gate detects),
+    // and it would hand Google a location request the rest of this service
+    // deliberately never makes. On a device without Play Services geolocator
+    // takes this route anyway (`GeolocationManager.createLocationClient`), so
+    // forcing it also makes the two builds behave alike.
+    return geo.Geolocator.getLastKnownPosition(
+      forceAndroidLocationManager: true, // Bypass Google Play Services
+    );
   }
 
   @override
@@ -810,6 +824,14 @@ class GeolocatorLocationService implements LocationService {
   /// delivered one within [kStreamPositionMaxAge], so the provider's own
   /// last-known is set.
   ///
+  /// Both halves of that hold only because
+  /// [GeolocatorWrapper.getLastKnownPosition] forces the platform
+  /// `LocationManager`. On geolocator's DEFAULT route the answer comes from
+  /// GMS's fused cache, which the app-op does not gate (so this gate would
+  /// certify access the OS had already withdrawn) and which nothing feeds
+  /// here, since the stream above is a `LocationManager` subscription (so a
+  /// live app could equally read as denied).
+  ///
   /// A failing platform channel returns `false` WITHOUT clearing the cache,
   /// mirroring the gate's `unableToDetermine` rule: not evidence that
   /// access ended, so the fix is kept, but not consent either, so it may
@@ -1168,6 +1190,13 @@ class GeolocatorLocationService implements LocationService {
   /// its unbounded behaviour: it is the SYSTEM-wide last known position, which
   /// any app on the device keeps current, and it is the only last-known source
   /// Android has.
+  ///
+  /// Android reads it through the platform `LocationManager`, which polls every
+  /// ENABLED provider ([GeolocatorWrapper.getLastKnownPosition]). GMS's fused
+  /// cache can hold a fix the platform providers do not, so this arm of the
+  /// cold chain may answer null slightly more often than the GMS route would —
+  /// accepted, because that route also answers AFTER an app-op denial, i.e. it
+  /// buys availability with a coordinate the OS no longer authorises.
   Future<Position?> _getLastKnownPosition() async {
     if (_isIOS) {
       final fix = await _iosSource.lastBestFix();

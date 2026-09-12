@@ -18,6 +18,12 @@
 # tripped seven per-path ratchets in one run with no code change. Compiler
 # breakage still gets caught, by rust-check/flutter-check/build-check, which
 # keep floating deliberately.
+#
+# All THREE pieces of the instrument are pinned there: rustc, the Flutter SDK,
+# and cargo-llvm-cov — the last because an unversioned `tool:` resolves to
+# `@latest`, and it had already moved 0.9.0 -> 0.9.1 between two runs on its
+# own. rustc decides which lines are instrumented; cargo-llvm-cov decides which
+# files are counted and how the ratio is rendered.
 
 name: Coverage
 
@@ -46,8 +52,10 @@ jobs:
           set -euo pipefail
           . scripts/ci/coverage_toolchain.env
           : "${HAVEN_COVERAGE_RUST_TOOLCHAIN:?not set in scripts/ci/coverage_toolchain.env}"
+          : "${HAVEN_COVERAGE_LLVM_COV_VERSION:?not set in scripts/ci/coverage_toolchain.env}"
           echo "rust=${HAVEN_COVERAGE_RUST_TOOLCHAIN}" >> "$GITHUB_OUTPUT"
-          echo "Measuring with rustc ${HAVEN_COVERAGE_RUST_TOOLCHAIN}"
+          echo "llvmcov=${HAVEN_COVERAGE_LLVM_COV_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Measuring with rustc ${HAVEN_COVERAGE_RUST_TOOLCHAIN} + cargo-llvm-cov ${HAVEN_COVERAGE_LLVM_COV_VERSION}"
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@master
@@ -55,66 +63,86 @@ jobs:
           toolchain: ${{ steps.toolchain.outputs.rust }}
           components: llvm-tools-preview
 
+      # PINNED, for the same reason rustc is: an unversioned `tool:` means
+      # `@latest`, and this tool decides which files are counted and how the
+      # ratio is rendered. It already drifted 0.9.0 -> 0.9.1 between runs
+      # 33355064806 and 34488512808 with no commit — a silent change of
+      # instrument under a manifest of pinned floors.
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-llvm-cov
+          tool: cargo-llvm-cov@${{ steps.toolchain.outputs.llvmcov }}
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: haven-core
 
+      # THE ONLY step in this job that runs the suite, and the only one that
+      # measures. Its coverage.lcov is the single artifact every gate below
+      # votes on; the HTML report is redrawn from the same run's profile data by
+      # `cargo llvm-cov report`, which merges the existing profraw and executes
+      # no test binary.
+      #
+      # It used to be three runs — this step, the threshold step and the HTML
+      # step each invoked bare `cargo llvm-cov`, and each of those re-runs the
+      # whole suite. That cost two things, one of them a correctness bug:
+      #   - every test's exposure to a flake was TRIPLED, and the two extra
+      #     runs were the ones WITHOUT the scale below. The env is read by the
+      #     test code itself (src/relay/manager.rs and the e2e helpers), so it
+      #     only ever applied to the step that set it; the other two raced on
+      #     budgets sized for an uninstrumented build, i.e. the timing headroom
+      #     this job grants itself covered one run in three. Run 34642726338 is
+      #     the flake that made that worth fixing.
+      #   - the threshold percentage was measured on a DIFFERENT execution of
+      #     the suite than coverage.lcov, which the per-path floors read.
+      #     Nothing made the two agree: one flaky-covered branch is enough for
+      #     the aggregate and the floors to describe different data, and for
+      #     neither verdict to be reproducible from the uploaded artifact. Both
+      #     now read this step's lcov, so that disagreement is not merely
+      #     unlikely, it is unrepresentable.
+      #
+      # Why the scale at all: instrumented builds are materially slower — every
+      # basic block carries a counter update, and the e2e targets run their
+      # tests concurrently, each with its own MockRelay + LiveSyncCore, on a
+      # 2-core runner. The e2e anti-vacuity waits are sized for an
+      # uninstrumented build, so in CI run 31216078806 one of them expired here
+      # while the SAME test passed in the uninstrumented rust-check job. Scaling
+      # those DELIVERY budgets cannot mask a defect — they assert that something
+      # arrived, so a bigger budget only removes a false negative — and it
+      # leaves `cargo test` untouched.
       - name: Run tests with coverage
-        # Instrumented builds are materially slower: every basic block carries a
-        # counter update, and the e2e targets run their tests concurrently, each
-        # with its own MockRelay + LiveSyncCore, on a 2-core runner. The e2e
-        # anti-vacuity waits are sized for an uninstrumented build, so in CI run
-        # 31216078806 one of them expired here while the SAME test passed in the
-        # uninstrumented rust-check job. Scaling those DELIVERY budgets cannot
-        # mask a defect — they assert that something arrived, so a bigger budget
-        # only removes a false negative — and it leaves `cargo test` untouched.
         env:
           HAVEN_TEST_WAIT_SCALE: '4'
         run: |
           cargo llvm-cov --all-features --lcov --output-path coverage.lcov \
             --ignore-filename-regex 'frb_generated'
 
+      # Computed from coverage.lcov — the SAME bytes the per-path floors below
+      # read — by the SAME script the Flutter job uses.
+      #
+      # It used to re-run the whole suite and parse llvm-cov's TOTAL row, so the
+      # aggregate could describe a DIFFERENT execution than the lcov the floors
+      # read. That is not hypothetical: two runs of this suite on one commit and
+      # one rustc measured 36600/38239 and 36607/38239 — identical instrumented
+      # lines, seven covered lines apart. Reading a single artifact makes the two
+      # gates incapable of disagreeing, instead of merely likely to agree.
+      #
+      # The metric is IDENTICAL, not an approximation. llvm-cov's TOTAL row
+      # reported lines=38239 missed=1639 — i.e. 36600 covered — which is exactly
+      # the lcov's LF and LH; check_lcov_aggregate.sh renders the same ratio to
+      # the same 2 decimals and compares with `>=`, so a value sitting exactly on
+      # 80.00% still passes, as it did here.
+      #
+      # It also keeps the lesson this step was rebuilt around: a PARSE FAILURE
+      # USED TO PASS THIS GATE (an empty COVERAGE made `bc` print nothing and
+      # `(( ))` read it as false, so losing the number printed a green check).
+      # The shared script treats a missing report, an unparsable one, or zero
+      # instrumented lines as exit-2 misconfiguration — never as 0% and never as
+      # 100% — and its --self-test pins all three, in repo-guards.yml and in the
+      # local gate's static half.
       - name: Check coverage threshold
-        run: |
-          # `pipefail` so a broken llvm-cov (or a missing TOTAL line) fails the
-          # pipeline instead of quietly yielding an empty COVERAGE.
-          set -euo pipefail
-
-          # Extract coverage percentage from lcov file
-          COVERAGE=$(cargo llvm-cov --all-features \
-            --ignore-filename-regex 'frb_generated' \
-            --summary-only | grep 'TOTAL' | awk '{print $10}' | sed 's/%//')
-          echo "Coverage: ${COVERAGE}%"
-
-          # A PARSE FAILURE USED TO PASS THIS GATE. With COVERAGE empty (or any
-          # non-numeric text), `echo " < 80" | bc -l` writes a syntax error to
-          # stderr and NOTHING to stdout; `(( ))` on an empty string evaluates
-          # to 0, i.e. false, so control fell through to the else branch and the
-          # job printed "✅ Coverage % meets threshold 80%" and exited 0. Every
-          # way of losing the number — an llvm-cov output change, a renamed
-          # TOTAL row, a build that produced no summary — therefore reported
-          # SUCCESS. Validate the shape before comparing.
-          case "${COVERAGE}" in
-            ''|*[!0-9.]*)
-              echo "::error::Could not parse a coverage percentage from llvm-cov (got: '${COVERAGE}')"
-              exit 1
-              ;;
-          esac
-
-          # Check if coverage meets threshold
-          THRESHOLD=80
-          if (( $(echo "$COVERAGE < $THRESHOLD" | bc -l) )); then
-            echo "❌ Coverage ${COVERAGE}% is below threshold ${THRESHOLD}%"
-            exit 1
-          else
-            echo "✅ Coverage ${COVERAGE}% meets threshold ${THRESHOLD}%"
-          fi
+        run: bash ../scripts/ci/check_lcov_aggregate.sh coverage.lcov 80 "Rust (haven-core)"
 
       # The gate above is a single AGGREGATE, and an aggregate is a budget the
       # whole crate shares: haven-core sits ~10 points over its 80% threshold,
@@ -132,10 +160,19 @@ jobs:
       # to re-pin the floors, and re-pinning needs the lcov the run measured.
       # Uploading only on success discarded it in exactly the run where it was
       # wanted, leaving a re-pin to be reconstructed on a matching toolchain.
+      # `report` redraws the run's profile data instead of re-running the suite:
+      # a failing aggregate or floor must still get its HTML, and re-running the
+      # whole instrumented suite to draw it was both wasted runner time and a
+      # third chance to fail for an unrelated reason, in the step whose entire
+      # job is to preserve evidence.
+      #
+      # This is now the ONLY use of `report`, and nothing load-bearing rides on
+      # it: if it misbehaves, a human finds a missing HTML artifact — no gate
+      # returns a wrong verdict, because every gate reads coverage.lcov.
       - name: Generate HTML report
         if: ${{ !cancelled() }}
         run: |
-          cargo llvm-cov --all-features --html \
+          cargo llvm-cov report --html \
             --ignore-filename-regex 'frb_generated'
 
       - name: Upload coverage reports

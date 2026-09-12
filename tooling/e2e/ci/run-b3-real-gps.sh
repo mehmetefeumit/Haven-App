@@ -38,10 +38,18 @@
 #
 # # Traps this lane is built around
 #
-#   1. `adb emu geo fix` is a ONE-SHOT injection into the goldfish GNSS HAL —
-#      it starts no stream, and the HAL discards any requested interval — so
-#      the fix must be RE-ISSUED on a loop for the life of the drive or a
-#      one-shot `getCurrentPosition()` can land in a gap and time out.
+#   1. `adb emu geo fix` SETS the emulated position; the emulator then
+#      streams it to the guest's GNSS HAL as NMEA once a second for as long
+#      as the platform runs a GNSS session, whether or not the injection is
+#      repeated. (CI run 34642726338: `Gnss:onGnssLocationCb` once a second
+#      inside every session, minutes after another lane had stopped its own
+#      re-issue loop; that lane's first session drained ~239 sentences that
+#      had been buffered one per second since the seed.) The loop below is
+#      therefore a RETRY for a console command that failed to land, not a
+#      refresh for a feed that expires — redundant rather than wrong, and
+#      it stays. What it must never be read as is a lever: stopping it
+#      creates no no-fix condition (a lane that needs one replaces the
+#      provider instead — `run-b1-fgs-publish.sh`'s `arm_no_fix`).
 #   2. A `pm grant` that is REJECTED still exits 0 (the hard-restricted gate
 #      is a bare `return` after a `Log.e`). The authoritative read is
 #      `dumpsys package`, so that is what gates here — and the drive target
@@ -303,9 +311,10 @@ readonly DRIVE_TIMEOUT="${B3_DRIVE_TIMEOUT:-12m}"
 # this lane's worst case, which its workflow derives at the drive step.
 readonly DRIVE_KILL_AFTER_SECS=30
 
-# `adb emu geo fix` re-issue period (trap 1 in the header). Short enough that
-# a one-shot `getCurrentPosition()` never waits long for a fresh fix, long
-# enough not to spam the console socket.
+# `adb emu geo fix` re-issue period (trap 1 in the header). The seeded
+# position does not expire, so this is a retry cadence for an injection that
+# failed to land — short enough to be quick about it, long enough not to spam
+# the console socket.
 readonly GEO_REISSUE_SECS="${B3_GEO_REISSUE_SECS:-5}"
 
 # The injected point. REQUIRED, with no default on purpose: the same pair is
@@ -457,8 +466,8 @@ do
 done
 
 # ---------------------------------------------------------------------------
-# Phase 3 — enable the platform location provider, then feed the emulator a
-# GPS fix and KEEP feeding it.
+# Phase 3 — enable the platform location provider, then seed the emulator's
+# position (and re-seed it on a loop — trap 1: a retry, not a refresh).
 #
 # `cmd location set-location-enabled true` is best-effort: the AVD images used
 # here have location on by default and the command is absent on some API

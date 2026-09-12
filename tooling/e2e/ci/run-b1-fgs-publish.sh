@@ -46,11 +46,14 @@
 #      window, at least one of them driven by a platform delivery, and every
 #      such delivery at least 90 % of the registered-interval floor after the
 #      registration that asked for it.
-#   8. ASSERT the no-fix chain: with the GPS drip stopped and the device forced
+#   8. ASSERT the no-fix chain: with the platform's `fused` provider replaced by
+#      a test provider nothing ever gives a location to, and the device forced
 #      into DEEP IDLE, a `trigger=watchdog` cycle still publishes — from the
-#      last known position, after the one-shot it cannot answer — inside
-#      `kStreamPositionMaxAge + kBackgroundRepeatInterval + kFirstDeliveryWait
-#      + kOneShotLocationTimeout` plus slack.
+#      last known position, after the one-shot it cannot answer — within
+#      `kLocationPublishMaxInterval + kBackgroundRepeatInterval +
+#      kFirstDeliveryWait + kOneShotLocationTimeout` plus slack OF THE PUBLISH
+#      BEFORE IT. The premise is read back from `dumpsys location`, and a
+#      delivery inside that window fails the step as a LANE defect, by name.
 #
 # Steps 5-8 are the runtime proof of Phase P2a (docs/POWER_EFFICIENCY_PLAN.md
 # 5.2). Before it, backgrounded Haven held a 1 Hz / 1 m stream AND took a 30 s
@@ -64,6 +67,13 @@
 # `[b1] IDLE_PHASE_BEGIN` AFTER `[b1] HOLD_COMPLETE` has closed the P2a window,
 # so steps 5-7 still read exactly the steady-state span they always did and the
 # forced-idle span is never mistaken for one.
+#
+# It also MAKES its own premise instead of assuming one. Until run 34642726338
+# the step rested on "the `geo fix` drip is stopped, therefore no fix can
+# arrive"; the emulator streams the seeded position at 1 Hz for as long as the
+# platform runs GNSS, so that was never true, and the step reported the healthy
+# delivery-driven publishes it then saw as "background publishing STOPS here".
+# See `arm_no_fix` and `assert_no_fix_chain_oracle`.
 #
 # Not assertable here, in step 8 or anywhere else: AP SUSPENSION. The emulator
 # never suspends its application processor, so "a delivery still wakes Dart once
@@ -166,9 +176,9 @@ dart_duration_secs() {
     printf '%s\n' "${secs}"
     return 0
   fi
-  # `const Duration kStreamPositionMaxAge = kLocationPublishMaxInterval;` — the
-  # ALIAS is the point of that declaration (the two constants are one number by
-  # construction, and the Dart doc says so), so following it keeps the bound
+  # `const Duration kBackgroundRepeatInterval = kLocationPublishMinInterval;` —
+  # the ALIAS is the point of that declaration (the two constants are one number
+  # by construction, and the Dart doc says so), so following it keeps the bound
   # derived instead of re-typing the number the alias exists to avoid. Depth-
   # bounded, so a cyclic edit fails at load time rather than recursing.
   (( depth < 4 )) || return 1
@@ -182,7 +192,7 @@ dart_duration_secs() {
 if ! PUBLISH_MIN_INTERVAL_SECS="$(dart_duration_secs kLocationPublishMinInterval)" \
    || ! FIX_LEAD_SECS="$(dart_duration_secs kBackgroundFixLeadTime)" \
    || ! WAKE_LOCK_MAX_AGE_SECS="$(dart_duration_secs kPublishWakeLockTimeout)" \
-   || ! STREAM_MAX_AGE_SECS="$(dart_duration_secs kStreamPositionMaxAge)" \
+   || ! PUBLISH_MAX_INTERVAL_SECS="$(dart_duration_secs kLocationPublishMaxInterval)" \
    || ! WATCHDOG_PERIOD_SECS="$(dart_duration_secs kBackgroundRepeatInterval)" \
    || ! FIRST_DELIVERY_WAIT_SECS="$(dart_duration_secs kFirstDeliveryWait)" \
    || ! ONE_SHOT_TIMEOUT_SECS="$(dart_duration_secs kOneShotLocationTimeout)"
@@ -193,7 +203,7 @@ below would be scanning nothing. Fix the extraction, never the bound." >&2
   exit 2
 fi
 readonly PUBLISH_MIN_INTERVAL_SECS FIX_LEAD_SECS WAKE_LOCK_MAX_AGE_SECS
-readonly STREAM_MAX_AGE_SECS WATCHDOG_PERIOD_SECS FIRST_DELIVERY_WAIT_SECS
+readonly PUBLISH_MAX_INTERVAL_SECS WATCHDOG_PERIOD_SECS FIRST_DELIVERY_WAIT_SECS
 readonly ONE_SHOT_TIMEOUT_SECS
 
 # The floor on the FGS's registered interval once it has published.
@@ -216,28 +226,38 @@ readonly MIN_FIX_INTERVAL_SECS=$((PUBLISH_MIN_INTERVAL_SECS - FIX_LEAD_SECS))
 # a false-red generator.
 readonly MIN_DELIVERY_GAP_SECS=$((MIN_FIX_INTERVAL_SECS * 9 / 10))
 
-# Step 8's bound: how long the no-fix chain may take to publish once the GPS
-# drip has stopped and the device is in deep idle.
+# Step 8's bound: how long background publishing may go quiet once the platform
+# can no longer answer with a fix.
 #
-# Every term is the length of one link in that chain, and every one of them is
-# read out of the Dart source above:
+# Measured between two PUBLISHES, not from the instant the no-fix condition was
+# armed. What a peer sees is the gap between markers, and it is the gap the
+# chain's own links set — an arm that lands just after a publish has a full
+# jittered interval ahead of it before the next one is even due, which a bound
+# measured from the arm would charge to the chain.
 #
-#   kStreamPositionMaxAge     the cached stream fix must age out before the
-#                             cycle stops being served from it,
-#   kBackgroundRepeatInterval the watchdog tick granularity — the cycle can only
-#                             start on a tick,
-#   kFirstDeliveryWait        the cold-cache wait for a platform answer that
-#                             will not come,
-#   kOneShotLocationTimeout   the one-shot that cannot succeed, before
-#                             `getLastKnownPosition()` finally answers.
+# Every term is the length of one link, and every one is read out of the Dart
+# source above:
+#
+#   kLocationPublishMaxInterval the longest a circle can be scheduled after its
+#                               last publish (the CSPRNG draw's ceiling),
+#   kBackgroundRepeatInterval   the watchdog tick granularity — with nothing
+#                               deliverable, a cycle can only start on a tick,
+#   kFirstDeliveryWait          the cold-cache wait for a platform answer that
+#                               will not come,
+#   kOneShotLocationTimeout     the one-shot that cannot succeed, before
+#                               `getLastKnownPosition()` finally answers.
 #
 # The last term is a MARGIN, not a bound: the encrypt, the relay ack and the
-# shell's own force-idle round trip on a loaded emulator. It is the only
-# hand-chosen number here, and it is deliberately additive so that no derived
-# term can be quietly widened by tuning it.
+# fetch that follow the fix on a loaded emulator. It is the only hand-chosen
+# number here, and it is deliberately additive so that no derived term can be
+# quietly widened by tuning it.
 readonly NO_FIX_SLACK_SECS=30
-readonly NO_FIX_BOUND_SECS=$((STREAM_MAX_AGE_SECS + WATCHDOG_PERIOD_SECS \
+readonly NO_FIX_BOUND_SECS=$((PUBLISH_MAX_INTERVAL_SECS + WATCHDOG_PERIOD_SECS \
   + FIRST_DELIVERY_WAIT_SECS + ONE_SHOT_TIMEOUT_SECS + NO_FIX_SLACK_SECS))
+
+# The platform provider step 8 silences to create that condition: the one the
+# FGS's registration and its one-shot both use. See `arm_no_fix`.
+readonly NO_FIX_PROVIDER='fused'
 
 # ---------------------------------------------------------------------------
 # VERBATIM markers (haven/lib/src/services/background_location_task.dart).
@@ -298,9 +318,9 @@ readonly MARK_HANDOFF_OK='[b1] HANDOFF_CONFIRMED'
 readonly MARK_HOLD_DONE='[b1] HOLD_COMPLETE'
 # Step 8's own window. Printed by the drive AFTER MARK_HOLD_DONE — the P2a
 # window is closed by then, so the forced-idle span is never read as steady
-# state — and it is what tells THIS script to stop the GPS drip and force the
-# device into deep idle. MUST match `kIdlePhaseBeginMarker` /
-# `kIdlePhaseEndMarker` in the drive target VERBATIM.
+# state — and it is what tells THIS script to take the platform's ability to
+# answer with a fix away and force the device into deep idle. MUST match
+# `kIdlePhaseBeginMarker` / `kIdlePhaseEndMarker` in the drive target VERBATIM.
 readonly MARK_IDLE_BEGIN='[b1] IDLE_PHASE_BEGIN'
 readonly MARK_IDLE_END='[b1] IDLE_PHASE_END'
 # This script's own device-stamped record that deep idle actually ENGAGED,
@@ -313,7 +333,29 @@ readonly MARK_IDLE_END='[b1] IDLE_PHASE_END'
 # result — a green row proving nothing, which is the failure mode this file
 # spends most of its length avoiding.
 readonly MARK_IDLE_FORCED='IDLE_FORCED state='
+# This script's own device-stamped record of the no-fix condition itself: the
+# `dumpsys location` read-back of what that provider IS after the test provider
+# was installed (see `arm_no_fix`). `mock` is the only verdict
+# that means "no fix can reach the app from here"; every other token names what
+# was found instead, and step 8 refuses to read a chain out of a window it did
+# not hold for.
+readonly MARK_NO_FIX_ARMED="NO_FIX_ARMED ${NO_FIX_PROVIDER}="
 readonly MARK_TRIGGER_WATCHDOG='[BackgroundTask] cycle trigger=watchdog'
+# The generic cycle-start line, and the two triggers that MEAN a platform
+# delivery arrived. Inside the no-fix window either one says the premise did not
+# hold — the lane, not the product, is what failed then.
+readonly MARK_TRIGGER_ANY='[BackgroundTask] cycle trigger='
+readonly MARK_TRIGGER_DELIVERY='[BackgroundTask] cycle trigger=delivery'
+readonly MARK_TRIGGER_PENDING='[BackgroundTask] cycle trigger=pending-delivery'
+# The markers `_publishCycle` prints around the ONLY calls that can reach the
+# platform for a fix, emitted only when the stream cache could not serve the
+# cycle. The interval between them is what separates a one-shot that was
+# ANSWERED (seconds) from one that ran out into `getLastKnownPosition()`
+# (kOneShotLocationTimeout or more) — i.e. the no-fix chain actually running.
+# MUST match background_location_task.dart VERBATIM; pinned there by
+# `background_location_task_delivery_cycle_test.dart`.
+readonly MARK_COLD_ASK='[BackgroundTask] cold fix: asking the platform'
+readonly MARK_COLD_IN_HAND='[BackgroundTask] cold fix: in hand'
 # The registration the cadence oracle measures its deliveries from. Logged in
 # step 7c of `_publishCycle`, BEFORE the fix and the publish of the same cycle,
 # so the registration that produced a delivery is the one logged in the cycle
@@ -1104,34 +1146,169 @@ produced it."
 }
 
 # ---------------------------------------------------------------------------
+# The no-fix condition (step 8's premise), and the read-back that proves it.
+#
+# Haven's background registration AND its one-shot both go to the platform's
+# `fused` provider — `geolocator`'s `LocationManagerClient` picks
+# `LocationManager.FUSED_PROVIDER` on API 31+ whenever it is enabled, and the
+# FGS asks for it with `forceLocationManager: true`. Replacing THAT provider
+# with a test provider nothing ever gives a location to is what makes "no fix
+# can arrive" true at the platform, rather than hoping the emulator stops
+# producing fixes (it does not — see the oracle below).
+#
+# Every link the chain has to walk stays real. From AOSP 14 source:
+#
+#   * `LocationManagerService.addTestProvider` -> `LocationProviderManager
+#     .setMockProvider` -> `MockableLocationProvider.setProviderLocked`, which
+#     hands the GMS proxy `ProviderRequest.EMPTY_REQUEST` and stops it.
+#     `MockLocationProvider.onSetRequest` is EMPTY and the mock reports a
+#     location only from `setProviderLocation`, which this lane never calls —
+#     so the FGS's registration and its one-shot both go unanswered.
+#   * The mock arrives `allowed=false` (`AbstractLocationProvider.State
+#     .EMPTY_STATE`), so the provider is briefly DISABLED before
+#     `set-test-provider-enabled` re-enables it. That is not noise: the disable
+#     clears the provider's last locations (`LocationProviderManager
+#     .onEnabledChanged`), so no historical re-delivery can answer the next
+#     registration either, and it reaches the app as a provider-disabled error,
+#     on which `GeolocatorLocationService` drops its cached fix. The cycle
+#     therefore reaches the platform from a COLD cache — the state step 8 is
+#     about.
+#   * `getLastKnownPosition()` is not a LocationManager read (geolocator routes
+#     it through Play services unless forced), so the chain's last link is the
+#     one thing the mock does not touch.
+#
+# `addTestProvider` returns SILENTLY when the caller's `OP_MOCK_LOCATION` app-op
+# is not allowed (`LocationManagerService.addTestProvider`: `if (!noteOp(...))
+# return;`), and `cmd location` exits 0 either way — which is exactly why this
+# ends in a read-back the oracle keys on rather than in an exit code.
+
+# Reads `dumpsys location` on stdin; prints ONE token for the ${NO_FIX_PROVIDER}
+# provider.
+#
+# `mock` — and only `mock` — means no fix can reach the app through it.
+#
+# The grammar is `LocationProviderManager.dump` (AOSP 14): the header
+# `<name> provider`, plus ` [mock]` when `mProvider.isMock()`, plus `:`; then,
+# indented under it, `last location=`, `enabled=`, the `MockableLocationProvider`
+# state (`allowed=`, `identity=`, `properties=`) and finally the provider's own
+# dump — for a test provider `MockLocationProvider.dump`'s
+# `last mock location=<location>`, which reads `null` until something injects
+# one. The block ends at the first line indented no deeper than the header.
+no_fix_verdict() {
+  awk -v prov="${NO_FIX_PROVIDER}" '
+    $0 ~ ("^[ ]*" prov " provider( \\[mock\\])?:[ ]*$") {
+      seen = 1
+      mock = (index($0, "[mock]") > 0)
+      indent = match($0, /[^ ]/) - 1
+      inblock = 1
+      next
+    }
+    inblock {
+      if ($0 ~ /^[ ]*$/) next
+      if (match($0, /[^ ]/) - 1 <= indent) { inblock = 0; next }
+      if ($0 ~ /^[ ]*enabled=true[ ]*$/) enabled = 1
+      if ($0 ~ /^[ ]*last mock location=/) {
+        if ($0 ~ /^[ ]*last mock location=null[ ]*$/) silent = 1; else reported = 1
+      }
+    }
+    END {
+      if (!seen) { print "no-fused-provider"; exit }
+      if (!mock) { print "not-mocked"; exit }
+      if (reported) { print "mock-reported-a-location"; exit }
+      if (!silent) { print "mock-unreadable"; exit }
+      if (!enabled) { print "mock-disabled"; exit }
+      print "mock"
+    }
+  '
+}
+
+# Installs the silent test provider and prints `no_fix_verdict`'s answer.
+#
+# Anything other than `mock` also dumps what the device said and the fused block
+# it said it about, because that — not the exit codes, which are 0 throughout —
+# is the only way to tell a refused app-op from a renamed provider from a dump
+# grammar that moved.
+arm_no_fix() {
+  local uid said dump verdict
+  uid="$(adb -s "${DEVICE}" shell id -u 2>/dev/null | tr -dc '0-9')" || true
+  if [[ -z "${uid}" ]]; then
+    echo "shell-uid-unreadable"
+    return 0
+  fi
+  said="$(adb -s "${DEVICE}" shell \
+    "appops set ${uid} android:mock_location allow; \
+     cmd location providers add-test-provider ${NO_FIX_PROVIDER}; \
+     cmd location providers set-test-provider-enabled ${NO_FIX_PROVIDER} true" \
+    2>&1)" || true
+  dump="$(adb -s "${DEVICE}" shell dumpsys location 2>/dev/null | tr -d '\r')" \
+    || true
+  verdict="$(printf '%s\n' "${dump}" | no_fix_verdict)"
+  if [[ "${verdict}" != "mock" ]]; then
+    {
+      echo "---- arming the no-fix condition said ----"
+      printf '%s\n' "${said}"
+      echo "---- dumpsys location, the ${NO_FIX_PROVIDER} provider block ----"
+      printf '%s\n' "${dump}" \
+        | grep -aA 12 -E "^[[:space:]]*${NO_FIX_PROVIDER} provider( \[mock\])?:" \
+        || echo "(no ${NO_FIX_PROVIDER} provider block in the dump)"
+    } >&2
+  fi
+  echo "${verdict}"
+}
+
+# ---------------------------------------------------------------------------
 # Oracle step 8 — the no-fix chain under deep idle.
 #
-# With the `geo fix` drip stopped, the registration steps 5-7 just proved has
-# nothing left to deliver. The claim is that publishing does not stop with it:
-# the watchdog notices (the circle falls due, or the silence outlasts
-# `kStreamPositionMaxAge`), runs a cycle, finds no fresh stream fix, spends
-# `kOneShotLocationTimeout` on a one-shot that cannot be answered, falls back to
-# `getLastKnownPosition()` and publishes anyway — with Doze's POLICY applied to
-# the app throughout.
+# The PREMISE first, because this step spent a round asserting a conclusion it
+# had never established. `adb emu geo fix` does not stop feeding the guest when
+# the re-issue loop stops: the emulator streams the last seeded position to the
+# guest's GNSS HAL as NMEA once a second for as long as the platform runs GNSS.
+# Run 34642726338's capture shows both halves of that — the HAL's
+# `Gnss:onGnssLocationCb` once a second in every GNSS session minutes after the
+# drip was killed, and three `trigger=delivery` cycles publishing inside the
+# forced-idle window — under the verdict "background publishing STOPS here".
+# It had not stopped; the window simply never tested anything.
 #
-# Three things keep it from being decoration:
+# So the premise is now MADE, at the platform, by replacing the `fused` provider
+# with a test provider nothing ever gives a location to (`arm_no_fix`), and
+# CHECKED, from that function's `dumpsys location` read-back.
 #
-#   * `state=IDLE` is required from `dumpsys deviceidle get deep`, the
-#     authoritative read. Without it a device that refused to doze would report
-#     the ordinary watchdog — already proven, on an awake device — as a Doze
-#     result.
-#   * The publish must be behind a `trigger=watchdog` marker. A delivery-driven
-#     publish here would mean the drip did not actually stop, so the no-fix
-#     chain never ran.
-#   * The bound is measured from the instant idle ENGAGED, not from the drive's
-#     request to engage it.
+# With it held, the claim is the one this step has always meant to make: with
+# the platform unable to answer, publishing carries on anyway — the watchdog
+# notices (a circle falls due, or the registration goes silent), runs a cycle,
+# finds no fresh stream fix, spends `kOneShotLocationTimeout` on a one-shot that
+# cannot be answered, falls back to `getLastKnownPosition()` and publishes —
+# with Doze's POLICY applied to the app throughout.
+#
+# Five things keep that from being decoration:
+#
+#   * `mock` from the arm read-back. `addTestProvider` returns SILENTLY when the
+#     caller's `MOCK_LOCATION` app-op is not allowed, so without the read-back a
+#     lane that armed nothing would report live fixes as a Doze result.
+#   * `state=IDLE` from `dumpsys deviceidle get deep`, the authoritative read:
+#     `force-idle` answers a device whose deep idle is disabled with a message
+#     and exit code 0.
+#   * NO delivery-driven cycle after the arm. One means fixes were still
+#     arriving — a LANE defect, and the point at which nothing about the product
+#     may be concluded from this window in either direction.
+#   * The publish must belong to a `trigger=watchdog` cycle that went COLD
+#     (`MARK_COLD_ASK`) and whose fix took at least `kOneShotLocationTimeout` to
+#     arrive. A cycle served from the stream cache proves the cache, not the
+#     chain; a one-shot answered in seconds proves a fix was available, i.e.
+#     that the premise slipped.
+#   * The bound is measured between publishes — see NO_FIX_BOUND_SECS.
 #
 # It does NOT prove the AP-suspend half; see this file's header.
 # ---------------------------------------------------------------------------
 assert_no_fix_chain_oracle() {
-  local logfile="$1" verdict state elapsed
-  verdict="$(awk -v forced="${MARK_IDLE_FORCED}" -v endm="${MARK_IDLE_END}" \
-                 -v wd="${MARK_TRIGGER_WATCHDOG}" '
+  local logfile="$1" verdict seen
+  local armed state leak pubs wds asks hands fast gap wait covered
+  verdict="$(awk -v armm="${MARK_NO_FIX_ARMED}" -v forced="${MARK_IDLE_FORCED}" \
+                 -v endm="${MARK_IDLE_END}" -v wdm="${MARK_TRIGGER_WATCHDOG}" \
+                 -v trigm="${MARK_TRIGGER_ANY}" -v delm="${MARK_TRIGGER_DELIVERY}" \
+                 -v penm="${MARK_TRIGGER_PENDING}" -v askm="${MARK_COLD_ASK}" \
+                 -v handm="${MARK_COLD_IN_HAND}" -v pubm="${MARK_PUBLISHED_PREFIX}" \
+                 -v oneshot="${ONE_SHOT_TIMEOUT_SECS}" '
     function ts(dm, hms,   md, t, sec, mo, dy, cum, i) {
       # The fraction split off by hand: a POSIX awk reads `16.091` through the
       # locale, and a comma-decimal one makes it 16.
@@ -1141,70 +1318,185 @@ assert_no_fix_chain_oracle() {
       return (cum + dy) * 86400 + t[1] * 3600 + t[2] * 60 \
         + sec[1] + sec[2] / 10 ^ length(sec[2])
     }
+    function tok(i, m,   v) {
+      v = substr($0, i + length(m)); sub(/[ \t\r].*$/, "", v); return v
+    }
     BEGIN {
       split("31 28 31 30 31 30 31 31 30 31 30 31", mlen, " ")
-      t0 = -1; state = "ABSENT"; pending = 0
+      armed = "ABSENT"; state = "ABSENT"; leak = "-"; fast = "-"
+      gap = "none"; wait = "none"
+      t_arm = -1; t_idle = -1; t_end = -1
+      prev_pub = -1; ask = -1; hand = -1; cur = "none"
     }
-    t0 < 0 {
-      i = index($0, forced)
-      if (i == 0) next
-      t0 = ts($1, $2)
-      state = substr($0, i + length(forced))
-      sub(/[ \t\r].*$/, "", state)
-      next
-    }
-    index($0, endm) { exit }
-    index($0, wd) { pending = 1; next }
-    index($0, "[BackgroundTask] cycle trigger=") { pending = 0; next }
     {
-      i = index($0, "Published to ")
-      if (i == 0 || !pending) next
-      n = substr($0, i + 13); sub(/\/.*$/, "", n)
-      if (n + 0 < 1) next
-      printf "%s|%d\n", state, ts($1, $2) - t0
-      found = 1
-      exit
+      t = ts($1, $2)
+      if (t_arm < 0 && (i = index($0, armm)) > 0) {
+        t_arm = t; armed = tok(i, armm); next
+      }
+      if (t_idle < 0 && (i = index($0, forced)) > 0) {
+        t_idle = t; state = tok(i, forced); next
+      }
+      if (index($0, endm) > 0) { t_end = t; exit }
+      # Publishes are read from the WHOLE capture: the silence the chain has to
+      # end starts at the publish before it, which is normally the last
+      # delivery-driven one of the P2a window.
+      if ((i = index($0, pubm)) > 0) {
+        n = substr($0, i + length(pubm)); sub(/[^0-9].*$/, "", n)
+        if (n + 0 < 1) next
+        if (t_arm >= 0) {
+          pubs++
+          if (!found && cur == "watchdog" && wd_idle && ask >= 0 && hand >= 0) {
+            found = 1
+            gap = (prev_pub >= 0) ? sprintf("%d", t - prev_pub) : "noprev"
+            wait = sprintf("%d", hand - ask)
+          }
+        }
+        prev_pub = t
+        next
+      }
+      if (t_arm < 0) next
+      if ((i = index($0, trigm)) > 0) {
+        ask = -1; hand = -1
+        if (index($0, wdm) > 0) {
+          cur = "watchdog"; wds++; wd_idle = (t_idle >= 0 && t >= t_idle)
+        } else {
+          cur = "other"
+          if (leak == "-" && (index($0, delm) > 0 || index($0, penm) > 0)) {
+            leak = $1 " " $2
+          }
+        }
+        next
+      }
+      if (index($0, askm) > 0) { ask = t; asks++; next }
+      if (index($0, handm) > 0 && ask >= 0) {
+        hand = t; hands++
+        if (fast == "-" && (t - ask) < oneshot + 0) fast = sprintf("%d", t - ask)
+        next
+      }
     }
-    END { if (!found) printf "%s|none\n", state }
+    END {
+      # How much of the silence the WINDOW itself covered: from the publish the
+      # gap would be measured against to the moment the drive closed the hold.
+      # Shorter than the bound means the hold ended before the chain was due,
+      # which is a fact about the capture and not about the product.
+      covered = (t_end >= 0 && prev_pub >= 0) \
+        ? sprintf("%d", t_end - prev_pub) : "-"
+      printf "%s|%s|%s|%d|%d|%d|%d|%s|%s|%s|%s\n", armed, state, leak, pubs + 0, \
+        wds + 0, asks + 0, hands + 0, fast, gap, wait, covered
+    }
   ' "${logfile}" 2>/dev/null)"
-  state="${verdict%%|*}"
-  elapsed="${verdict##*|}"
+  if [[ -z "${verdict}" ]]; then
+    echo "FAIL: the oracle's parser produced nothing over '${logfile}' — the capture is \
+missing or unreadable, so this step has nothing to read."
+    return 1
+  fi
+  IFS='|' read -r armed state leak pubs wds asks hands fast gap wait covered \
+    <<<"${verdict}" || true
 
-  if [[ "${state}" == "ABSENT" ]]; then
-    echo "FAIL: the forced-idle phase never started — no '${MARK_IDLE_FORCED}' stamp in \
+  if [[ "${armed}" == "ABSENT" ]]; then
+    echo "FAIL: the no-fix condition was never armed — no '${MARK_NO_FIX_ARMED}' stamp in \
 the capture. Either the drive never printed '${MARK_IDLE_BEGIN}' or this script's idle \
-watcher died before it could act, so the no-fix chain was never exercised."
+watcher died before it could arm, so the chain was never exercised and nothing about it — \
+in either direction — can be read from this run."
+    return 1
+  fi
+  if [[ "${armed}" != "mock" ]]; then
+    echo "FAIL: the no-fix condition was NOT established: with the test provider installed, \
+'dumpsys location' read the platform's ${NO_FIX_PROVIDER} provider back as '${armed}'. A fix could still \
+reach the app, so this window tested nothing — in particular it does NOT say that \
+publishing stopped. The arming output and the fused block are in the step log above; \
+suspect the MOCK_LOCATION app-op, the provider name, or an image whose dump grammar moved."
+    return 1
+  fi
+  if [[ "${state}" == "ABSENT" ]]; then
+    echo "FAIL: the forced-idle phase never started — no '${MARK_IDLE_FORCED}' stamp in the \
+capture, so the device was never put into deep idle and the Doze half of this step ran on \
+nothing."
     return 1
   fi
   if [[ "${state}" != "IDLE" ]]; then
     echo "FAIL: the device did not enter deep idle ('dumpsys deviceidle get deep' read \
-back '${state}'). Anything that publishes after this is the ordinary watchdog on an \
-awake device, which steps 1-7 already cover; none of it would be a Doze result."
+back '${state}'). Anything that publishes after this is the ordinary watchdog on an awake \
+device, which steps 1-7 already cover; none of it would be a Doze result."
     return 1
   fi
-  if [[ "${elapsed}" == "none" ]]; then
-    echo "FAIL: no '${MARK_TRIGGER_WATCHDOG}' cycle published after the device entered \
-deep idle. With the GPS drip stopped the delivery-driven path has nothing to run on, so \
-background publishing STOPS here unless the no-fix chain (stale stream fix -> one-shot \
-timeout -> getLastKnownPosition) carries it."
+  if [[ "${leak}" != "-" ]]; then
+    echo "FAIL: the no-fix premise did not hold — a platform DELIVERY reached the FGS at \
+${leak}, after the ${NO_FIX_PROVIDER} provider had been replaced by a test provider that is \
+never given a location. Fixes were still arriving, so this window never ran the no-fix chain, and it is \
+NOT evidence that publishing stopped: ${pubs} publish(es) landed in it. Suspect the arming \
+(app-op, provider name, dump grammar), not the product."
     return 1
   fi
-  if (( elapsed < 0 )); then
-    echo "FAIL: the no-fix watchdog publish is stamped ${elapsed} s BEFORE deep idle \
-engaged — the device clock moved backwards, so nothing can be read from this capture."
+  if [[ "${fast}" != "-" ]]; then
+    echo "FAIL: the no-fix premise did not hold — a cycle that found no fresh stream fix \
+had one in hand ${fast} s later, inside the ${ONE_SHOT_TIMEOUT_SECS} s one-shot timeout. A \
+fix that arrives that quickly is the platform answering, not \`getLastKnownPosition()\` \
+after the one-shot ran out, so something was still feeding the app."
     return 1
   fi
-  if (( elapsed > NO_FIX_BOUND_SECS )); then
-    echo "FAIL: the no-fix watchdog publish landed ${elapsed} s after deep idle engaged, \
-past the ${NO_FIX_BOUND_SECS} s bound (kStreamPositionMaxAge ${STREAM_MAX_AGE_SECS} s + \
+  if [[ "${gap}" == "none" ]]; then
+    seen="Seen after the arm: ${wds} watchdog cycle(s), ${asks} cold acquisition(s), \
+${hands} of which produced a fix, ${pubs} publish(es)."
+    if (( pubs == 0 )); then
+      echo "FAIL: nothing published at all once the platform could no longer answer. \
+${seen} The chain (watchdog -> one-shot timeout -> getLastKnownPosition) is then the only \
+thing that can publish, so background sharing STOPPED here — which indoors, on a real \
+phone, is a user who believes they are sharing and is not."
+    else
+      echo "FAIL: publishing continued (${pubs} publish(es)) but nothing published THROUGH \
+the no-fix chain: no watchdog cycle missed the stream cache, ran its one-shot out and \
+published from the last known position. ${seen} Publishing did not stop; what is unproven \
+is the chain that has to carry it once the cached fix ages out."
+    fi
+    # BEFORE either reading is acted on: was the window even long enough? The
+    # bound is measured between publishes, so the drive's hold has to outlast
+    # the last publish by it. If it did not, this capture cannot say publishing
+    # stopped — the chain was not yet due when the hold closed — and saying so
+    # is how round 3's verdict went wrong in the first place.
+    if [[ "${covered}" != "-" ]] && (( covered < NO_FIX_BOUND_SECS )); then
+      echo "  NOT A PRODUCT FINDING: the hold closed ${covered} s after the publish \
+before it, inside the ${NO_FIX_BOUND_SECS} s the chain's own links are allowed, so the \
+chain was not yet due. Lengthen the drive's forced-idle hold \
+(\`_forcedIdleHoldDuration\`) — do not read anything about the product out of this."
+    fi
+    if (( asks > hands )); then
+      echo "  $((asks - hands)) cold acquisition(s) never produced a fix at all: the \
+one-shot ran out and getLastKnownPosition() came back empty, which is the chain's last link \
+failing. Play services is NOT in this path: the read is forced onto the platform \
+LocationManager (\`forceAndroidLocationManager: true\`), so it polls EVERY enabled \
+provider's last-known, not only the ${NO_FIX_PROVIDER} one this step silenced. An empty \
+answer therefore means no enabled provider held any last-known at all — the honest no-data \
+state, in which publishing nothing is correct and this step cannot prove the chain. Check \
+that the GPS drip seeded \`gps\` before ${MARK_IDLE_BEGIN}; if it did and the read is \
+still empty, that is a product finding."
+    fi
+    return 1
+  fi
+  if [[ "${gap}" == "noprev" ]]; then
+    echo "FAIL: the chain published, but no earlier publish appears in the capture, so the \
+silence it ended cannot be measured. Step 3 requires one inside the P2a window, so this is a \
+truncated capture rather than a product finding."
+    return 1
+  fi
+  if (( gap < 0 )); then
+    echo "FAIL: the chain's publish is stamped ${gap} s BEFORE the publish that precedes it \
+— the device clock moved backwards, so nothing can be read from this capture."
+    return 1
+  fi
+  if (( gap > NO_FIX_BOUND_SECS )); then
+    echo "FAIL: the no-fix chain published ${gap} s after the publish before it, past the \
+${NO_FIX_BOUND_SECS} s bound (kLocationPublishMaxInterval ${PUBLISH_MAX_INTERVAL_SECS} s + \
 kBackgroundRepeatInterval ${WATCHDOG_PERIOD_SECS} s + kFirstDeliveryWait \
 ${FIRST_DELIVERY_WAIT_SECS} s + kOneShotLocationTimeout ${ONE_SHOT_TIMEOUT_SECS} s + \
-${NO_FIX_SLACK_SECS} s slack). Publishing recovered, but late enough that a peer's \
-228 s marker retention had already lapsed."
+${NO_FIX_SLACK_SECS} s slack). Publishing recovered, but slower than the chain's own links \
+account for."
     return 1
   fi
-  echo "  no-fix chain: deep idle engaged; a ${MARK_TRIGGER_WATCHDOG} cycle published \
-${elapsed} s later (bound ${NO_FIX_BOUND_SECS} s)."
+  echo "  no-fix chain: the ${NO_FIX_PROVIDER} provider was silenced and deep idle engaged; \
+a ${MARK_TRIGGER_WATCHDOG} cycle found no fresh fix, waited ${wait} s on a one-shot that \
+could not be answered, and published ${gap} s after the publish before it (bound \
+${NO_FIX_BOUND_SECS} s)."
   return 0
 }
 
@@ -1345,22 +1637,98 @@ build_fixture_logcat() {
   } > "${out}"
 }
 
-# Write a step-8 capture: <out> <deep-idle state read-back> <watchdog publish
-# hh:mm:ss, or `none`>. The publish is preceded by its trigger two seconds
-# earlier, as the real cycle logs it.
-build_fixture_idle_logcat() {
-  local out="$1" state="$2" pub="$3"
-  {
-    printf '08-02 04:43:30.000  1111  1130 I flutter : %s\n' "${MARK_HOLD_DONE}"
-    printf '08-02 04:43:31.000  1111  1130 I flutter : %s\n' "${MARK_IDLE_BEGIN}"
+# One publish line, at <hh:mm:ss>.
+_fixture_publish() {
+  printf '08-02 %s.000  1111  1140 I flutter : [BackgroundTask] Published to 1/1 due circle(s) (1 eligible), fetched 1/1 circle(s).\n' \
+    "$1"
+}
+
+# Write a step-8 capture: <out> <no-fix read-back> <deep-idle read-back> <cycle>.
+#
+# The capture always opens with a publish at 04:43:20 — the last delivery-driven
+# one of the P2a window, which is the publish the no-fix gap is measured from.
+# <cycle> is `none`, or `<kind>:<hh:mm:ss of its publish>`:
+#
+#   chain     the shape the chain really logs: the watchdog trigger, the cold
+#             marker two seconds later (kFirstDeliveryWait), the fix in hand
+#             kOneShotLocationTimeout after that, then the publish;
+#   fast      the same, but the fix arrives 5 s after the ask — a one-shot that
+#             was ANSWERED, i.e. a fix was available after all;
+#   warm      a watchdog cycle that published straight from the stream cache,
+#             with no platform read at all;
+#   empty     a cold cycle whose read never produced a fix, and so never
+#             published (the publish argument is ignored);
+#   delivery  a delivery-driven cycle, which inside this window means the
+#             premise did not hold.
+#
+# The preamble every step-8 capture shares — the publish the no-fix gap is
+# measured from, the drive's two markers and the two device-stamped read-backs
+# ('none' omits one) — and the COLD cycle shape, both in ONE copy: the fixtures
+# below are hand-built around the same stamps, and a stamp that drifted between
+# a builder and a hand-built case is a difference nothing would report.
+_fixture_idle_preamble() {
+  local armed="$1" state="$2"
+  _fixture_publish '04:43:20'
+  printf '08-02 04:43:30.000  1111  1130 I flutter : %s\n' "${MARK_HOLD_DONE}"
+  printf '08-02 04:43:31.000  1111  1130 I flutter : %s\n' "${MARK_IDLE_BEGIN}"
+  if [[ "${armed}" != "none" ]]; then
+    printf '08-02 04:43:33.000  1500  1500 I %-8s: %s%s\n' \
+      "${SAMPLE_TAG}" "${MARK_NO_FIX_ARMED}" "${armed}"
+  fi
+  if [[ "${state}" != "none" ]]; then
     printf '08-02 04:43:34.000  1500  1500 I %-8s: %s%s\n' \
       "${SAMPLE_TAG}" "${MARK_IDLE_FORCED}" "${state}"
-    if [[ "${pub}" != "none" ]]; then
-      printf '08-02 %s.000  1111  1140 I flutter : %s\n' \
-        "$(_fixture_bump "${pub}" -2)" "${MARK_TRIGGER_WATCHDOG}"
-      printf '08-02 %s.000  1111  1140 I flutter : [BackgroundTask] Published to 1/1 due circle(s) (1 eligible), fetched 1/1 circle(s).\n' \
-        "${pub}"
-    fi
+  fi
+}
+
+# One COLD cycle: <trigger line> <publish hh:mm:ss> <seconds the read took>.
+# The fix lands a second before the publish and the trigger sits a whole
+# kFirstDeliveryWait ahead of the ask, so the read is the only length under
+# test. Emits NO publish line — the caller decides whether one follows, and
+# what it says.
+_fixture_cold_cycle() {
+  local trigline="$1" pub="$2" read_secs="$3" hand trig
+  hand="$(_fixture_bump "${pub}" -1)"
+  trig="$(_fixture_bump "${hand}" $(( -read_secs - FIRST_DELIVERY_WAIT_SECS )))"
+  printf '08-02 %s.000  1111  1140 I flutter : %s\n' "${trig}" "${trigline}"
+  printf '08-02 %s.000  1111  1140 I flutter : %s\n' \
+    "$(_fixture_bump "${trig}" "${FIRST_DELIVERY_WAIT_SECS}")" "${MARK_COLD_ASK}"
+  printf '08-02 %s.000  1111  1140 I flutter : %s\n' "${hand}" "${MARK_COLD_IN_HAND}"
+}
+
+build_fixture_idle_logcat() {
+  local out="$1" armed="$2" state="$3" cycle="$4"
+  local kind="${cycle%%:*}" pub="${cycle#*:}"
+  {
+    _fixture_idle_preamble "${armed}" "${state}"
+    case "${kind}" in
+      chain|fast|empty)
+        if [[ "${kind}" == "empty" ]]; then
+          printf '08-02 04:45:00.000  1111  1140 I flutter : %s\n' \
+            "${MARK_TRIGGER_WATCHDOG}"
+          printf '08-02 04:45:02.000  1111  1140 I flutter : %s\n' "${MARK_COLD_ASK}"
+        else
+          if [[ "${kind}" == "chain" ]]; then
+            _fixture_cold_cycle "${MARK_TRIGGER_WATCHDOG}" "${pub}" \
+              "${ONE_SHOT_TIMEOUT_SECS}"
+          else
+            _fixture_cold_cycle "${MARK_TRIGGER_WATCHDOG}" "${pub}" 5
+          fi
+          _fixture_publish "${pub}"
+        fi
+        ;;
+      warm)
+        printf '08-02 %s.000  1111  1140 I flutter : %s\n' \
+          "$(_fixture_bump "${pub}" -2)" "${MARK_TRIGGER_WATCHDOG}"
+        _fixture_publish "${pub}"
+        ;;
+      delivery)
+        printf '08-02 %s.000  1111  1140 I flutter : %s\n' \
+          "$(_fixture_bump "${pub}" -2)" "${MARK_TRIGGER_DELIVERY}"
+        _fixture_publish "${pub}"
+        ;;
+      none) ;;
+    esac
     printf '08-02 04:52:00.000  1111  1130 I flutter : %s\n' "${MARK_IDLE_END}"
   } > "${out}"
 }
@@ -1378,7 +1746,7 @@ run_self_test() {
   # Pinned by EQUALITY, never by a floor: the run used to end with a hard-coded
   # "all N fixtures passed" and no counter, so deleting a case left the message
   # — and the exit code — untouched. Mirrors check_android_location_power.sh.
-  local -r SELF_TEST_FIXTURES=71
+  local -r SELF_TEST_FIXTURES=95
   local tmp fail=0 checked=0 got
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
@@ -2080,76 +2448,562 @@ not failed under the ${MIN_DELIVERY_GAP_SECS} s floor (paired as '${got}')" >&2
   fi
 
   # --- step 8: the no-fix chain under deep idle ----------------------------
+  #
+  # The gap is measured from the publish the fixture opens with (04:43:20), so
+  # the at-bound case publishes exactly NO_FIX_BOUND_SECS after it.
   local pub_ok pub_late
-  pub_ok="$(_fixture_bump '04:43:34' "${NO_FIX_BOUND_SECS}")"
-  pub_late="$(_fixture_bump '04:43:34' "$((NO_FIX_BOUND_SECS + 1))")"
+  pub_ok="$(_fixture_bump '04:43:20' "${NO_FIX_BOUND_SECS}")"
+  pub_late="$(_fixture_bump '04:43:20' "$((NO_FIX_BOUND_SECS + 1))")"
 
-  # (49) Idle engaged, and a watchdog cycle published at exactly the bound.
-  build_fixture_idle_logcat "${tmp}/idle.ok.log" 'IDLE' "${pub_ok}"
+  # (49) Armed, idle engaged, and a cold watchdog cycle published from the last
+  #      known position at exactly the bound.
+  build_fixture_idle_logcat "${tmp}/idle.ok.log" 'mock' 'IDLE' "chain:${pub_ok}"
   _case
   if ! assert_no_fix_chain_oracle "${tmp}/idle.ok.log" >/dev/null; then
-    echo "SELF-TEST FAIL (49): a watchdog publish at exactly the ${NO_FIX_BOUND_SECS} s \
-bound was rejected" >&2
+    echo "SELF-TEST FAIL (49): a no-fix chain publish at exactly the \
+${NO_FIX_BOUND_SECS} s bound was rejected" >&2
     assert_no_fix_chain_oracle "${tmp}/idle.ok.log" >&2 || true
     fail=1
   fi
 
-  # (50) Publishing simply stops once the fixes do — the thing step 8 exists to
-  #      catch, and the P2b failure mode.
-  build_fixture_idle_logcat "${tmp}/idle.silent.log" 'IDLE' 'none'
-  _case
-  if assert_no_fix_chain_oracle "${tmp}/idle.silent.log" >/dev/null 2>&1; then
-    echo "SELF-TEST FAIL (50): a forced-idle phase with no publish at all passed" >&2
-    fail=1
-  fi
-
-  # (51) ANTI-VACUITY. `force-idle` exits 0 on a device that refuses to doze, so
-  #      a publish under `state=ACTIVE` is the ordinary watchdog on an awake
-  #      device — already covered by steps 1-7, and no kind of Doze result.
-  build_fixture_idle_logcat "${tmp}/idle.awake.log" 'ACTIVE' "${pub_ok}"
-  _case
-  if assert_no_fix_chain_oracle "${tmp}/idle.awake.log" >/dev/null 2>&1; then
-    echo "SELF-TEST FAIL (51): a publish on a device that never entered deep idle passed" >&2
-    fail=1
-  fi
-
-  # (52) The phase never ran at all (no stamp): also not a pass.
-  grep -vF -- "${MARK_IDLE_FORCED}" "${tmp}/idle.ok.log" > "${tmp}/idle.absent.log" || true
-  _case
-  if assert_no_fix_chain_oracle "${tmp}/idle.absent.log" >/dev/null 2>&1; then
-    echo "SELF-TEST FAIL (52): a capture with no '${MARK_IDLE_FORCED}' stamp passed" >&2
-    fail=1
-  fi
-
-  # (53) One second past the bound. Publishing recovered, but late enough that a
-  #      peer's 228 s marker retention had already lapsed.
-  build_fixture_idle_logcat "${tmp}/idle.late.log" 'IDLE' "${pub_late}"
+  # (50) One second past the bound: publishing recovered too slowly for the
+  #      chain's own links to explain.
+  build_fixture_idle_logcat "${tmp}/idle.late.log" 'mock' 'IDLE' "chain:${pub_late}"
   _case
   if assert_no_fix_chain_oracle "${tmp}/idle.late.log" >/dev/null 2>&1; then
-    echo "SELF-TEST FAIL (53): a watchdog publish $((NO_FIX_BOUND_SECS + 1)) s after \
-idle engaged passed a ${NO_FIX_BOUND_SECS} s bound" >&2
+    echo "SELF-TEST FAIL (50): a chain publish $((NO_FIX_BOUND_SECS + 1)) s after the \
+publish before it passed a ${NO_FIX_BOUND_SECS} s bound" >&2
     fail=1
   fi
 
-  # (54) A DELIVERY-driven publish under idle proves the opposite of step 8: the
-  #      drip did not stop, so the no-fix chain never ran.
-  # `index`/`substr`, not sed: the marker's `[...]` is a character class in a
-  # BRE, so a sed pattern would match nothing and hand this fixture back its own
-  # passing input — a mutation test that mutates nothing.
-  awk -v wd="${MARK_TRIGGER_WATCHDOG}" '
-    {
-      i = index($0, wd)
-      if (i > 0) {
-        $0 = substr($0, 1, i - 1) "[BackgroundTask] cycle trigger=delivery" \
-             substr($0, i + length(wd))
-      }
-      print
-    }
-  ' "${tmp}/idle.ok.log" > "${tmp}/idle.delivery.log"
+  # (51) Publishing simply stops once the platform stops answering — the thing
+  #      step 8 exists to catch, and the P2b failure mode. The VERDICT matters as
+  #      much as the rc: this is the one shape that may be reported as publishing
+  #      having stopped.
+  build_fixture_idle_logcat "${tmp}/idle.silent.log" 'mock' 'IDLE' 'none'
   _case
-  if assert_no_fix_chain_oracle "${tmp}/idle.delivery.log" >/dev/null 2>&1; then
-    echo "SELF-TEST FAIL (54): a delivery-driven publish was accepted as the no-fix \
-chain" >&2
+  if got="$(assert_no_fix_chain_oracle "${tmp}/idle.silent.log")" \
+     || [[ "${got}" != *"STOPPED"* ]]; then
+    echo "SELF-TEST FAIL (51): a no-fix window with no publish at all was not reported \
+as publishing having stopped: '${got}'" >&2
+    fail=1
+  fi
+
+  # (52) ANTI-VACUITY. `force-idle` exits 0 on a device that refuses to doze, so
+  #      a publish under `state=ACTIVE` is the ordinary watchdog on an awake
+  #      device — already covered by steps 1-7, and no kind of Doze result.
+  build_fixture_idle_logcat "${tmp}/idle.awake.log" 'mock' 'ACTIVE' "chain:${pub_ok}"
+  _case
+  if assert_no_fix_chain_oracle "${tmp}/idle.awake.log" >/dev/null 2>&1; then
+    echo "SELF-TEST FAIL (52): a publish on a device that never entered deep idle \
+passed" >&2
+    fail=1
+  fi
+
+  # (53) The forced-idle stamp never arrived: also not a pass.
+  build_fixture_idle_logcat "${tmp}/idle.nostamp.log" 'mock' 'none' "chain:${pub_ok}"
+  _case
+  if assert_no_fix_chain_oracle "${tmp}/idle.nostamp.log" >/dev/null 2>&1; then
+    echo "SELF-TEST FAIL (53): a capture with no '${MARK_IDLE_FORCED}' stamp passed" >&2
+    fail=1
+  fi
+
+  # (54) A DELIVERY-driven publish inside the window proves the premise slipped,
+  #      and the verdict must say so INSTEAD of claiming publishing stopped: run
+  #      34642726338 failed exactly here, with three healthy delivery-driven
+  #      publishes in the window and "background publishing STOPS here" as the
+  #      verdict.
+  build_fixture_idle_logcat "${tmp}/idle.delivery.log" 'mock' 'IDLE' 'delivery:04:45:00'
+  _case
+  if got="$(assert_no_fix_chain_oracle "${tmp}/idle.delivery.log")" \
+     || [[ "${got}" != *"premise did not hold"* || "${got}" == *"STOPPED"* ]]; then
+    echo "SELF-TEST FAIL (54): a delivery inside the no-fix window was not reported as \
+the premise failing: '${got}'" >&2
+    fail=1
+  fi
+
+  # (72) The condition was never armed at all — no stamp. Nothing about the
+  #      chain can be read from such a capture in EITHER direction.
+  build_fixture_idle_logcat "${tmp}/idle.unarmed.log" 'none' 'IDLE' "chain:${pub_ok}"
+  _case
+  if got="$(assert_no_fix_chain_oracle "${tmp}/idle.unarmed.log")" \
+     || [[ "${got}" != *"never armed"* ]]; then
+    echo "SELF-TEST FAIL (72): a capture with no '${MARK_NO_FIX_ARMED}' stamp was not \
+reported as an unarmed window: '${got}'" >&2
+    fail=1
+  fi
+
+  # (73) The arm ran and did not take (the app-op is refused SILENTLY, so this is
+  #      the shape a mis-armed lane really has). Not a product finding.
+  build_fixture_idle_logcat "${tmp}/idle.notmock.log" 'not-mocked' 'IDLE' "chain:${pub_ok}"
+  _case
+  if got="$(assert_no_fix_chain_oracle "${tmp}/idle.notmock.log")" \
+     || [[ "${got}" != *"NOT established"* || "${got}" == *"STOPPED"* ]]; then
+    echo "SELF-TEST FAIL (73): a read-back that was not 'mock' was not reported as an \
+unestablished premise: '${got}'" >&2
+    fail=1
+  fi
+
+  # (74) A watchdog publish served from the stream cache is publishing, but it is
+  #      not the chain: nothing in it went near the platform. Crediting it would
+  #      pass a build whose one-shot/last-known fallback is broken, which is the
+  #      half that carries sharing once the cached fix ages out.
+  #
+  #      It also pins WHERE the too-short-hold note measures from. That warm
+  #      publish lands at the bound, leaving under ${NO_FIX_BOUND_SECS} s of hold
+  #      after it, so the chain was genuinely not due again before the window
+  #      closed and the note belongs here. Anchored on the arm stamp instead the
+  #      same capture looks long enough, which is why the anchor is the PUBLISH.
+  build_fixture_idle_logcat "${tmp}/idle.warm.log" 'mock' 'IDLE' "warm:${pub_ok}"
+  _case
+  if got="$(assert_no_fix_chain_oracle "${tmp}/idle.warm.log")" \
+     || [[ "${got}" != *"nothing published THROUGH the no-fix chain"* \
+           || "${got}" != *"NOT A PRODUCT FINDING"* ]]; then
+    echo "SELF-TEST FAIL (74): a cache-served watchdog publish was credited to the \
+no-fix chain, or the hold it left too short went unsaid: '${got}'" >&2
+    fail=1
+  fi
+
+  # (75) The cold read came back in 5 s: the one-shot was ANSWERED, so a fix was
+  #      available and the premise slipped between the read-back and the cycle.
+  build_fixture_idle_logcat "${tmp}/idle.fast.log" 'mock' 'IDLE' "fast:${pub_ok}"
+  _case
+  if got="$(assert_no_fix_chain_oracle "${tmp}/idle.fast.log")" \
+     || [[ "${got}" != *"one-shot timeout"* || "${got}" == *"STOPPED"* ]]; then
+    echo "SELF-TEST FAIL (75): a one-shot answered inside its timeout was accepted as \
+the last-known fallback: '${got}'" >&2
+    fail=1
+  fi
+
+  # (76) The chain's LAST link failing: the cycle asked the platform and never
+  #      got a position, so nothing published. That IS publishing stopping, and
+  #      the verdict has to name the empty read rather than leave it as a count.
+  build_fixture_idle_logcat "${tmp}/idle.empty.log" 'mock' 'IDLE' 'empty:none'
+  _case
+  if got="$(assert_no_fix_chain_oracle "${tmp}/idle.empty.log")" \
+     || [[ "${got}" != *"STOPPED"* || "${got}" != *"never produced a fix"* ]]; then
+    echo "SELF-TEST FAIL (76): a cold read that produced no fix at all was not reported \
+as the chain's last link failing: '${got}'" >&2
+    fail=1
+  fi
+
+  # --- the arm read-back's own grammar --------------------------------------
+  #
+  # The unmocked block below is VERBATIM from run 34642726338's capture (the
+  # `dumpsys location` dump `fail()` prints). The mocked one has no real capture
+  # yet — this lane has never armed a test provider on a device — so every line
+  # of it is derived from AOSP 14 source, field by field, and from nothing
+  # observed:
+  #
+  #   * the header, `last location=` and `enabled=` — `LocationProviderManager
+  #     .dump`: `ipw.print(" provider")`, then `if (mProvider.isMock())
+  #     ipw.print(" [mock]")`, then `println(":")`. Four-space indent, six-space
+  #     body, from `LocationManagerService.dump`'s two-space
+  #     `IndentingPrintWriter`.
+  #   * `allowed=` / `identity=` / `properties=` — `MockableLocationProvider
+  #     .dump`. `identity` is `CallerIdentity.toString`, `uid/package[tag]` —
+  #     the shape the real block above shows on a device. The uid is the BINDER
+  #     caller's, i.e. `adb shell`'s 2000; the package and tag are the arguments
+  #     `LocationShellCommand` passes, `mContext.getOpPackageName()` and
+  #     `getAttributionTag()` on the context `LocationManagerService` builds with
+  #     `createAttributionContext(ATTRIBUTION_TAG)`, `ATTRIBUTION_TAG =
+  #     "LocationService"`. `properties` is `handleAddTestProvider`'s DEFAULT —
+  #     `Criteria.POWER_LOW` and `ACCURACY_FINE`, because this lane passes
+  #     neither `--powerRequirement` nor `--accuracy` — and
+  #     `ProviderProperties.toString` prints POWER_USAGE_LOW as `Low`.
+  #     Both lines were transcribed wrongly the first time (`2000/android`,
+  #     `powerUsage=High`) and nothing caught it, because the parser reads
+  #     neither. A fixture that agrees with the parser rather than with the
+  #     platform is the defect this file exists to avoid, so they are corrected
+  #     here even though no verdict moves.
+  #   * `last mock location=` — `MockLocationProvider.dump`, one line, `null`
+  #     until `set-test-provider-location`, which this lane never calls.
+  #
+  # `extra attribution tags=` is absent because no `--extraAttributionTags` is
+  # passed. Both directions fail CLOSED: a grammar this parser does not
+  # recognise answers with a token that is not `mock`, and step 8 then refuses
+  # to read anything out of the window at all.
+  local real_fused mock_fused
+  real_fused='    fused provider:
+      service: ProviderRequest[OFF]
+      last location=Location[fused 52.370215,4.895167 hAcc=5.0 et=+10m0s201ms alt=0.0 vAcc=0.5 vel=0.0 sAcc=0.5]
+      enabled=true
+      allowed=true
+      identity=10131/com.google.android.gms[fused_location_provider]
+      extra attribution tags={awareness_provider, activity_recognition_provider, network_location_provider, network_location_calibration, current_semantic_location, fused_location_provider, wearable_flp_shim, geofencer_provider}
+      properties=ProviderProperties[powerUsage=Low, accuracy=Fine, supports=[bearing,speed,altitude]]
+      stationary throttled=false (not stationary)
+      target service=10131/com.google.android.gms/com.google.android.location.fused.FusedLocationService@1
+      connected=true'
+  mock_fused='    fused provider [mock]:
+      service: ProviderRequest[OFF]
+      last location=null
+      enabled=true
+      allowed=true
+      identity=2000/android[LocationService]
+      properties=ProviderProperties[powerUsage=Low, accuracy=Fine]
+      last mock location=null'
+
+  # (77) The real image's own fused block: a provider that can still answer.
+  _case
+  got="$(printf '%s\n' "${real_fused}" | no_fix_verdict)"
+  if [[ "${got}" != "not-mocked" ]]; then
+    echo "SELF-TEST FAIL (77): run 34642726338's fused block read as '${got}', expected \
+'not-mocked'" >&2
+    fail=1
+  fi
+
+  # (78) The armed shape, and the only one step 8 accepts.
+  _case
+  got="$(printf '%s\n' "${mock_fused}" | no_fix_verdict)"
+  if [[ "${got}" != "mock" ]]; then
+    echo "SELF-TEST FAIL (78): the armed fused block read as '${got}', expected 'mock'" >&2
+    fail=1
+  fi
+
+  # (79) Installed but left disabled — `add-test-provider` alone leaves it that
+  #      way, and geolocator then picks `gps` instead, which CAN answer.
+  _case
+  got="$(printf '%s\n' "${mock_fused//enabled=true/enabled=false}" | no_fix_verdict)"
+  if [[ "${got}" != "mock-disabled" ]]; then
+    echo "SELF-TEST FAIL (79): a disabled test provider read as '${got}', expected \
+'mock-disabled'" >&2
+    fail=1
+  fi
+
+  # (80) Something injected a location into it: no longer silent. The value is
+  #      `Location.toString()`'s, which for anything a test provider produced
+  #      ends in a bare ` mock` (`setProviderLocation` calls
+  #      `setIsFromMockProvider(true)`; `toString` then appends it) and carries
+  #      `set-test-provider-location`'s default 100 m accuracy.
+  _case
+  got="$(printf '%s\n' "${mock_fused/last mock location=null/last mock location=Location[fused 52.370215,4.895167 hAcc=100.0 et=+9m1s978ms mock]}" \
+    | no_fix_verdict)"
+  if [[ "${got}" != "mock-reported-a-location" ]]; then
+    echo "SELF-TEST FAIL (80): a test provider that had reported read as '${got}', \
+expected 'mock-reported-a-location'" >&2
+    fail=1
+  fi
+
+  # (81) A test provider whose own dump line is not there: the block says the
+  #      provider is mocked but not that it has stayed silent, and "silent" is
+  #      the half step 8 rests on. A dump grammar that moved lands here.
+  _case
+  got="$(printf '%s\n' "${mock_fused%$'\n'*}" | no_fix_verdict)"
+  if [[ "${got}" != "mock-unreadable" ]]; then
+    echo "SELF-TEST FAIL (81): a test provider with no 'last mock location=' line read \
+as '${got}', expected 'mock-unreadable'" >&2
+    fail=1
+  fi
+
+  # (82) No fused provider in the dump at all — the read-back cannot be vacuous.
+  _case
+  got="$(printf '%s\n' "${real_fused//fused provider:/network provider:}" | no_fix_verdict)"
+  if [[ "${got}" != "no-fused-provider" ]]; then
+    echo "SELF-TEST FAIL (82): a dump with no fused block read as '${got}', expected \
+'no-fused-provider'" >&2
+    fail=1
+  fi
+
+  # (85) The armed block AS THE LANE WILL ACTUALLY READ IT. `arm_no_fix` dumps
+  #      the instant after the swap, while the FGS still holds its registration
+  #      — `MockableLocationProvider.setProviderLocked` hands the mock the
+  #      CURRENT request — so the real block carries a live `service:` line and
+  #      a `listeners:` sub-block between the header and `last location=`, not
+  #      the `ProviderRequest[OFF]` of the quiet fixture above. Those lines are
+  #      the one shape the parser has to walk PAST rather than read, and the
+  #      indentation is the device's own: run 34642726338's power samples print
+  #      `fused` registrations at eight spaces (six-space `listeners:` header
+  #      plus `IndentingPrintWriter`'s two), and the request text has no `gps `
+  #      provider token on this image.
+  _case
+  got="$(printf '%s\n' '    fused provider [mock]:
+      service: ProviderRequest[@+2m39s0ms, HIGH_ACCURACY, WorkSource{10192 com.oblivioustech.haven}]
+      listeners:
+        10192/com.oblivioustech.haven/F5F24530 Request[@+2m39s0ms HIGH_ACCURACY, WorkSource{10192 com.oblivioustech.haven}]
+        10192/com.oblivioustech.haven/5438ED82 Request[@0 HIGH_ACCURACY, WorkSource{10192 com.oblivioustech.haven}] (inactive)
+      last location=null
+      enabled=true
+      allowed=true
+      identity=2000/android[LocationService]
+      properties=ProviderProperties[powerUsage=Low, accuracy=Fine]
+      last mock location=null' | no_fix_verdict)"
+  if [[ "${got}" != "mock" ]]; then
+    echo "SELF-TEST FAIL (85): an armed fused block carrying the FGS's live \
+registration read as '${got}', expected 'mock' — the parser must walk past the \
+'service:'/'listeners:' lines, not read them" >&2
+    fail=1
+  fi
+
+  # --- the two real captures this step was rebuilt from ---------------------
+
+  # (83) Run 34642726338's forced-idle window, VERBATIM, with the arm stamp this
+  #      lane now writes spliced in (that run had none). Three delivery-driven
+  #      cycles, each publishing: the verdict must be the premise, and must not
+  #      claim publishing stopped — it plainly did not.
+  {
+    printf '%s\n' \
+      '09-11 20:42:53.442  4922  4922 I flutter : [BackgroundTask] Published to 1/1 due circle(s) (1 eligible), fetched 0/1 circle(s).' \
+      '09-11 20:44:54.357  4922  4922 I flutter : [b1] IDLE_PHASE_BEGIN'
+    printf '09-11 20:44:55.900  6731  6731 I %-8s: %smock\n' \
+      "${SAMPLE_TAG}" "${MARK_NO_FIX_ARMED}"
+    printf '%s\n' \
+      '09-11 20:44:55.932  6731  6731 I b1power : IDLE_FORCED state=IDLE' \
+      '09-11 20:45:00.302  4922  4922 I flutter : [BackgroundTask] cycle trigger=delivery' \
+      '09-11 20:45:00.314  4922  4922 I flutter : [BackgroundTask] registration armed (159s)' \
+      '09-11 20:45:21.964  4922  4922 I flutter : [BackgroundTask] Published to 1/1 due circle(s) (1 eligible), fetched 1/1 circle(s).' \
+      '09-11 20:47:44.317  4922  4922 I flutter : [BackgroundTask] cycle trigger=delivery' \
+      '09-11 20:47:44.329  4922  4922 I flutter : [BackgroundTask] registration armed (105s)' \
+      '09-11 20:47:50.866  4922  4922 I flutter : [BackgroundTask] Published to 1/1 due circle(s) (1 eligible), fetched 1/1 circle(s).' \
+      '09-11 20:49:34.326  4922  4922 I flutter : [BackgroundTask] cycle trigger=delivery' \
+      '09-11 20:49:34.337  4922  4922 I flutter : [BackgroundTask] registration armed (130s)' \
+      '09-11 20:49:40.869  4922  4922 I flutter : [BackgroundTask] Published to 1/1 due circle(s) (1 eligible), fetched 0/1 circle(s).' \
+      '09-11 20:50:34.410  4922  4922 I flutter : [b1] IDLE_PHASE_END'
+  } > "${tmp}/real.idle.delivery.log"
+  _case
+  if got="$(assert_no_fix_chain_oracle "${tmp}/real.idle.delivery.log")" \
+     || [[ "${got}" != *"premise did not hold"* || "${got}" == *"STOPPED"* \
+           || "${got}" != *"3 publish(es)"* ]]; then
+    echo "SELF-TEST FAIL (83): run 34642726338's window was not reported as three \
+publishes under a premise that did not hold: '${got}'" >&2
+    fail=1
+  fi
+
+  # (84) Run 34511084722's window, VERBATIM up to its watchdog publish, with the
+  #      same stamp spliced in. That publish is what step 8 used to accept as a
+  #      pass; its fix arrived 5 s after the trigger, with no cold-read markers
+  #      at all (the run predates them), so it cannot be attributed to the chain
+  #      and must not be credited to it.
+  {
+    printf '%s\n' \
+      '09-10 18:25:06.374  4032  4032 I flutter : [BackgroundTask] Published to 1/1 due circle(s) (1 eligible), fetched 0/1 circle(s).' \
+      '09-10 18:26:36.205  4032  4032 I flutter : [b1] IDLE_PHASE_BEGIN'
+    printf '09-10 18:26:38.000  6344  6344 I %-8s: %smock\n' \
+      "${SAMPLE_TAG}" "${MARK_NO_FIX_ARMED}"
+    printf '%s\n' \
+      '09-10 18:26:38.052  6344  6344 I b1power : IDLE_FORCED state=IDLE' \
+      '09-10 18:28:01.064  4032  4032 I flutter : [BackgroundTask] cycle trigger=watchdog' \
+      '09-10 18:28:01.076  4032  4032 I flutter : [BackgroundTask] registration armed (31s)' \
+      '09-10 18:28:06.023  4032  4032 I flutter : [BackgroundTask] Published to 1/1 due circle(s) (1 eligible), fetched 1/1 circle(s).' \
+      '09-10 18:32:16.258  4032  4032 I flutter : [b1] IDLE_PHASE_END'
+  } > "${tmp}/real.idle.watchdog.log"
+  _case
+  if got="$(assert_no_fix_chain_oracle "${tmp}/real.idle.watchdog.log")" \
+     || [[ "${got}" != *"nothing published THROUGH the no-fix chain"* ]]; then
+    echo "SELF-TEST FAIL (84): run 34511084722's unattributable watchdog publish was \
+still credited to the no-fix chain: '${got}'" >&2
+    fail=1
+  fi
+
+  # --- what the step-8 oracle is allowed to CREDIT --------------------------
+  #
+  # Every case below was found by mutating `assert_no_fix_chain_oracle` and
+  # watching the suite stay green: each one is a term the oracle already gets
+  # right and nothing above pins. They are here because this step's whole
+  # history is of an oracle that read the right thing by accident.
+
+  # (86) The OTHER delivery trigger. `_runCycle` logs `pending-delivery` when a
+  #      fix landed while a publish was in flight, so inside this window it says
+  #      exactly what `delivery` says — the premise slipped — and the verdict
+  #      must not blame the product.
+  {
+    _fixture_idle_preamble 'mock' 'IDLE'
+    printf '08-02 04:45:00.000  1111  1140 I flutter : %s\n' "${MARK_TRIGGER_PENDING}"
+    _fixture_publish '04:45:02'
+    printf '08-02 04:52:00.000  1111  1130 I flutter : %s\n' "${MARK_IDLE_END}"
+  } > "${tmp}/idle.pending.log"
+  _case
+  if got="$(assert_no_fix_chain_oracle "${tmp}/idle.pending.log")" \
+     || [[ "${got}" != *"premise did not hold"* || "${got}" == *"STOPPED"* ]]; then
+    echo "SELF-TEST FAIL (86): a '${MARK_TRIGGER_PENDING}' cycle inside the no-fix \
+window was not reported as the premise failing: '${got}'" >&2
+    fail=1
+  fi
+
+  # (87) P0-1's signature INSIDE step 8. The chain ran — cold ask, one-shot run
+  #      out, fix in hand — and then every circle's publish failed, so the line
+  #      says `0/`. Reading the marker and not the count is the defect this whole
+  #      file was built around; step 8 must not reintroduce it by crediting a
+  #      cycle that reached no relay.
+  {
+    _fixture_idle_preamble 'mock' 'IDLE'
+    _fixture_cold_cycle "${MARK_TRIGGER_WATCHDOG}" "${pub_ok}" "${ONE_SHOT_TIMEOUT_SECS}"
+    printf '08-02 %s.000  1111  1140 I flutter : [BackgroundTask] Published to 0/1 due circle(s) (1 eligible), fetched 0/1 circle(s).\n' \
+      "${pub_ok}"
+    printf '08-02 04:52:00.000  1111  1130 I flutter : %s\n' "${MARK_IDLE_END}"
+  } > "${tmp}/idle.zero.log"
+  _case
+  if got="$(assert_no_fix_chain_oracle "${tmp}/idle.zero.log")" \
+     || [[ "${got}" != *"STOPPED"* ]]; then
+    echo "SELF-TEST FAIL (87): a chain cycle whose publish reached 0 circles was not \
+reported as publishing having stopped: '${got}'" >&2
+    fail=1
+  fi
+
+  # (88) The markers belong to ONE cycle. A cold cycle that reached no relay,
+  #      followed by a warm watchdog cycle that did, is two facts — not a chain
+  #      publish. Crediting it would let a build whose last-known fallback never
+  #      publishes pass on the strength of its stream cache.
+  {
+    _fixture_idle_preamble 'mock' 'IDLE'
+    _fixture_cold_cycle "${MARK_TRIGGER_WATCHDOG}" '04:45:00' "${ONE_SHOT_TIMEOUT_SECS}"
+    printf '08-02 04:45:00.000  1111  1140 I flutter : [BackgroundTask] Published to 0/1 due circle(s) (1 eligible), fetched 0/1 circle(s).\n'
+    printf '08-02 04:46:00.000  1111  1140 I flutter : %s\n' "${MARK_TRIGGER_WATCHDOG}"
+    _fixture_publish '04:46:02'
+    printf '08-02 04:52:00.000  1111  1130 I flutter : %s\n' "${MARK_IDLE_END}"
+  } > "${tmp}/idle.carryover.log"
+  _case
+  if got="$(assert_no_fix_chain_oracle "${tmp}/idle.carryover.log")" \
+     || [[ "${got}" != *"nothing published THROUGH the no-fix chain"* ]]; then
+    echo "SELF-TEST FAIL (88): a warm watchdog publish inherited the PREVIOUS cycle's \
+cold-read markers and was credited to the chain: '${got}'" >&2
+    fail=1
+  fi
+
+  # (89) The fourth trigger. `paused-signal` is the UI isolate's handoff prompt,
+  #      not a platform delivery: it is neither a premise breach nor the
+  #      watchdog, and a cold read under it proves nothing about the chain Doze
+  #      has to be carried by. A watchdog cycle runs FIRST and publishes
+  #      nothing, so the capture is one where the window's deep-idle ordering is
+  #      already satisfied and the trigger is the only thing left separating the
+  #      two cycles.
+  {
+    _fixture_idle_preamble 'mock' 'IDLE'
+    printf '08-02 04:44:00.000  1111  1140 I flutter : %s\n' "${MARK_TRIGGER_WATCHDOG}"
+    _fixture_cold_cycle '[BackgroundTask] cycle trigger=paused-signal' \
+      "${pub_ok}" "${ONE_SHOT_TIMEOUT_SECS}"
+    _fixture_publish "${pub_ok}"
+    printf '08-02 04:52:00.000  1111  1130 I flutter : %s\n' "${MARK_IDLE_END}"
+  } > "${tmp}/idle.paused.log"
+  _case
+  if got="$(assert_no_fix_chain_oracle "${tmp}/idle.paused.log")" \
+     || [[ "${got}" != *"nothing published THROUGH the no-fix chain"* \
+           || "${got}" == *"premise did not hold"* ]]; then
+    echo "SELF-TEST FAIL (89): a cold 'paused-signal' cycle was credited to the no-fix \
+chain (or mistaken for a delivery): '${got}'" >&2
+    fail=1
+  fi
+
+  # (90) The window's CLOSING edge. Restoring `resumed` hands publishing back to
+  #      the UI isolate and stops the service, so anything after
+  #      `${MARK_IDLE_END}` is teardown; an oracle that read to EOF would credit
+  #      a teardown publish to a window that had already ended.
+  {
+    _fixture_idle_preamble 'mock' 'IDLE'
+    printf '08-02 04:52:00.000  1111  1130 I flutter : %s\n' "${MARK_IDLE_END}"
+    _fixture_cold_cycle "${MARK_TRIGGER_WATCHDOG}" '04:53:00' "${ONE_SHOT_TIMEOUT_SECS}"
+    _fixture_publish '04:53:00'
+  } > "${tmp}/idle.afterend.log"
+  _case
+  if got="$(assert_no_fix_chain_oracle "${tmp}/idle.afterend.log")" \
+     || [[ "${got}" != *"STOPPED"* ]]; then
+    echo "SELF-TEST FAIL (90): a chain publish AFTER '${MARK_IDLE_END}' was credited to \
+the forced-idle window: '${got}'" >&2
+    fail=1
+  fi
+
+  # (91) FALSE-RED GUARD, and the only case here that must PASS. Every real
+  #      capture opens with the P2a window's delivery-driven cycles; they sit
+  #      before the arm stamp and are what steps 5-7 measure. Reading them as
+  #      premise breaches — or letting their markers reach the attribution —
+  #      would fail a perfectly healthy run.
+  {
+    _fixture_delivery_cycle '04:43:10'
+    _fixture_idle_preamble 'mock' 'IDLE'
+    _fixture_cold_cycle "${MARK_TRIGGER_WATCHDOG}" "${pub_ok}" "${ONE_SHOT_TIMEOUT_SECS}"
+    _fixture_publish "${pub_ok}"
+    printf '08-02 04:52:00.000  1111  1130 I flutter : %s\n' "${MARK_IDLE_END}"
+  } > "${tmp}/idle.prearm.log"
+  _case
+  if ! assert_no_fix_chain_oracle "${tmp}/idle.prearm.log" >/dev/null; then
+    echo "SELF-TEST FAIL (91): the P2a window's own delivery cycles, before the arm, \
+failed a healthy no-fix window" >&2
+    assert_no_fix_chain_oracle "${tmp}/idle.prearm.log" >&2 || true
+    fail=1
+  fi
+
+  # (92) A clock that moved backwards. The gap is a subtraction of two device
+  #      stamps, so a rollback makes it negative — which is smaller than any
+  #      bound and would otherwise read as a fast, healthy recovery. Built by
+  #      hand rather than from `_fixture_cold_cycle`: the cycle has to stay
+  #      inside the forced-idle window while its PUBLISH lands before the one
+  #      the gap is measured from, which no derivation from the publish stamp
+  #      can produce.
+  {
+    _fixture_idle_preamble 'mock' 'IDLE'
+    printf '08-02 04:45:00.000  1111  1140 I flutter : %s\n' "${MARK_TRIGGER_WATCHDOG}"
+    printf '08-02 04:45:02.000  1111  1140 I flutter : %s\n' "${MARK_COLD_ASK}"
+    printf '08-02 %s.000  1111  1140 I flutter : %s\n' \
+      "$(_fixture_bump '04:45:02' "${ONE_SHOT_TIMEOUT_SECS}")" "${MARK_COLD_IN_HAND}"
+    _fixture_publish '04:43:15'
+    printf '08-02 04:52:00.000  1111  1130 I flutter : %s\n' "${MARK_IDLE_END}"
+  } > "${tmp}/idle.backwards.log"
+  _case
+  if got="$(assert_no_fix_chain_oracle "${tmp}/idle.backwards.log")" \
+     || [[ "${got}" != *"clock moved backwards"* ]]; then
+    echo "SELF-TEST FAIL (92): a chain publish stamped BEFORE the publish preceding it \
+was accepted rather than reported as a clock rollback: '${got}'" >&2
+    fail=1
+  fi
+
+  # (93) Deep idle has to come FIRST. A cold watchdog cycle that ran before the
+  #      device was dozed is the ordinary awake-device watchdog steps 1-7 already
+  #      cover; crediting it would report an awake result as a Doze one even
+  #      though the read-back later says IDLE.
+  {
+    _fixture_idle_preamble 'mock' 'none'
+    _fixture_cold_cycle "${MARK_TRIGGER_WATCHDOG}" '04:45:00' "${ONE_SHOT_TIMEOUT_SECS}"
+    _fixture_publish '04:45:00'
+    printf '08-02 04:46:00.000  1500  1500 I %-8s: %sIDLE\n' \
+      "${SAMPLE_TAG}" "${MARK_IDLE_FORCED}"
+    printf '08-02 04:52:00.000  1111  1130 I flutter : %s\n' "${MARK_IDLE_END}"
+  } > "${tmp}/idle.preidle.log"
+  _case
+  if got="$(assert_no_fix_chain_oracle "${tmp}/idle.preidle.log")" \
+     || [[ "${got}" != *"nothing published THROUGH the no-fix chain"* ]]; then
+    echo "SELF-TEST FAIL (93): a cold watchdog publish from BEFORE deep idle engaged \
+was credited to the no-fix chain: '${got}'" >&2
+    fail=1
+  fi
+
+  # (94) Nothing to measure the silence from. Step 3 requires a publish inside
+  #      the P2a window, so a capture without one is truncated — a fact about
+  #      the capture, which must not be reported as a chain that recovered in
+  #      however many seconds the parser happened to compute.
+  {
+    printf '08-02 04:43:30.000  1111  1130 I flutter : %s\n' "${MARK_HOLD_DONE}"
+    printf '08-02 04:43:31.000  1111  1130 I flutter : %s\n' "${MARK_IDLE_BEGIN}"
+    printf '08-02 04:43:33.000  1500  1500 I %-8s: %smock\n' \
+      "${SAMPLE_TAG}" "${MARK_NO_FIX_ARMED}"
+    printf '08-02 04:43:34.000  1500  1500 I %-8s: %sIDLE\n' \
+      "${SAMPLE_TAG}" "${MARK_IDLE_FORCED}"
+    _fixture_cold_cycle "${MARK_TRIGGER_WATCHDOG}" "${pub_ok}" "${ONE_SHOT_TIMEOUT_SECS}"
+    _fixture_publish "${pub_ok}"
+    printf '08-02 04:52:00.000  1111  1130 I flutter : %s\n' "${MARK_IDLE_END}"
+  } > "${tmp}/idle.noprev.log"
+  _case
+  if got="$(assert_no_fix_chain_oracle "${tmp}/idle.noprev.log")" \
+     || [[ "${got}" != *"no earlier publish"* ]]; then
+    echo "SELF-TEST FAIL (94): a chain publish with nothing before it to measure from \
+was not reported as a truncated capture: '${got}'" >&2
+    fail=1
+  fi
+
+  # (95) The hold closed before the chain was DUE. Everything the window needs is
+  #      present — armed, dozed, silent — and still nothing published, but only
+  #      100 s of the 302 s the chain's own links are allowed had passed. That is
+  #      a capture too short to conclude from, and calling it "background sharing
+  #      STOPPED" is precisely the over-claim round 3 was reverted for.
+  {
+    _fixture_idle_preamble 'mock' 'IDLE'
+    printf '08-02 04:45:00.000  1111  1130 I flutter : %s\n' "${MARK_IDLE_END}"
+  } > "${tmp}/idle.shorthold.log"
+  _case
+  if got="$(assert_no_fix_chain_oracle "${tmp}/idle.shorthold.log")" \
+     || [[ "${got}" != *"NOT A PRODUCT FINDING"* ]]; then
+    echo "SELF-TEST FAIL (95): a hold that closed $((NO_FIX_BOUND_SECS - 100)) s before \
+the chain was due was reported as publishing having stopped, with nothing said about the \
+window being too short: '${got}'" >&2
     fail=1
   fi
 
@@ -2354,10 +3208,11 @@ readonly TARGET="${2:-integration_test/b1_fgs_live_foreground_test.dart}"
 # or flutter_test's post-test unmount stops the service — see Phase 4). So this
 # bounds arming + BOTH of the drive's holds — the steady-state one (one
 # kLocationPublishMaxInterval plus slack, 200 s: the latest a delivery-driven
-# publish can land after the handoff cycle) and the forced-idle one (332 s: the
-# no-fix chain's own length, step 8) — plus RustLib/keyring/SQLCipher boot under
+# publish can land after the handoff cycle) and the forced-idle one (362 s: the
+# no-fix chain's own length, plus one last pre-arm cycle and the arming round
+# trips, step 8) — plus RustLib/keyring/SQLCipher boot under
 # the emulator's mlock pressure, plus GPS and relay slack, plus the broadcast
-# barrier below. The drive target's own `Timeout` is 14m and fires first with an
+# barrier below. The drive target's own `Timeout` is 15m and fires first with an
 # attributable message; this is the belt. Phase 5 holds no timeouts of its own —
 # by the time it reads, the capture is complete, so it is a set of reads rather
 # than live polls.
@@ -2487,10 +3342,12 @@ fail() {
   # Emulator location state. B1 is the FIRST lane to need a REAL position (every
   # other scenario injects FakeLocationService), so a silent GPS failure is a
   # live risk and would otherwise present as an unattributed publish timeout.
-  # Two known traps: `adb emu geo fix` is a ONE-SHOT injection into the goldfish
-  # GNSS HAL with no stream between injections (hence the re-issue loop), and the
-  # AVD runs a `google_apis` image where geolocator may resolve to FUSED location
-  # while `geo fix` documents only the LocationManager provider.
+  # Two facts to read it with: `adb emu geo fix` SETS the emulated position and
+  # the emulator then streams it to the guest once a second while the platform
+  # runs GNSS (so a stale `last location` is the platform not having run GNSS,
+  # not a drip that stopped), and the AVD runs a `google_apis` image where
+  # geolocator resolves to the FUSED provider — the block step 8 arms, so after
+  # it this dump should show `fused provider [mock]`.
   echo "---- emulator location state ----" >&2
   # `sed`, not `head`: under pipefail a `head` that stops reading SIGPIPEs grep,
   # and run 34488512808 printed forty lines and then "(dumpsys location
@@ -2617,13 +3474,24 @@ adb -s "${DEVICE}" logcat -d 2>/dev/null \
 echo "== END SPIKE PROBE =="
 
 # ---------------------------------------------------------------------------
-# Phase 3 — feed the emulator a GPS fix, and keep feeding it.
+# Phase 3 — give the emulator a position to report.
 #
 # The FGS isolate uses the REAL GeolocatorLocationService (overrides injected in
-# the drive isolate do not reach it), and `_publishCycle` takes a ONE-SHOT
-# `getCurrentLocation()` per due circle. `adb emu geo fix` sets the emulated
-# position, but a single fix can age out before the cycle that needs it, so it
-# is re-issued on a short loop for the life of the lane.
+# the drive isolate do not reach it), so something has to be on the other end of
+# its registration.
+#
+# What `adb emu geo fix` does is SET the emulated position; the emulator then
+# streams it to the guest's GNSS HAL as NMEA once a second for as long as the
+# platform runs GNSS, whether or not the injection is repeated. Run
+# 34642726338's capture is the evidence both ways: the HAL logged
+# `Gnss:onGnssLocationCb` once a second inside every GNSS session, including the
+# sessions five minutes after the re-issue loop below had been killed, and the
+# first session drained a backlog of ~239 buffered sentences — one per second
+# since the seed. The loop is therefore belt-and-braces and NOTHING in this lane
+# may rest on stopping it; step 8 takes the platform's ability to answer away at
+# the provider instead (`arm_no_fix`), and it deliberately leaves this loop
+# running while it does, so a no-fix window can never be an artefact of a feed
+# that stopped.
 #
 # NOTE the argument order: `geo fix` takes LONGITUDE first, then LATITUDE.
 # ---------------------------------------------------------------------------
@@ -2696,10 +3564,12 @@ SAMPLE_PID=$!
 # `${MARK_HOLD_DONE}` has closed the P2a window, so nothing below can disturb
 # the span steps 5-7 read.
 #
-# Stopping the drip is the whole experiment: `adb emu geo fix` is a one-shot
-# injection with no stream between injections, so with the loop dead the
-# registration this lane just proved has nothing left to deliver and the only
-# way another location reaches a relay is the no-fix chain.
+# Taking the platform's ability to answer away is the whole experiment, and it
+# happens BEFORE the device is dozed — `DeviceIdleController` asks for a
+# location on its way into IDLE (its STATE_LOCATING step), and a real fix landing
+# in the fused provider's last-location slot at that moment is one a later
+# registration could still be handed as a historical re-delivery. With the test
+# provider already in place that request goes to the mock, like every other.
 #
 # `battery unplug` first, because `DeviceIdleController.updateChargingLocked()`
 # drops the device straight back to ACTIVE on a charging event and the emulator
@@ -2711,10 +3581,14 @@ SAMPLE_PID=$!
   until grep -aqF -- "${MARK_IDLE_BEGIN}" "${LOGCAT_FILE}" 2>/dev/null; do
     sleep 2
   done
-  echo "Phase 4/5 — forced-idle phase: stopping the GPS drip and dozing the device..."
-  if [[ -n "${GEO_PID}" ]] && kill -0 "${GEO_PID}" 2>/dev/null; then
-    kill "${GEO_PID}" 2>/dev/null || true
-  fi
+  echo "Phase 4/5 — no-fix phase: replacing the platform's ${NO_FIX_PROVIDER} \
+provider with a silent test provider..."
+  no_fix_state="$(arm_no_fix)" || no_fix_state="arm-failed"
+  echo "Phase 4/5 — no-fix state: ${no_fix_state}"
+  adb -s "${DEVICE}" shell \
+    "log -p i -t ${SAMPLE_TAG} '${MARK_NO_FIX_ARMED}${no_fix_state}'" \
+    >/dev/null 2>&1 || true
+  echo "Phase 4/5 — forced-idle phase: dozing the device..."
   adb -s "${DEVICE}" shell dumpsys battery unplug >/dev/null 2>&1 || true
   adb -s "${DEVICE}" shell dumpsys deviceidle enable deep >/dev/null 2>&1 || true
   adb -s "${DEVICE}" shell dumpsys deviceidle force-idle >/dev/null 2>&1 || true
@@ -3030,17 +3904,20 @@ echo "${oracle_out}"
 echo "  [7/8] Publishes are delivery-driven and spaced at least \
 ${MIN_DELIVERY_GAP_SECS} s apart from the registration that produced them."
 
-# (8) The no-fix chain, in the SECOND hold: the drip is stopped and the device
-#     is in deep idle, so nothing can be delivered and the delivery-driven path
-#     this lane just proved has nothing to run on. Publishing must continue
-#     anyway, from the watchdog and the last known position.
+# (8) The no-fix chain, in the SECOND hold: the platform's `fused` provider is a
+#     test provider nothing gives a location to and the device is in deep idle,
+#     so the delivery-driven path this lane just proved has nothing to run on.
+#     Publishing must continue anyway, from the watchdog and the last known
+#     position. The oracle's own failures distinguish "the premise did not hold"
+#     from "publishing stopped" — they are opposite findings, and only the
+#     second is about the product.
 if ! oracle_out="$(assert_no_fix_chain_oracle "${LOGCAT_FILE}")"; then
   echo "${oracle_out}" >&2
-  fail "background publishing did not survive the no-fix chain under deep idle (above)."
+  fail "the no-fix chain under deep idle was not proven (above)."
 fi
 echo "${oracle_out}"
-echo "  [8/8] Publishing survived deep idle with no fix available: a \
-'${MARK_TRIGGER_WATCHDOG}' cycle published from the last known position."
+echo "  [8/8] Publishing survived deep idle with the platform unable to answer: \
+a '${MARK_TRIGGER_WATCHDOG}' cycle published from the last known position."
 
 # Evidence only, never asserted: the emulator's GNSS accounting. batterystats on
 # a goldfish HAL measures nothing real (there is no receiver), so a threshold
