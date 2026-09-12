@@ -265,7 +265,7 @@ flutter|lib/src/services/foreground_liveness_probe.dart|58  # measured 60.98% (2
 
 # --- Location send/receive pipeline -----------------------------------------
 flutter|lib/src/services/location_sharing_service.dart|87   # measured 89.51% (384/429)
-flutter|lib/src/services/geolocator_location_service.dart|88 # measured 90.95% (181/199)
+flutter|lib/src/services/geolocator_location_service.dart|94 # measured 96.98% (193/199)
 flutter|lib/src/services/live_sync_resubscriber.dart|100    # measured 100.00% (117/117)
 flutter|lib/src/services/subscription_service.dart|100      # measured 100.00% (58/58)
 
@@ -301,7 +301,7 @@ flutter|lib/src/services/background_location_task.dart|85   # measured 87.32% (4
 # (18/22) on Flutter 3.41.0, which would pin at 79 — recorded as an ORDER OF
 # MAGNITUDE, not as provenance. Add the row with `--repin flutter <lcov>` from
 # the next CI coverage artifact.
-flutter|lib/src/services/background_location_manager.dart|53 # measured 55.47% (71/128)
+flutter|lib/src/services/background_location_manager.dart|54 # measured 56.49% (74/131)
 flutter|lib/src/services/background_catchup_worker.dart|26  # measured 28.40% (23/81)
 
 # --- MLS / relay / identity / profile FFI seams -----------------------------
