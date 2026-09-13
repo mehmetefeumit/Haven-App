@@ -1,0 +1,11 @@
+[
+  {
+    "rule": "S7",
+    "scope": { "sink_glob": "*dirty.logcat.log", "tag": "haven_core" },
+    "pattern": "^dialing wss://relay\\.example\\.com$",
+    "justification": "a fixture entry that forgives exactly the S7 line of the dirty fixture",
+    "proof": "Cargo.toml:1",
+    "owner": "logscan-selftest",
+    "expires": "2099-01-01"
+  }
+]

@@ -35,6 +35,15 @@ import io.crates.keyring.Keyring
  */
 class HavenApplication : Application() {
     override fun onCreate() {
+        // Positive control for the runtime log-privacy scanner
+        // (`tooling/logscan`, Phase 0b): proves the `logcat` sink is reached
+        // this early in the process lifecycle, before anything else in this
+        // method can run or fail. Undeclared (no host proxy channel reaches
+        // this process) and matched by shape; literal token only — see
+        // `scripts/ci/native_log_allowlist.txt`.
+        if (BuildConfig.DEBUG) {
+            Log.d(TAG, "logscan-plant-kotlin-open-K2AM7DR9FT")
+        }
         super.onCreate()
         registerActivityLifecycleCallbacks(SecureWindowCallbacks)
         // The foreground-service task engine is created without an Activity

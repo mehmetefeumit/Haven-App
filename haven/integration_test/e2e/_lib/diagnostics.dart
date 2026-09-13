@@ -33,6 +33,13 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/main.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
+import 'package:haven/src/utils/log_alias.dart'
+    show
+        LogAliasClass,
+        LogOrigin,
+        logAliasHandle,
+        magnitudeBucket,
+        relativeSecs;
 
 import 'scenario_harness.dart';
 
@@ -51,7 +58,6 @@ Future<void> dumpScenarioState({
 
   log('=== begin ===');
   log('role=${ctx.role.name}');
-  log('relay=${ctx.relay.url}');
 
   // ProviderContainer access — guarded because HavenApp may not be
   // mounted (e.g., failure happened during pumpWidget itself).
@@ -62,12 +68,12 @@ Future<void> dumpScenarioState({
     // Circles snapshot.
     try {
       final circles = await container.read(circlesProvider.future);
-      log('circles.count=${circles.length}');
+      log('circles.count=${magnitudeBucket(circles.length)}');
       for (final circle in circles) {
         log(
-          'circle name="${circle.displayName}" '
+          'circle=${logAliasHandle(LogAliasClass.circle, circle.displayName)} '
           'membership=${circle.membershipStatus.name} '
-          'members=${circle.members.length}',
+          'members=${magnitudeBucket(circle.members.length)}',
         );
       }
     } on Object catch (e) {
@@ -79,16 +85,14 @@ Future<void> dumpScenarioState({
       final memberLocations = await container.read(
         memberLocationsProvider.future,
       );
-      log('memberLocations.count=${memberLocations.length}');
+      log('memberLocations.count=${magnitudeBucket(memberLocations.length)}');
       for (final loc in memberLocations) {
-        // Redact pubkey to 8 chars + ellipsis — pubkeys are public-by-
-        // design but reducing the surface in CI artifacts is cheap and
-        // matches the consistency standard used by the consolidated
-        // E2E test (Security LOW finding).
-        final redacted = loc.pubkey.length > 8
-            ? '${loc.pubkey.substring(0, 8)}…'
-            : loc.pubkey;
-        log('memberLocation pubkey=$redacted ts=${loc.timestamp}');
+        // Per-process salted handle, never a truncated prefix (Log
+        // anonymity pillar: no pubkey "at any truncation").
+        final handle = logAliasHandle(LogAliasClass.peer, loc.pubkey);
+        // Relative to now, never the absolute instant (Log anonymity pillar).
+        final age = relativeSecs(LogOrigin.now(), loc.timestamp);
+        log('memberLocation pubkey=$handle ts=$age');
       }
     } on Object catch (e) {
       log('memberLocations.read=ERROR ${e.runtimeType}');

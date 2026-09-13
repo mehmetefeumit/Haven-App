@@ -60,6 +60,8 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:haven/src/rust/api.dart';
+import 'package:haven/src/utils/log_alias.dart'
+    show LogAliasClass, logAliasHandle, magnitudeBucket;
 
 import 'test_relay.dart';
 import 'test_user.dart';
@@ -396,8 +398,8 @@ class SyntheticUser {
       );
     } on Object catch (e) {
       debugPrint(
-        '[SyntheticUser:$label] gift-wrap ${_redactPk(giftWrap.id)} did not '
-        'process (${e.runtimeType}); trying another',
+        '[SyntheticUser:$label] gift-wrap ${_redactEventId(giftWrap.id)} '
+        'did not process (${e.runtimeType}); trying another',
       );
     } finally {
       for (var i = 0; i < secret.length; i++) {
@@ -413,11 +415,15 @@ class SyntheticUser {
       final accepted = await user.circleManager.acceptInvitation(
         giftWrapId: invitation.mlsGroupId,
       );
+      final circleHandle = logAliasHandle(
+        LogAliasClass.circle,
+        invitation.circleName,
+      );
       debugPrint(
         '[SyntheticUser:$label] acceptInvitation OK '
-        '(circleName="${invitation.circleName}", '
+        '(circle=$circleHandle, '
         'inviter=${_redactPk(invitation.inviterPubkey)}, '
-        'members=${accepted.members.length})',
+        'members=${magnitudeBucket(accepted.members.length)})',
       );
       return accepted;
     } on Object catch (e) {
@@ -481,7 +487,7 @@ class SyntheticUser {
     // this helper would silently regress the privacy posture.
     debugPrint(
       '[SyntheticUser:$label] published location evt='
-      '${id == null ? "?" : _redactPk(id)}',
+      '${id == null ? "?" : _redactEventId(id)}',
     );
     return id ?? '<unknown>';
   }
@@ -695,7 +701,7 @@ class SyntheticUser {
             case LocationMessageResultKindFfi.unrecoverable:
               debugPrint(
                 '[SyntheticUser:$label] $context: group entered '
-                'Unrecoverable state for evt=${_redactPk(event.id)}',
+                'Unrecoverable state for evt=${_redactEventId(event.id)}',
               );
           }
         }
@@ -703,18 +709,18 @@ class SyntheticUser {
         decryptFailed++;
         debugPrint(
           '[SyntheticUser:$label] decrypt failed for evt='
-          '${_redactPk(event.id)}: ${e.runtimeType}',
+          '${_redactEventId(event.id)}: ${e.runtimeType}',
         );
       }
     }
     debugPrint(
       '[SyntheticUser:$label] $context: '
-      'events=${events.length} '
-      'locations=$locationsProcessed '
-      'groupUpdates=$groupUpdatesProcessed '
-      'decryptFailed=$decryptFailed '
-      'distinctSenders=${decryptedSenders.length} '
-      'publishedCommits=${publishedCommitEventIds.length} '
+      'events=${magnitudeBucket(events.length)} '
+      'locations=${magnitudeBucket(locationsProcessed)} '
+      'groupUpdates=${magnitudeBucket(groupUpdatesProcessed)} '
+      'decryptFailed=${magnitudeBucket(decryptFailed)} '
+      'distinctSenders=${magnitudeBucket(decryptedSenders.length)} '
+      'publishedCommits=${magnitudeBucket(publishedCommitEventIds.length)} '
       'withheldPendingCommit=$withheldPendingCommit',
     );
     return (
@@ -781,7 +787,7 @@ class SyntheticUser {
           if (id != null) publishedIds.add(id);
           debugPrint(
             '[SyntheticUser:$label] $context: published + confirmed '
-            'receive-side auto-commit evt=${_redactPk(id ?? "?")}',
+            'receive-side auto-commit evt=${_redactEventId(id ?? "?")}',
           );
         } else {
           await user.circleManager.publishFailed(pending: commit.pending);
@@ -938,9 +944,14 @@ class SyntheticUser {
   static String _bytesToHex(List<int> bytes) =>
       bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
 
-  /// Short prefix-and-ellipsis pubkey form for log lines. Pubkeys are
-  /// public-by-design Nostr metadata but truncating in CI logs makes
-  /// failure artifacts less casually identifying.
+  /// Per-process salted handle for a pubkey (Security Rule 15 / the Log
+  /// anonymity pillar): a truncated hex prefix is still a partial
+  /// identifier, so this never slices the string — it aliases it.
   static String _redactPk(String hex) =>
-      hex.length <= 8 ? hex : '${hex.substring(0, 8)}…';
+      logAliasHandle(LogAliasClass.peer, hex);
+
+  /// Same, for an event id — a distinct [LogAliasClass] so a pubkey and an
+  /// event id that happen to share bytes never alias to the same handle.
+  static String _redactEventId(String hex) =>
+      logAliasHandle(LogAliasClass.event, hex);
 }

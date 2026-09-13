@@ -1,0 +1,69 @@
+# Runtime log-privacy scanner for Haven's CI lanes and soak tiers.
+#
+# A lane captures a logcat, a `log show` export, a drive transcript, a relay
+# log and a handful of diag files, then uploads them to a public repository for
+# 14 days. Security Rule 15 says no identifier of any shape may be in any of
+# them, in any encoding, full or truncated. This binary is the runtime proof of
+# that: the run declares the values it minted, `seal` expands them into every
+# encoding the tree can render, and `scan` streams every captured sink looking
+# for them plus the structural shapes an undeclared identifier takes.
+#
+# It is a separate Cargo project (NOT a member of haven-core, and not folded
+# into tooling/e2e/local-relay) so it never enters the app build, never drags
+# tokio/tungstenite into `cargo test`, and can be built on a runner that has no
+# Android/iOS toolchain at all.
+#
+# UNIX ONLY, deliberately: the manifest writer uses `DirBuilderExt`/
+# `OpenOptionsExt` for the 0700/0600 modes and `O_EXCL`, which are the path
+# discipline rather than a convenience. It runs on the Linux and macOS runners
+# and must NOT be added to cross-check.yml.
+[package]
+name = "haven-logscan"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Runtime log-privacy scanner for Haven's E2E lanes (needle manifest + structural rules)."
+license = "MIT"
+
+# Not a member of any workspace: the repository has no root Cargo.toml, and an
+# empty `[workspace]` table keeps a future one from silently absorbing this
+# crate into the app's dependency graph.
+[workspace]
+
+# The scanner's logic lives in a library so the self-test, the in-crate tests
+# and (in Tier 1) `haven-core`'s own log capture can all drive the SAME
+# expander. Two expanders would mean two coverage claims, and only one of them
+# would be tested.
+[lib]
+name = "haven_logscan"
+path = "src/lib.rs"
+
+[[bin]]
+name = "haven-logscan"
+path = "src/main.rs"
+
+[dependencies]
+# Versions match what haven-core/Cargo.lock already resolves, so a lane that
+# builds both crates downloads nothing extra.
+aho-corasick = "1.1"
+regex = "1.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+sha2 = "0.10"
+hex = "0.4"
+base64 = "0.22"
+bech32 = "0.11"
+unicode-normalization = "0.1"
+idna = "1.1"
+# `default-features = false` + `os_rng` deliberately: it makes `thread_rng`
+# absent from the build rather than merely unused, so a plant token can only
+# ever be minted from the OS CSPRNG.
+rand = { version = "0.9", default-features = false, features = ["os_rng"] }
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }

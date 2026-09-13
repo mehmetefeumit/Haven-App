@@ -53,9 +53,12 @@ readonly REPO_ROOT
 readonly SCRIPT_NAME='check_native_log_allowlist'
 readonly ALLOWLIST_REL='scripts/ci/native_log_allowlist.txt'
 
-# The four raw calls in the tree today (wrapper callers come on top). A scanner
-# that stopped recognising them would otherwise report "0 calls, all listed".
-readonly MIN_NATIVE_SITES=4
+# The four raw calls in the tree today plus the two runtime-log-scanner plants
+# (`HavenApplication.onCreate`, `AppDelegate`); wrapper callers come on top. A
+# scanner that stopped recognising them would otherwise report "0 calls, all
+# listed", and a deleted plant would read as tidiness instead of a lost
+# positive control.
+readonly MIN_NATIVE_SITES=6
 
 log()  { printf '\033[1;34m[%s]\033[0m %s\n' "${SCRIPT_NAME}" "$*"; }
 fail() { printf '\033[1;31m[%s] FAIL:\033[0m %s\n' "${SCRIPT_NAME}" "$*" >&2; }

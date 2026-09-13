@@ -93,10 +93,16 @@
 #   locationSharing=true)` is emitted only once the manager exists, so it proves
 #   the Rule-14 acquire succeeded rather than merely failing to observe it.
 #
-# * Step 3 is windowed at BOTH ends. It opens at the handoff because a publish
-#   emitted while the UI was still foregrounded is not the thing under test — it
-#   is a Rule-14 single-writer violation, and counting it as success would
-#   invert the lane's meaning. It closes at the hold because everything after
+# * Step 3 is windowed at BOTH ends. It opens at the FGS's own
+#   `[BackgroundTask] session acquired` line after the pause, because a publish
+#   emitted while the UI still held the MLS session is not the thing under test
+#   — it is a Rule-14 single-writer violation, and counting it as success would
+#   invert the lane's meaning. The FGS's line and not the drive's
+#   `HANDOFF_CONFIRMED`, because the drive only OBSERVES the handoff through a
+#   poll while the FGS publishes the moment it lands: run 34740325027 published
+#   38 ms before the marker and went red on a healthy cadence
+#   (`proof_window_opener`; the marker opens the window only when the FGS
+#   acquired at `onStart`). It closes at the hold because everything after
 #   that is teardown, where the service is stopped deliberately (twice: the
 #   resume takes the MLS session back by stopping it, then the post-test unmount
 #   stops it again) — an EOF-bounded window reads those as the service dying
@@ -288,7 +294,7 @@ readonly MARK_LOCSHARING_OK='locationSharing=true'
 # `_locationSharingService != null`, so like the one above it is constructible
 # only when the Rule-14 acquire actually worked. Accepting either is not a
 # weakening: both prove the same thing, at the two points it can legitimately
-# happen.
+# happen. It is also where the proof window opens (`proof_window_opener`).
 readonly MARK_SESSION_ACQUIRED='[BackgroundTask] session acquired'
 readonly MARK_PUBLISHED_PREFIX='[BackgroundTask] Published to '
 readonly MARK_CYCLE_FAILED='[BackgroundTask] Publish cycle FAILED'
@@ -302,9 +308,10 @@ readonly MARK_PAUSE='[b1] PAUSE_DELIVERED'
 # real SharedPreferences, that `kForegroundActiveAtMsKey` actually reached 0 —
 # i.e. that `_onPaused()` ran to COMPLETION rather than merely being dispatched.
 # This, not the pause itself, is the moment the FGS's gate-3 foreground check
-# stops rejecting it, so it is the correct window start for the publish oracle:
-# windowing from the dispatch instead would open the window before the FGS was
-# permitted to publish at all. Mirrors `kHandoffConfirmedMarker`.
+# stops rejecting it, and step 1 requires it. It opens the proof window ONLY
+# when the FGS acquired at `onStart` (`proof_window_opener`): the poll observes
+# the flag the FGS reads directly, so it can trail the FGS's own first publish.
+# Mirrors `kHandoffConfirmedMarker`.
 readonly MARK_HANDOFF_OK='[b1] HANDOFF_CONFIRMED'
 # Closes the proof window. Printed by the drive the instant its hold ends and
 # BEFORE it restores `resumed`, so everything after it is teardown. That
@@ -411,6 +418,41 @@ window_between_markers() {
     f && index($0, e) { exit }
     f
   ' "${logfile}" 2>/dev/null || true
+}
+
+# Print what the proof window OPENS at in <capture>, for `window_between_markers`:
+# the FIRST `[BackgroundTask] session acquired` LINE after `[b1] PAUSE_DELIVERED`,
+# else the `[b1] HANDOFF_CONFIRMED` marker.
+#
+# The acquire, because the FGS can only take the MLS session once `_onPaused()`
+# has released it (Rule 14), so every publish after that line is post-handoff
+# BY CONSTRUCTION — and the isolate that publishes is the one that logs it, in
+# order. The drive's `HANDOFF_CONFIRMED` is an OBSERVER's poll of the flag the
+# FGS reads directly, and the FGS publishes the moment it flips: in run
+# 34740325027 the publish landed 38 ms BEFORE the marker (trigger-to-publish
+# 0.88 s against the poll's 0.93 s) and step 7 reddened a healthy cadence on
+# one publish; in run 34676420734 the same shape landed 674 ms AFTER it and
+# passed. Opened at the marker, the window measured the poll.
+#
+# The marker still opens the window when nothing is acquired after the pause:
+# the FGS acquired at `onStart` (`Initialized (… locationSharing=true)`) and
+# logs nothing at the handoff, so the poll is the only post-handoff anchor.
+#
+# The whole LINE rather than the marker: an earlier FGS instance in the same
+# capture can have logged `session acquired` before the pause, and
+# `window_between_markers` opens at the first substring match. The line's own
+# stamp and PID make it unique.
+proof_window_opener() {
+  local logfile="$1" line
+  line="$(awk -v p="${MARK_PAUSE}" -v a="${MARK_SESSION_ACQUIRED}" '
+    !paused { if (index($0, p)) paused = 1; next }
+    index($0, a) { print; exit }
+  ' "${logfile}" 2>/dev/null)" || true
+  if [[ -n "${line}" ]]; then
+    printf '%s\n' "${line}"
+  else
+    printf '%s\n' "${MARK_HANDOFF_OK}"
+  fi
 }
 
 # Print the PID column of the first line containing <marker>.
@@ -788,15 +830,16 @@ successful_publish_count() {
 # the honest subject — the interval is what the platform was ASKED for.
 #
 # Paired against the capture, not the window alone. The first delivery in the
-# window answers the HANDOFF cycle's registration, and that cycle arms about a
-# second after the pause — which beats the drive's 1 s poll to
-# `[b1] HANDOFF_CONFIRMED`: 81 ms before it in run 34511084722, 84 ms in
-# 34488512808. Read from the window alone that pair does not exist, and run
-# 34511084722 went red on a healthy delivery 99 s after a 98 s registration. So
-# <capture>, up to the window's opening marker, supplies the registration live
-# when the window opened — and every `[BackgroundTask] onStart` clears it: a
-# registration dies with its FGS instance, and pairing across one would let a
-# publish with no interval of its own pass.
+# window answers the HANDOFF cycle's registration, and when the window opens at
+# `[b1] HANDOFF_CONFIRMED` (the onStart-acquire variant, `proof_window_opener`)
+# that registration can precede it — the cycle arms about a second after the
+# pause, which beats the drive's 1 s poll: 81 ms before it in run 34511084722,
+# 84 ms in 34488512808. Read from the window alone that pair does not exist,
+# and run 34511084722 went red on a healthy delivery 99 s after a 98 s
+# registration. So <capture>, up to the line the window opened at, supplies the
+# registration live when it opened — and every `[BackgroundTask] onStart`
+# clears it: a registration dies with its FGS instance, and pairing across one
+# would let a publish with no interval of its own pass.
 #
 # A delivery that did not lead to a publish is not a cadence point, and neither
 # is any other trigger (`watchdog`, `paused-signal`, `pending-delivery`) — the
@@ -806,8 +849,9 @@ successful_publish_count() {
 #
 # Usage: delivery_gaps_after_registration <window> <capture>
 delivery_gaps_after_registration() {
-  local windowfile="$1" logfile="$2"
-  awk -v open="${MARK_HANDOFF_OK}" '
+  local windowfile="$1" logfile="$2" open
+  open="$(proof_window_opener "${logfile}")"
+  awk -v open="${open}" '
     function ts(dm, hms,   md, t, sec, mo, dy, cum, i) {
       # The fraction split off by hand: a POSIX awk reads `16.091` through the
       # locale, and a comma-decimal one makes it 16.
@@ -1746,7 +1790,7 @@ run_self_test() {
   # Pinned by EQUALITY, never by a floor: the run used to end with a hard-coded
   # "all N fixtures passed" and no counter, so deleting a case left the message
   # — and the exit code — untouched. Mirrors check_android_location_power.sh.
-  local -r SELF_TEST_FIXTURES=95
+  local -r SELF_TEST_FIXTURES=99
   local tmp fail=0 checked=0 got
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
@@ -1754,6 +1798,13 @@ run_self_test() {
 
   # Every case calls this exactly once, immediately before it asserts.
   _case() { checked=$((checked + 1)); }
+
+  # Cuts <name>.window from <name>.log the way Phase 5 does — through
+  # `proof_window_opener` — so a fixture is sliced where the lane slices.
+  _cut_window() {
+    window_between_markers "${tmp}/$1.log" "$(proof_window_opener "${tmp}/$1.log")" \
+      "${MARK_HOLD_DONE}" > "${tmp}/$1.window"
+  }
 
   # (1) THE CRITICAL FIXTURE — P0-1's actual signature. The marker substring is
   #     present but the count is 0. A `grep -q 'Published to'` oracle would pass
@@ -2040,8 +2091,7 @@ minUpdateDistance 1.0, got '${got}'" >&2
   d2_ok="$(_fixture_bump "${arm2_ok}" "${MIN_DELIVERY_GAP_SECS}")"
   d2_tight="$(_fixture_bump "${arm2_ok}" "$((MIN_DELIVERY_GAP_SECS - 1))")"
   build_fixture_logcat "${tmp}/power.ok.log" 2 "${d1_ok}" "${d2_ok}" '04:42:45'
-  window_between_markers "${tmp}/power.ok.log" "${MARK_HANDOFF_OK}" "${MARK_HOLD_DONE}" \
-    > "${tmp}/power.ok.window"
+  _cut_window power.ok
 
   # A capture whose most recent cycle before every steady-state sample is the
   # WATCHDOG — the one cycle a `getCurrentLocation()` one-shot is legitimate on.
@@ -2049,8 +2099,7 @@ minUpdateDistance 1.0, got '${got}'" >&2
     /SAMPLE [345]$/ { print wd }
     { print }
   ' "${tmp}/power.ok.log" > "${tmp}/power.watchdog.log"
-  window_between_markers "${tmp}/power.watchdog.log" "${MARK_HANDOFF_OK}" \
-    "${MARK_HOLD_DONE}" > "${tmp}/power.watchdog.window"
+  _cut_window power.watchdog
 
   # (27) The healthy capture passes.
   _case
@@ -2218,8 +2267,7 @@ ${WAKE_LOCK_MAX_AGE_SECS} s ceiling" >&2
     fail=1
   fi
   build_fixture_logcat "${tmp}/power.tight.log" 2 "${d1_ok}" "${d2_tight}" '04:42:45'
-  window_between_markers "${tmp}/power.tight.log" "${MARK_HANDOFF_OK}" "${MARK_HOLD_DONE}" \
-    > "${tmp}/power.tight.window"
+  _cut_window power.tight
   _case
   if assert_cadence_oracle "${tmp}/power.tight.window" \
        "${tmp}/power.tight.log" >/dev/null 2>&1; then
@@ -2231,8 +2279,7 @@ ${WAKE_LOCK_MAX_AGE_SECS} s ceiling" >&2
   #      again, which is the failure mode the delivery-driven cadence replaced a
   #      poll with.
   build_fixture_logcat "${tmp}/power.none.log" 0 "${d1_ok}" "${d2_ok}" '04:42:45'
-  window_between_markers "${tmp}/power.none.log" "${MARK_HANDOFF_OK}" "${MARK_HOLD_DONE}" \
-    > "${tmp}/power.none.window"
+  _cut_window power.none
   _case
   if assert_cadence_oracle "${tmp}/power.none.window" \
        "${tmp}/power.none.log" >/dev/null 2>&1; then
@@ -2247,8 +2294,7 @@ ${WAKE_LOCK_MAX_AGE_SECS} s ceiling" >&2
     { print }
     index($0, "SAMPLE 4") { print ins }
   ' "${tmp}/power.ok.log" > "${tmp}/power.barren.log"
-  window_between_markers "${tmp}/power.barren.log" "${MARK_HANDOFF_OK}" "${MARK_HOLD_DONE}" \
-    > "${tmp}/power.barren.window"
+  _cut_window power.barren
   _case
   if ! assert_cadence_oracle "${tmp}/power.barren.window" \
        "${tmp}/power.barren.log" >/dev/null; then
@@ -2271,8 +2317,7 @@ cadence point" >&2
   d1_floor="$(_fixture_bump '04:40:08' "${MIN_DELIVERY_GAP_SECS}")"
   d1_tight="$(_fixture_bump '04:40:08' "$((MIN_DELIVERY_GAP_SECS - 1))")"
   build_fixture_logcat "${tmp}/power.single.log" 1 "${d1_floor}" "${d2_ok}" '04:42:45'
-  window_between_markers "${tmp}/power.single.log" "${MARK_HANDOFF_OK}" \
-    "${MARK_HOLD_DONE}" > "${tmp}/power.single.window"
+  _cut_window power.single
   _case
   if ! assert_cadence_oracle "${tmp}/power.single.window" \
        "${tmp}/power.single.log" >/dev/null; then
@@ -2283,8 +2328,7 @@ produces was rejected at exactly the ${MIN_DELIVERY_GAP_SECS} s floor" >&2
     fail=1
   fi
   build_fixture_logcat "${tmp}/power.singletight.log" 1 "${d1_tight}" "${d2_ok}" '04:42:45'
-  window_between_markers "${tmp}/power.singletight.log" "${MARK_HANDOFF_OK}" \
-    "${MARK_HOLD_DONE}" > "${tmp}/power.singletight.window"
+  _cut_window power.singletight
   _case
   if assert_cadence_oracle "${tmp}/power.singletight.window" \
        "${tmp}/power.singletight.log" >/dev/null 2>&1; then
@@ -2298,8 +2342,7 @@ on the window a healthy run actually produces" >&2
   #      and "nothing measurable" must never read as "every pair was fine".
   sed 's/trigger=delivery/trigger=watchdog/' "${tmp}/power.single.log" \
     > "${tmp}/power.nodelivery.log"
-  window_between_markers "${tmp}/power.nodelivery.log" "${MARK_HANDOFF_OK}" \
-    "${MARK_HOLD_DONE}" > "${tmp}/power.nodelivery.window"
+  _cut_window power.nodelivery
   _case
   if assert_cadence_oracle "${tmp}/power.nodelivery.window" \
        "${tmp}/power.nodelivery.log" >/dev/null 2>&1; then
@@ -2312,8 +2355,7 @@ the cadence oracle" >&2
   #      for a different reason, and equally not a pass.
   grep -vF -- "${MARK_REG_ARMED}" "${tmp}/power.single.log" \
     > "${tmp}/power.noarm.log" || true
-  window_between_markers "${tmp}/power.noarm.log" "${MARK_HANDOFF_OK}" \
-    "${MARK_HOLD_DONE}" > "${tmp}/power.noarm.window"
+  _cut_window power.noarm
   _case
   if assert_cadence_oracle "${tmp}/power.noarm.window" \
        "${tmp}/power.noarm.log" >/dev/null 2>&1; then
@@ -2322,10 +2364,11 @@ the cadence oracle" >&2
   fi
 
   # --- step 7 on run 34511084722's own lines -------------------------------
-  # Verbatim, in the order the device logged them. The handoff cycle armed 81 ms
-  # BEFORE `[b1] HANDOFF_CONFIRMED`, so the registration behind the window's
-  # first delivery lies outside the window — the order no synthetic fixture
-  # above has, and the one that reddened that run.
+  # Verbatim, in the order the device logged them. The handoff cycle acquired,
+  # armed (81 ms before `[b1] HANDOFF_CONFIRMED`) and published ahead of the
+  # drive's poll — the order no synthetic fixture above has, and the one that
+  # reddened that run while the marker opened the window. (74) replays it as
+  # the onStart-acquire variant, where the marker still does.
   local -r R_ONSTART='09-10 18:23:12.318  4032  4032 I flutter : [BackgroundTask] onStart (starter=TaskStarter.developer)'
   local -r R_PAUSE='09-10 18:23:15.055  4032  4032 I flutter : [b1] PAUSE_DELIVERED pid=4032'
   local -r R_TRIG_PAUSED='09-10 18:23:15.138  4032  4032 I flutter : [BackgroundTask] cycle trigger=paused-signal'
@@ -2347,27 +2390,29 @@ the cadence oracle" >&2
   local -r R_TRIG_D3='09-10 18:29:22.367  4032  4032 I flutter : [BackgroundTask] cycle trigger=delivery'
   local -r R_ARM_116='09-10 18:29:22.378  4032  4032 I flutter : [BackgroundTask] registration armed (116s)'
   local -r R_PUB_D3='09-10 18:29:29.088  4032  4032 I flutter : [BackgroundTask] Published to 1/1 due circle(s) (1 eligible), fetched 0/1 circle(s).'
-  # Run 34488512808's handoff registration, from an earlier app process.
+  # Run 34488512808's handoff registration, from an earlier app process, and
+  # the acquire that process logged ahead of it (synthesized on the arm's stamp:
+  # that run's capture holds only the arm).
   local -r R_ARM_PREV_PROC='09-10 14:54:58.153  4190  4190 I flutter : [BackgroundTask] registration armed (144s)'
+  local -r R_ACQ_PREV_PROC='09-10 14:54:57.901  4190  4190 I flutter : [BackgroundTask] session acquired'
 
   # Writes <name>.log from the remaining arguments and cuts <name>.window from it.
   _real_capture() {
     local name="$1"; shift
     printf '%s\n' "$@" > "${tmp}/${name}.log"
-    window_between_markers "${tmp}/${name}.log" "${MARK_HANDOFF_OK}" \
-      "${MARK_HOLD_DONE}" > "${tmp}/${name}.window"
+    _cut_window "${name}"
   }
   _real_capture real.ok "${R_ONSTART}" "${R_PAUSE}" "${R_TRIG_PAUSED}" \
     "${R_ACQUIRED}" "${R_ARM_98}" "${R_HANDOFF}" "${R_PUB_HANDOFF}" \
     "${R_TRIG_D1}" "${R_ARM_128}" "${R_PUB_D1}" "${R_HOLD}"
 
-  # (66) The delivery pairs with the 98 s registration logged before the window
-  #      opened: 18:23:16.091 -> 18:24:55.341.
+  # (66) The delivery pairs with the 98 s registration the handoff cycle armed:
+  #      18:23:16.091 -> 18:24:55.341.
   _case
   got="$(delivery_gaps_after_registration "${tmp}/real.ok.window" "${tmp}/real.ok.log")"
   if [[ "${got}" != "99250" ]]; then
     echo "SELF-TEST FAIL (66): run 34511084722's first delivery paired as '${got}', \
-expected 99250 ms after the registration armed before '${MARK_HANDOFF_OK}'" >&2
+expected 99250 ms after the handoff cycle's registration" >&2
     fail=1
   fi
 
@@ -2434,7 +2479,8 @@ not failed under the ${MIN_DELIVERY_GAP_SECS} s floor (paired as '${got}')" >&2
   # (71) The capture is context, never claims: widening what step 7 MEASURES
   #      past the window is the one thing reading it must not do. The same real
   #      lines reordered (stamps unread) so a delivery-driven publish precedes
-  #      the handoff and the window holds two publishes, neither of them one.
+  #      the acquire and the handoff, and the window holds two publishes,
+  #      neither of them one.
   _real_capture real.prewindow "${R_ONSTART}" "${R_PAUSE}" "${R_ARM_98}" \
     "${R_TRIG_D1}" "${R_ARM_128}" "${R_PUB_D1}" "${R_HANDOFF}" \
     "${R_TRIG_PAUSED}" "${R_ACQUIRED}" "${R_PUB_HANDOFF}" "${R_TRIG_WD}" \
@@ -2442,8 +2488,103 @@ not failed under the ${MIN_DELIVERY_GAP_SECS} s floor (paired as '${got}')" >&2
   _case
   if assert_cadence_oracle "${tmp}/real.prewindow.window" \
        "${tmp}/real.prewindow.log" >/dev/null 2>&1; then
-    echo "SELF-TEST FAIL (71): a delivery-driven publish from before \
-'${MARK_HANDOFF_OK}' was credited to the proof window" >&2
+    echo "SELF-TEST FAIL (71): a delivery-driven publish from before the window \
+opened was credited to the proof window" >&2
+    fail=1
+  fi
+
+  # --- the window's opener, on run 34740325027's own lines -----------------
+  # Verbatim. The FGS acquired, armed and published 38 ms BEFORE the drive's
+  # poll printed `[b1] HANDOFF_CONFIRMED`; a window opened at the marker held
+  # ONE publish and step 7 reddened a healthy cadence, where run 34676420734 —
+  # the same shape, the publish 674 ms AFTER the marker — had passed.
+  local -r F_ONSTART='09-13 06:00:35.247  4357  4357 I flutter : [BackgroundTask] onStart (starter=TaskStarter.developer)'
+  local -r F_PAUSE='09-13 06:00:38.514  4357  4357 I flutter : [b1] PAUSE_DELIVERED pid=4357'
+  local -r F_TRIG_PAUSED='09-13 06:00:38.645  4357  4357 I flutter : [BackgroundTask] cycle trigger=paused-signal'
+  local -r F_ACQUIRED='09-13 06:00:39.279  4357  4357 I flutter : [BackgroundTask] session acquired'
+  local -r F_ARM_108='09-13 06:00:39.321  4357  4357 I flutter : [BackgroundTask] registration armed (108s)'
+  local -r F_PUB_HANDOFF='09-13 06:00:39.527  4357  4357 I flutter : [BackgroundTask] Published to 1/1 due circle(s) (1 eligible), fetched 1/1 circle(s).'
+  local -r F_HANDOFF='09-13 06:00:39.565  4357  4357 I flutter : [b1] HANDOFF_CONFIRMED'
+  local -r F_TRIG_D1='09-13 06:02:28.772  4357  4357 I flutter : [BackgroundTask] cycle trigger=delivery'
+  local -r F_ARM_124='09-13 06:02:28.795  4357  4357 I flutter : [BackgroundTask] registration armed (124s)'
+  local -r F_PUB_D1='09-13 06:02:38.085  4357  4357 I flutter : [BackgroundTask] Published to 1/1 due circle(s) (1 eligible), fetched 0/1 circle(s).'
+  local -r F_HOLD='09-13 06:03:59.620  4357  4357 I flutter : [b1] HOLD_COMPLETE'
+
+  # (72) The window opens at the FGS's own acquire, so the publish the poll
+  #      trailed is credited: two publishes, the delivery paired with the 108 s
+  #      registration now INSIDE the window (06:00:39.321 -> 06:02:28.772).
+  _real_capture race.ok "${F_ONSTART}" "${F_PAUSE}" "${F_TRIG_PAUSED}" \
+    "${F_ACQUIRED}" "${F_ARM_108}" "${F_PUB_HANDOFF}" "${F_HANDOFF}" \
+    "${F_TRIG_D1}" "${F_ARM_124}" "${F_PUB_D1}" "${F_HOLD}"
+  _case
+  got="$(successful_publish_count "${tmp}/race.ok.window")/$(delivery_gaps_after_registration \
+    "${tmp}/race.ok.window" "${tmp}/race.ok.log")"
+  if [[ "$(head -n 1 "${tmp}/race.ok.window")" != "${F_ACQUIRED}" \
+        || "${got}" != "2/109451" ]] \
+     || ! assert_cadence_oracle "${tmp}/race.ok.window" "${tmp}/race.ok.log" >/dev/null; then
+    echo "SELF-TEST FAIL (72): run 34740325027's healthy window was not credited \
+(publishes/gap '${got}') — the FGS's own publish 38 ms before '${MARK_HANDOFF_OK}' is \
+post-handoff by construction" >&2
+    assert_cadence_oracle "${tmp}/race.ok.window" "${tmp}/race.ok.log" >&2 || true
+    fail=1
+  fi
+
+  # (73) A publish that precedes the acquire is a publish from before the
+  #      handoff, whatever the drive's marker says: the same lines reordered so
+  #      a delivery-driven publish and the registration that would pair it sit
+  #      between the pause and the acquire. Opened at the pause it would pass —
+  #      two publishes, the delivery 109 s after its registration.
+  _real_capture race.preacquire "${F_ONSTART}" "${F_PAUSE}" "${F_ARM_108}" \
+    "${F_TRIG_D1}" "${F_ARM_124}" "${F_PUB_D1}" "${F_TRIG_PAUSED}" \
+    "${F_ACQUIRED}" "${F_PUB_HANDOFF}" "${F_HANDOFF}" "${F_HOLD}"
+  _case
+  got="$(successful_publish_count "${tmp}/race.preacquire.window")"
+  if [[ "$(head -n 1 "${tmp}/race.preacquire.window")" != "${F_ACQUIRED}" \
+        || "${got}" != "1" ]] \
+     || assert_cadence_oracle "${tmp}/race.preacquire.window" \
+          "${tmp}/race.preacquire.log" >/dev/null 2>&1; then
+    echo "SELF-TEST FAIL (73): a delivery-driven publish from before \
+'${MARK_SESSION_ACQUIRED}' was credited to the proof window (${got} publish(es) \
+counted)" >&2
+    fail=1
+  fi
+
+  # (74) The onStart-acquire variant: nothing is acquired after the pause, so
+  #      the drive's marker opens the window and the handoff cycle's
+  #      registration lies BEFORE it — run 34511084722's lines without their
+  #      acquire, the pairing that reddened that run, read from the capture.
+  #      An acquire from an EARLIER process before the pause is not this one.
+  _real_capture race.onstart "${R_ACQ_PREV_PROC}" "${R_ARM_PREV_PROC}" \
+    "${R_ONSTART}" "${R_PAUSE}" "${R_TRIG_PAUSED}" "${R_ARM_98}" "${R_HANDOFF}" \
+    "${R_PUB_HANDOFF}" "${R_TRIG_D1}" "${R_ARM_128}" "${R_PUB_D1}" "${R_HOLD}"
+  _case
+  got="$(delivery_gaps_after_registration "${tmp}/race.onstart.window" \
+    "${tmp}/race.onstart.log")"
+  if [[ "$(head -n 1 "${tmp}/race.onstart.window")" != "${R_HANDOFF}" \
+        || "${got}" != "99250" ]] \
+     || ! assert_cadence_oracle "${tmp}/race.onstart.window" \
+          "${tmp}/race.onstart.log" >/dev/null; then
+    echo "SELF-TEST FAIL (74): with no '${MARK_SESSION_ACQUIRED}' after the pause the \
+window must open at '${MARK_HANDOFF_OK}' and pair the delivery with the registration \
+before it (paired as '${got}')" >&2
+    assert_cadence_oracle "${tmp}/race.onstart.window" "${tmp}/race.onstart.log" >&2 || true
+    fail=1
+  fi
+
+  # (75) …and with both, the acquire AFTER the pause is the opener, never the
+  #      earlier process's: `window_between_markers` opens at the first
+  #      substring match, which is why the opener is a whole line.
+  _real_capture race.prevacq "${R_ACQ_PREV_PROC}" "${R_ARM_PREV_PROC}" \
+    "${R_ONSTART}" "${R_PAUSE}" "${R_TRIG_PAUSED}" "${R_ACQUIRED}" "${R_ARM_98}" \
+    "${R_HANDOFF}" "${R_PUB_HANDOFF}" "${R_TRIG_D1}" "${R_ARM_128}" "${R_PUB_D1}" \
+    "${R_HOLD}"
+  _case
+  got="$(head -n 1 "${tmp}/race.prevacq.window")"
+  if [[ "${got}" != "${R_ACQUIRED}" ]] \
+     || ! assert_cadence_oracle "${tmp}/race.prevacq.window" \
+          "${tmp}/race.prevacq.log" >/dev/null; then
+    echo "SELF-TEST FAIL (75): the window opened at '${got}' instead of the acquire \
+that followed the pause" >&2
     fail=1
   fi
 
@@ -3806,15 +3947,18 @@ _publishCycle returns immediately and silently forever."
 fi
 echo "  [2/8] FGS initialized with location sharing wired (Rule-14 acquire succeeded)."
 
-# (3) Delivery, windowed to the handoff→hold-complete span and PARSED (never
+# (3) Delivery, windowed to the acquire→hold-complete span and PARSED (never
 #     grepped — `Published to 0/1` is P0-1's own signature and contains the
-#     marker). The window OPENS at the handoff because a publish emitted while
-#     the UI was still foregrounded is a Rule-14 single-writer violation, not a
-#     success; it CLOSES at the hold because everything after is teardown, where
-#     the service is stopped on purpose.
+#     marker). The window OPENS at the FGS's own `session acquired` line after
+#     the pause — post-handoff by construction, where the drive's
+#     `HANDOFF_CONFIRMED` is a poll that can trail the FGS's first publish (see
+#     `proof_window_opener`) — because a publish emitted while the UI still held
+#     the session is a Rule-14 single-writer violation, not a success; it CLOSES
+#     at the hold because everything after is teardown, where the service is
+#     stopped on purpose.
 WINDOW="${LOG_DIR}/post-pause.window.log"
-window_between_markers "${LOGCAT_FILE}" "${MARK_HANDOFF_OK}" "${MARK_HOLD_DONE}" \
-  > "${WINDOW}"
+window_between_markers "${LOGCAT_FILE}" "$(proof_window_opener "${LOGCAT_FILE}")" \
+  "${MARK_HOLD_DONE}" > "${WINDOW}"
 # Recorded, not asserted: a drive killed mid-hold never prints the close, and
 # the window then runs to EOF. That is the safe direction, but it changes what
 # the assertions below are reading, so say so when one of them fails.

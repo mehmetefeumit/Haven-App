@@ -558,7 +558,10 @@
 #   E2E harness self-tests            tooling/e2e/ci/*.sh --self-test
 #     The bash guards embedded in the E2E tooling must not silently rot: the
 #     connect-flake retry predicate must never retry a genuine test failure,
-#     the secret-leak log scanner must catch planted key material, and the iOS
+#     the secret-leak log scanner must catch planted key material, the
+#     log-privacy scan wrapper (scan-logs.sh) must fold that scanner's verdict
+#     with the runtime identifier scanner's, delete every sink on a leak and
+#     fail closed on an absent binary, and the iOS
 #     retry classifier + first-test watchdog must admit exactly one
 #     infrastructure signature and refuse everything else — including an empty
 #     or absent log, where "no evidence" must not read as "flake". The relay
@@ -1425,6 +1428,32 @@ jobs:
       - name: E2E harness self-test (secret-leak scanner)
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash tooling/e2e/ci/scan-logs-for-secrets.sh --self-test
+
+      # The log-privacy gate that runs the scanner above TOGETHER with the
+      # runtime identifier scanner (tooling/logscan) and contains on a leak.
+      # Driven here with a FAKE haven-logscan (HAVEN_LOGSCAN_BIN) and the REAL
+      # key-material floor, so this toolchain-free job pins the wrapper's own
+      # contract: the two verdicts fold 1 > 2 > 3 > 4 > 0, only a leak deletes
+      # and it deletes every named sink, an absent or non-executable scanner is
+      # rc 2 and never a skip, and the manifest is named by basename only. The
+      # wrapper meets the REAL binary in rust-check.yml's logscan-tooling job
+      # (its mutation check: a clean sink keeps, a planted prefix deletes, a
+      # missed plant is unusable) — that job builds the crate; this one
+      # deliberately builds nothing.
+      - name: E2E harness self-test (log-privacy scan wrapper)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/scan-logs.sh --self-test
+
+      # The recorder's shutdown summary is the only place a run says whether
+      # its declaration channel recorded, refused or lost anything, or found a
+      # previous run's sidecar already there. e2e-android.yml reads it back
+      # through this helper before anything trusts the sealed manifest; the
+      # fixtures pin every shape it must refuse (a refused or lost count, a
+      # STALE marker, a missing line, an earlier unhealthy summary, an absent
+      # or empty log), the one it must accept, and that it prints counts only.
+      - name: E2E harness self-test (proxy declaration-channel summary)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/check-proxy-sidecar-summary.sh --self-test
 
       - name: Build-retry predicate self-test
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}

@@ -60,6 +60,10 @@ barrier */timeout:INSTALL_BARRIER_SECS#1 charge INSTALL_BARRIER_SECS
 
 unit tooling/e2e/ci/run-single-avd-scenario.sh
 install lib:install_fresh#1 charge @
+# The post-drive log-privacy gate: the key-material floor and the identifier
+# scanner over files already on disk — no wait of its own, so its budget is the
+# wrapper's, which is nothing.
+logscan log_privacy_gate#1/bash:scan-logs.sh#1 charge @
 wifi-off sleep:2#1 charge WIFI_OFF_TIMEOUT_SECS
 route sleep:2#2 charge GUEST_NET_TIMEOUT_SECS
 # Only the last attempt can reach DRIVE_TIMEOUT: an attempt is retried after a

@@ -21,13 +21,17 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use tokio_tungstenite::tungstenite::Message;
 
-use crate::frame::{MLS_GROUP_ID_ACK_VERB, MLS_GROUP_ID_VERB, SENTINEL_ACK_VERB, SENTINEL_VERB};
+use crate::frame::{
+    ControlVerb, CANARY_MANIFEST_ACK_VERB, CANARY_MANIFEST_VERB, MLS_GROUP_ID_ACK_VERB,
+    MLS_GROUP_ID_VERB, NEEDLE_DECL_ACK_VERB, NEEDLE_DECL_VERB, SENTINEL_ACK_VERB, SENTINEL_VERB,
+};
 use crate::journal::{Degraded, WireJournal, TYPE_CONN_OPEN, TYPE_FRAME};
-use crate::proxy::{MlsGroupIdSink, Proxy, ProxyConfig, Route};
+use crate::needles::{CanarySink, NeedleSink};
+use crate::proxy::{ControlSinks, MlsGroupIdSink, Proxy, ProxyConfig, Route};
 
 /// Number of cases [`run`] must execute. A case that stops running is a case
 /// that stops proving anything, and silence is how that goes unnoticed.
-const DECLARED_CASES: usize = 7;
+const DECLARED_CASES: usize = 9;
 
 /// Everything the self-test can conclude.
 type Case = Result<(), String>;
@@ -49,6 +53,8 @@ pub async fn run() -> Result<(), String> {
         ("E fail-open", case_fail_open().await),
         ("F endpoint attribution", case_endpoints().await),
         ("G mls-group-id channel", case_mls_group_id().await),
+        ("H needle + canary channel", case_needles().await),
+        ("I unknown control verb", case_unknown_control_verb().await),
     ] {
         executed += 1;
         match result {
@@ -100,6 +106,16 @@ impl TempDir {
             std::process::id()
         ));
         std::fs::create_dir_all(&path).map_err(|e| format!("temp dir: {:?}", e.kind()))?;
+        // OWNER-ONLY, because case H writes a needle sidecar in here and the
+        // sinks refuse a directory that is not 0700 — the same rule the real
+        // /tmp/haven-soak/needles is held to, and for the same reason: these
+        // files hold the values a run declared.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+                .map_err(|e| format!("temp dir mode: {:?}", e.kind()))?;
+        }
         Ok(Self(path))
     }
 }
@@ -295,6 +311,17 @@ async fn recv_collecting(
             }
         }
     }
+}
+
+/// Fails when any of `needles` appears in `haystack`.
+///
+/// An assertion of ABSENCE over the raw bytes, deliberately: a value that leaked
+/// through a field this case forgot to inspect is still a leak.
+fn absent_from(haystack: &str, needles: &[&str], why: &str) -> Case {
+    if needles.iter().any(|needle| haystack.contains(needle)) {
+        return Err(why.to_owned());
+    }
+    Ok(())
 }
 
 fn verb_is(value: &Value, verb: &str) -> bool {
@@ -911,6 +938,326 @@ async fn case_mls_group_id() -> Case {
     }
 
     close(client).await;
+    echo.abort();
+    Ok(())
+}
+
+/// H: the device→host NEEDLE and CANARY channels, proved on THIS runner.
+///
+/// The same three claims as case G, for the two verbs whose payloads the runtime
+/// log scanner treats as ground truth:
+///
+/// * the declaration reaches its SIDECAR (a lane with no sidecar hands the
+///   scanner an empty needle set, which cannot fail),
+/// * it never reaches the JOURNAL (the journal is one of the files the scanner
+///   reads, so the announcement would be found as a leak), and
+/// * it never reaches the UPSTREAM (a needle forwarded to a relay is stored by
+///   it and lands in a log the lane uploads).
+///
+/// The upstream is the ECHO server for the reason cases C and G use it: a real
+/// relay ignores an unknown verb in silence, so a forwarded declaration would be
+/// invisible and the most important claim here would be unguarded.
+async fn case_needles() -> Case {
+    const DECL: &str = r#"{"class":"pubkey","value":"c0ffee0000000000000000000000000000000000000000000000000000000001"}"#;
+    const MANIFEST: &str =
+        r#"{"role":"selftest","petname":"Quiet Wanderer","latitude":-47.209318}"#;
+    // A SECOND, distinct manifest: the Android lane's connect-flake retry
+    // re-runs the drive target inside this same proxy instance and re-mints its
+    // plant, so a run legitimately announces more than one.
+    const MANIFEST_AGAIN: &str =
+        r#"{"role":"selftest","petname":"Loud Wanderer","latitude":-47.209319}"#;
+    // Needle declarations are the one place the scanner's own values live, so
+    // the assertions below scan for these substrings rather than for a field.
+    const DECL_VALUE: &str = "c0ffee0000000000000000000000000000000000000000000000000000000001";
+    const MANIFEST_VALUE: &str = "Quiet Wanderer";
+    const MANIFEST_VALUE_AGAIN: &str = "Loud Wanderer";
+
+    let dir = TempDir::new("needles")?;
+    let journal_path = dir.0.join("journal.ndjson");
+    let decl_path = dir.0.join("selftest.needles.decl");
+    let canaries_path = dir.0.join("selftest.canaries.json");
+    let (upstream, echo) = start_echo_upstream().await?;
+    let journal = Arc::new(WireJournal::open(&journal_path));
+    let needles = Arc::new(NeedleSink::new("selftest".to_owned(), decl_path.clone()));
+    let canaries = Arc::new(CanarySink::new(canaries_path.clone()));
+    let proxy = needle_proxy(&upstream, journal, &needles, &canaries).await?;
+    let mut client = connect(proxy.local_addr()).await?;
+
+    // Confirm the upstream really is receiving, or "the declaration did not
+    // arrive" would be true of everything and prove nothing.
+    send(&mut client, r#"["REQ","before",{"kinds":[1]}]"#).await?;
+    recv_until(&mut client, "the echo of the pre-declaration REQ", |v| {
+        verb_is(v, "ECHO") && v[1].as_str().is_some_and(|t| t.contains("before"))
+    })
+    .await?;
+
+    // Every ack carries a COUNT and nothing else: the sidecar line number for a
+    // declaration, the manifest lines held for an announcement. Echoing the
+    // payload would put the declared value back on the wire, where a harness
+    // that logged the ack would publish the needle into the drive log.
+    declare_awaiting_ack(
+        &mut client,
+        &format!(r#"["{NEEDLE_DECL_VERB}",{DECL}]"#),
+        NEEDLE_DECL_ACK_VERB,
+        0,
+    )
+    .await?;
+    declare_awaiting_ack(
+        &mut client,
+        &format!(r#"["{CANARY_MANIFEST_VERB}",{MANIFEST}]"#),
+        CANARY_MANIFEST_ACK_VERB,
+        1,
+    )
+    .await?;
+    // A second, DISTINCT manifest — the connect-flake retry's shape — is
+    // APPENDED, so the ack counts two.
+    declare_awaiting_ack(
+        &mut client,
+        &format!(r#"["{CANARY_MANIFEST_VERB}",{MANIFEST_AGAIN}]"#),
+        CANARY_MANIFEST_ACK_VERB,
+        2,
+    )
+    .await?;
+
+    // THE BARRIER: the echo upstream answers in order on one connection, so once
+    // the echo of a message sent AFTER both declarations comes back, a forwarded
+    // declaration would already have arrived. No sleep, no flake.
+    send(&mut client, r#"["REQ","after",{"kinds":[1]}]"#).await?;
+    let seen = recv_collecting(&mut client, "the echo of the post-declaration REQ", |v| {
+        verb_is(v, "ECHO") && v[1].as_str().is_some_and(|t| t.contains("after"))
+    })
+    .await?;
+
+    let declared = [
+        DECL_VALUE,
+        MANIFEST_VALUE,
+        MANIFEST_VALUE_AGAIN,
+        NEEDLE_DECL_VERB,
+        CANARY_MANIFEST_VERB,
+    ];
+    for message in seen.iter().filter(|m| m.contains("ECHO")) {
+        absent_from(
+            message,
+            &declared,
+            "a declaration was FORWARDED upstream. A needle a relay stores lands in a log the \
+             lane uploads, which is exactly what the scanner asserts cannot happen.",
+        )?;
+    }
+
+    // The journal must hold the surrounding traffic and none of the values: its
+    // silence only means something if it recorded anything at all.
+    let text = std::fs::read_to_string(&journal_path).unwrap_or_default();
+    if !text.contains("\"after\"") {
+        return Err("the journal did not record the barrier".to_owned());
+    }
+    absent_from(
+        &text,
+        &declared,
+        "a declaration reached the JOURNAL, which the log scanner reads as a sink. The run would \
+         report a leak it made itself, and a genuine leak would be indistinguishable from it.",
+    )?;
+
+    // ...and the sidecars hold exactly what was declared.
+    check_needle_sidecars(
+        &decl_path,
+        &canaries_path,
+        DECL_VALUE,
+        &[MANIFEST, MANIFEST_AGAIN],
+    )?;
+    let stats = needles.stats();
+    if stats.recorded != 1 || stats.refused != 0 || stats.lost != 0 || stats.stale {
+        return Err(format!(
+            "needle sidecar stats are wrong: {} recorded, {} refused, {} lost, stale={}",
+            stats.recorded, stats.refused, stats.lost, stats.stale
+        ));
+    }
+    let canary_stats = canaries.stats();
+    if canary_stats.recorded != 2 || canary_stats.repeats != 0 || canary_stats.stale {
+        return Err(format!(
+            "canary sidecar stats are wrong: {} recorded, {} repeat(s), stale={}",
+            canary_stats.recorded, canary_stats.repeats, canary_stats.stale
+        ));
+    }
+
+    close(client).await;
+    echo.abort();
+    Ok(())
+}
+
+/// Sends one control frame and waits for its ack, asserting the ack is exactly
+/// `[verb, count]`.
+async fn declare_awaiting_ack(client: &mut Client, frame: &str, ack_verb: &str, want: u64) -> Case {
+    send(client, frame).await?;
+    let ack = recv_until(client, ack_verb, |v| {
+        verb_is(v, ack_verb) && v[1].as_u64() == Some(want)
+    })
+    .await?;
+    if ack.as_array().map(Vec::len) != Some(2) {
+        return Err(format!(
+            "{ack_verb} must carry a COUNT and nothing else — never the declared value"
+        ));
+    }
+    Ok(())
+}
+
+/// A one-route proxy with the needle sinks wired in.
+async fn needle_proxy(
+    upstream: &str,
+    journal: Arc<WireJournal>,
+    needles: &Arc<NeedleSink>,
+    canaries: &Arc<CanarySink>,
+) -> Result<Proxy, String> {
+    Proxy::start_with_sinks(
+        &ProxyConfig {
+            routes: vec![Route {
+                listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+                upstream: upstream.to_owned(),
+            }],
+        },
+        journal,
+        ControlSinks {
+            mls_group_ids: Arc::new(MlsGroupIdSink::disabled()),
+            needles: Arc::clone(needles),
+            canaries: Arc::clone(canaries),
+        },
+    )
+    .await
+    .map_err(|e| format!("proxy start: {:?}", e.kind()))
+}
+
+/// The two sidecar FILE FORMATS, which `haven-logscan seal` and
+/// `check-wire-canaries.dart` are written against.
+fn check_needle_sidecars(
+    decl_path: &Path,
+    canaries_path: &Path,
+    decl_value: &str,
+    manifests: &[&str],
+) -> Case {
+    let decl = std::fs::read_to_string(decl_path).unwrap_or_default();
+    let decl_lines: Vec<&str> = decl.lines().filter(|l| !l.is_empty()).collect();
+    if decl_lines.len() != 1 || !decl_lines[0].contains(decl_value) {
+        return Err(format!(
+            "the declaration sidecar holds {} line(s); it must hold exactly the one declaration",
+            decl_lines.len()
+        ));
+    }
+    if !decl_lines[0].contains(r#""role":"selftest""#) || !decl_lines[0].contains(r#""seq":0"#) {
+        return Err("the sidecar line must carry the role and the seq".to_owned());
+    }
+
+    // Each manifest's MEMBERS, unchanged, one manifest per line, in the order
+    // announced. Rendered by the JSON writer, so member order is normalised and
+    // nothing else is: the consumer parses each line as a manifest.
+    let mut expected = String::new();
+    for manifest in manifests {
+        let object = serde_json::from_str::<Value>(manifest)
+            .map_err(|_| "the fixture manifest must be JSON".to_owned())?;
+        expected += &object.to_string();
+        expected.push('\n');
+    }
+    let held = std::fs::read_to_string(canaries_path).unwrap_or_default();
+    if held != expected {
+        return Err(format!(
+            "the canary sidecar must hold every announced manifest, one object per line; it \
+             holds {} line(s)",
+            held.lines().count()
+        ));
+    }
+    Ok(())
+}
+
+/// I: a `HAVEN_*` verb the shared table does not carry TERMINATES the
+/// connection instead of being forwarded.
+///
+/// This is the hole a second proxy binary would otherwise open: today an
+/// unrecognised verb was journalled and relayed, so a future control verb the
+/// proxy in the socket had not learned would carry its payload — a needle, a
+/// group id — straight to the relay. Every table entry must still work, which
+/// the cases above establish; this one is the negative.
+async fn case_unknown_control_verb() -> Case {
+    let dir = TempDir::new("unknownverb")?;
+    let journal_path = dir.0.join("journal.ndjson");
+    let (upstream, echo) = start_echo_upstream().await?;
+    let journal = Arc::new(WireJournal::open(&journal_path));
+    let proxy = Proxy::start(
+        &ProxyConfig {
+            routes: vec![Route {
+                listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+                upstream,
+            }],
+        },
+        journal,
+        Arc::new(MlsGroupIdSink::disabled()),
+    )
+    .await
+    .map_err(|e| format!("proxy start: {:?}", e.kind()))?;
+    let mut client = connect(proxy.local_addr()).await?;
+
+    send(&mut client, r#"["REQ","before",{"kinds":[1]}]"#).await?;
+    recv_until(&mut client, "the echo of the pre-verb REQ", |v| {
+        verb_is(v, "ECHO") && v[1].as_str().is_some_and(|t| t.contains("before"))
+    })
+    .await?;
+
+    // A verb in the namespace that the table does not carry — the shape a
+    // future control verb arrives in, carrying a payload nothing intercepts.
+    send(
+        &mut client,
+        r#"["HAVEN_WIRE_CHAOS",{"value":"never-forwarded-0001"}]"#,
+    )
+    .await?;
+
+    // The connection must END. Reading until the stream closes is the
+    // deterministic form of that: no sleep, and an echo arriving instead fails
+    // the case.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err("the connection stayed open after an unknown control verb".to_owned());
+        }
+        match tokio::time::timeout(remaining, client.next()).await {
+            Err(_) => {
+                return Err("the connection stayed open after an unknown control verb".to_owned())
+            }
+            Ok(None | Some(Err(_))) => break,
+            Ok(Some(Ok(Message::Text(text)))) => {
+                if text.as_str().contains("never-forwarded-0001") {
+                    return Err(
+                        "an unknown control verb was FORWARDED upstream; its payload would reach \
+                         a relay and every log the relay's operator keeps"
+                            .to_owned(),
+                    );
+                }
+            }
+            Ok(Some(Ok(_))) => {}
+        }
+    }
+
+    let text = std::fs::read_to_string(&journal_path).unwrap_or_default();
+    if text.contains("never-forwarded-0001") || text.contains("HAVEN_WIRE_CHAOS") {
+        return Err(
+            "an unknown control verb reached the journal. Its payload is exactly what a future \
+             verb would carry, and the journal is a file the scanner reads."
+                .to_owned(),
+        );
+    }
+    if !text.contains("unknown control verb") {
+        return Err(
+            "the termination left no conn_error record, so a lane would see a connection that \
+             simply stopped"
+                .to_owned(),
+        );
+    }
+
+    // Every table entry must be exempt from this rule, or the harness's own
+    // channel would die with it.
+    for verb in ControlVerb::ALL {
+        if verb.as_str() == "HAVEN_WIRE_CHAOS" {
+            return Err("the fixture verb must be OUTSIDE the table".to_owned());
+        }
+    }
+
     echo.abort();
     Ok(())
 }

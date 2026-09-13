@@ -95,6 +95,54 @@ pub fn init_app() {
     // The backend FRB installs is release-present (feature-gated, not
     // `debug_assertions`-gated), so this cap is the control point.
     log::set_max_level(max_log_level(cfg!(debug_assertions)));
+
+    // THE LAST STATEMENT, deliberately: this line is the positive control that
+    // proves, on the device, that a backend is installed, that the target
+    // allowlist admits this crate and that the cap is `Debug`. Emitted after
+    // both are set, so it can only appear if the whole path works — and
+    // release-stripped, because a shipped build says nothing at `Debug` at all.
+    // The runtime log scanner requires it in every logcat/iOS capture; without
+    // it, "no identifier in the log" would also be satisfied by a log nothing
+    // ever reached.
+    #[cfg(debug_assertions)]
+    {
+        let plant = logscan_plant_token();
+        log::debug!("{plant}");
+    }
+}
+
+/// This process's `logscan` positive-control token.
+///
+/// Random per process (`OsRng`, never `thread_rng`) so a STALE token left in a
+/// capture by an earlier run cannot satisfy this run's check, and interned so
+/// two isolates calling `init_app` do not mint two. Structurally inert by
+/// construction — no bech32 HRP, no hex run, no array, no coordinate — so it
+/// trips no rule of either scanner; a plant that did would be a mis-designed
+/// control rather than a finding.
+///
+/// Carries nothing about the user: it is 50 bits of fresh randomness that dies
+/// with the process.
+#[cfg(debug_assertions)]
+fn logscan_plant_token() -> &'static str {
+    /// Crockford-ish: no `I`, `O`, `0` or `1`, so a token read off a screen
+    /// cannot be mistyped into a different one. Exactly 32 symbols, which makes
+    /// `byte & 0x1F` a uniform choice with no modulo bias.
+    const ALPHABET: &[u8; 32] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    /// Long enough that a collision with an unrelated log token is not a
+    /// practical concern (32^10 ≈ 2^50).
+    const LEN: usize = 10;
+
+    static TOKEN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    TOKEN.get_or_init(|| {
+        use rand::RngCore;
+        let mut bytes = [0u8; LEN];
+        rand::rngs::OsRng.fill_bytes(&mut bytes);
+        let suffix: String = bytes
+            .iter()
+            .map(|b| char::from(ALPHABET[usize::from(*b) & 0x1F]))
+            .collect();
+        format!("logscan-plant-rust-open-{suffix}")
+    })
 }
 
 /// The global `log` cap for this build: `Debug`, where developers and the E2E
@@ -9803,6 +9851,66 @@ mod tests {
              relay was reachable."
         );
     }
+
+    /// The plant's SHAPE is the contract: the runtime scanner matches
+    /// `logscan-plant-rust-open-[A-Z2-9]{10}` by shape, because `init_app`
+    /// cannot declare it over the proxy's control channel.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn the_logscan_plant_token_has_the_declared_shape() {
+        let token = super::logscan_plant_token();
+        let suffix = token
+            .strip_prefix("logscan-plant-rust-open-")
+            .unwrap_or_else(|| panic!("the prefix is what the scanner keys on"));
+        assert_eq!(suffix.chars().count(), 10, "the scanner expects 10 chars");
+        assert!(
+            suffix
+                .chars()
+                .all(|c| matches!(c, 'A'..='H' | 'J'..='N' | 'P'..='Z' | '2'..='9')),
+            "the alphabet excludes I, O, 0 and 1 so a token cannot be mistyped into another"
+        );
+        // Interned: two isolates calling init_app must not inflate the count the
+        // scanner reconciles.
+        assert_eq!(token, super::logscan_plant_token());
+    }
+
+    /// A plant that tripped a scanner rule would be a mis-designed control
+    /// reported as a leak, so the shapes of the toolchain-free bash scanner
+    /// (`tooling/e2e/ci/scan-logs-for-secrets.sh`) are asserted against it.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn the_logscan_plant_token_is_structurally_inert() {
+        let token = super::logscan_plant_token();
+        assert!(
+            !token.contains("nsec1") && !token.contains("npub1") && !token.contains("note1"),
+            "a bech32-looking plant would be read as key material"
+        );
+        let longest_hex_run = token
+            .chars()
+            .fold((0usize, 0usize), |(longest, current), c| {
+                let current = if c.is_ascii_hexdigit() {
+                    current + 1
+                } else {
+                    0
+                };
+                (longest.max(current), current)
+            })
+            .0;
+        assert!(
+            longest_hex_run < 16,
+            "a 16+ hex run is a key/id shape, and the plant must not look like one (saw \
+             {longest_hex_run})"
+        );
+        assert!(
+            !token.contains('[') && !token.contains(',') && !token.contains('.'),
+            "no array and no decimal pair: those are the byte-array and coordinate rules"
+        );
+        assert!(
+            !token.contains("://") && !token.to_ascii_lowercase().contains("secret"),
+            "no URL and no secret-adjacent keyword"
+        );
+    }
+
     use super::*;
 
     /// Builds a `Known` cached profile row for the `from_cached` tests.

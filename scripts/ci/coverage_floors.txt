@@ -302,7 +302,7 @@ flutter|lib/src/services/background_location_task.dart|85   # measured 87.32% (4
 # MAGNITUDE, not as provenance. Add the row with `--repin flutter <lcov>` from
 # the next CI coverage artifact.
 flutter|lib/src/services/background_location_manager.dart|54 # measured 56.49% (74/131)
-flutter|lib/src/services/background_catchup_worker.dart|26  # measured 28.40% (23/81)
+flutter|lib/src/services/background_catchup_worker.dart|30  # measured 32.94% (28/85)
 
 # --- MLS / relay / identity / profile FFI seams -----------------------------
 # The Dart side of every Rust call. Same reading as above: these numbers are
@@ -326,7 +326,7 @@ flutter|lib/src/services/nostr_relay_preferences_service.dart|100 # measured 100
 # --- Leave / wipe paths -----------------------------------------------------
 # The proofs that leaving a circle and logging out actually destroy state.
 flutter|lib/src/services/pending_leave_service.dart|87      # measured 89.47% (34/38)
-flutter|lib/src/services/pending_mls_wipe_service.dart|75   # measured 77.78% (14/18)
+flutter|lib/src/services/pending_mls_wipe_service.dart|76   # measured 78.95% (15/19)
 
 # --- Tile privacy -----------------------------------------------------------
 # tile_key.dart strips the Stadia API key before a URL is ever used as a cache
@@ -339,6 +339,6 @@ flutter|lib/src/network/pinned_tile_client.dart|59|10       # measured 61.54% (8
 # The providers layer is where service results become UI state; the validators
 # are the input filters on relay URLs and npubs.
 flutter|lib/src/providers/|84                # measured 86.13% (1590/1846)
-flutter|lib/src/utils/|90                    # measured 92.37% (218/236)
+flutter|lib/src/utils/|91                    # measured 93.43% (270/289)
 flutter|lib/src/utils/relay_url_validator.dart|93           # measured 95.83% (23/24)
 flutter|lib/src/utils/npub_validator.dart|82                # measured 84.38% (27/32)

@@ -1,0 +1,11 @@
+[
+  {
+    "rule": "S7",
+    "scope": { "sink_glob": "*", "tag": null },
+    "pattern": "dialing",
+    "justification": "a fixture entry, kept past its date on purpose",
+    "proof": "Cargo.toml:1",
+    "owner": "logscan-selftest",
+    "expires": "2020-01-01"
+  }
+]

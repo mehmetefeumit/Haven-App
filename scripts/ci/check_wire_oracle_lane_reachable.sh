@@ -542,6 +542,45 @@ check_oracle_runs() { # <records> <file> <job>
 }
 
 # ---------------------------------------------------------------------------
+# Link 5 — the runtime log scanner is switched on where the recorder runs.
+#
+# run-single-avd-scenario.sh takes its identifier-scanner arm only when the
+# job exports HAVEN_LOGSCAN=true; a recording lane without it seals nothing
+# and scans its captures with the key-material floor alone, while every
+# citation of scan-logs.sh still resolves through the upload-scan step — so
+# the flag's absence is the one way the runner's half of the gate goes quiet
+# with everything else green. The proxy's declaration channel exists FOR the
+# scanner, so a wired lane declares the flag at JOB level (the block link 1
+# reads the relay URL from — a step-level env reaches one step, and the drive
+# is not the only step that needs it) and declares it `true`.
+#
+# Asked only of lanes driven by a runner that HAS the arm. Today that is
+# run-single-avd-scenario.sh alone; run-ios-sim-scenario.sh records too but
+# reads no flag, and demanding one there would pin a lie. Widen LOGSCAN_RUNNER_RE
+# in the commit that gives another runner the arm.
+# ---------------------------------------------------------------------------
+readonly LOGSCAN_RUNNER_RE='run-single-avd-scenario[.]sh'
+
+check_logscan_is_on() { # <records> <file> <job>
+  local records="$1" file="$2" job="$3"
+  local decl value
+  job_records "${records}" "${file}" "${job}" | text_of \
+    | grep -qE -- "${LOGSCAN_RUNNER_RE}" || return
+  decl="$(step_records "${records}" "${file}" "${job}" 0 | text_of \
+            | grep -E '^[[:space:]]*HAVEN_LOGSCAN[[:space:]]*:' | head -n 1 || true)"
+  if [[ -z "${decl}" ]]; then
+    violation "${file}:${job}: the job starts the recorder but declares no job-level \`HAVEN_LOGSCAN: \"true\"\`. run-single-avd-scenario.sh seals the needle manifest and runs the identifier scanner over the logcat and drive logs only under that flag; without it the declarations the proxy collected are sealed by nobody and those captures are scanned by the key-material floor alone, while the upload-scan step keeps every manifest citation green. Declare it in the job's \`env:\` block, beside HAVEN_E2E_RELAY."
+    return
+  fi
+  value="${decl%%#*}"
+  value="${value#*:}"
+  value="${value//[[:space:]\"\']/}"
+  if [[ "${value}" != "true" ]]; then
+    violation "${file}:${job}: HAVEN_LOGSCAN is declared as '${value}', not \`\"true\"\`. Any other value is the flag's absence with better manners — the runner takes the floor-only arm — so a recording lane may not carry one."
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # Link 4 — one sentinel string, both halves.
 # ---------------------------------------------------------------------------
 check_sentinel_is_shared() { # <records> <file> <job>
@@ -733,7 +772,7 @@ check_dir() { # check_dir <workflow-dir> <exempt-list-newline-separated> [harnes
     violation "these entries in KNOWN_UNWIRED_LANES are stale — the job either wires the recorder now, or no longer exists: $(tr '\n' ' ' <<<"${stale}" | sed 's/ *$//'). A stale exemption is an exemption nobody can re-derive; delete the line."
   fi
 
-  # The four links, per wired job.
+  # The five links, per wired job.
   local entry file job
   while IFS= read -r entry; do
     [[ -z "${entry}" ]] && continue
@@ -742,6 +781,7 @@ check_dir() { # check_dir <workflow-dir> <exempt-list-newline-separated> [harnes
     check_proxy_is_stopped     "${records}" "${file}" "${job}"
     check_oracle_runs          "${records}" "${file}" "${job}"
     check_sentinel_is_shared   "${records}" "${file}" "${job}"
+    check_logscan_is_on        "${records}" "${file}" "${job}"
   done <<<"${wired}"
 
   if (( VIOLATIONS == 0 && BROKEN == 0 )); then
@@ -771,6 +811,7 @@ jobs:
     env:
       HAVEN_E2E_RELAY: ws://10.0.2.2:${port}
       HAVEN_WIRE_SENTINEL: HAVEN_WIRE_SENTINEL:\${{ github.run_id }}-\${{ github.run_attempt }}
+      HAVEN_LOGSCAN: "true"
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -827,7 +868,7 @@ self_test() {
   # carried in prose instead (docs/CI_HARDENING_BACKLOG.md, Workstream C) — the
   # one arrangement in which deleting a fixture reports "self-test: OK" while
   # checking one thing fewer. Same pin as check_e2e_step_timeout_ordering.sh.
-  local -r SELF_TEST_CASES=39
+  local -r SELF_TEST_CASES=43
   local tmp failures=0 cases=0
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
@@ -1149,6 +1190,42 @@ exit 0
 SH
   _expect "link 4: a define that exists only in a harness COMMENT does not count" \
     "${e6}" "${EX_PLAIN}" 1 "DRIVE is never given" "${hdoc}"
+
+  # --- E7. Link 5: the recorder runs but the scanner is never switched on.
+  #         The lane's declarations then land in a sidecar nobody seals, and
+  #         every scan-logs.sh citation still resolves through the upload
+  #         step — the one way the runner's half of the gate goes quiet with
+  #         everything else green.
+  local e7="${tmp}/e7"; write_wired_lane "${e7}"
+  write_plain_lane "${e7}" 'e2e-integration.yml' 'e2e_integration'
+  sed -i '/HAVEN_LOGSCAN: "true"/d' "${e7}/e2e-android.yml"
+  _expect "link 5: a wired lane without HAVEN_LOGSCAN fails, naming it" \
+    "${e7}" "${EX_PLAIN}" 1 "HAVEN_LOGSCAN"
+
+  local e7b="${tmp}/e7b"; write_wired_lane "${e7b}"
+  write_plain_lane "${e7b}" 'e2e-integration.yml' 'e2e_integration'
+  sed -i 's|HAVEN_LOGSCAN: "true"|HAVEN_LOGSCAN: "false"|' "${e7b}/e2e-android.yml"
+  _expect "link 5: HAVEN_LOGSCAN declared false fails" \
+    "${e7b}" "${EX_PLAIN}" 1 "not \`\"true\"\`"
+
+  # ...and a step-level declaration is not the job-level one the runner is
+  #    handed on every step that needs it.
+  local e7c="${tmp}/e7c"; write_wired_lane "${e7c}"
+  write_plain_lane "${e7c}" 'e2e-integration.yml' 'e2e_integration'
+  sed -i '/HAVEN_LOGSCAN: "true"/d' "${e7c}/e2e-android.yml"
+  sed -i 's|      - name: Run e2e_combined on the emulator|      - name: Run e2e_combined on the emulator\n        env:\n          HAVEN_LOGSCAN: "true"|' \
+    "${e7c}/e2e-android.yml"
+  _expect "link 5: a step-level HAVEN_LOGSCAN does not count" \
+    "${e7c}" "${EX_PLAIN}" 1 "job-level"
+
+  # ...and a recording lane driven by a runner with no scanner arm (the iOS
+  #    shape today) is not asked for a flag its runner would never read.
+  local e7d="${tmp}/e7d"; write_wired_lane "${e7d}"
+  write_plain_lane "${e7d}" 'e2e-integration.yml' 'e2e_integration'
+  sed -i '/HAVEN_LOGSCAN: "true"/d; s|run-single-avd-scenario.sh integration_test/e2e/e2e_combined.dart|run-ios-sim-scenario.sh integration_test/e2e/e2e_combined.dart|' \
+    "${e7d}/e2e-android.yml"
+  _expect "link 5: a lane whose runner has no scanner arm is not asked for the flag" \
+    "${e7d}" "${EX_PLAIN}" 0
 
   # --- F. The floor that cannot be exempted: NOTHING is wired. Even with every
   #        lane declared, this must RED — it is the state Workstream C exists to

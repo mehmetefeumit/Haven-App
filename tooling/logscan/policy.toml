@@ -1,0 +1,334 @@
+# haven-logscan policy — what is a needle, where it is searched, and what the
+# expander is allowed to produce.
+#
+# This file is COMPILED IN (`include_str!` in src/policy.rs). There is no
+# `--policy` flag: an instrument whose own rules a caller can substitute at
+# runtime is not an instrument, and `scripts/ci/check_wire_proxy_test_only.sh:180-191`
+# records that lesson being learned twice. Editing the policy means editing this
+# file, which means a reviewed diff.
+#
+# Policy is ALL-BLOCKING. There is no `deferred_until` and no class B: the owner
+# rejected deferral classes (OD-L1/OD-L2) and Phase L0 landed the alias handles,
+# so every class below is a leak on day one.
+schema = 1
+
+# Bits per character a base64-shaped run must exceed before S4 calls it a blob.
+# 4.2 sits above a long camel-case identifier (~3.9) and far below random base64
+# (~5.6). Both directions are fixture-asserted in src/rules.rs.
+base64_entropy_bits = 4.2
+
+# The floor of the floors: no sink may search a term shorter than this, and the
+# seal drops anything below it with a recorded reason. Six characters is where a
+# term stops being a needle and starts being furniture.
+min_term_len = 6
+
+# Terms identical to one of these are log furniture that every line carries
+# anyway, so searching for them would redden every lane on nothing.
+furniture = [
+  "flutter", "haven", "debug", "release", "null", "true", "false", "none",
+  "redacted", "unknown", "localhost", "127.0.0.1", "system", "default",
+]
+
+# ---------------------------------------------------------------------------
+# Needle classes
+# ---------------------------------------------------------------------------
+# `scoped_out` = sink classes that legitimately hold the class, where a needle of
+# it is NOT searched (a relay log holding pubkeys and event ids is not a Haven
+# leak). `secret = true` = the raw value is committed (SHA-256) and never
+# serialised.
+[classes]
+nsec = { kind = "bytes", secret = true, bech32 = ["nsec"] }
+secret = { kind = "bytes", secret = true }
+mls_group_id = { kind = "bytes" }
+nostr_group_id = { kind = "bytes", scoped_out = ["relay"] }
+pubkey = { kind = "bytes", bech32 = ["npub"], bech32_tlv_gap = ["nprofile"], scoped_out = ["relay"] }
+event_id = { kind = "bytes", bech32 = ["note", "nevent"], bech32_tlv_gap = ["nevent"], scoped_out = ["relay"] }
+kp_slot = { kind = "text", scoped_out = ["relay"] }
+subscription_id = { kind = "text", scoped_out = ["relay"] }
+relay_url = { kind = "url", scoped_out = ["relay", "proxy"] }
+blossom_url = { kind = "url" }
+circle_name = { kind = "text" }
+display_name = { kind = "text" }
+petname = { kind = "text" }
+about = { kind = "text" }
+device_id = { kind = "text" }
+coordinate = { kind = "coordinate" }
+geohash = { kind = "geohash" }
+# Positive controls. Not expanded: a plant is matched literally and tallied.
+plant = { kind = "plant" }
+
+# ---------------------------------------------------------------------------
+# Sink classes
+# ---------------------------------------------------------------------------
+# `term_floor` is 8 for the device-wide captures and 6 elsewhere, because a
+# 6-character term in a logcat shared with every vendor daemon matches furniture.
+# `owned_tags` are matched as PREFIXES: `android_logger` tags a record with its
+# module path truncated to 23 characters, so `haven_core` has to cover
+# `haven_core::relay::man`.
+# `required_shape_plants` name the UNDECLARED plants (there is no native harness
+# channel to declare through), each proving that emitter's log backend reached
+# this capture.
+[sinks]
+logcat = { term_floor = 8, structural_rules = true, reassemble = true, min_lines = 2000, entry_format = "logcat", required_shape_plants = ["rust", "kotlin"], owned_tags = ["flutter", "haven_core", "rust_lib_haven", "RustStdoutStderr", "frb_user", "HavenApplication", "MainActivity", "PublishWakeLock", "com.oblivioustech.haven"] }
+ios = { term_floor = 8, structural_rules = true, reassemble = false, min_lines = 2000, entry_format = "ios", required_shape_plants = ["rust", "swift"], owned_processes = ["Runner", "frb_user", "HavenSLC", "HavenBGTask", "haven_core"] }
+drive = { term_floor = 6, structural_rules = true, reassemble = false, min_lines = 100, entry_format = "plain" }
+rust-test = { term_floor = 6, structural_rules = true, reassemble = false, min_lines = 20, entry_format = "plain" }
+proxy = { term_floor = 6, structural_rules = true, reassemble = false, min_lines = 5, entry_format = "plain" }
+diag = { term_floor = 6, structural_rules = true, reassemble = false, min_lines = 1, entry_format = "plain" }
+# A relay log legitimately holds pubkeys, event ids and `#h` tags: structural
+# rules are OFF here and the public classes are scoped out. What is NOT scoped
+# out is the real MLS group id, the secrets, the names and the coordinates —
+# their presence in a relay log would be the violation itself.
+relay = { term_floor = 6, structural_rules = false, reassemble = false, min_lines = 5, entry_format = "plain" }
+
+# ---------------------------------------------------------------------------
+# The coverage ledger
+# ---------------------------------------------------------------------------
+# One hand-written claim per (class, encoding), reconciled against the expander
+# on every seal (src/ledger.rs). Four disagreements are rc 3: a `covered` label
+# the expander does not search, a `gap` it does search, a label nothing here
+# declares, and a gap with no reason.
+#
+# The boundaries are stated as LITERALS and never computed from the expander's
+# constants. A ledger that recomputed its own bounds would follow a narrowing
+# change instead of reporting it — which is the one thing it exists not to do.
+#
+# `not_gaps` are renderings deliberately out of scope entirely, each with the
+# sentence why. They are not gaps, because nothing in this tree produces them;
+# if the expander ever starts producing one, reconciliation reports it as a label
+# the ledger does not declare.
+
+[ledger.nsec]
+# Secret class: the raw value is committed, never serialised, so every raw rendering is a declared gap and only the commitment's encodings are searchable.
+covered = [
+  "sha256-hex", "sha256-hex-prefix8", "sha256-hex-prefix16"
+]
+[ledger.nsec.gaps]
+"hex-lower" = "secret-class raw never serialised"
+"hex-upper" = "secret-class raw never serialised"
+"hex-prefix8" = "secret-class raw never serialised"
+"hex-prefix12" = "secret-class raw never serialised"
+"hex-prefix16" = "secret-class raw never serialised"
+"hex-spaced" = "secret-class raw never serialised"
+"hex-reversed-bytes" = "secret-class raw never serialised"
+"rust-debug-x" = "secret-class raw never serialised"
+"rust-debug-upper-x" = "secret-class raw never serialised"
+"rust-debug-02x" = "secret-class raw never serialised"
+"rust-debug-alt-x" = "secret-class raw never serialised"
+"dart-radix16-unpadded" = "secret-class raw never serialised"
+"base64-std-align0" = "secret-class raw never serialised"
+"base64-std-align0-padded" = "secret-class raw never serialised"
+"base64-std-align1" = "secret-class raw never serialised"
+"base64-std-align1-padded" = "secret-class raw never serialised"
+"base64-std-align2" = "secret-class raw never serialised"
+"base64-std-align2-padded" = "secret-class raw never serialised"
+"base64-url-align0" = "secret-class raw never serialised"
+"base64-url-align0-padded" = "secret-class raw never serialised"
+"base64-url-align1" = "secret-class raw never serialised"
+"base64-url-align1-padded" = "secret-class raw never serialised"
+"base64-url-align2" = "secret-class raw never serialised"
+"base64-url-align2-padded" = "secret-class raw never serialised"
+"debug-array" = "secret-class raw never serialised"
+"debug-array-compact" = "secret-class raw never serialised"
+"bech32-nsec" = "secret-class raw never serialised"
+"bech32-nsec-upper" = "secret-class raw never serialised"
+
+[ledger.secret]
+# Exporter/epoch secrets, the SQLCipher passphrase, the assignment salt, KeyPackage private material. Same commitment rule as `nsec`.
+covered = [
+  "sha256-hex", "sha256-hex-prefix8", "sha256-hex-prefix16"
+]
+[ledger.secret.gaps]
+"hex-lower" = "secret-class raw never serialised"
+"hex-upper" = "secret-class raw never serialised"
+"hex-prefix8" = "secret-class raw never serialised"
+"hex-prefix12" = "secret-class raw never serialised"
+"hex-prefix16" = "secret-class raw never serialised"
+"hex-spaced" = "secret-class raw never serialised"
+"hex-reversed-bytes" = "secret-class raw never serialised"
+"rust-debug-x" = "secret-class raw never serialised"
+"rust-debug-upper-x" = "secret-class raw never serialised"
+"rust-debug-02x" = "secret-class raw never serialised"
+"rust-debug-alt-x" = "secret-class raw never serialised"
+"dart-radix16-unpadded" = "secret-class raw never serialised"
+"base64-std-align0" = "secret-class raw never serialised"
+"base64-std-align0-padded" = "secret-class raw never serialised"
+"base64-std-align1" = "secret-class raw never serialised"
+"base64-std-align1-padded" = "secret-class raw never serialised"
+"base64-std-align2" = "secret-class raw never serialised"
+"base64-std-align2-padded" = "secret-class raw never serialised"
+"base64-url-align0" = "secret-class raw never serialised"
+"base64-url-align0-padded" = "secret-class raw never serialised"
+"base64-url-align1" = "secret-class raw never serialised"
+"base64-url-align1-padded" = "secret-class raw never serialised"
+"base64-url-align2" = "secret-class raw never serialised"
+"base64-url-align2-padded" = "secret-class raw never serialised"
+"debug-array" = "secret-class raw never serialised"
+"debug-array-compact" = "secret-class raw never serialised"
+
+[ledger.mls_group_id]
+# The REAL MLS group id (Security Rule 4). Searched in every sink, including the relay log, where its presence would be the violation itself.
+covered = [
+  "hex-lower", "hex-upper", "hex-prefix8", "hex-prefix12", "hex-prefix16", "hex-spaced",
+  "hex-reversed-bytes", "rust-debug-x", "rust-debug-upper-x", "rust-debug-02x",
+  "rust-debug-alt-x", "dart-radix16-unpadded", "base64-std-align0", "base64-std-align0-padded",
+  "base64-std-align1", "base64-std-align1-padded", "base64-std-align2",
+  "base64-std-align2-padded", "base64-url-align0", "base64-url-align0-padded",
+  "base64-url-align1", "base64-url-align1-padded", "base64-url-align2",
+  "base64-url-align2-padded", "debug-array", "debug-array-compact", "sha256-hex",
+  "sha256-hex-prefix8", "sha256-hex-prefix16"
+]
+
+[ledger.nostr_group_id]
+# The `#h` join key a relay already holds for every circle, which is exactly why a log must not repeat it.
+covered = [
+  "hex-lower", "hex-upper", "hex-prefix8", "hex-prefix12", "hex-prefix16", "hex-spaced",
+  "hex-reversed-bytes", "rust-debug-x", "rust-debug-upper-x", "rust-debug-02x",
+  "rust-debug-alt-x", "dart-radix16-unpadded", "base64-std-align0", "base64-std-align0-padded",
+  "base64-std-align1", "base64-std-align1-padded", "base64-std-align2",
+  "base64-std-align2-padded", "base64-url-align0", "base64-url-align0-padded",
+  "base64-url-align1", "base64-url-align1-padded", "base64-url-align2",
+  "base64-url-align2-padded", "debug-array", "debug-array-compact", "sha256-hex",
+  "sha256-hex-prefix8", "sha256-hex-prefix16"
+]
+
+[ledger.pubkey]
+covered = [
+  "hex-lower", "hex-upper", "hex-prefix8", "hex-prefix12", "hex-prefix16", "hex-spaced",
+  "hex-reversed-bytes", "rust-debug-x", "rust-debug-upper-x", "rust-debug-02x",
+  "rust-debug-alt-x", "dart-radix16-unpadded", "base64-std-align0", "base64-std-align0-padded",
+  "base64-std-align1", "base64-std-align1-padded", "base64-std-align2",
+  "base64-std-align2-padded", "base64-url-align0", "base64-url-align0-padded",
+  "base64-url-align1", "base64-url-align1-padded", "base64-url-align2",
+  "base64-url-align2-padded", "debug-array", "debug-array-compact", "sha256-hex",
+  "sha256-hex-prefix8", "sha256-hex-prefix16", "bech32-npub", "bech32-npub-upper"
+]
+[ledger.pubkey.gaps]
+"bech32-nprofile-tlv-hint" = "TLV forms carry relay hints; S3 is the net"
+
+[ledger.event_id]
+covered = [
+  "hex-lower", "hex-upper", "hex-prefix8", "hex-prefix12", "hex-prefix16", "hex-spaced",
+  "hex-reversed-bytes", "rust-debug-x", "rust-debug-upper-x", "rust-debug-02x",
+  "rust-debug-alt-x", "dart-radix16-unpadded", "base64-std-align0", "base64-std-align0-padded",
+  "base64-std-align1", "base64-std-align1-padded", "base64-std-align2",
+  "base64-std-align2-padded", "base64-url-align0", "base64-url-align0-padded",
+  "base64-url-align1", "base64-url-align1-padded", "base64-url-align2",
+  "base64-url-align2-padded", "debug-array", "debug-array-compact", "sha256-hex",
+  "sha256-hex-prefix8", "sha256-hex-prefix16", "bech32-note", "bech32-note-upper",
+  "bech32-nevent", "bech32-nevent-upper"
+]
+[ledger.event_id.gaps]
+"bech32-nevent-tlv-hint" = "TLV forms carry relay hints; S3 is the net"
+
+[ledger.kp_slot]
+covered = [
+  "utf8", "nfc", "nfd", "nfkc", "nfkd", "lower", "upper", "casefold", "search-fold",
+  "percent-component", "percent-form", "json-escaped", "latin1-from-char-codes", "utf8/base64",
+  "nfc/base64", "nfd/base64", "nfkc/base64", "nfkd/base64", "lower/base64", "upper/base64",
+  "casefold/base64", "search-fold/base64", "percent-component/base64", "percent-form/base64",
+  "json-escaped/base64", "latin1-from-char-codes/base64", "utf8-drop1", "utf8-drop2",
+  "utf8-drop3", "utf8-drop4"
+]
+
+[ledger.subscription_id]
+covered = [
+  "utf8", "nfc", "nfd", "nfkc", "nfkd", "lower", "upper", "casefold", "search-fold",
+  "percent-component", "percent-form", "json-escaped", "latin1-from-char-codes", "utf8/base64",
+  "nfc/base64", "nfd/base64", "nfkc/base64", "nfkd/base64", "lower/base64", "upper/base64",
+  "casefold/base64", "search-fold/base64", "percent-component/base64", "percent-form/base64",
+  "json-escaped/base64", "latin1-from-char-codes/base64", "utf8-drop1", "utf8-drop2",
+  "utf8-drop3", "utf8-drop4"
+]
+
+[ledger.device_id]
+covered = [
+  "utf8", "nfc", "nfd", "nfkc", "nfkd", "lower", "upper", "casefold", "search-fold",
+  "percent-component", "percent-form", "json-escaped", "latin1-from-char-codes", "utf8/base64",
+  "nfc/base64", "nfd/base64", "nfkc/base64", "nfkd/base64", "lower/base64", "upper/base64",
+  "casefold/base64", "search-fold/base64", "percent-component/base64", "percent-form/base64",
+  "json-escaped/base64", "latin1-from-char-codes/base64", "utf8-drop1", "utf8-drop2",
+  "utf8-drop3", "utf8-drop4"
+]
+
+[ledger.circle_name]
+covered = [
+  "utf8", "nfc", "nfd", "nfkc", "nfkd", "lower", "upper", "casefold", "search-fold",
+  "percent-component", "percent-form", "json-escaped", "latin1-from-char-codes", "utf8/base64",
+  "nfc/base64", "nfd/base64", "nfkc/base64", "nfkd/base64", "lower/base64", "upper/base64",
+  "casefold/base64", "search-fold/base64", "percent-component/base64", "percent-form/base64",
+  "json-escaped/base64", "latin1-from-char-codes/base64", "utf8-drop1", "utf8-drop2",
+  "utf8-drop3", "utf8-drop4"
+]
+[ledger.circle_name.not_gaps]
+"utf8/base58" = "base58 is not derived: no code path in this tree encodes a name in base58, and adding an encoder nothing here can cross-check would assert less than it appears to"
+"utf8/base32" = "base32, quoted-printable and UTF-16 byte dumps are not derived, for the same reason: none is produced anywhere in this tree"
+"utf8/base64/base64" = "compositions deeper than ONE base64 layer over a string form are not derived; the space is unbounded and base64 gets the single layer because base64 is what a Nostr content field and an FFI error string actually carry"
+
+[ledger.display_name]
+covered = [
+  "utf8", "nfc", "nfd", "nfkc", "nfkd", "lower", "upper", "casefold", "search-fold",
+  "percent-component", "percent-form", "json-escaped", "latin1-from-char-codes", "utf8/base64",
+  "nfc/base64", "nfd/base64", "nfkc/base64", "nfkd/base64", "lower/base64", "upper/base64",
+  "casefold/base64", "search-fold/base64", "percent-component/base64", "percent-form/base64",
+  "json-escaped/base64", "latin1-from-char-codes/base64", "utf8-drop1", "utf8-drop2",
+  "utf8-drop3", "utf8-drop4"
+]
+
+[ledger.petname]
+covered = [
+  "utf8", "nfc", "nfd", "nfkc", "nfkd", "lower", "upper", "casefold", "search-fold",
+  "percent-component", "percent-form", "json-escaped", "latin1-from-char-codes", "utf8/base64",
+  "nfc/base64", "nfd/base64", "nfkc/base64", "nfkd/base64", "lower/base64", "upper/base64",
+  "casefold/base64", "search-fold/base64", "percent-component/base64", "percent-form/base64",
+  "json-escaped/base64", "latin1-from-char-codes/base64", "utf8-drop1", "utf8-drop2",
+  "utf8-drop3", "utf8-drop4"
+]
+
+[ledger.about]
+covered = [
+  "utf8", "nfc", "nfd", "nfkc", "nfkd", "lower", "upper", "casefold", "search-fold",
+  "percent-component", "percent-form", "json-escaped", "latin1-from-char-codes", "utf8/base64",
+  "nfc/base64", "nfd/base64", "nfkc/base64", "nfkd/base64", "lower/base64", "upper/base64",
+  "casefold/base64", "search-fold/base64", "percent-component/base64", "percent-form/base64",
+  "json-escaped/base64", "latin1-from-char-codes/base64", "utf8-drop1", "utf8-drop2",
+  "utf8-drop3", "utf8-drop4"
+]
+
+[ledger.coordinate]
+covered = [
+  "lat/decimal-round3", "lat/decimal-round4", "lat/decimal-round5", "lat/decimal-round6",
+  "lat/decimal-round7", "lat/decimal-trunc3", "lat/decimal-trunc4", "lat/decimal-trunc5",
+  "lat/decimal-trunc6", "lat/decimal-trunc7", "lat/trimmed", "lat/scientific",
+  "lat/scientific-dart", "lat/comma-decimal", "lat/unsigned", "lat/sign-plus",
+  "lon/decimal-round3", "lon/decimal-round4", "lon/decimal-round5", "lon/decimal-round6",
+  "lon/decimal-round7", "lon/decimal-trunc3", "lon/decimal-trunc4", "lon/decimal-trunc5",
+  "lon/decimal-trunc6", "lon/decimal-trunc7", "lon/trimmed", "lon/scientific",
+  "lon/scientific-dart", "lon/comma-decimal", "lon/unsigned", "lon/sign-plus",
+  "pair-latlon/sep-comma", "pair-latlon/sep-comma-space", "pair-latlon/sep-space",
+  "pair-lonlat/sep-comma", "pair-lonlat/sep-comma-space", "pair-lonlat/sep-space"
+]
+[ledger.coordinate.not_gaps]
+"coord/dms" = "a degrees/minutes/seconds rendering is not derived: the symbol set, spacing and hemisphere suffix vary so widely between formatters that one derived string would assert almost nothing"
+"coord/plus-code" = "Open Location Code, MGRS, UTM, H3 and S2 are alternative geocoding SYSTEMS rather than encodings of these numbers, and no code path in this tree produces one"
+"coord/base58" = "base58 is not derived: nothing in this tree renders a coordinate in it"
+
+[ledger.geohash]
+covered = [
+  "full", "prefix6", "prefix7", "prefix8"
+]
+[ledger.geohash.not_gaps]
+"prefix4" = "below the global 6-character term floor: a 4-character base32 token lands inside base64 ciphertext by chance, so it is not searched for at any precision of any value"
+"prefix5" = "below the global 6-character term floor, for the same reason as prefix4; the standalone-field form is covered from precision 6 up"
+
+[ledger.relay_url]
+covered = [
+  "as-declared", "no-trailing-slash", "trailing-slash", "scheme-alt", "host-only", "host-upper",
+  "host-punycode", "with-port", "without-port", "percent-encoded"
+]
+
+[ledger.blossom_url]
+covered = [
+  "as-declared", "no-trailing-slash", "trailing-slash", "scheme-alt", "host-only", "host-upper",
+  "host-punycode", "with-port", "without-port", "percent-encoded"
+]

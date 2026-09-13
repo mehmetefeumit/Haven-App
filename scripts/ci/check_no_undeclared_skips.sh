@@ -65,7 +65,7 @@
 #   check_no_undeclared_skips.sh --self-test
 #
 # `<surface>` selects the manifest rows to reconcile against: `haven-core`,
-# `rust_builder` or `flutter`. Surfaces are reconciled independently so a
+# `rust_builder`, `e2e_tooling`, `logscan` or `flutter`. Surfaces are reconciled independently so a
 # haven-core entry is not reported stale while checking rust_builder.
 #
 # Produce the inputs with:

@@ -52,10 +52,23 @@
 #   HAVEN_E2E_RELAY  WebSocket URL of the strfry relay (e.g.
 #                    ws://10.0.2.2:7777 — host loopback alias from
 #                    inside the emulator).
+# Optional env:
+#   HAVEN_LOGSCAN    `true` on a lane that runs the recording wire proxy:
+#                    after the drive the captured logs are sealed against
+#                    the run's declared identifiers and scanned by
+#                    haven-logscan as well as by the key-material floor
+#                    (see log_privacy_gate). The proxy must have been started
+#                    AFTER `/tmp/haven-soak/needles/` was rotated, exactly as
+#                    e2e-android.yml does — a stale sidecar there is the
+#                    proxy's, not this script's, to refuse.
+#   HAVEN_LOGSCAN_BIN  the scanner binary (default: tooling/logscan's release build).
 #
 # Side effects:
 #   - Writes /tmp/adb-logcat.log (uploaded as a CI failure artifact).
 #   - Writes /tmp/scenario.apk (the per-scenario debug APK).
+#   - Writes /tmp/flutter-drive.final-attempt.log, and with HAVEN_LOGSCAN=true
+#     the sealed manifest under /tmp/haven-soak/needles/ (never uploaded) and
+#     /tmp/logscan-report.ndjson (sink:line and class only).
 #   - Spawns a logcat tee process; cleanup trap kills it on exit.
 
 set -euo pipefail
@@ -290,6 +303,86 @@ scan_logs_or_contain() {
          "$*" >&2
   fi
   return "${rc}"
+}
+
+# worst_rc <a> <b> — the verdict of two gates, 1 > 2 > 3 > 4 > 0 (the tree's
+# closed exit set, as scan-logs.sh and haven-logscan fold it). A code outside
+# that set is a broken guard, never a pass.
+worst_rc() {
+  local rc
+  for rc in 1 2 3 4; do
+    if (( $1 == rc || $2 == rc )); then return "${rc}"; fi
+  done
+  if (( $1 == 0 && $2 == 0 )); then return 0; fi
+  return 2
+}
+
+# log_privacy_gate <needle-dir> <logcat> <drive-final> <drive-full> — the gate
+# every captured log passes BEFORE anything echoes or uploads it.
+#
+# Two arms. With HAVEN_LOGSCAN=true — e2e-android.yml, the one lane the
+# runtime identifier scanner is wired into so far — it seals the run's needle
+# manifest from the declaration sidecar(s) the recording proxy wrote, then
+# hands every log to scan-logs.sh, which runs the key-material floor AND the
+# identifier scanner and contains on a leak. Otherwise it is the floor alone,
+# exactly as every other caller of this runner has today: they start no
+# recording proxy, so there is no declaration channel to seal from.
+#
+# The flag-on arm fails CLOSED at every joint — an absent binary, a sidecar
+# the drive never wrote, a seal that refuses — and still runs the wrapper
+# after a failed seal, so the floor's containment never waits on the scanner.
+# The seal declares the lane's own loopback endpoints as exempt from the URL
+# and IP rules (the app-facing relay URL, the proxy's two listen spellings,
+# and the proxy's upstream when the workflow exported it) and the relay URL
+# itself as a needle; the `--expect` floors are what e2e_combined.dart
+# declares — three roles, the three role fakes plus the canary coordinate,
+# one circle name, one petname, at least one circle, and the three
+# deterministic event carriers. Reads HAVEN_LOGSCAN_BIN at call time so
+# --self-test can inject a fake.
+log_privacy_gate() {
+  local needle_dir="$1" logcat="$2" drive_final="$3" drive_full="$4"
+  if [[ "${HAVEN_LOGSCAN:-}" != "true" ]]; then
+    scan_logs_or_contain "${logcat}" "${drive_full}"
+    return
+  fi
+  local bin="${HAVEN_LOGSCAN_BIN:-${repo_root}/tooling/logscan/target/release/haven-logscan}"
+  local run_id="${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-local}"
+  local manifest="${needle_dir}/${run_id}.needles.json"
+  local seal_rc=0
+  local -a decls=("${needle_dir}"/*.needles.decl)
+  if [[ ! -f "${bin}" || ! -x "${bin}" ]]; then
+    echo "ERROR: haven-logscan is not an executable file at ${bin}. Build it" \
+         "(cargo build --release --manifest-path tooling/logscan/Cargo.toml) or" \
+         "point HAVEN_LOGSCAN_BIN at one. An absent scanner is a broken guard," \
+         "never a skipped scan." >&2
+    seal_rc=2
+  elif [[ ! -e "${decls[0]}" ]]; then
+    echo "ERROR: no needle declaration sidecar under ${needle_dir}: the drive" \
+         "never reached the recording proxy's declaration channel, so there is" \
+         "nothing to seal and this run cannot prove its logs clean." >&2
+    seal_rc=3
+  else
+    local -a seal_args=()
+    local decl
+    for decl in "${decls[@]}"; do seal_args+=(--decl "${decl}"); done
+    seal_args+=(--host-decl "relay_url=${RELAY_URL}"
+                --exempt-endpoint "${RELAY_URL}"
+                --exempt-endpoint ws://127.0.0.1:7788
+                --exempt-endpoint ws://10.0.2.2:7788)
+    [[ -z "${WIRE_UPSTREAM:-}" ]] || seal_args+=(--exempt-endpoint "${WIRE_UPSTREAM}")
+    "${bin}" seal --run-id "${run_id}" "${seal_args[@]}" \
+      --expect pubkey=3 --expect coordinate=4 --expect circle_name=1 \
+      --expect petname=1 --expect nostr_group_id=1 --expect mls_group_id=1 \
+      --expect event_id=3 \
+      --out "${manifest}" || seal_rc=$?
+  fi
+  local scan_rc=0
+  bash "${SCAN_LOGS}" --manifest "${manifest}" \
+    --sink "logcat=${logcat}" \
+    --sink "drive=${drive_final},${drive_full}" \
+    --plants-in "drive=${drive_final}" \
+    --report /tmp/logscan-report.ndjson || scan_rc=$?
+  worst_rc "${seal_rc}" "${scan_rc}"
 }
 
 # --self-test — validate is_connect_flake against synthetic drive logs WITHOUT
@@ -641,8 +734,12 @@ wlan0	0002000A	00000000	0000	0	0	0	00FFFFFF	0	0	0" 10.0.2.2; then
   #      on a public repository — so the echo must sit AFTER the gate, and
   #      there must be exactly one. Both are read from this file's top-level
   #      lines (the fixture's own mentions are indented, so `^` skips them).
-  local gate_line cat_line cat_count
-  gate_line="$(grep -n '^scan_logs_or_contain /tmp/adb-logcat.log /tmp/flutter-drive.log' \
+  #      The gate is log_privacy_gate, called on the real paths, and its body
+  #      must route the flag-off arm through scan_logs_or_contain and the
+  #      flag-on arm through scan-logs.sh, seal BEFORE scan — the wiring the
+  #      (9c) fixtures below exercise, pinned here so it cannot quietly move.
+  local gate_line cat_line cat_count gate_body
+  gate_line="$(grep -n '^log_privacy_gate /tmp/haven-soak/needles /tmp/adb-logcat.log ' \
                  "${BASH_SOURCE[0]}" | cut -d: -f1 | head -n 1)"
   cat_line="$(grep -n '^cat /tmp/flutter-drive.log' "${BASH_SOURCE[0]}" \
                 | cut -d: -f1 | head -n 1)"
@@ -653,7 +750,7 @@ wlan0	0002000A	00000000	0000	0	0	0	00FFFFFF	0	0	0" 10.0.2.2; then
     fail=1
   elif (( cat_line < gate_line )); then
     echo "SELF-TEST FAIL (9b): the drive log is echoed at line ${cat_line}," \
-         "before the secret-leak gate at line ${gate_line}: a leak would reach" \
+         "before the log-privacy gate at line ${gate_line}: a leak would reach" \
          "the job log before the guard could fail" >&2
     fail=1
   fi
@@ -662,12 +759,188 @@ wlan0	0002000A	00000000	0000	0	0	0	00FFFFFF	0	0	0" 10.0.2.2; then
          "found ${cat_count}" >&2
     fail=1
   fi
+  if ! grep -qF 'log_privacy_gate /tmp/haven-soak/needles /tmp/adb-logcat.log "${FINAL_ATTEMPT_LOG}" /tmp/flutter-drive.log' \
+       "${BASH_SOURCE[0]}"; then
+    echo "SELF-TEST FAIL (9b): the real gate call no longer names the logcat," \
+         "the final-attempt slice and the full drive log" >&2
+    fail=1
+  fi
+  gate_body="$(sed -n '/^log_privacy_gate() {/,/^}/p' "${BASH_SOURCE[0]}" \
+                 | grep -v '^[[:space:]]*#')"
+  if ! grep -qF 'scan_logs_or_contain "${logcat}" "${drive_full}"' <<<"${gate_body}"; then
+    echo "SELF-TEST FAIL (9b): the flag-off arm no longer runs the key-material" \
+         "floor through scan_logs_or_contain" >&2
+    fail=1
+  fi
+  local seal_line wrapper_line
+  seal_line="$(grep -n '"${bin}" seal ' <<<"${gate_body}" | cut -d: -f1 | head -n 1)"
+  wrapper_line="$(grep -n 'bash "${SCAN_LOGS}" --manifest' <<<"${gate_body}" | cut -d: -f1 | head -n 1)"
+  if [[ -z "${seal_line}" || -z "${wrapper_line}" ]] || (( wrapper_line < seal_line )); then
+    echo "SELF-TEST FAIL (9b): the flag-on arm must seal the needle manifest" \
+         "and THEN run scan-logs.sh (seal='${seal_line}', scan='${wrapper_line}')" >&2
+    fail=1
+  fi
+  if grep -qE 'if[[:space:]]+\[\[[[:space:]]+-x[[:space:]]' <<<"${gate_body}"; then
+    echo "SELF-TEST FAIL (9b): a soft \`if [[ -x …\` scanner gate is back — an" \
+         "unbuilt scanner would be skipped, not fatal" >&2
+    fail=1
+  fi
+
+  # ---------------------------------------------------------------
+  # (9c) The flag-on arm, end to end: a FAKE haven-logscan (HAVEN_LOGSCAN_BIN,
+  #      read at call time), the REAL scan-logs.sh and the REAL key-material
+  #      floor. What is under test is the gate's own wiring — that it seals
+  #      from the sidecar directory it is given, hands every log to the
+  #      wrapper, folds the two verdicts, and contains on a leak — never the
+  #      scanner's patterns, which are the crate's own tests.
+  # ---------------------------------------------------------------
+  local fake_bin="${tmp}/fake-logscan" seal_argv="${tmp}/seal-argv" scan_argv="${tmp}/scan-argv"
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'case "${1:-}" in' \
+    '  seal) printf "%s\n" "$@" > "${FAKE_SEAL_ARGV}"; exit "${FAKE_SEAL_RC:-0}" ;;' \
+    '  scan) printf "%s\n" "$@" > "${FAKE_SCAN_ARGV}"; exit "${FAKE_SCAN_RC:-0}" ;;' \
+    'esac' \
+    'exit 9' \
+    > "${fake_bin}"
+  chmod +x "${fake_bin}"
+  # The globals the gate reads; SCAN_LOGS is the REAL wrapper next to this
+  # file, RELAY_URL the value the lane would carry.
+  local RELAY_URL="ws://10.0.2.2:7788" repo_root="${tmp}"
+  local SCAN_LOGS
+  SCAN_LOGS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/scan-logs.sh"
+  local needles="${tmp}/needles" logcat="${tmp}/logcat.log"
+  local drive_final="${tmp}/drive-final.log" drive_full="${tmp}/drive-full.log"
+  mkdir -p "${needles}"
+  : > "${needles}/default.needles.decl"
+  export FAKE_SEAL_ARGV="${seal_argv}" FAKE_SCAN_ARGV="${scan_argv}"
+  reset_gate_logs() {
+    printf 'I/flutter ( 111): started\n' > "${logcat}"
+    printf '00:03 +1: a scenario\n' > "${drive_final}"
+    printf '===== attempt 1 =====\n00:03 +1: a scenario\n' > "${drive_full}"
+    rm -f "${seal_argv}" "${scan_argv}"
+  }
+  # gate_case <label> <want-rc> <deleted|kept> <seal-rc> <scan-rc> [needle-dir]
+  gate_case() {
+    local label="$1" want="$2" fate="$3" dir="${6:-${needles}}" rc=0 f
+    HAVEN_LOGSCAN=true HAVEN_LOGSCAN_BIN="${fake_bin}" FAKE_SEAL_RC="$4" FAKE_SCAN_RC="$5" \
+      log_privacy_gate "${dir}" "${logcat}" "${drive_final}" "${drive_full}" \
+      > "${tmp}/gate-out" 2>&1 || rc=$?
+    if (( rc != want )); then
+      echo "SELF-TEST FAIL (9c ${label}): wanted rc ${want}, got ${rc}" >&2
+      fail=1
+    fi
+    for f in "${logcat}" "${drive_final}" "${drive_full}"; do
+      if [[ "${fate}" == deleted && -e "${f}" ]]; then
+        echo "SELF-TEST FAIL (9c ${label}): a leak verdict left ${f##*/} on disk" \
+             "for the failure-artifact upload to publish" >&2
+        fail=1
+      elif [[ "${fate}" == kept && ! -e "${f}" ]]; then
+        echo "SELF-TEST FAIL (9c ${label}): rc ${rc} removed ${f##*/}, which it" \
+             "had no leak to contain" >&2
+        fail=1
+      fi
+    done
+  }
+  reset_gate_logs; gate_case "scanner leak contains"        1 deleted 0 1
+  reset_gate_logs; gate_case "clean"                        0 kept    0 0
+  reset_gate_logs; gate_case "scanner unusable keeps"       3 kept    0 3
+  reset_gate_logs; gate_case "seal meta-floor keeps"        4 kept    4 0
+  reset_gate_logs; gate_case "leak outranks a failed seal"  1 deleted 4 1
+  reset_gate_logs; gate_case "seal guard outranks unusable" 2 kept    2 3
+  # The wrapper runs even when the seal failed: the floor's containment never
+  # waits on the scanner.
+  reset_gate_logs
+  printf 'D/keyring ( 111): Entry { secret: Some([1, 2, 3]) }\n' >> "${logcat}"
+  gate_case "floor contains under a failed seal"            1 deleted 4 0
+  # No sidecar: the channel wrote nothing, so the seal is skipped as rc 3 —
+  # and the wrapper still runs (the scan argv is recorded).
+  reset_gate_logs; gate_case "no sidecar is 3"              3 kept    0 0 "${tmp}/no-needles"
+  if [[ ! -e "${scan_argv}" ]]; then
+    echo "SELF-TEST FAIL (9c no sidecar): a missing sidecar skipped the wrapper" \
+         "instead of only the seal" >&2
+    fail=1
+  fi
+  # An absent binary is rc 2 from the seal AND from the wrapper — never a skip.
+  reset_gate_logs
+  rc=0
+  HAVEN_LOGSCAN=true HAVEN_LOGSCAN_BIN="${tmp}/no-such-binary" \
+    log_privacy_gate "${needles}" "${logcat}" "${drive_final}" "${drive_full}" \
+    > "${tmp}/gate-out" 2>&1 || rc=$?
+  if (( rc != 2 )) || [[ ! -e "${logcat}" || ! -e "${drive_full}" ]]; then
+    echo "SELF-TEST FAIL (9c absent binary): wanted rc 2 with the logs kept," \
+         "got rc ${rc}" >&2
+    fail=1
+  fi
+  # The seal's argv: the run id, every sidecar, the relay URL both as a needle
+  # and as an exempt endpoint, both proxy listen spellings, the scenario's
+  # declaration floors, the logcat line floor, and the manifest path under the
+  # sidecar directory — and the upstream only when the workflow exported it.
+  reset_gate_logs
+  : > "${needles}/second.needles.decl"
+  gate_case "seal argv" 0 kept 0 0
+  local -a got_seal=() want_seal=(seal --run-id local-local
+    --decl "${needles}/default.needles.decl" --decl "${needles}/second.needles.decl"
+    --host-decl "relay_url=${RELAY_URL}" --exempt-endpoint "${RELAY_URL}"
+    --exempt-endpoint ws://127.0.0.1:7788 --exempt-endpoint ws://10.0.2.2:7788
+    --expect pubkey=3 --expect coordinate=4 --expect circle_name=1
+    --expect petname=1 --expect nostr_group_id=1 --expect mls_group_id=1
+    --expect event_id=3
+    --out "${needles}/local-local.needles.json")
+  mapfile -t got_seal < "${seal_argv}"
+  if [[ "${got_seal[*]}" != "${want_seal[*]}" ]]; then
+    echo "SELF-TEST FAIL (9c seal argv): got '${got_seal[*]}', expected '${want_seal[*]}'" >&2
+    fail=1
+  fi
+  rm -f "${needles}/second.needles.decl"
+  reset_gate_logs
+  rc=0
+  GITHUB_RUN_ID=424242 GITHUB_RUN_ATTEMPT=2 WIRE_UPSTREAM=ws://127.0.0.1:7777 \
+    HAVEN_LOGSCAN=true HAVEN_LOGSCAN_BIN="${fake_bin}" FAKE_SEAL_RC=0 FAKE_SCAN_RC=0 \
+    log_privacy_gate "${needles}" "${logcat}" "${drive_final}" "${drive_full}" \
+    > "${tmp}/gate-out" 2>&1 || rc=$?
+  mapfile -t got_seal < "${seal_argv}"
+  if (( rc != 0 )) || [[ "${got_seal[*]}" != *"--run-id 424242-2 "* ]] \
+     || [[ "${got_seal[*]}" != *"--exempt-endpoint ws://127.0.0.1:7777 "* ]] \
+     || [[ "${got_seal[*]}" != *"--out ${needles}/424242-2.needles.json" ]]; then
+    echo "SELF-TEST FAIL (9c run id): the seal must carry the workflow run id" \
+         "and attempt, the exported upstream, and the matching manifest path;" \
+         "got '${got_seal[*]}'" >&2
+    fail=1
+  fi
+  # The wrapper's argv: the manifest the seal wrote, the logcat as one sink,
+  # both drive files as the other, plants reconciled against the final
+  # attempt only.
+  local -a got_scan=() want_scan=(scan --manifest "${needles}/424242-2.needles.json"
+    --sink "logcat=${logcat}" --sink "drive=${drive_final},${drive_full}"
+    --plants-in "drive=${drive_final}" --report /tmp/logscan-report.ndjson)
+  mapfile -t got_scan < "${scan_argv}"
+  if [[ "${got_scan[*]}" != "${want_scan[*]}" ]]; then
+    echo "SELF-TEST FAIL (9c scan argv): got '${got_scan[*]}', expected '${want_scan[*]}'" >&2
+    fail=1
+  fi
+  # The flag-off arm never touches the scanner: with HAVEN_LOGSCAN unset the
+  # gate is exactly the (9a) floor gate over the logcat and the full drive log.
+  reset_gate_logs
+  rc=0
+  export FAKE_SCAN_RC=1
+  HAVEN_LOGSCAN_BIN="${fake_bin}" \
+    log_privacy_gate "${needles}" "${logcat}" "${drive_final}" "${drive_full}" \
+    > "${tmp}/gate-out" 2>&1 || rc=$?
+  unset FAKE_SCAN_RC
+  if (( rc != 1 )) || [[ -e "${logcat}" || -e "${drive_full}" ]] \
+     || [[ ! -e "${drive_final}" ]] || [[ -e "${seal_argv}" || -e "${scan_argv}" ]]; then
+    echo "SELF-TEST FAIL (9c flag-off): with HAVEN_LOGSCAN unset the gate must be" \
+         "the floor alone over the logcat and full drive log (rc ${rc})" >&2
+    fail=1
+  fi
+  unset FAKE_SEAL_ARGV FAKE_SCAN_ARGV
 
   if (( fail )); then
     echo "run-single-avd-scenario: SELF-TEST FAILED" >&2
     return 1
   fi
-  echo "run-single-avd-scenario: self-test passed (connect flake caught; clean pass, real post-connect failure, and non-connect failure all correctly NOT retried; app-failure check scoped to the final attempt; the network gate admits a guest whose on-link routes cover the relay, still rejects one with no route to it, and is satisfied by neither loopback, a foreign subnet, a downed interface, nor adb noise; the Wi-Fi read-back accepts only a literal 0, never 'null' or adb noise; a connect-flake retry restores the app through install_app and re-grants; the secret-leak gate removes what it flags and nothing else, and the drive log is echoed only after it. Phase 2's install barrier is app-install-lib.sh's, and its own --self-test pins it)."
+  echo "run-single-avd-scenario: self-test passed (connect flake caught; clean pass, real post-connect failure, and non-connect failure all correctly NOT retried; app-failure check scoped to the final attempt; the network gate admits a guest whose on-link routes cover the relay, still rejects one with no route to it, and is satisfied by neither loopback, a foreign subnet, a downed interface, nor adb noise; the Wi-Fi read-back accepts only a literal 0, never 'null' or adb noise; a connect-flake retry restores the app through install_app and re-grants; the secret-leak gate removes what it flags and nothing else; the log-privacy gate seals from the sidecar directory and then runs scan-logs.sh over the logcat and both drive logs, folds the seal's and the wrapper's verdicts, contains on a leak even under a failed seal, fails closed on an absent binary or sidecar, is the floor alone when HAVEN_LOGSCAN is unset, and the drive log is echoed only after it. Phase 2's install barrier is app-install-lib.sh's, and its own --self-test pins it)."
   return 0
 }
 
@@ -695,6 +968,9 @@ readonly HAVEN_DIR="${repo_root}/haven"
 readonly BUILD_APK="${HAVEN_DIR}/build/app/outputs/flutter-apk/app-debug.apk"
 # Secret-leak guard (Security Rule #6) — run after the drive, before exit.
 readonly SECRET_SCAN="${script_dir}/scan-logs-for-secrets.sh"
+# The log-privacy gate's flag-on arm (Security Rule 15): the floor above plus
+# the runtime identifier scanner, one call, one verdict — see log_privacy_gate.
+readonly SCAN_LOGS="${script_dir}/scan-logs.sh"
 
 if [[ ! -f "${HAVEN_DIR}/pubspec.yaml" ]]; then
   echo "ERROR: Haven project not found at ${HAVEN_DIR}" >&2
@@ -708,6 +984,10 @@ fi
 
 if [[ ! -f "${SECRET_SCAN}" ]]; then
   echo "ERROR: secret-leak guard missing at ${SECRET_SCAN}" >&2
+  exit 1
+fi
+if [[ ! -f "${SCAN_LOGS}" ]]; then
+  echo "ERROR: log-privacy gate missing at ${SCAN_LOGS}" >&2
   exit 1
 fi
 
@@ -1305,21 +1585,31 @@ elif (( drive_rc == 124 || drive_rc == 137 )); then
        "and was killed (rc=${drive_rc}); treating as a target failure." >&2
 fi
 
+# The FINAL attempt's slice of the accumulated drive log (see
+# final_attempt_start, above). Produced BEFORE the gate because it is one of
+# the gate's sinks: positive controls are reconciled against the attempt that
+# actually ran, while needles are searched in every attempt's output.
+readonly FINAL_ATTEMPT_LOG=/tmp/flutter-drive.final-attempt.log
+attempt_slice_after /tmp/flutter-drive.log "${final_attempt_start:-0}" \
+  > "${FINAL_ATTEMPT_LOG}"
+
 # -----------------------------------------------------------------
-# Secret-leak guard (CLAUDE.md Security Rule #6). Scan the captured
+# Log-privacy gate (CLAUDE.md Security Rules 6 and 15). Scan the captured
 # logcat + drive logs for key material (e.g. keyring-core dumping the
-# SQLCipher DB-key bytes at DEBUG). This runs REGARDLESS of the test's
-# own pass/fail, so a leak can't ride along on a green run — a hit fails
-# the scenario even when the test itself passed. A hit also REMOVES both
-# logs (scan_logs_or_contain), and the drive log is echoed only below it:
-# the job log is world-readable, and the upload that a failure triggers
-# must find nothing to publish.
+# SQLCipher DB-key bytes at DEBUG) and — on the lane that sets
+# HAVEN_LOGSCAN=true — for every identifier the run declared, in every
+# encoding. This runs REGARDLESS of the test's own pass/fail, so a leak
+# can't ride along on a green run — a hit fails the scenario even when the
+# test itself passed. A hit also REMOVES every scanned log
+# (log_privacy_gate), and the drive log is echoed only below it: the job
+# log is world-readable, and the upload that a failure triggers must find
+# nothing to publish.
 # -----------------------------------------------------------------
-echo "Scanning E2E logs for secret material..."
+echo "Scanning E2E logs for secret material and declared identifiers..."
 scan_rc=0
-scan_logs_or_contain /tmp/adb-logcat.log /tmp/flutter-drive.log || scan_rc=$?
+log_privacy_gate /tmp/haven-soak/needles /tmp/adb-logcat.log "${FINAL_ATTEMPT_LOG}" /tmp/flutter-drive.log || scan_rc=$?
 if (( scan_rc != 0 )); then
-  echo "ERROR: secret-leak guard tripped — see the line(s) above." >&2
+  echo "ERROR: log-privacy gate failed (rc ${scan_rc}) — see the line(s) above." >&2
   exit 1
 fi
 cat /tmp/flutter-drive.log || true
@@ -1336,11 +1626,8 @@ cat /tmp/flutter-drive.log || true
 # same scenario failed correctly on iOS, which runs under `flutter test`.
 #
 # So a zero exit code is necessary, not sufficient. See drive-log-lib.sh.
+# Scoped to the FINAL attempt only (FINAL_ATTEMPT_LOG, above).
 # -----------------------------------------------------------------
-# Scoped to the FINAL attempt only (see final_attempt_start, above).
-readonly FINAL_ATTEMPT_LOG=/tmp/flutter-drive.final-attempt.log
-attempt_slice_after /tmp/flutter-drive.log "${final_attempt_start:-0}" \
-  > "${FINAL_ATTEMPT_LOG}"
 
 # The other half of the warn-and-drive network gate. If the drive really did
 # die because the guest had no route to the relay, say so HERE, where the

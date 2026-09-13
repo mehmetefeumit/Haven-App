@@ -63,6 +63,7 @@ jobs:
     # lane dies anonymous. It is therefore every step cap this job can run,
     # plus the most the work no step cap bounds has taken:
     #                                                          poll / flag-on
+    #   Build the runtime log scanner                            10
     #   Build E2E test APK                                       25
     #   Create AVD snapshot (on an AVD-cache miss)               15
     #   Start recording wire proxy                               20
@@ -73,12 +74,12 @@ jobs:
     #     both paths of this job (ci.yml and e2e-nightly.yml,
     #     2026-07-29..09-11), 11.1 of it one Setup Flutter
     #     stall (run 30792258968)                                13
-    #                                                   = 118 / 134 -> 120 / 135
+    #                                                   = 128 / 144 -> 130 / 145
     # Measured time alone is not the rule. Sized that way (14.5 min before
     # the drive + 45 + 0.3 = 59.8, so 65) a 24-minute build and a 44-minute
     # drive, each inside its own cap, would have died here.
     # job-uncapped-minutes: 12.9 (149 runs, worst 30792258968)
-    timeout-minutes: ${{ inputs.live_sync && 135 || 120 }}
+    timeout-minutes: ${{ inputs.live_sync && 145 || 130 }}
     env:
       # 7788, NOT the relay's own port: this lane runs the recording wire proxy
       # (tooling/e2e/ci/start-wire-proxy.sh) in front of strfry. strfry keeps
@@ -90,6 +91,12 @@ jobs:
       # certify nothing. scripts/ci/check_wire_oracle_lane_reachable.sh pins it.
       HAVEN_E2E_RELAY: ws://10.0.2.2:7788
       FLUTTER_SUPPRESS_ANALYTICS: "true"
+      # The runtime log scanner is wired into THIS lane (the one that runs the
+      # recording proxy, whose control channel carries the run's declared
+      # identifiers). run-single-avd-scenario.sh reads it: after the drive it
+      # seals the needle manifest and runs every captured log through
+      # tooling/e2e/ci/scan-logs.sh before echoing or keeping any of it.
+      HAVEN_LOGSCAN: "true"
 
     steps:
       - name: Checkout
@@ -123,7 +130,17 @@ jobs:
           workspaces: |
             haven-core
             tooling/e2e/local-relay
+            tooling/logscan
           key: e2e-android-x64
+
+      # The runtime log scanner, release-built ONCE, before Flutter and the
+      # emulator are resident (same reasoning as the APK build below). The
+      # runner seals and scans with it after the drive; the scan step at the
+      # bottom runs it over the upload-only logs. Capped so a cargo stall fails
+      # fast; the cap is a term of the job cap's sum above.
+      - name: Build the runtime log scanner
+        timeout-minutes: 10
+        run: cargo build --release --manifest-path tooling/logscan/Cargo.toml
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -280,10 +297,20 @@ jobs:
       # pid file rather than chosen here: `HAVEN_WIRE_JOURNAL` overrides the
       # per-instance default, and a lane that hardcodes one path is a lane that
       # silently reads the wrong file the day it runs two recorders.
+      #
+      # The needle directory is rotated BEFORE the proxy starts, never after:
+      # the proxy creates its declaration sidecar there with O_EXCL on the
+      # drive's first declaration, so a file left by an earlier run on a reused
+      # runner would make it refuse (or, appended to, would seal a previous
+      # run's identifiers into this run's manifest), and a rotation once the
+      # proxy is live would unlink the file it holds open. Owner-only, because
+      # what lands there is every identifier the run declares, verbatim.
       - name: Start recording wire proxy
         timeout-minutes: 20
         run: |
           set -euo pipefail
+          mkdir -m 0700 -p /tmp/haven-soak/needles
+          rm -f /tmp/haven-soak/needles/*.needles.decl /tmp/haven-soak/needles/*.needles.json /tmp/haven-soak/needles/*.canaries.json
           upstream=ws://127.0.0.1:7777; bash tooling/e2e/ci/start-wire-proxy.sh 7788 "${upstream}"
           echo "WIRE_UPSTREAM=${upstream}" >> "${GITHUB_ENV}"
           claim=/tmp/haven-wire-proxy.journalpath
@@ -475,6 +502,21 @@ jobs:
       - name: Stop recording wire proxy
         if: always()
         run: bash tooling/e2e/ci/stop-wire-proxy.sh
+
+      # The recorder's own account of its declaration channel, read back
+      # BEFORE anything trusts the sidecars it wrote. Its shutdown summary
+      # says how many declarations and canary manifests it recorded, refused
+      # or lost, and whether it found a previous run's file already there. A
+      # refused or lost declaration is a needle the scanner never searched
+      # for — its "clean" is quieter than the run believed; a STALE sidecar is
+      # a previous run's identifiers sealed into this run's manifest. Neither
+      # is visible anywhere else. Counts only, so this step's log carries
+      # nothing a value could ride on. Standard guard condition, not
+      # `always()`: the summary is written on every outcome (the stop step is
+      # `always()`), so its absence is a broken recorder, not a skipped run.
+      - name: Proxy declaration channel stayed healthy
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/check-proxy-sidecar-summary.sh /tmp/haven-wire-proxy.log
 
       # THE POINT OF ALL OF THE ABOVE: read the transcript.
       #
@@ -730,13 +772,19 @@ jobs:
           fi
 
           # C6 — content canaries. The manifest of planted values is announced
-          # by the scenario itself; the drive log is where the device's own
-          # prints land (it is the same stream drive-log-lib.sh reads the
-          # on-device reporter out of), so it IS the manifest source.
+          # by the scenario over the proxy's control channel and lands in the
+          # per-role canary sidecar under /tmp/haven-soak/needles/ (JSON
+          # lines, one manifest per line) — never in the drive log, which is
+          # uploaded. The sidecar holds the planted VALUES: it is handed to the
+          # oracle as an argument, exactly as the raw journal is, and is never
+          # read into this log (check_wire_proxy_test_only.sh check 6). An
+          # unmatched glob reaches the oracle as a literal and is reported
+          # absent (rc 3); a sidecar that parses to no manifest is a
+          # META-FLOOR (rc 4) — the oracle's own self-test pins both.
           rc=0
           dart tooling/e2e/ci/check-wire-canaries.dart \
             --journal "${WIRE_JOURNAL}" \
-            --manifest /tmp/flutter-drive.log \
+            --manifest /tmp/haven-soak/needles/*.canaries.json \
             --sentinel "${WIRE_SENTINEL}" || rc=$?
           verdict "C6 canaries" "${rc}"
 
@@ -811,24 +859,47 @@ jobs:
             top -bn1 | head -40 || true
           } > /tmp/diag.log 2>&1
 
-      # The logcat and the drive log were scanned by the runner (which deletes
-      # them on a leak), the wire summary by its producer, and the proxy's own
-      # log is exempt (check_wire_proxy_test_only.sh, invariant 3); these are
-      # the uploaded logs none of them sees.
+      # Where each uploaded log is scanned, and by what. The logcat and both
+      # drive logs go through the runner's log-privacy gate (HAVEN_LOGSCAN
+      # above): it seals the run's needle manifest from the proxy's declaration
+      # sidecar, runs tooling/e2e/ci/scan-logs.sh — the key-material floor AND
+      # the identifier scanner — and deletes them on a leak, before the drive
+      # log is echoed. The wire summary is run through the key-material floor
+      # by its producer. What is left is scanned HERE, against the SAME sealed
+      # manifest, by the same wrapper: the relay log (structural rules off —
+      # a relay legitimately holds pubkeys and event ids), the host
+      # diagnostics, the proxy's own log (lengths, counts, fixed labels and its
+      # loopback endpoints, which the manifest exempts by name), and the wire
+      # summary again, this time for identifiers — as a `diag` sink, NOT a
+      # `drive` one: it is a host-written digest the drive never planted a
+      # positive control into, and the `drive` class demands the Dart
+      # open/close plants and a hundred lines of every file, which the summary
+      # would fail on every red run for a reason that is not a finding. `diag`
+      # keeps the same term floor and structural rules with a one-line floor
+      # and no plant requirement. The summary is named only when it exists: it
+      # is produced `if: failure()`, so on a green run there is neither a file
+      # to scan nor one to upload, and the two predicates are the same.
       # Scan-before-upload, as its OWN step on every outcome short of a
-      # cancellation: a leak (rc 1) deletes the scanned files and fails the lane
-      # even on an otherwise green run, so the upload finds nothing to publish;
-      # an unscannable log (rc 3) fails it and leaves the files as they are. The
-      # standard guard condition (not `always()`) is what lets
+      # cancellation: a leak (rc 1) deletes every scanned file and fails the
+      # lane even on an otherwise green run, so the upload finds nothing to
+      # publish; an unscannable log (rc 3), a broken guard (rc 2) or an unmet
+      # floor (rc 4) fails it and leaves the files as they are. The standard
+      # guard condition (not `always()`) is what lets
       # docs/privacy/privacy_invariants.json cite this step as the runtime
       # scanner's enforcing run.
       - name: Scan captured logs for secrets before upload
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: |
-          logs=(/tmp/strfry.log /tmp/diag.log)
+          summary=()
+          if [[ -f /tmp/wire-summary.log ]]; then summary=(--sink diag=/tmp/wire-summary.log); fi
           rc=0
-          bash tooling/e2e/ci/scan-logs-for-secrets.sh "${logs[@]}" || rc=$?
-          if [ "${rc}" -eq 1 ]; then rm -f -- "${logs[@]}"; fi
+          bash tooling/e2e/ci/scan-logs.sh \
+            --manifest /tmp/haven-soak/needles/*.needles.json \
+            --sink relay=/tmp/strfry.log \
+            --sink diag=/tmp/diag.log \
+            --sink proxy=/tmp/haven-wire-proxy.log \
+            ${summary[@]+"${summary[@]}"} \
+            --report /tmp/logscan-report-upload.ndjson || rc=$?
           exit "${rc}"
 
       - name: Upload failure artifacts
@@ -839,6 +910,12 @@ jobs:
           # e2e-android job's artifact when BOTH are called in one ci.yml run
           # (upload-artifact@v4+ rejects a duplicate name in the same run).
           name: e2e-android${{ inputs.live_sync && '-live-sync' || '' }}-${{ github.run_id }}
+          # The scanner's findings reports (/tmp/logscan-report.ndjson from the
+          # runner, /tmp/logscan-report-upload.ndjson from the step above) hold
+          # sink:line, class, encoding and rule ids only — never a value — but
+          # are NOT uploaded: check_wire_proxy_test_only.sh bans every .ndjson
+          # from an upload path, keyed on the extension alone. The same
+          # findings are printed as LEAK lines in the two scanning steps' logs.
           path: |
             /tmp/adb-logcat.log
             /tmp/flutter-drive.log
@@ -851,6 +928,15 @@ jobs:
             /tmp/haven-wire-proxy.log
           retention-days: 14
           if-no-files-found: ignore
+
+      # The declaration sidecars, the sealed manifest and the wire-canary
+      # manifest hold the run's identifiers verbatim. They are never uploaded
+      # (check_wire_proxy_test_only.sh) and they do not outlive the job either:
+      # removed on EVERY outcome, after every upload step, so a reused runner
+      # never starts the next run holding the last run's needles.
+      - name: Discard needle manifests
+        if: always()
+        run: rm -f /tmp/haven-soak/needles/*.needles.decl /tmp/haven-soak/needles/*.needles.json /tmp/haven-soak/needles/*.canaries.json
 
       # Relay teardown (CI-1). Runs LAST and `if: always()` so the
       # strfry container + its host data dir are removed on every

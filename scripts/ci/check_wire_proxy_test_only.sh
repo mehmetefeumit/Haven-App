@@ -20,20 +20,26 @@
 # check_m7_background_delivery_assertion.sh (a test hook that must not drift
 # into the shipped app).
 #
-# ## The five invariants
+# ## The invariants
 #
 #   1. NO PRODUCTION REACH. No file under haven/lib, haven-core/src or
 #      haven/rust_builder/src may name the proxy, its journal, its env vars or
 #      its sentinel. The harness may (haven/integration_test is not scanned).
 #
-#   2. NOT IN A BUILD PATH. No shipped manifest may depend on the crate, so it
-#      cannot enter an APK, an IPA or the release wrapper.
+#   2. NOT IN A BUILD PATH. No shipped manifest may depend on either tooling
+#      crate — the recorder (tooling/e2e/local-relay) or the runtime log
+#      scanner (tooling/logscan) — so neither can enter an APK, an IPA or the
+#      release wrapper, and both declare `publish = false`.
 #
 #   3. THE RAW EVIDENCE IS NEVER AN ARTIFACT. No workflow may name a `.ndjson`
 #      path, or any `/tmp/haven-wire-*` path other than a `.log`, in an
 #      upload-artifact step. CI artifacts are retained for days on a public
 #      repository; the redacted summary
-#      (tooling/e2e/ci/summarize-wire-journal.sh) is what a lane uploads.
+#      (tooling/e2e/ci/summarize-wire-journal.sh) is what a lane uploads. Nor
+#      may an upload entry end in a bare wildcard — `/tmp/**`, `/tmp/haven*`,
+#      `/tmp/logs/*` — a sweep that takes whatever sits beside the named files,
+#      a relocated sidecar included; `/tmp/strfry-profile-*.log` stays legal
+#      because its extension still bounds what it matches.
 #
 #      The prefix half of that ban exists for the MLS-GROUP-ID SIDECAR
 #      (`/tmp/haven-wire-proxy.mlsgroupid`), which the device fills over the
@@ -57,6 +63,48 @@
 #      the instrument breaking the product, which is the one outcome fail-open
 #      exists to prevent.
 #
+#   6. THE NEEDLE SIDECARS ARE NEVER READ OUT EITHER. The declaration channel
+#      writes `/tmp/haven-soak/needles/<role>.needles.decl` (every value a run
+#      declared, verbatim, secret-class material included) and
+#      `<role>.canaries.json`; `haven-logscan seal` adds `<run>.needles.json`.
+#      These are the needles a scanner searches FOR, so publishing one turns the
+#      absence assertion into a lookup table for whoever reads the artifact.
+#
+#      The ban is keyed on WHAT THE FILE IS — its extension — and on the
+#      soak root, for the reason recorded in check 3: a location-keyed ban on
+#      the MLS sidecar was defeated twice by callers moving the path. It covers
+#      five exposure shapes, in workflows and in tooling/e2e/ci runners alike:
+#      an upload-artifact `path:` (check 3); a reading command on the file —
+#      `cat`/`tee`/`head`/`tail`/`base64`/`less`/`more`/`awk`/`sed`/`jq`/`od`/
+#      `xxd`/`strings`/`cut`/`nl` — at a command position; a redirection that
+#      reads it without naming a command (`< file`, `$(< file)`); a
+#      `$GITHUB_STEP_SUMMARY` write; and a `gh issue`/`gh pr` body. `grep` is
+#      deliberately NOT in the list: the runners' own self-tests grep their
+#      source for lines that name the directory. WRITING and DELETING are
+#      untouched: `seal --out`, `rm`, `shred` and `mkdir` are how the lane
+#      legitimately handles these files, and a guard that forbade them would
+#      forbid the cleanup too.
+#
+#      What a per-line grep cannot see, stated so nobody reads more into a
+#      green run than it proves: an INDIRECT read — `f=…/x.needles.decl` on
+#      one line and `cat "$f"` on another — is outside this check. The ban is
+#      keyed on the line that spells the path, not the one that uses it.
+#
+#      `--disclose-values` (haven-logscan's local-triage flag, which prints
+#      matched text) may appear in no workflow and no runner; and there is no
+#      `HAVEN_NEEDLE_DIR`, by design — the directory is a constant in
+#      tooling/e2e/local-relay/src/needles.rs precisely so this guard can name
+#      it, and an env override would reinstate the defeat above.
+#
+#   7. THE SCANNER BINARY IS NOT A LANE'S TO CHOOSE. `HAVEN_LOGSCAN_BIN` is
+#      read at call time by scan-logs.sh and the runner so their self-tests can
+#      inject a fake; an e2e workflow that set it would point the whole
+#      log-privacy gate at a binary of its choosing — a stub that exits 0 is a
+#      green lane that scanned nothing. No `.github/workflows/e2e-*.yml` may
+#      assign it (an `env:` key, an `export`, an inline `NAME=… cmd`); the one
+#      legitimate setter is rust-check.yml's logscan-tooling job, which is not
+#      an e2e lane and points it at the binary it just built.
+#
 # Pure grep/awk, no toolchain — belongs in repo-guards.yml.
 #
 # Usage:
@@ -73,9 +121,15 @@ set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 readonly CRATE_DIR='tooling/e2e/local-relay'
+readonly LOGSCAN_DIR='tooling/logscan'
+# Both harness-only crates: neither may enter a shipped build (check 2).
+readonly TOOLING_CRATES=("${CRATE_DIR}" "${LOGSCAN_DIR}")
 readonly JOURNAL_RS='tooling/e2e/local-relay/src/journal.rs'
 readonly SUMMARIZE_SH='tooling/e2e/ci/summarize-wire-journal.sh'
-readonly SELF_TEST_FIXTURES=34
+# Lane runners. Scanned beside the workflows because a `cat` in a runner reaches
+# the same job log an `echo` in a workflow step does.
+readonly E2E_CI_DIR='tooling/e2e/ci'
+readonly SELF_TEST_FIXTURES=78
 
 # Trees that ship. `haven/integration_test` is deliberately absent: that is the
 # harness, and it is where the sentinel emitter belongs.
@@ -92,6 +146,13 @@ readonly PRODUCTION_TREES=(
 # others do not have: a shipped app that could emit that verb would be handing
 # its real MLS group id to whatever it is connected to. The harness is where
 # the emitter belongs (haven/integration_test is not scanned).
+#
+# HAVEN_NEEDLE_DECL and HAVEN_WIRE_CANARY_MANIFEST carry exactly the same
+# reason: a shipped app able to emit either would be handing whatever it
+# declares — pubkeys, group ids, names, coordinates, secret-class material — to
+# whatever it is connected to. HAVEN_NEEDLE_DIR is here as a name that must
+# exist NOWHERE: the needle directory is a constant so the path bans below can
+# name it, and an override would make the subject of those bans relocatable.
 readonly FORBIDDEN_TOKENS=(
   'haven-wire-proxy'
   'haven_local_relay'
@@ -99,6 +160,9 @@ readonly FORBIDDEN_TOKENS=(
   'HAVEN_WIRE_JOURNAL'
   'HAVEN_WIRE_SENTINEL'
   'HAVEN_WIRE_MLS_GROUP_ID'
+  'HAVEN_NEEDLE_DECL'
+  'HAVEN_WIRE_CANARY_MANIFEST'
+  'HAVEN_NEEDLE_DIR'
 )
 
 # Manifests and wrappers that decide what gets built into a shipped artifact.
@@ -140,21 +204,23 @@ check_no_production_reach() {
 
 # 2. No shipped manifest pulls the crate in.
 check_not_in_build_path() {
-  local root="$1" rc=0 manifest
-  for manifest in "${BUILD_MANIFESTS[@]}"; do
-    local f="${root}/${manifest}"
-    [[ -f "${f}" ]] || continue
-    if grep -qF -- "${CRATE_DIR}" "${f}"; then
-      fail "${manifest} references ${CRATE_DIR}. The recording proxy must never be part of a build that ships."
+  local root="$1" rc=0 manifest crate
+  for crate in "${TOOLING_CRATES[@]}"; do
+    for manifest in "${BUILD_MANIFESTS[@]}"; do
+      local f="${root}/${manifest}"
+      [[ -f "${f}" ]] || continue
+      if grep -qF -- "${crate}" "${f}"; then
+        fail "${manifest} references ${crate}. A harness-only crate must never be part of a build that ships."
+        rc=1
+      fi
+    done
+    # `publish = false` keeps it off crates.io even by accident.
+    local crate_toml="${root}/${crate}/Cargo.toml"
+    if [[ -f "${crate_toml}" ]] && ! grep -qE '^[[:space:]]*publish[[:space:]]*=[[:space:]]*false' "${crate_toml}"; then
+      fail "${crate}/Cargo.toml no longer declares publish = false."
       rc=1
     fi
   done
-  # `publish = false` keeps it off crates.io even by accident.
-  local crate_toml="${root}/${CRATE_DIR}/Cargo.toml"
-  if [[ -f "${crate_toml}" ]] && ! grep -qE '^[[:space:]]*publish[[:space:]]*=[[:space:]]*false' "${crate_toml}"; then
-    fail "${CRATE_DIR}/Cargo.toml no longer declares publish = false."
-    rc=1
-  fi
   return "${rc}"
 }
 
@@ -187,9 +253,30 @@ upload_forbidden_path_hits() { # upload_forbidden_path_hits <workflow-file>
       # out from under the prefix entirely. A guard whose subject can be
       # relocated by an env var must key on what the file IS.
       if (text ~ /\.mlsgroupid/) return 1
+      # The needle sidecars and the sealed manifest, keyed on WHAT THEY ARE the
+      # first time rather than on where they live — the defeat above, learned.
+      # A relocated `${RUNNER_TEMP}/alice.needles.decl` is still a file holding
+      # every value a run declared.
+      if (text ~ /\.needles\.decl|\.needles\.json|\.canaries\.json|\.attribution\.json/) return 1
+      # The directory, and the soak root above it: nothing under it is ever
+      # uploadable, so `needles/` and a `/tmp/haven-soak/*` sweep are both out.
+      if (text ~ /needles\//) return 1
+      if (text ~ /\/tmp\/haven-soak/) return 1
       # A wholesale directory upload sweeps up whatever the recorder wrote,
       # including a relocated sidecar.
       if (text ~ /^[[:space:]]*-?[[:space:]]*\/tmp\/?\*?[[:space:]]*$/) return 1
+      # ...and so does any entry ending in a bare wildcard: `/tmp/**`,
+      # `/tmp/haven*`, `/tmp/logs/*` take whatever sits beside the named
+      # files. An extension after the last `/` bounds the match, so
+      # `/tmp/strfry-profile-*.log` stays legal.
+      entry = text
+      sub(/^[[:space:]]*(path:)?[[:space:]]*-?[[:space:]]*/, "", entry)
+      sub(/[[:space:]]*$/, "", entry)
+      if (entry ~ /\*$/) {
+        last = entry
+        sub(/.*\//, "", last)
+        if (last !~ /\./) return 1
+      }
       rest = text
       while (match(rest, /\/tmp\/haven-wire-[^[:space:]]*/)) {
         tok = substr(rest, RSTART, RLENGTH)
@@ -242,6 +329,114 @@ check_raw_journal_not_uploaded() {
       rc=1
     fi
   done
+  return "${rc}"
+}
+
+# Prints `<file>:<line>` for every line that READS a needle file into a place a
+# human or a public artifact can see it.
+#
+# Deny-list by CONTEXT, not by path: the lane has to write, delete and pass these
+# files around (`seal --out`, `--decl`, `rm -f`, `shred`, `mkdir`), and a rule
+# that caught those would be turned off within a week. What is forbidden is the
+# four shapes that PUBLISH a file's contents — a reading command, a step-summary
+# write, an issue/PR body — plus `--disclose-values`, which makes the scanner
+# itself print the matched text.
+#
+# `tee` counts as a reading command even though it writes: it copies to stdout,
+# and a step's stdout is the job log, which cannot be retracted per step.
+needle_exposure_hits() { # needle_exposure_hits <file>
+  awk '
+    {
+      line = $0
+      sub(/[[:space:]]*#.*$/, "", line)
+      if (line ~ /^[[:space:]]*$/) next
+
+      # haven-logscan prints matched text with this flag. Local triage only.
+      if (line ~ /--disclose-values/) { print FILENAME ":" NR ":disclose-values"; next }
+
+      if (line !~ /\.needles\.decl|\.needles\.json|\.canaries\.json|\.attribution\.json|needles\/|\/tmp\/haven-soak/) next
+
+      if (line ~ /(^|[;&|(]|[[:space:]])(cat|tee|head|tail|base64|less|more|awk|sed|jq|od|xxd|strings|cut|nl)([[:space:]]|$)/) {
+        print FILENAME ":" NR ":read-command"; next
+      }
+      # `< file` and `$(< file)` read without naming a command. A `<` must be
+      # followed by whitespace, a quote or a slash so that `<<EOF` heredocs,
+      # `<(…)` process substitutions and a `<path>` usage placeholder are not
+      # read as redirections.
+      if (line ~ /(^|[^<>])<([[:space:]]+[^[:space:]]*|["\/][^[:space:]]*)(\.needles\.decl|\.needles\.json|\.canaries\.json|\.attribution\.json|needles\/|\/tmp\/haven-soak)/ \
+          || line ~ /\$\([[:space:]]*<[[:space:]]*["\/]?[^[:space:]]*(\.needles\.decl|\.needles\.json|\.canaries\.json|\.attribution\.json|needles\/|\/tmp\/haven-soak)/) {
+        print FILENAME ":" NR ":redirect-read"; next
+      }
+      if (line ~ /GITHUB_STEP_SUMMARY/) { print FILENAME ":" NR ":step-summary"; next }
+      if (line ~ /gh[[:space:]]+(issue|pr)[[:space:]]/) { print FILENAME ":" NR ":gh-body"; next }
+    }
+  ' "$1"
+}
+
+# 6. No workflow or runner reads a needle file out, and no env var can move one.
+check_needle_files_are_not_exposed() {
+  local root="$1" rc=0 file hits
+  local -a scanned=()
+  local dir="${root}/.github/workflows"
+  [[ -d "${dir}" ]] || { fail ".github/workflows not found"; return 1; }
+  for file in "${dir}"/*.yml "${dir}"/*.yaml "${root}/${E2E_CI_DIR}"/*.sh; do
+    [[ -f "${file}" ]] || continue
+    scanned+=("${file}")
+  done
+  if (( ${#scanned[@]} == 0 )); then
+    fail "no workflow or ${E2E_CI_DIR} runner found — this check would pass vacuously."
+    return 1
+  fi
+
+  for file in "${scanned[@]}"; do
+    hits="$(needle_exposure_hits "${file}")"
+    if [[ -n "${hits}" ]]; then
+      printf '%s\n' "${hits}" >&2
+      fail "$(basename "${file}") publishes a needle file's contents (or passes --disclose-values). Those files hold every value a run declared — the needles a scanner searches FOR — so printing one turns an absence assertion into a lookup table for whoever reads the log. Writing, deleting and passing the paths as arguments are fine; reading them out is not."
+      rc=1
+    fi
+  done
+
+  # The directory is a CONSTANT so the bans above have a subject. An override
+  # would relocate it out from under them — the defeat check 3 records, twice.
+  local -a override_trees=("${root}/${CRATE_DIR}/src" "${root}/${E2E_CI_DIR}" "${dir}")
+  local tree
+  for tree in "${override_trees[@]}"; do
+    [[ -d "${tree}" ]] || continue
+    hits="$(grep -rlF -- 'HAVEN_NEEDLE_DIR' "${tree}" 2>/dev/null || true)"
+    if [[ -n "${hits}" ]]; then
+      printf '%s\n' "${hits}" >&2
+      fail "HAVEN_NEEDLE_DIR appears under ${tree#"${root}/"}. The needle directory must stay a constant: a path a caller can relocate defeats every ban on it, which is exactly how the MLS sidecar's first ban was broken."
+      rc=1
+    fi
+  done
+  return "${rc}"
+}
+
+# 7. No e2e lane may point the log-privacy gate at a binary of its choosing.
+check_logscan_binary_not_overridden() {
+  local root="$1" rc=0 file hits n=0
+  local dir="${root}/.github/workflows"
+  [[ -d "${dir}" ]] || { fail ".github/workflows not found"; return 1; }
+  for file in "${dir}"/e2e-*.yml; do
+    [[ -f "${file}" ]] || continue
+    n=$(( n + 1 ))
+    # Comment text stripped first, so documenting the ban does not trip it.
+    hits="$(awk '{
+        line = $0
+        sub(/[[:space:]]*#.*$/, "", line)
+        if (line ~ /(^|[^A-Za-z0-9_])HAVEN_LOGSCAN_BIN[[:space:]]*[:=]/) print FILENAME ":" NR
+      }' "${file}")"
+    if [[ -n "${hits}" ]]; then
+      printf '%s\n' "${hits}" >&2
+      fail "$(basename "${file}") assigns HAVEN_LOGSCAN_BIN. That variable exists so the wrapper's and the runner's --self-test can inject a fake scanner; an e2e lane setting it points its whole log-privacy gate at a binary of its choosing, and a stub that exits 0 is a green lane that scanned nothing. Lanes run the binary the workflow built at tooling/logscan/target/release/haven-logscan; rust-check.yml's logscan-tooling job is the one legitimate setter."
+      rc=1
+    fi
+  done
+  if (( n == 0 )); then
+    fail "no .github/workflows/e2e-*.yml found — this check would pass vacuously."
+    return 1
+  fi
   return "${rc}"
 }
 
@@ -322,6 +517,8 @@ run_all() {
   check_raw_journal_not_uploaded "${root}"
   check_summary_is_scanned "${root}"
   check_recorder_cannot_break_traffic "${root}"
+  check_needle_files_are_not_exposed "${root}"
+  check_logscan_binary_not_overridden "${root}"
 }
 
 # ---------------------------------------------------------------------------
@@ -357,13 +554,33 @@ self_test() {
     printf 'void main() {}\n' > "${r}/haven/lib/src/app.dart"
     printf 'pub fn x() {}\n' > "${r}/haven-core/src/lib.rs"
     printf 'pub fn y() {}\n' > "${r}/haven/rust_builder/src/api.rs"
-    # The harness legitimately names BOTH control verbs; it must never be
-    # flagged for either.
-    printf "const t = String.fromEnvironment('HAVEN_WIRE_SENTINEL');\nconst m = 'HAVEN_WIRE_MLS_GROUP_ID';\n" \
+    # The harness legitimately names EVERY control verb; it must never be
+    # flagged for any of them.
+    printf "const t = String.fromEnvironment('HAVEN_WIRE_SENTINEL');\nconst m = 'HAVEN_WIRE_MLS_GROUP_ID';\nconst n = 'HAVEN_NEEDLE_DECL';\nconst c = 'HAVEN_WIRE_CANARY_MANIFEST';\n" \
       > "${r}/haven/integration_test/e2e/_lib/test_relay.dart"
+
+    # The needle directory as a CONSTANT, which is what keeps it bannable.
+    printf 'pub const NEEDLE_DIR: &str = "/tmp/haven-soak/needles";\n' \
+      > "${r}/${CRATE_DIR}/src/needles.rs"
+    # A lane runner doing everything it legitimately does with these files:
+    # create the directory, seal from them, hand the paths on, delete them.
+    cat > "${r}/${E2E_CI_DIR}/run-single-avd-scenario.sh" <<'SH'
+#!/usr/bin/env bash
+mkdir -m 0700 -p /tmp/haven-soak/needles
+haven-logscan seal --decl /tmp/haven-soak/needles/default.needles.decl \
+  --out /tmp/haven-soak/needles/run-1.needles.json
+bash tooling/e2e/ci/scan-logs.sh /tmp/haven-soak/needles/run-1.needles.json --sink drive=/tmp/flutter-drive.log
+tail -n 50 /tmp/flutter-drive.log
+# NEVER cat /tmp/haven-soak/needles/default.needles.decl, and never pass
+# --disclose-values here: reproduce locally instead.
+rm -f /tmp/haven-soak/needles/*
+SH
 
     printf '[package]\nname = "haven-local-relay"\npublish = false\n' \
       > "${r}/${CRATE_DIR}/Cargo.toml"
+    mkdir -p "${r}/${LOGSCAN_DIR}"
+    printf '[package]\nname = "haven-logscan"\npublish = false\n' \
+      > "${r}/${LOGSCAN_DIR}/Cargo.toml"
     printf '[package]\nname = "haven-core"\n' > "${r}/haven-core/Cargo.toml"
     printf '[package]\nname = "rust_builder"\n' > "${r}/haven/rust_builder/Cargo.toml"
     printf 'name: haven\n' > "${r}/haven/pubspec.yaml"
@@ -418,6 +635,20 @@ jobs:
       - name: Start the recorder
         run: HAVEN_WIRE_JOURNAL=/tmp/haven-wire-journal.ndjson bash tooling/e2e/ci/start-wire-proxy.sh
 YAML
+    # An e2e lane doing what a lane legitimately does with the scanner: build
+    # it and run the gate — never choose the binary (check 7).
+    cat > "${r}/.github/workflows/e2e-lane.yml" <<'YAML'
+jobs:
+  lane:
+    env:
+      HAVEN_LOGSCAN: "true"
+    steps:
+      - name: Build the runtime log scanner
+        run: cargo build --release --manifest-path tooling/logscan/Cargo.toml
+      - name: Scan captured logs for secrets before upload
+        # Never set HAVEN_LOGSCAN_BIN here: the lane runs the binary it built.
+        run: bash tooling/e2e/ci/scan-logs.sh --manifest /tmp/haven-soak/needles/run.needles.json --sink diag=/tmp/diag.log
+YAML
   }
 
   local ok="${tmp}/ok"; _mk "${ok}"
@@ -455,6 +686,24 @@ YAML
     > "${mlsenv}/haven-core/src/lib.rs"
   _case "the sidecar env var in haven-core fails" 1 check_no_production_reach "${mlsenv}"
 
+  # The same reasoning for the needle channel: an app that could declare a
+  # needle would be handing the declared value to whatever it is connected to.
+  _case "the harness naming the needle verbs is not flagged" 0 check_no_production_reach "${ok}"
+  local declleak="${tmp}/declleak"; _mk "${declleak}"
+  printf "void main() { ws.send('[\"HAVEN_NEEDLE_DECL\",{\"value\":\$v}]'); }\n" \
+    > "${declleak}/haven/lib/src/app.dart"
+  _case "the needle-decl verb in haven/lib fails" 1 check_no_production_reach "${declleak}"
+
+  local canaryleak="${tmp}/canaryleak"; _mk "${canaryleak}"
+  printf 'pub const V: &str = "HAVEN_WIRE_CANARY_MANIFEST";\n' \
+    > "${canaryleak}/haven-core/src/lib.rs"
+  _case "the canary-manifest verb in haven-core fails" 1 check_no_production_reach "${canaryleak}"
+
+  local dirleak="${tmp}/dirleak"; _mk "${dirleak}"
+  printf 'pub const D: &str = "HAVEN_NEEDLE_DIR";\n' \
+    > "${dirleak}/haven/rust_builder/src/api.rs"
+  _case "a needle-dir override in rust_builder fails" 1 check_no_production_reach "${dirleak}"
+
   echo "self-test: check 2 — not in a build path"
   _case "healthy manifests pass" 0 check_not_in_build_path "${ok}"
   local depended="${tmp}/depended"; _mk "${depended}"
@@ -465,6 +714,16 @@ YAML
   printf '[package]\nname = "haven-local-relay"\n' \
     > "${publishable}/${CRATE_DIR}/Cargo.toml"
   _case "publish = false removed fails" 1 check_not_in_build_path "${publishable}"
+
+  # The scanner crate is held to the same two rules as the recorder.
+  local scan_depended="${tmp}/scandepended"; _mk "${scan_depended}"
+  printf '[package]\nname = "haven-core"\n[dependencies]\nhaven-logscan = { path = "../tooling/logscan" }\n' \
+    > "${scan_depended}/haven-core/Cargo.toml"
+  _case "haven-core path-depending on the scanner crate fails" 1 check_not_in_build_path "${scan_depended}"
+
+  local scan_publishable="${tmp}/scanpublishable"; _mk "${scan_publishable}"
+  printf '[package]\nname = "haven-logscan"\n' > "${scan_publishable}/${LOGSCAN_DIR}/Cargo.toml"
+  _case "the scanner crate without publish = false fails" 1 check_not_in_build_path "${scan_publishable}"
 
   echo "self-test: check 3 — the raw journal is never an artifact"
   _case "healthy workflows pass" 0 check_raw_journal_not_uploaded "${ok}"
@@ -663,6 +922,362 @@ jobs:
 YAML
   _case "an unnamed future wire-proxy file is banned by default" 1 check_raw_journal_not_uploaded "${claimup}"
 
+  # ---------------------------------------------------------------------------
+  # ...and the NEEDLE files, which are the same hazard one step further: the MLS
+  # sidecar holds one class of value, a `.needles.decl` holds every class a run
+  # declared. Keyed on the EXTENSION from the start, so the two defeats above
+  # (rename into an exempt suffix, relocate out of the prefix) are unavailable.
+  # ---------------------------------------------------------------------------
+  local sealed="${tmp}/sealed"; _mk "${sealed}"
+  cat > "${sealed}/.github/workflows/e2e.yml" <<'YAML'
+jobs:
+  lane:
+    steps:
+      - uses: actions/upload-artifact@v6
+        with:
+          path: |
+            /tmp/flutter-test.log
+            /tmp/haven-soak/needles/run-1.needles.json
+YAML
+  _case "a lane uploading the sealed needle manifest fails" 1 check_raw_journal_not_uploaded "${sealed}"
+
+  local declup="${tmp}/declup"; _mk "${declup}"
+  cat > "${declup}/.github/workflows/e2e.yml" <<'YAML'
+jobs:
+  lane:
+    steps:
+      - uses: actions/upload-artifact@v6
+        with:
+          path: ${{ runner.temp }}/alice.needles.decl
+YAML
+  _case "a declaration sidecar RELOCATED out of /tmp still fails" 1 \
+    check_raw_journal_not_uploaded "${declup}"
+
+  local canup="${tmp}/canup"; _mk "${canup}"
+  cat > "${canup}/.github/workflows/e2e.yml" <<'YAML'
+jobs:
+  lane:
+    steps:
+      - uses: actions/upload-artifact@v6
+        with:
+          path: /tmp/haven-soak/needles/alice.canaries.json
+YAML
+  _case "a lane uploading the canary manifest fails" 1 check_raw_journal_not_uploaded "${canup}"
+
+  local dirup="${tmp}/dirup"; _mk "${dirup}"
+  cat > "${dirup}/.github/workflows/e2e.yml" <<'YAML'
+jobs:
+  lane:
+    steps:
+      - uses: actions/upload-artifact@v6
+        with:
+          path: /tmp/haven-soak/needles/
+YAML
+  _case "a lane uploading the needle DIRECTORY fails" 1 check_raw_journal_not_uploaded "${dirup}"
+
+  # Priced and banned before it exists: an attribution map is the join key
+  # between the aliases in an uploaded report and the real ids in an artifact.
+  local attrup="${tmp}/attrup"; _mk "${attrup}"
+  cat > "${attrup}/.github/workflows/e2e.yml" <<'YAML'
+jobs:
+  lane:
+    steps:
+      - uses: actions/upload-artifact@v6
+        with:
+          path: /tmp/evidence/run-1.attribution.json
+YAML
+  _case "a lane uploading an attribution map fails" 1 check_raw_journal_not_uploaded "${attrup}"
+
+  local soaksweep="${tmp}/soaksweep"; _mk "${soaksweep}"
+  cat > "${soaksweep}/.github/workflows/e2e.yml" <<'YAML'
+jobs:
+  lane:
+    steps:
+      - uses: actions/upload-artifact@v6
+        with:
+          path: |
+            /tmp/haven-soak/*
+YAML
+  _case "a wholesale soak-directory upload fails" 1 check_raw_journal_not_uploaded "${soaksweep}"
+
+  # ...and naming the sealed manifest in a RUN step is how the lane works.
+  local sealok="${tmp}/sealok"; _mk "${sealok}"
+  cat > "${sealok}/.github/workflows/e2e.yml" <<'YAML'
+jobs:
+  lane:
+    steps:
+      - name: Seal the needle manifest
+        run: |
+          haven-logscan seal --run-id "${GITHUB_RUN_ID}" \
+            --decl /tmp/haven-soak/needles/default.needles.decl \
+            --out /tmp/haven-soak/needles/run.needles.json
+      - uses: actions/upload-artifact@v6
+        with:
+          path: /tmp/wire-summary.log
+YAML
+  _case "sealing a manifest in a run step is allowed" 0 check_raw_journal_not_uploaded "${sealok}"
+
+  # A bare-wildcard entry is a sweep, whatever prefix it carries.
+  local star2="${tmp}/star2"; _mk "${star2}"
+  cat > "${star2}/.github/workflows/e2e.yml" <<'YAML'
+jobs:
+  lane:
+    steps:
+      - uses: actions/upload-artifact@v6
+        with:
+          path: |
+            /tmp/flutter-test.log
+            /tmp/**
+YAML
+  _case "a /tmp/** upload fails" 1 check_raw_journal_not_uploaded "${star2}"
+
+  local starprefix="${tmp}/starprefix"; _mk "${starprefix}"
+  cat > "${starprefix}/.github/workflows/e2e.yml" <<'YAML'
+jobs:
+  lane:
+    steps:
+      - uses: actions/upload-artifact@v6
+        with:
+          path: /tmp/haven*
+YAML
+  _case "a /tmp/haven* upload fails" 1 check_raw_journal_not_uploaded "${starprefix}"
+
+  local stardir="${tmp}/stardir"; _mk "${stardir}"
+  cat > "${stardir}/.github/workflows/e2e.yml" <<'YAML'
+jobs:
+  lane:
+    steps:
+      - uses: actions/upload-artifact@v6
+        with:
+          path: |
+            - /tmp/logs/*
+YAML
+  _case "a /tmp/logs/* upload fails" 1 check_raw_journal_not_uploaded "${stardir}"
+
+  # ...while a wildcard bounded by an extension is how a multi-relay lane
+  # names its logs, and must stay legal.
+  local starext="${tmp}/starext"; _mk "${starext}"
+  cat > "${starext}/.github/workflows/e2e.yml" <<'YAML'
+jobs:
+  lane:
+    steps:
+      - uses: actions/upload-artifact@v6
+        with:
+          path: |
+            /tmp/strfry-profile-*.log
+            /tmp/diag.log
+YAML
+  _case "an extension-bounded wildcard upload is allowed" 0 check_raw_journal_not_uploaded "${starext}"
+
+  echo "self-test: check 6 — needle files are never read out (extends check 3)"
+  _case "a healthy tree passes" 0 check_needle_files_are_not_exposed "${ok}"
+
+  local catdecl="${tmp}/catdecl"; _mk "${catdecl}"
+  cat > "${catdecl}/.github/workflows/e2e.yml" <<'YAML'
+jobs:
+  lane:
+    steps:
+      - name: Debug the declarations
+        run: cat /tmp/haven-soak/needles/default.needles.decl
+YAML
+  _case "a workflow cat-ing a declaration sidecar fails" 1 \
+    check_needle_files_are_not_exposed "${catdecl}"
+
+  # `tee` writes AND copies to stdout, and a step's stdout is the job log, which
+  # no later deletion can retract.
+  local teedecl="${tmp}/teedecl"; _mk "${teedecl}"
+  cat > "${teedecl}/.github/workflows/e2e.yml" <<'YAML'
+jobs:
+  lane:
+    steps:
+      - run: haven-logscan seal --decl x.needles.decl --out /tmp/haven-soak/needles/r.needles.json | tee /tmp/seal.log
+YAML
+  _case "a workflow tee-ing a needle path fails" 1 \
+    check_needle_files_are_not_exposed "${teedecl}"
+
+  local summary="${tmp}/summary"; _mk "${summary}"
+  cat > "${summary}/.github/workflows/e2e.yml" <<'YAML'
+jobs:
+  lane:
+    steps:
+      - run: sed -n 1p /tmp/haven-soak/needles/alice.needles.decl >> "$GITHUB_STEP_SUMMARY"
+YAML
+  _case "a step-summary write of a needle file fails" 1 \
+    check_needle_files_are_not_exposed "${summary}"
+
+  local issue="${tmp}/issue"; _mk "${issue}"
+  cat > "${issue}/.github/workflows/e2e.yml" <<'YAML'
+jobs:
+  lane:
+    steps:
+      - run: gh issue create --title soak --body-file /tmp/haven-soak/needles/run.needles.json
+YAML
+  _case "an issue body built from a needle file fails" 1 \
+    check_needle_files_are_not_exposed "${issue}"
+
+  # A RUNNER is scanned too: its stdout is the same job log.
+  local runnercat="${tmp}/runnercat"; _mk "${runnercat}"
+  printf '#!/usr/bin/env bash\nhead -n 3 "/tmp/haven-soak/needles/${ROLE}.needles.decl"\n' \
+    > "${runnercat}/${E2E_CI_DIR}/run-single-avd-scenario.sh"
+  _case "a runner reading a declaration sidecar fails" 1 \
+    check_needle_files_are_not_exposed "${runnercat}"
+
+  # THE TWO SHAPES THAT MUST STAY LEGAL, or the lane cannot clean up after
+  # itself and the ban is turned off within a week.
+  local cleanup="${tmp}/cleanup"; _mk "${cleanup}"
+  printf '#!/usr/bin/env bash\nrm -f /tmp/haven-soak/needles/*\nshred -u /tmp/haven-soak/needles/alice.canaries.json\n' \
+    > "${cleanup}/${E2E_CI_DIR}/run-single-avd-scenario.sh"
+  _case "deleting the needle files is allowed" 0 check_needle_files_are_not_exposed "${cleanup}"
+
+  local seal_runner="${tmp}/sealrunner"; _mk "${seal_runner}"
+  printf '#!/usr/bin/env bash\nmkdir -m 0700 -p /tmp/haven-soak/needles\nhaven-logscan seal --decl /tmp/haven-soak/needles/a.needles.decl --out /tmp/haven-soak/needles/r.needles.json\n' \
+    > "${seal_runner}/${E2E_CI_DIR}/run-single-avd-scenario.sh"
+  _case "sealing and mkdir in a runner are allowed" 0 \
+    check_needle_files_are_not_exposed "${seal_runner}"
+
+  # A read verb on a path that is NOT a needle file is ordinary lane work.
+  local tailother="${tmp}/tailother"; _mk "${tailother}"
+  printf '#!/usr/bin/env bash\ntail -n 50 /tmp/flutter-drive.log\ncat /tmp/haven-wire-proxy.log\n' \
+    > "${tailother}/${E2E_CI_DIR}/run-single-avd-scenario.sh"
+  _case "reading a non-needle log is allowed" 0 check_needle_files_are_not_exposed "${tailother}"
+
+  # The wider read-verb list: a structured reader is a reader.
+  local jqread="${tmp}/jqread"; _mk "${jqread}"
+  cat > "${jqread}/.github/workflows/e2e.yml" <<'YAML'
+jobs:
+  lane:
+    steps:
+      - run: jq -r .value /tmp/haven-soak/needles/run.needles.json
+YAML
+  _case "a workflow jq-ing the sealed manifest fails" 1 check_needle_files_are_not_exposed "${jqread}"
+
+  local awkread="${tmp}/awkread"; _mk "${awkread}"
+  printf '#!/usr/bin/env bash\nawk -F, "{print \\$1}" /tmp/haven-soak/needles/alice.canaries.json\n' \
+    > "${awkread}/${E2E_CI_DIR}/run-single-avd-scenario.sh"
+  _case "a runner awk-ing the canary manifest fails" 1 check_needle_files_are_not_exposed "${awkread}"
+
+  # A redirection reads without naming any command.
+  local redirloop="${tmp}/redirloop"; _mk "${redirloop}"
+  printf '#!/usr/bin/env bash\nwhile IFS= read -r l; do echo "${l}"; done < /tmp/haven-soak/needles/default.needles.decl\n' \
+    > "${redirloop}/${E2E_CI_DIR}/run-single-avd-scenario.sh"
+  _case "a runner looping over a sidecar through < fails" 1 check_needle_files_are_not_exposed "${redirloop}"
+
+  local substread="${tmp}/substread"; _mk "${substread}"
+  cat > "${substread}/.github/workflows/e2e.yml" <<'YAML'
+jobs:
+  lane:
+    steps:
+      - run: echo "$(< "/tmp/haven-soak/needles/run.needles.json")"
+YAML
+  _case "a workflow reading a manifest through \$(< …) fails" 1 check_needle_files_are_not_exposed "${substread}"
+
+  # The two shapes the redirection rule must leave alone: an APPEND write to a
+  # sidecar (`>`, not `<`), and a `<path>` usage placeholder in an echo.
+  local appendwrite="${tmp}/appendwrite"; _mk "${appendwrite}"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$1" >> /tmp/haven-soak/needles/default.needles.decl\necho "usage: scan --manifest <path>.needles.json"\n' \
+    > "${appendwrite}/${E2E_CI_DIR}/run-single-avd-scenario.sh"
+  _case "an append write and a <path> placeholder are allowed" 0 check_needle_files_are_not_exposed "${appendwrite}"
+
+  # grep is deliberately outside the list: the runners' self-tests grep their
+  # own source for the lines that name the directory.
+  local grepdir="${tmp}/grepdir"; _mk "${grepdir}"
+  printf '#!/usr/bin/env bash\ngrep -n "^log_privacy_gate /tmp/haven-soak/needles " "${BASH_SOURCE[0]}"\n' \
+    > "${grepdir}/${E2E_CI_DIR}/run-single-avd-scenario.sh"
+  _case "a grep naming the directory is not a read-out" 0 check_needle_files_are_not_exposed "${grepdir}"
+
+  # ...and a COMMENT documenting the ban must stay writable.
+  local commented_ban="${tmp}/commentedban"; _mk "${commented_ban}"
+  printf '#!/usr/bin/env bash\n# never cat /tmp/haven-soak/needles/*.needles.decl or pass --disclose-values\ntrue\n' \
+    > "${commented_ban}/${E2E_CI_DIR}/run-single-avd-scenario.sh"
+  _case "documenting the ban is allowed" 0 check_needle_files_are_not_exposed "${commented_ban}"
+
+  local disclose="${tmp}/disclose"; _mk "${disclose}"
+  cat > "${disclose}/.github/workflows/e2e.yml" <<'YAML'
+jobs:
+  lane:
+    steps:
+      - run: haven-logscan scan --manifest m.needles.json --disclose-values
+YAML
+  _case "--disclose-values in a workflow fails" 1 check_needle_files_are_not_exposed "${disclose}"
+
+  local disclose_runner="${tmp}/discloserunner"; _mk "${disclose_runner}"
+  printf '#!/usr/bin/env bash\nhaven-logscan scan --manifest "${M}" --disclose-values\n' \
+    > "${disclose_runner}/${E2E_CI_DIR}/run-single-avd-scenario.sh"
+  _case "--disclose-values in a runner fails" 1 \
+    check_needle_files_are_not_exposed "${disclose_runner}"
+
+  # The relocation defeat, refused at the source: no env var may name the
+  # directory the bans above are keyed on.
+  local dirvar_crate="${tmp}/dirvarcrate"; _mk "${dirvar_crate}"
+  printf 'let dir = std::env::var("HAVEN_NEEDLE_DIR").unwrap_or_default();\n' \
+    > "${dirvar_crate}/${CRATE_DIR}/src/needles.rs"
+  _case "a needle-dir env override in the crate fails" 1 \
+    check_needle_files_are_not_exposed "${dirvar_crate}"
+
+  local dirvar_runner="${tmp}/dirvarrunner"; _mk "${dirvar_runner}"
+  printf '#!/usr/bin/env bash\nHAVEN_NEEDLE_DIR="${RUNNER_TEMP}" bash start-wire-proxy.sh\n' \
+    > "${dirvar_runner}/${E2E_CI_DIR}/run-single-avd-scenario.sh"
+  _case "a needle-dir env override in a runner fails" 1 \
+    check_needle_files_are_not_exposed "${dirvar_runner}"
+
+  # The vacuity route: a tree with nothing to scan must FAIL rather than pass
+  # for want of anything to look at.
+  local nofiles="${tmp}/nofiles"; _mk "${nofiles}"
+  rm -f "${nofiles}"/.github/workflows/*.yml "${nofiles}/${E2E_CI_DIR}"/*.sh
+  _case "a tree with no workflow or runner fails" 1 \
+    check_needle_files_are_not_exposed "${nofiles}"
+
+  echo "self-test: check 7 — no e2e lane chooses the scanner binary"
+  _case "a lane that builds and runs the scanner passes" 0 check_logscan_binary_not_overridden "${ok}"
+
+  local binenv="${tmp}/binenv"; _mk "${binenv}"
+  cat > "${binenv}/.github/workflows/e2e-lane.yml" <<'YAML'
+jobs:
+  lane:
+    env:
+      HAVEN_LOGSCAN_BIN: /usr/bin/true
+    steps:
+      - run: bash tooling/e2e/ci/scan-logs.sh --manifest m.needles.json --sink diag=/tmp/diag.log
+YAML
+  _case "an env: HAVEN_LOGSCAN_BIN in an e2e lane fails" 1 check_logscan_binary_not_overridden "${binenv}"
+
+  local binexport="${tmp}/binexport"; _mk "${binexport}"
+  cat > "${binexport}/.github/workflows/e2e-lane.yml" <<'YAML'
+jobs:
+  lane:
+    steps:
+      - run: |
+          export HAVEN_LOGSCAN_BIN="${RUNNER_TEMP}/stub"
+          bash tooling/e2e/ci/scan-logs.sh --manifest m.needles.json --sink diag=/tmp/diag.log
+YAML
+  _case "an exported HAVEN_LOGSCAN_BIN in an e2e lane fails" 1 check_logscan_binary_not_overridden "${binexport}"
+
+  local bininline="${tmp}/bininline"; _mk "${bininline}"
+  cat > "${bininline}/.github/workflows/e2e-lane.yml" <<'YAML'
+jobs:
+  lane:
+    steps:
+      - run: HAVEN_LOGSCAN_BIN=/bin/true bash tooling/e2e/ci/run-single-avd-scenario.sh x.dart
+YAML
+  _case "an inline HAVEN_LOGSCAN_BIN=… prefix in an e2e lane fails" 1 check_logscan_binary_not_overridden "${bininline}"
+
+  # The legitimate setter is not an e2e lane, and documenting the ban is not
+  # setting it.
+  local binrustcheck="${tmp}/binrustcheck"; _mk "${binrustcheck}"
+  cat > "${binrustcheck}/.github/workflows/rust-check.yml" <<'YAML'
+jobs:
+  logscan-tooling:
+    steps:
+      - run: |
+          export HAVEN_LOGSCAN_BIN="${PWD}/target/release/haven-logscan"
+          bash ../e2e/ci/scan-logs.sh --manifest m.needles.json --sink drive=clean.log
+YAML
+  _case "rust-check.yml pointing at the binary it built is allowed" 0 check_logscan_binary_not_overridden "${binrustcheck}"
+
+  local nolanes="${tmp}/nolanes"; _mk "${nolanes}"
+  rm -f "${nolanes}/.github/workflows/e2e-lane.yml"
+  _case "a tree with no e2e lane fails rather than passing vacuously" 1 check_logscan_binary_not_overridden "${nolanes}"
+
   echo "self-test: check 4 — the summary stays scanned"
   _case "healthy summary script passes" 0 check_summary_is_scanned "${ok}"
   local unscanned="${tmp}/unscanned"; _mk "${unscanned}"
@@ -788,7 +1403,7 @@ main() {
     echo "docs/WIRE_JOURNAL.md." >&2
     exit 1
   fi
-  echo "wire-proxy test-only guard: OK (no production reach, no build-path dependency, neither the raw journal nor the mls-group-id sidecar uploaded, summary scanned, recorder cannot break traffic)."
+  echo "wire-proxy test-only guard: OK (no production reach, no build-path dependency for either tooling crate, neither the raw journal nor the mls-group-id sidecar uploaded and no bare-wildcard upload, summary scanned, recorder cannot break traffic, no needle sidecar read out or relocatable, no e2e lane chooses the scanner binary)."
 }
 
 main "$@"

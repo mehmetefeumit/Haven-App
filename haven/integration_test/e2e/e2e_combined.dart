@@ -186,6 +186,8 @@ import 'package:haven/src/services/live_sync_resubscriber.dart'
 import 'package:haven/src/services/location_sharing_service.dart' show MemberLocation;
 import 'package:haven/src/services/nostr_circle_service.dart' show NostrCircleService;
 import 'package:haven/src/test_keys.dart';
+import 'package:haven/src/utils/log_alias.dart'
+    show LogAliasClass, logAliasHandle, magnitudeBucket;
 import 'package:integration_test/integration_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -193,6 +195,7 @@ import '_lib/circle_creation.dart' show createCircleConfirmed;
 import '_lib/coordination.dart';
 import '_lib/diagnostics.dart';
 import '_lib/fake_location_service.dart';
+import '_lib/log_needles.dart';
 import '_lib/pump_helpers.dart';
 import '_lib/scenario_harness.dart';
 import '_lib/sheet_helpers.dart';
@@ -225,6 +228,16 @@ import '_lib/throw_time_error_capture.dart';
 /// wire by design — and never the real MLS group id (Security Rule 4). The
 /// drive log is the right channel for exactly that reason.
 final WireCanaryPlant _canaries = WireCanaryPlant.mint(role: 'alice');
+
+/// Log-privacy-scanner declarations for this run (Phase 0b), bound to
+/// `ctx.relay` as soon as `setUpAll` opens it. Top-level (rather than local to
+/// `main()`) because several helper functions below it — e.g.
+/// `_announceMlsGroupId` — are themselves top-level and declare needles
+/// alongside their existing C5.8 announcement. `late`, not nullable: a helper
+/// invoked before `setUpAll` completes is a harness bug that should fail
+/// loudly (`LateInitializationError`), not silently skip declarations for the
+/// whole run.
+late LogNeedles _needles;
 
 /// Circle name Alice types into the form.
 ///
@@ -415,6 +428,13 @@ void main() {
     ctx = await ScenarioHarness.bootstrap();
     didInitCtx = true;
 
+    // Runtime log-privacy scanner (Phase 0b) — bind as soon as a connection
+    // to the recording proxy exists, and plant the OPEN token before any
+    // other traffic: a plant proves the sink was reached from THIS point
+    // forward, so the earlier it lands, the more of the run it covers.
+    _needles = LogNeedles(ctx.relay);
+    await _needles.plant('open');
+
     // Pre-seed Alice's identity from her sentinel seed and skip
     // onboarding. The production identity-loading + KeyPackagePublisher
     // providers run exactly as in a real install — only the seed
@@ -437,6 +457,32 @@ void main() {
     didInitBob = true;
     carol = await SyntheticUser.carol(ctx.relay);
     didInitCarol = true;
+
+    // Declare every identity and coordinate this run mints, as soon as each
+    // is known, so the scanner has ground truth for the whole run (an id
+    // declared late still covers frames recorded earlier — the sidecar is
+    // read on the host after the drive finishes).
+    await _needles.declare('pubkey', _alicePubkeyHex());
+    await _needles.declare('pubkey', bob.pubkeyHex);
+    await _needles.declare('pubkey', carol.pubkeyHex);
+    await _needles.declare(
+      'coordinate',
+      '$aliceFakeLatitude,$aliceFakeLongitude',
+    );
+    await _needles.declare(
+      'coordinate',
+      '$bobFakeLatitude,$bobFakeLongitude',
+    );
+    await _needles.declare(
+      'coordinate',
+      '$carolFakeLatitude,$carolFakeLongitude',
+    );
+    await _needles.declare('circle_name', _canaries.circleDisplayName);
+    await _needles.declare('petname', _canaries.petname);
+    await _needles.declare(
+      'coordinate',
+      '${_canaries.latitude},${_canaries.longitude}',
+    );
 
     debugPrint(
       '[e2e_combined:setUpAll] '
@@ -647,6 +693,7 @@ void main() {
         await _announceMlsGroupId(
           relay: ctx.relay,
           mlsGroupId: mlsGroupId,
+          nostrGroupId: bobCircle.circle.nostrGroupId,
           label: 'core flow: family circle',
         );
 
@@ -682,6 +729,7 @@ void main() {
           longitude: bobFakeLongitude,
           relay: ctx.relay,
         );
+        await _needles.declare('event_id', preAddEventId);
 
         // Wait for the event to be observable on the relay (non-vacuous:
         // proves it is genuinely stored, not just queued).
@@ -692,7 +740,7 @@ void main() {
           reason:
               'PRE-ADD: the first kind-445 landing after the subscription '
               'should be the event Bob just published '
-              '(id=${_redactPk(preAddEventId)}). A mismatch means a stale '
+              '(id=${_redactEventId(preAddEventId)}). A mismatch means a stale '
               'or unexpected event arrived instead.',
         );
 
@@ -790,7 +838,7 @@ void main() {
         );
         debugPrint(
           '[e2e_combined] PRE-ADD location publish + Alice-positive-control '
-          '+ Bob own-echo pin OK — eventId=${_redactPk(preAddEventId)}',
+          '+ Bob own-echo pin OK — eventId=${_redactEventId(preAddEventId)}',
         );
 
         final epochBeforeAdd = await _aliceEpochForTest(tester, mlsGroupId);
@@ -1416,6 +1464,7 @@ void main() {
       await _announceMlsGroupId(
         relay: fe2Relay,
         mlsGroupId: creationResult.circle.mlsGroupId,
+        nostrGroupId: creationResult.circle.nostrGroupId,
         label: 'FE-2 circle',
       );
 
@@ -1608,8 +1657,9 @@ void main() {
       );
 
       debugPrint(
-        '[FE-2] invite-ignore OK — Dave has ${daveInvites.length} pending '
-        'invitation(s) and 0 accepted; Alice has ${aliceMembers.length} '
+        '[FE-2] invite-ignore OK — Dave has '
+        '${magnitudeBucket(daveInvites.length)} pending invitation(s) and 0 '
+        'accepted; Alice has ${magnitudeBucket(aliceMembers.length)} '
         'member(s) (herself + the invited-but-unjoined Dave).',
       );
     });
@@ -1924,7 +1974,8 @@ void main() {
           );
           debugPrint(
             '[M11:H1] remove converged under Location noise: epoch '
-            '$epochBefore->$epochAfter, roster=${roster.length}.',
+            '$epochBefore->$epochAfter, '
+            'roster=${magnitudeBucket(roster.length)}.',
           );
         } finally {
           await _m11StopEngine(container, generation);
@@ -2067,6 +2118,7 @@ void main() {
           await _announceMlsGroupId(
             relay: m11Relay,
             mlsGroupId: creation.circle.mlsGroupId,
+            nostrGroupId: creation.circle.nostrGroupId,
             label: 'M11:f circle (Bob-created)',
           );
 
@@ -2428,9 +2480,10 @@ void main() {
                 'co-timed publishes are kept out of the same second.',
           );
           debugPrint(
-            '[M11:e] Alice published to $published circle(s) through the '
-            'production burst; their kind-445 created_at separation is '
-            'asserted on the host by check-wire-correlation.sh C5.1.',
+            '[M11:e] Alice published to ${magnitudeBucket(published)} '
+            'circle(s) through the production burst; their kind-445 '
+            'created_at separation is asserted on the host by '
+            'check-wire-correlation.sh C5.1.',
           );
         } finally {
           await _m11StopEngine(container, generation);
@@ -2567,6 +2620,7 @@ void main() {
           await _announceMlsGroupId(
             relay: m11Relay,
             mlsGroupId: creation.circle.mlsGroupId,
+            nostrGroupId: creation.circle.nostrGroupId,
             label: 'M11:g circle (Bob-created)',
           );
 
@@ -2725,10 +2779,17 @@ void main() {
       }
 
       // ONE announcement, at the very end, so every carrier id recorded
-      // anywhere in this file is inside it. `debugPrint` is the sink because
-      // the lane already captures the drive log and greps it for the marker
-      // prefix; nothing on the manifest is secret (see `_canaries`).
-      _canaries.announce(debugPrint);
+      // anywhere in this file is inside it. Goes over the proxy's control
+      // channel to the `.canaries.json` sidecar (Phase 0b) — never the drive
+      // log, which is a CI artifact with weeks of retention and would also
+      // trip the runtime scanner's structural rules on the very values this
+      // manifest exists to prove absent. Guarded exactly like
+      // `_announceMlsGroupId`: `announceCanaryManifest` throws on an
+      // undeclared recorder (there is no sidecar for an unproxied lane to
+      // reach), so this is the polite half of that same fail-closed pair.
+      if (wireRecorderDeclared) {
+        await _needles.announceCanaryManifest(_canaries.manifest().toJson());
+      }
 
       expect(
         sentinelFailure,
@@ -2769,11 +2830,13 @@ void main() {
         );
       }
 
+      final carrierEventCount = magnitudeBucket(
+        manifest.carrierEventIds.values.expand((e) => e).length,
+      );
       debugPrint(
         '[e2e_combined] wire-canary manifest announced '
-        '(${CanaryId.all.length} canaries, '
-        '${manifest.carrierEventIds.values.expand((e) => e).length} '
-        'carrier events).',
+        '(${magnitudeBucket(CanaryId.all.length)} canaries, '
+        '$carrierEventCount carrier events).',
       );
 
       // Same "a missing proof is not a pass" floor, for the OTHER host input:
@@ -2797,6 +2860,12 @@ void main() {
               'creates a circle ran in this lane.',
         );
       }
+
+      // LAST act of the capture — after the sentinel and the canary
+      // manifest — so a truncated, rotated or unflushed sink is reported as
+      // rc 3 (a plant the scanner never caught) rather than passing clean by
+      // never having been given the chance to miss anything.
+      await _needles.plant('close');
     },
     timeout: const Timeout(Duration(minutes: 2)),
   );
@@ -2954,6 +3023,7 @@ Future<String> _aliceCreatesTwoMemberCircle({
   _canaries
     ..nostrGroupIdHex = familyHex
     ..recordCircleNameCarrier(bobGiftWrap.id);
+  await _needles.declare('event_id', bobGiftWrap.id);
 
   // Capture the init kind-445 commit from the relay. Opened AFTER we wait for
   // the gift-wrap (guaranteeing the circle-creation flow published its commit
@@ -2991,6 +3061,7 @@ Future<String> _aliceCreatesTwoMemberCircle({
   // carries the group's metadata, so any of them would do; the init commit is
   // simply the one this helper already has in hand.
   _canaries.recordCircleNameCarrier(initCommit.id);
+  await _needles.declare('event_id', initCommit.id);
 
   debugPrint(
     '[e2e_combined:alice] PHASE 2a complete (2-member circle, '
@@ -3236,6 +3307,8 @@ Future<CircleWithMembersFfi> _aliceAddsCarolViaUi({
   // -------------------------------------------------------------------
   final carolGiftWrap = await carolGiftWrapFuture;
   final addCommit = await addCommitFuture;
+  await _needles.declare('event_id', carolGiftWrap.id);
+  await _needles.declare('event_id', addCommit.id);
 
   // 1. Carol's gift-wrap must be addressed to her pubkey via #p.
   final pTag = carolGiftWrap.tag('p');
@@ -3409,8 +3482,8 @@ Future<CircleWithMembersFfi> _aliceAddsCarolViaUi({
 
   debugPrint(
     '[e2e_combined:alice] PHASE 2b relay assertions OK — '
-    'carol gift-wrap ${_redactPk(carolGiftWrap.id)}, '
-    'add commit ${_redactPk(addCommit.id)} '
+    'carol gift-wrap ${_redactEventId(carolGiftWrap.id)}, '
+    'add commit ${_redactEventId(addCommit.id)} '
     'distinct ephemeral key, no expiration tag, no MLS group id leakage, '
     'welcome cardinality OK (1 carol gift-wrap, 0 bob gift-wraps; '
     'commit cardinality via epoch delta).',
@@ -3764,7 +3837,7 @@ Future<void> _carolAcceptsAndEpochCheck({
     reason:
         'FORWARD SECRECY VIOLATION (Add / epoch boundary): Carol decrypted '
         "Bob's pre-add location "
-        '(id=${_redactPk(preAddLocationEvent.id)}). '
+        '(id=${_redactEventId(preAddLocationEvent.id)}). '
         'Carol joined at epoch ${epochBeforeAdd + 1} via the Add Welcome; '
         'the pre-add event was encrypted at epoch $epochBeforeAdd whose '
         "exporter secret was NEVER part of Carol's Welcome (RFC 9420 §8.1). "
@@ -3896,24 +3969,27 @@ Future<void> _publishAndObserveThreeWayLocations({
   _canaries
     ..recordCoordinateCarrier(aliceLocationEvent.id)
     ..recordPetnameOpportunity(aliceLocationEvent.id);
+  await _needles.declare('event_id', aliceLocationEvent.id);
 
   // -----------------------------------------------------------------
   // Step 2 — Bob and Carol publish their locations via FFI. Each
   // call encrypts a kind-445 via `encryptLocation` and publishes
   // it to the same hermetic relay Alice publishes to.
   // -----------------------------------------------------------------
-  await bob.publishLocation(
+  final bobLocationEventId = await bob.publishLocation(
     circle: bobCircle,
     latitude: bobFakeLatitude,
     longitude: bobFakeLongitude,
     relay: ctx.relay,
   );
-  await carol.publishLocation(
+  await _needles.declare('event_id', bobLocationEventId);
+  final carolLocationEventId = await carol.publishLocation(
     circle: carolCircle,
     latitude: carolFakeLatitude,
     longitude: carolFakeLongitude,
     relay: ctx.relay,
   );
+  await _needles.declare('event_id', carolLocationEventId);
 
   // -----------------------------------------------------------------
   // Step 3 — Alice observes Bob and Carol's locations in her
@@ -4050,7 +4126,8 @@ Future<void> _publishAndObserveThreeWayLocations({
       if (missing.isNotEmpty) {
         debugPrint(
           '[e2e_combined:alice] PHASE 4 poll — '
-          'memberLocationsProvider missing ${missing.length} peers',
+          'memberLocationsProvider missing ${magnitudeBucket(missing.length)} '
+          'peers',
         );
       }
       return missing;
@@ -4289,8 +4366,8 @@ Future<Map<String, DecryptedCoords>> _drainUntilLocationsVisible({
   );
   debugPrint(
     '[e2e_combined:${peer.label}] location convergence ok '
-    '(${accumulatedSenders.length}/${expectedSenders.length} '
-    'distinct senders decrypted)',
+    '(${magnitudeBucket(accumulatedSenders.length)}/'
+    '${magnitudeBucket(expectedSenders.length)} distinct senders decrypted)',
   );
   return accumulatedCoords;
 }
@@ -4940,7 +5017,7 @@ Future<void> _assertWirePrivacyInvariants({
       hMatches,
       isTrue,
       reason:
-          'kind-445 ${_redactPk(e.id)} must carry the nostr_group_id in '
+          'kind-445 ${_redactEventId(e.id)} must carry the nostr_group_id in '
           'its h tag, not the real MLS group id (Security Rule 4).',
     );
     for (final tag in e.tags) {
@@ -4950,7 +5027,7 @@ Future<void> _assertWirePrivacyInvariants({
           isFalse,
           reason:
               'the real MLS group id leaked into a kind-445 tag on event '
-              '${_redactPk(e.id)} (Security Rule 4).',
+              '${_redactEventId(e.id)} (Security Rule 4).',
         );
       }
     }
@@ -4964,15 +5041,16 @@ Future<void> _assertWirePrivacyInvariants({
       e.tag('p'),
       isNull,
       reason:
-          'kind-445 ${_redactPk(e.id)} carries a `p` (recipient) tag — '
+          'kind-445 ${_redactEventId(e.id)} carries a `p` (recipient) tag — '
           'that deanonymizes circle membership at the relay. Group '
           'messages must route by the `h` tag alone (MIP-03).',
     );
   }
   debugPrint(
     '[e2e_combined] wire-privacy invariants OK '
-    '(${events.length} kind-445, ${distinctAuthors.length} distinct '
-    'ephemeral keys, no MLS group id on the wire, no recipient p-tags)',
+    '(${magnitudeBucket(events.length)} kind-445, '
+    '${magnitudeBucket(distinctAuthors.length)} distinct ephemeral keys, no '
+    'MLS group id on the wire, no recipient p-tags)',
   );
 }
 
@@ -5015,6 +5093,7 @@ int _announcedMlsGroupIds = 0;
 Future<void> _announceMlsGroupId({
   required TestRelay relay,
   required List<int> mlsGroupId,
+  required List<int> nostrGroupId,
   required String label,
 }) async {
   // Lanes that declare NO recording proxy must not transmit this value at all.
@@ -5033,6 +5112,20 @@ Future<void> _announceMlsGroupId({
     'recording proxy ($label, ${mlsGroupId.length * 2} hex chars). The id is '
     'intercepted by the proxy, never forwarded to a relay, never journalled, '
     'and never logged or put in the canary manifest.',
+  );
+  // Also declared as log-scanner needles (Phase 0b) — a SEPARATE channel and
+  // sidecar from the C5.8 announcement above, feeding `haven-logscan`'s
+  // broader "is this value in any captured sink" check rather than the
+  // wire-correlation oracle's narrower "is it on THIS wire" one. Handled
+  // exactly like the announcement above (intercepted, never forwarded, never
+  // journalled), so declaring it here adds no exposure.
+  await _needles.declare(
+    'mls_group_id',
+    _hexLower(Uint8List.fromList(mlsGroupId)),
+  );
+  await _needles.declare(
+    'nostr_group_id',
+    _hexLower(Uint8List.fromList(nostrGroupId)),
   );
 }
 
@@ -5114,8 +5207,8 @@ _nonAdminLeavesAndAdminObserves({
       }
       debugPrint(
         '[e2e_combined:${admin.label}] post-leave drain '
-        'groupUpdates=${summary.groupUpdatesProcessed} '
-        'members=${refreshed.members.length} '
+        'groupUpdates=${magnitudeBucket(summary.groupUpdatesProcessed)} '
+        'members=${magnitudeBucket(refreshed.members.length)} '
         'stillHasLeaver=${stillHasLeaver(refreshed)}',
       );
       return refreshed;
@@ -5257,8 +5350,8 @@ Future<void> _assertForwardSecrecyAfterRemoval({
     debugPrint(
       '[e2e_combined:${leaver.label}] PHASE 7 attempt $attempt — '
       'post-removal event not decrypted (expected); '
-      'decryptFailed=${summary.decryptFailed} '
-      'locations=${summary.locationsProcessed}',
+      'decryptFailed=${magnitudeBucket(summary.decryptFailed)} '
+      'locations=${magnitudeBucket(summary.locationsProcessed)}',
     );
     await Future<void>.delayed(_convergencePollInterval);
   }
@@ -5269,7 +5362,7 @@ Future<void> _assertForwardSecrecyAfterRemoval({
     reason:
         'FORWARD SECRECY VIOLATION: ${leaver.label} was removed from the '
         "circle yet decrypted ${admin.label}'s post-removal kind-445 "
-        '(event ${_redactPk(eventId)}). A removed member MUST NOT read '
+        '(event ${_redactEventId(eventId)}). A removed member MUST NOT read '
         'messages sent after their removal — broken if `complete_leave` '
         "failed to purge the leaver's MLS state or the post-removal "
         'epoch advance did not take effect. Leaver decrypted-location '
@@ -5563,7 +5656,8 @@ Future<void> _assertAliceCirclesProviderHasFamily({
 
   debugPrint(
     '[e2e_combined:alice] circlesProvider assertion OK — '
-    '"$_circleName" with ${family.members.length} members on the roster.',
+    '${logAliasHandle(LogAliasClass.circle, _circleName)} with '
+    '${magnitudeBucket(family.members.length)} members on the roster.',
   );
 }
 
@@ -5671,8 +5765,13 @@ Future<void> _prepareAlicePubkey() async {
   _aliceCachedPubkeyHex = ident.pubkeyHex;
 }
 
-String _redactPk(String hex) =>
-    hex.length <= 8 ? hex : '${hex.substring(0, 8)}…';
+// A truncated hex prefix is still a partial identifier — the Log anonymity
+// pillar bans a pubkey/event id "at any truncation", not merely in full — so
+// both redactors route through the per-process salted handle instead of
+// slicing the string.
+String _redactPk(String hex) => logAliasHandle(LogAliasClass.peer, hex);
+
+String _redactEventId(String hex) => logAliasHandle(LogAliasClass.event, hex);
 
 /// Reads the current MLS epoch for [mlsGroupId] from Alice's production
 /// `CircleManagerFfi`.
@@ -6014,6 +6113,7 @@ Future<CircleFfi> _m11AliceCreatesCircle({
   await _announceMlsGroupId(
     relay: relay,
     mlsGroupId: result.circle.mlsGroupId,
+    nostrGroupId: result.circle.nostrGroupId,
     label: 'M11 circle "$name"',
   );
 

@@ -65,6 +65,7 @@
 //       pass. Distinct from 3 because the operator response differs: 3 means
 //       fix the recorder, 4 means fix the scenario.
 
+import 'dart:convert';
 import 'dart:io';
 
 import '../../../haven/integration_test/e2e/_lib/wire_canaries.dart';
@@ -589,6 +590,41 @@ int selfTest(void Function(String) out, void Function(String) err) {
       );
     expectRc(rcUnusable, 'manifest carrier id is not a string', <String>[
       '--journal', clean.path, '--manifest', mistyped.path,
+    ]);
+
+    // The `<role>.canaries.json` sidecar shape (recon §9.2 of the Phase 0b
+    // brief): one BARE manifest object per line, no marker prefix at all —
+    // the production path now that the announcement moved off the drive log.
+    final sidecar = File('${tmp.path}/solo.canaries.json')
+      ..writeAsStringSync('${jsonEncode(plant.manifest().toJson())}\n');
+    expectRc(rcClean, 'JSON-lines sidecar with no marker parses clean',
+        <String>[
+      '--journal', clean.path, '--manifest', sidecar.path,
+    ]);
+
+    // The proxy appends every DISTINCT manifest it is handed (a
+    // byte-identical repeat — e.g. the connect-flake retry re-announcing
+    // after a reconnect — is idempotent, never a second line), so the
+    // sidecar may hold more than one line. Each is graded independently,
+    // exactly as the marker-based multi-role path already does.
+    final repeatedSidecar = File('${tmp.path}/repeated.canaries.json')
+      ..writeAsStringSync(
+        '${jsonEncode(plant.manifest().toJson())}\n'
+        '${jsonEncode(plant.manifest().toJson())}\n',
+      );
+    expectRc(rcClean, 'JSON-lines sidecar with a repeated manifest line',
+        <String>[
+      '--journal', clean.path, '--manifest', repeatedSidecar.path,
+    ]);
+
+    // A malformed line in that same JSON-lines shape: valid JSON, an object,
+    // but missing required fields. Recognised as an ATTEMPTED manifest (not
+    // silently skipped, unlike an ordinary non-JSON drive-log line) because a
+    // corrupted plant must not read as "nothing was planted".
+    final malformedSidecar = File('${tmp.path}/broken.canaries.json')
+      ..writeAsStringSync('{"role":"solo"}\n');
+    expectRc(rcUnusable, 'malformed JSON-lines sidecar line', <String>[
+      '--journal', clean.path, '--manifest', malformedSidecar.path,
     ]);
 
     // A binary frame the proxy rendered with from_utf8_lossy and that fits

@@ -1,0 +1,11 @@
+[Haven] startup complete for circle#a91f3c at epoch+0
+logscan-plant-dart-open-ABCDEFGHJK
+[LocationSharing] published to relay#0b12cc at t+0s, members bucket 2-4
+[Circle] member peer#77ab21 joined, epoch+1
+[Identity] secret loaded from the keychain, type=Keys
+[Relay] dial attempt 2 of 3 failed: SocketException
+[Profile] avatar cached, digest withheld
+[Subscription] sub#5512aa opened with 2 filters
+[Map] marker layer rebuilt in 12 ms
+[Catchup] background wake landed a fix at t+62s
+logscan-plant-dart-close-KMNPQRSTUV

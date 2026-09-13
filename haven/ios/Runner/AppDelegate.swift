@@ -49,6 +49,15 @@ import UIKit
     // scheduling tasks (scheduleNextCatchup) is gated by the enable predicate.
     bgTaskHandler.registerBGTask()
 
+    // Positive control for the runtime log-privacy scanner (`tooling/logscan`,
+    // Phase 0b): proves the `ios` (`log show`) sink is reached this early in
+    // the launch path. Undeclared (no host proxy channel reaches this
+    // process) and matched by shape; literal token only — see
+    // `scripts/ci/native_log_allowlist.txt`.
+    #if DEBUG
+    NSLog("logscan-plant-swift-open-N48X2CR93Y")
+    #endif
+
     GeneratedPluginRegistrant.register(with: self)
 
     if let controller = window?.rootViewController as? FlutterViewController {

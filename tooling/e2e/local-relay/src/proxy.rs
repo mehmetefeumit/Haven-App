@@ -24,12 +24,20 @@
 //!
 //! # The device→host control channel
 //!
-//! Two verbs a CLIENT may send are intercepted here and never reach a relay:
-//! `HAVEN_WIRE_SENTINEL` (a snapshot marker, journalled as ordinary `c2r`
-//! traffic) and `HAVEN_WIRE_MLS_GROUP_ID` (the real MLS group id, journalled
-//! NOWHERE — it goes to [`MlsGroupIdSink`]). Both are answered with a
-//! synthesized ack, and neither ack is journalled: recording one as `r2c`
+//! Every verb in [`ControlVerb::ALL`] — ONE table, in the library, so a second
+//! proxy binary cannot ship a shorter list — is intercepted here and never
+//! reaches a relay: `HAVEN_WIRE_SENTINEL` (a snapshot marker, journalled as
+//! ordinary `c2r` traffic) and `HAVEN_WIRE_MLS_GROUP_ID`,
+//! `HAVEN_NEEDLE_DECL`, `HAVEN_WIRE_CANARY_MANIFEST` (values a host-side oracle
+//! must hold to assert an ABSENCE, journalled NOWHERE — they go to
+//! [`MlsGroupIdSink`] and the [`crate::needles`] sidecars). Each is answered
+//! with a synthesized ack, and no ack is journalled: recording one as `r2c`
 //! would claim the relay sent it.
+//!
+//! A client frame whose verb is in the `HAVEN_` namespace but NOT in the table
+//! TERMINATES the connection. Forwarding it would hand a relay the payload of a
+//! control verb this build cannot intercept — which is how a needle declaration
+//! ends up stored by `strfry` and uploaded in a lane's relay log.
 //!
 //! # Errors are logged by KIND, never interpolated
 //!
@@ -72,10 +80,12 @@ use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::frame::{
-    classify_binary, classify_text, mls_group_id_ack, sentinel_ack, validate_mls_group_id,
-    MlsGroupIdRejection, Observation, MLS_GROUP_ID_VERB,
+    canary_manifest_ack, classify_binary, classify_text, mls_group_id_ack, needle_decl_ack,
+    sentinel_ack, validate_mls_group_id, ControlFrame, ControlVerb, MlsGroupIdRejection,
+    Observation, CONTROL_VERB_NAMESPACE,
 };
 use crate::journal::{now_ms, Dir, Endpoint, WireJournal};
+use crate::needles::{CanarySink, NeedleSink};
 
 /// How long a connection's teardown waits for frames the journal has already
 /// recorded to reach their socket.
@@ -89,6 +99,8 @@ const TEARDOWN_DRAIN: Duration = Duration::from_secs(5);
 const REASON_C2R_DISCARDED: &str = "c2r frames discarded";
 /// `reason` recorded when journalled relay→client frames never left the proxy.
 const REASON_R2C_DISCARDED: &str = "r2c frames discarded";
+/// `reason` recorded when a client named a control verb outside the table.
+const REASON_UNKNOWN_CONTROL_VERB: &str = "unknown control verb";
 /// `reason` recorded when the client→relay stream failed mid-connection.
 const REASON_C2R_READ_FAILED: &str = "c2r read failed";
 /// `reason` recorded when the relay→client stream failed mid-connection.
@@ -110,21 +122,68 @@ pub struct ProxyConfig {
     pub routes: Vec<Route>,
 }
 
+/// Where each intercepted control verb's payload goes.
+///
+/// One struct rather than three parameters so a new verb's sink reaches every
+/// call site at once, and so the "journalled nowhere" half of the contract is
+/// visible in one place: none of these is the journal.
+#[derive(Clone)]
+pub struct ControlSinks {
+    /// The real MLS group ids (Security Rule 4).
+    pub mls_group_ids: Arc<MlsGroupIdSink>,
+    /// Declared log needles.
+    pub needles: Arc<NeedleSink>,
+    /// The run's wire-canary manifest.
+    pub canaries: Arc<CanarySink>,
+}
+
+impl ControlSinks {
+    /// The sinks a caller with no host-side log scanner needs: the MLS sidecar
+    /// only, with the needle sidecars disabled.
+    #[must_use]
+    pub fn with_mls_group_ids(mls_group_ids: Arc<MlsGroupIdSink>) -> Self {
+        Self {
+            mls_group_ids,
+            needles: Arc::new(NeedleSink::disabled()),
+            canaries: Arc::new(CanarySink::disabled()),
+        }
+    }
+}
+
 /// A running proxy.
 pub struct Proxy {
     bound: Vec<Route>,
     journal: Arc<WireJournal>,
-    mls_group_ids: Arc<MlsGroupIdSink>,
+    sinks: ControlSinks,
     connections: Arc<AtomicU64>,
     accept_tasks: Vec<JoinHandle<()>>,
 }
 
 impl Proxy {
+    /// Binds every route's listener and starts accepting, with the MLS-group-id
+    /// sidecar as the only control sink.
+    ///
+    /// # Errors
+    ///
+    /// As [`Proxy::start_with_sinks`].
+    pub async fn start(
+        config: &ProxyConfig,
+        journal: Arc<WireJournal>,
+        mls_group_ids: Arc<MlsGroupIdSink>,
+    ) -> std::io::Result<Self> {
+        Self::start_with_sinks(
+            config,
+            journal,
+            ControlSinks::with_mls_group_ids(mls_group_ids),
+        )
+        .await
+    }
+
     /// Binds every route's listener and starts accepting.
     ///
-    /// `mls_group_ids` receives the real MLS group ids the device declares over
-    /// the control channel. It is a SEPARATE sink from the journal on purpose —
-    /// see [`MlsGroupIdSink`].
+    /// `sinks` receive the values the device declares over the control channel.
+    /// They are SEPARATE from the journal on purpose — see [`MlsGroupIdSink`]
+    /// and [`crate::needles`].
     ///
     /// Binding is the one thing that is NOT fail-open: a proxy that cannot
     /// listen leaves the app pointed at a dead port, so the lane must fail
@@ -135,10 +194,10 @@ impl Proxy {
     /// Returns the underlying [`std::io::Error`] when a listener cannot bind,
     /// or an `InvalidInput` error when the routing table is empty or names a
     /// listen address that is not loopback.
-    pub async fn start(
+    pub async fn start_with_sinks(
         config: &ProxyConfig,
         journal: Arc<WireJournal>,
-        mls_group_ids: Arc<MlsGroupIdSink>,
+        sinks: ControlSinks,
     ) -> std::io::Result<Self> {
         if config.routes.is_empty() {
             return Err(std::io::Error::new(
@@ -186,21 +245,21 @@ impl Proxy {
                 listen: local_addr.to_string(),
             };
             let journal = Arc::clone(&journal);
-            let mls_group_ids = Arc::clone(&mls_group_ids);
+            let sinks = sinks.clone();
             let connections = Arc::clone(&connections);
             accept_tasks.push(tokio::spawn(accept_loop(
                 listener,
                 endpoint,
                 connections,
                 journal,
-                mls_group_ids,
+                sinks,
             )));
         }
 
         Ok(Self {
             bound,
             journal,
-            mls_group_ids,
+            sinks,
             connections,
             accept_tasks,
         })
@@ -240,7 +299,19 @@ impl Proxy {
     /// The sidecar the declared MLS group ids go to.
     #[must_use]
     pub const fn mls_group_ids(&self) -> &Arc<MlsGroupIdSink> {
-        &self.mls_group_ids
+        &self.sinks.mls_group_ids
+    }
+
+    /// The sidecar declared log needles go to.
+    #[must_use]
+    pub const fn needles(&self) -> &Arc<NeedleSink> {
+        &self.sinks.needles
+    }
+
+    /// The sidecar the wire-canary manifest goes to.
+    #[must_use]
+    pub const fn canaries(&self) -> &Arc<CanarySink> {
+        &self.sinks.canaries
     }
 
     /// Stops accepting. In-flight connections end when their peers close.
@@ -655,7 +726,7 @@ async fn accept_loop(
     endpoint: Endpoint,
     connections: Arc<AtomicU64>,
     journal: Arc<WireJournal>,
-    mls_group_ids: Arc<MlsGroupIdSink>,
+    sinks: ControlSinks,
 ) {
     loop {
         match listener.accept().await {
@@ -663,10 +734,10 @@ async fn accept_loop(
                 let index = connections.fetch_add(1, Ordering::SeqCst);
                 let conn_id = format!("c{index}");
                 let journal = Arc::clone(&journal);
-                let mls_group_ids = Arc::clone(&mls_group_ids);
+                let sinks = sinks.clone();
                 let endpoint = endpoint.clone();
                 tokio::spawn(async move {
-                    handle_connection(stream, conn_id, endpoint, journal, mls_group_ids).await;
+                    handle_connection(stream, conn_id, endpoint, journal, sinks).await;
                 });
             }
             Err(err) => {
@@ -689,7 +760,7 @@ async fn handle_connection(
     conn_id: String,
     endpoint: Endpoint,
     journal: Arc<WireJournal>,
-    mls_group_ids: Arc<MlsGroupIdSink>,
+    sinks: ControlSinks,
 ) {
     // Nagle off: `ts_ms` should reflect when a message was observed, not when
     // a coalescing timer expired.
@@ -750,7 +821,7 @@ async fn handle_connection(
         relay_tx,
         Some(Control {
             reply: client_tx.clone(),
-            mls_group_ids: &mls_group_ids,
+            sinks: &sinks,
         }),
         Dir::ClientToRelay,
         &conn_id,
@@ -934,14 +1005,127 @@ struct Control<'a> {
     /// Sink for synthesized acks — the same channel the relay→client pump
     /// writes to, which is why the client socket is owned by one writer task.
     reply: mpsc::UnboundedSender<Outbound>,
-    /// Where a declared MLS group id goes. NEVER the journal.
-    mls_group_ids: &'a MlsGroupIdSink,
+    /// Where each declared value goes. NEVER the journal.
+    sinks: &'a ControlSinks,
+}
+
+/// What the byte-level gate decided about one client message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Disposition {
+    /// Ordinary traffic, or a well-formed control frame the interception point
+    /// below handles.
+    Dispatch,
+    /// Names a verb in the shared table but is not a readable frame of it:
+    /// intercepted, not forwarded, not journalled, not acked.
+    Refuse(ControlVerb),
+    /// Names a control verb outside the table: the connection ends.
+    Terminate,
+}
+
+/// Classifies one CLIENT message for the byte-level gate.
+///
+/// The two namespace rules are deliberately asymmetric. A well-formed ordinary
+/// frame (`EVENT`, `REQ`, …) is never terminated for merely CONTAINING the
+/// namespace prefix — ciphertext and base64url payloads can carry any byte
+/// sequence, and killing a connection on a coincidence would be an instrument
+/// breaking the product. A message that is not a readable frame at all, and
+/// names the prefix, has no such innocent reading.
+fn disposition(message: &Message) -> Disposition {
+    let raw: &[u8] = match message {
+        Message::Text(text) => text.as_bytes(),
+        Message::Binary(bytes) => bytes,
+        Message::Ping(_) | Message::Pong(_) | Message::Frame(_) | Message::Close(_) => {
+            return Disposition::Dispatch
+        }
+    };
+
+    if let Message::Text(text) = message {
+        if let Some(verb) = classify_text(text.as_str()).verb() {
+            if ControlVerb::from_verb(verb).is_some() {
+                return Disposition::Dispatch;
+            }
+            if verb.starts_with(CONTROL_VERB_NAMESPACE) {
+                return Disposition::Terminate;
+            }
+            // An ordinary frame, which may still carry a control verb inside a
+            // field: that is what the table's byte-level net below is for.
+            return ControlVerb::named_in(raw).map_or(Disposition::Dispatch, Disposition::Refuse);
+        }
+    }
+
+    if let Some(verb) = ControlVerb::named_in(raw) {
+        return Disposition::Refuse(verb);
+    }
+    if contains(raw, CONTROL_VERB_NAMESPACE.as_bytes()) {
+        return Disposition::Terminate;
+    }
+    Disposition::Dispatch
+}
+
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+/// Byte length of a message's payload, for a log line that may carry a length
+/// and never a value.
+fn payload_len(message: &Message) -> usize {
+    match message {
+        Message::Text(text) => text.as_str().len(),
+        Message::Binary(bytes) => bytes.len(),
+        Message::Ping(_) | Message::Pong(_) | Message::Frame(_) | Message::Close(_) => 0,
+    }
+}
+
+/// Hands one classified control frame to its sink and answers the client.
+///
+/// `true` means the frame was fully handled here and must be neither journalled
+/// nor forwarded. The match is EXHAUSTIVE over [`ControlFrame`], so a verb added
+/// to [`ControlVerb::ALL`] cannot be left un-intercepted: the compiler refuses
+/// the build instead of the proxy forwarding it.
+fn intercept(control: &Control<'_>, frame: ControlFrame<'_>, conn_id: &str) -> bool {
+    match frame {
+        ControlFrame::MlsGroupId(raw) => {
+            let declaration = control.sinks.mls_group_ids.declare(conn_id, raw);
+            if let Some(normalized) = declaration.ack {
+                reply(control, mls_group_id_ack(&normalized));
+            }
+            true
+        }
+        ControlFrame::NeedleDecl(payload) => {
+            let declaration = control.sinks.needles.declare(conn_id, payload);
+            if let Some(seq) = declaration.ack {
+                reply(control, needle_decl_ack(seq));
+            }
+            true
+        }
+        ControlFrame::CanaryManifest(payload) => {
+            let announcement = control.sinks.canaries.announce(conn_id, payload);
+            if let Some(lines) = announcement.ack {
+                reply(control, canary_manifest_ack(lines));
+            }
+            true
+        }
+        // The sentinel is the one control frame that IS journalled: it is a
+        // marker in the recording, and its ack has to carry the `wire_seq` the
+        // recorder allocates for it.
+        ControlFrame::Sentinel(_) => false,
+    }
+}
+
+/// Queues one synthesized ack for the client.
+///
+/// Never journalled: recording it as `r2c` would claim the relay sent it.
+fn reply(control: &Control<'_>, ack: String) {
+    let _ = control.reply.send(Outbound {
+        message: Message::Text(ack.into()),
+        journalled: false,
+    });
 }
 
 /// One direction of one connection.
 ///
-/// `control` is `Some` only on the client→relay pump: both control verbs are
-/// client-originated and both acks go back to that same client.
+/// `control` is `Some` only on the client→relay pump: every control verb is
+/// client-originated and every ack goes back to that same client.
 ///
 /// `claimed` counts the frames this pump has journalled AND handed to the
 /// writer, i.e. the lines whose truth the teardown has to preserve.
@@ -1001,31 +1185,45 @@ async fn pump<S>(
         // sender emits well-formed JSON, so it was unreachable, but it is the
         // one place an edit on either side could break the invariant silently.
         //
-        // A frame naming the declaration verb is a declaration whatever else is
-        // wrong with it, and is refused rather than relayed.
+        // A frame naming ANY control verb is a control frame whatever else is
+        // wrong with it, and is refused rather than relayed; a frame naming a
+        // verb that is not in the table at all ends the connection.
         if control.is_some() {
-            let names_verb = match &message {
-                Message::Text(text) => text.as_str().contains(MLS_GROUP_ID_VERB),
-                Message::Binary(bytes) => bytes
-                    .windows(MLS_GROUP_ID_VERB.len())
-                    .any(|w| w == MLS_GROUP_ID_VERB.as_bytes()),
-                _ => false,
-            };
-            let classified = matches!(&message, Message::Text(text)
-                if classify_text(text.as_str()).mls_group_id.is_some());
-            if names_verb && !classified {
-                // Never journalled, never forwarded, never acked: an
-                // unparseable declaration cannot be recorded, so acking it
-                // would tell the drive the host holds a value it does not.
-                eprintln!(
-                    "[wire-proxy] conn={conn_id} refused an unparseable MLS-group-id declaration ({} bytes); not forwarded, not journalled",
-                    match &message {
-                        Message::Text(t) => t.as_str().len(),
-                        Message::Binary(b) => b.len(),
-                        _ => 0,
-                    }
-                );
-                continue;
+            match disposition(&message) {
+                Disposition::Dispatch => {}
+                Disposition::Refuse(verb) => {
+                    // Never journalled, never forwarded, never acked: an
+                    // unparseable declaration cannot be recorded, so acking it
+                    // would tell the drive the host holds a value it does not.
+                    eprintln!(
+                        "[wire-proxy] conn={conn_id} refused an unparseable {} frame ({} bytes); \
+                         not forwarded, not journalled",
+                        verb.as_str(),
+                        payload_len(&message)
+                    );
+                    continue;
+                }
+                Disposition::Terminate => {
+                    // The payload of a verb this build cannot intercept is a
+                    // payload that would reach the relay. Closing is the only
+                    // fail-closed answer: the harness loses its socket, which is
+                    // loud, instead of the lane losing a privacy guarantee,
+                    // which is silent.
+                    eprintln!(
+                        "[wire-proxy] conn={conn_id} TERMINATED: a frame named a control verb \
+                         outside the shared table ({} bytes). It was neither forwarded nor \
+                         journalled — a verb this build cannot intercept would carry its payload \
+                         to the relay.",
+                        payload_len(&message)
+                    );
+                    journal.record_conn_error(
+                        conn_id,
+                        endpoint,
+                        now_ms(),
+                        REASON_UNKNOWN_CONTROL_VERB,
+                    );
+                    break;
+                }
             }
         }
 
@@ -1039,29 +1237,26 @@ async fn pump<S>(
 
         let mut journalled = false;
         if let Some(observation) = observation {
-            // INTERCEPTED BEFORE THE RECORDER — the one control frame that must
-            // not reach the journal at all.
+            // INTERCEPTED BEFORE THE RECORDER — the control frames that must not
+            // reach the journal at all.
             //
-            // The declared value is the REAL MLS group id, and the oracle that
-            // consumes it (check-wire-correlation.sh C5.8) asserts Security
-            // Rule 4 by scanning the journal for exactly that string. Record it
-            // here and the scan finds the announcement the harness made itself:
-            // the assertion would be an instrument talking to itself, and a
-            // genuine leak would be indistinguishable from this line. It is not
-            // forwarded either — Rule 4 says the id never reaches a relay, and
-            // this interception is what guarantees it for this channel.
+            // Each declared value is one a host-side oracle asserts is ABSENT
+            // from the journal (Security Rule 4 for an MLS group id) or from
+            // every captured log (Rule 15 for a needle). Record it here and the
+            // scan finds the announcement the harness made itself: the
+            // assertion becomes an instrument talking to itself, and a genuine
+            // leak is indistinguishable from this line. None is forwarded
+            // either — that interception is what makes the guarantee this
+            // proxy's property rather than the app's.
             //
             // Ordered before `record`, not after a `continue`, because the
-            // journal has no retraction for a line it has already written.
-            if let (Some(raw), Some(control)) = (&observation.mls_group_id, control.as_ref()) {
-                let declaration = control.mls_group_ids.declare(conn_id, raw);
-                if let Some(normalized) = declaration.ack {
-                    let _ = control.reply.send(Outbound {
-                        message: Message::Text(mls_group_id_ack(&normalized).into()),
-                        journalled: false,
-                    });
+            // journal has no retraction for a line it has already written. The
+            // match is EXHAUSTIVE over the shared table, so a verb added to
+            // `ControlVerb::ALL` cannot be left un-intercepted.
+            if let (Some(frame), Some(control)) = (observation.control(), control.as_ref()) {
+                if intercept(control, frame, conn_id) {
+                    continue;
                 }
-                continue;
             }
 
             let seq = journal.record(conn_id, endpoint, dir, now_ms(), &observation);
@@ -1071,11 +1266,7 @@ async fn pump<S>(
                 // so no relay's unknown-command handling can perturb the
                 // scenario, and the marker never appears in real relay traffic.
                 // The ack is synthesized here, so it is not a journalled frame.
-                let ack = sentinel_ack(token, seq, conn_id);
-                let _ = control.reply.send(Outbound {
-                    message: Message::Text(ack.into()),
-                    journalled: false,
-                });
+                reply(control, sentinel_ack(token, seq, conn_id));
                 continue;
             }
             // Counted BEFORE the hand-off, not after: the journal line already

@@ -1766,6 +1766,58 @@ void main() {
       );
     });
 
+    test('parses the JSON-lines sidecar shape — a bare object, no marker',
+        () {
+      // `<role>.canaries.json` (Phase 0b): the proxy writes ONE bare manifest
+      // object per line, no `[wire-canary] MANIFEST ` prefix at all — that
+      // marker form is for the self-test fixtures only now.
+      final manifest = _manifest();
+      final parsed = WireCanaryManifest.parseAll(
+        '${jsonEncode(manifest.toJson())}\n',
+      );
+      expect(parsed, hasLength(1));
+      expect(parsed.single.role, manifest.role);
+      expect(parsed.single.circleDisplayName, manifest.circleDisplayName);
+    });
+
+    test('an ordinary non-JSON line in a bare-manifest file is skipped, not '
+        'thrown on', () {
+      // Unlike the marker path (whose marker IS the caller's promise that a
+      // manifest follows), a line that is not even JSON here is simply not a
+      // manifest — unrelated prose sharing the file must not become a parse
+      // failure.
+      final manifest = _manifest();
+      final parsed = WireCanaryManifest.parseAll(
+        'not json at all\n${jsonEncode(manifest.toJson())}\n\n',
+      );
+      expect(parsed, hasLength(1));
+      expect(parsed.single.role, manifest.role);
+    });
+
+    test('a bare-JSON line that is an array (not an object) is skipped', () {
+      expect(WireCanaryManifest.parseAll('[1,2,3]\n'), isEmpty);
+    });
+
+    test('a malformed bare-manifest line throws rather than reading as '
+        'nothing-planted', () {
+      // Recognised as an ATTEMPTED manifest (a JSON object) rather than
+      // silently skipped, exactly like a broken marker line: a corrupted
+      // plant must not read as "nothing was planted".
+      expect(
+        () => WireCanaryManifest.parseAll('{"role":"solo"}\n'),
+        throwsA(isA<FormatException>()),
+      );
+    });
+
+    test('a sidecar with a repeated manifest line yields both — the proxy '
+        'appends distinct manifests rather than refusing a second one', () {
+      final manifest = _manifest();
+      final line = jsonEncode(manifest.toJson());
+      final parsed = WireCanaryManifest.parseAll('$line\n$line\n');
+      expect(parsed, hasLength(2));
+      expect(parsed.every((m) => m.role == manifest.role), isTrue);
+    });
+
     test('a marker line with a broken payload throws rather than reads as '
         'nothing-planted', () {
       expect(

@@ -2831,7 +2831,8 @@
       ],
       "guards": [
         "scripts/ci/check_no_key_logging.sh",
-        "tooling/e2e/ci/scan-logs-for-secrets.sh#workflow=e2e-android.yml"
+        "tooling/e2e/ci/scan-logs-for-secrets.sh#workflow=e2e-ios.yml",
+        "tooling/e2e/ci/scan-logs.sh#workflow=e2e-android.yml"
       ]
     },
     {
@@ -2917,7 +2918,110 @@
         "scripts/ci/check_debug_impls_covered.sh",
         "scripts/ci/check_release_log_silencer.sh",
         "scripts/ci/check_native_log_allowlist.sh",
-        "tooling/e2e/ci/scan-logs-for-secrets.sh#workflow=e2e-android.yml"
+        "tooling/e2e/ci/scan-logs-for-secrets.sh#workflow=e2e-ios.yml",
+        "tooling/e2e/ci/scan-logs.sh#workflow=e2e-android.yml"
+      ]
+    },
+    {
+      "id": "INV-K-LOG-SINKS-ARE-SCANNED-BEFORE-UPLOAD",
+      "title": "Every captured E2E log is scanned for key material and declared identifiers before it is echoed or uploaded",
+      "statement": "On the Android core-flow lane every captured log — the logcat, the full and final-attempt drive transcripts, the relay log, the host diagnostics, the wire-proxy log and the redacted wire summary — passes through tooling/e2e/ci/scan-logs.sh, which runs the key-material floor (scan-logs-for-secrets.sh) AND the runtime identifier scanner (haven-logscan, against the manifest sealed from the identifiers the run declared over the proxy's control channel) before any of it is echoed into the job log or handed to an upload step; a leak (rc 1) deletes every scanned sink before the failure-artifact upload can see it, and the gate fails closed — an absent or non-executable scanner binary, a declaration sidecar the drive never wrote, a missed positive control, an unmet line or declaration floor is a red lane, never a skipped scan. This becomes false the first time a captured log reaches an upload-artifact path or a `cat` without having passed scan-logs.sh, the first time a leak verdict leaves a sink on disk, or the first time an absent binary, sidecar or manifest lets the scanning step exit 0.",
+      "status": "enforced",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [],
+      "doc_anchors": [
+        "docs/E2E_TROUBLESHOOTING.md#failure-mode-13--the-runtime-log-scanner-fails-the-android-lane-rc-1-3-or-4"
+      ],
+      "symbols": [
+        {
+          "file": "tooling/logscan/src/lib.rs",
+          "symbol": "RC_LEAK"
+        }
+      ],
+      "tests": [
+        {
+          "file": "tooling/logscan/src/lib.rs",
+          "name": "aggregation_is_leak_guard_unusable_meta_clean"
+        },
+        {
+          "file": "tooling/logscan/src/cli.rs",
+          "name": "an_absent_sink_is_unusable_and_an_absent_manifest_is_a_meta_floor"
+        },
+        {
+          "file": "tooling/logscan/src/cli.rs",
+          "name": "an_empty_sink_is_as_fatal_as_an_absent_one"
+        },
+        {
+          "file": "tooling/logscan/src/plants.rs",
+          "name": "the_highest_seq_wins_and_the_rest_are_superseded"
+        },
+        {
+          "file": "tooling/logscan/src/plants.rs",
+          "name": "no_minted_token_trips_any_rule_of_either_scanner"
+        },
+        {
+          "file": "tooling/logscan/src/cli.rs",
+          "name": "a_declaration_floor_unmet_seals_nothing"
+        }
+      ],
+      "guards": [
+        "tooling/e2e/ci/scan-logs.sh#workflow=e2e-android.yml",
+        "tooling/e2e/ci/scan-logs-for-secrets.sh#workflow=e2e-ios.yml"
+      ]
+    },
+    {
+      "id": "INV-K-NEEDLE-MANIFEST-NEVER-LEAVES-THE-RUNNER",
+      "title": "The needle declaration sidecars and the sealed manifest never leave the runner",
+      "statement": "The declaration sidecars (*.needles.decl), the sealed needle manifest (*.needles.json) and the wire-canary manifest (*.canaries.json) under /tmp/haven-soak/needles/ hold the run's declared identifiers verbatim — pubkeys, group ids, event ids, names, coordinates, and the digests of secret-class values — and never leave the runner: their directory is a constant with no environment override, the manifest is written 0600 into a 0700 directory and never overwritten, no workflow names one of them or their directory in an upload-artifact path, a step summary, an issue or PR body, or a cat/tee/head/tail/base64 command in a workflow or a lane runner, the scanner and its wrapper print counts, classes, encodings, rule ids and sink:line only (the manifest by basename), and the lane removes all three shapes in a final always() step. This becomes false the first time one of those files (or a wholesale /tmp upload) appears in an upload path, the first time a workflow or runner reads one of them into a job log, the first time the scanner's value-disclosing local triage flag appears in a workflow, or the first time a sidecar from one run is still on the runner when the next run's proxy starts.",
+      "status": "enforced",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [],
+      "doc_anchors": [
+        "docs/E2E_TROUBLESHOOTING.md#failure-mode-13--the-runtime-log-scanner-fails-the-android-lane-rc-1-3-or-4"
+      ],
+      "symbols": [
+        {
+          "file": "tooling/e2e/local-relay/src/needles.rs",
+          "symbol": "NEEDLE_DIR"
+        }
+      ],
+      "tests": [
+        {
+          "file": "tooling/logscan/src/manifest.rs",
+          "name": "a_sealed_manifest_is_0600_and_never_overwritten"
+        },
+        {
+          "file": "tooling/logscan/src/manifest.rs",
+          "name": "the_needle_directory_is_0700"
+        },
+        {
+          "file": "tooling/logscan/src/manifest.rs",
+          "name": "the_out_path_must_carry_the_banned_extension_in_the_banned_directory"
+        },
+        {
+          "file": "tooling/logscan/src/cli.rs",
+          "name": "a_manifest_path_outside_the_needle_directory_is_refused"
+        },
+        {
+          "file": "tooling/logscan/src/cli.rs",
+          "name": "logscan_never_prints_a_needle"
+        },
+        {
+          "file": "tooling/logscan/src/cli.rs",
+          "name": "disclose_values_is_the_only_path_that_prints_the_value_and_it_warns"
+        },
+        {
+          "file": "tooling/logscan/src/report.rs",
+          "name": "a_report_line_names_the_class_and_never_the_value"
+        },
+        {
+          "file": "tooling/logscan/src/manifest.rs",
+          "name": "a_secret_class_declaration_withholds_the_raw_value"
+        }
+      ],
+      "guards": [
+        "scripts/ci/check_wire_proxy_test_only.sh",
+        "tooling/e2e/ci/scan-logs.sh#workflow=e2e-android.yml"
       ]
     },
     {

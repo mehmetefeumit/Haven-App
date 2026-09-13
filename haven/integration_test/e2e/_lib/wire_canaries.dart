@@ -96,15 +96,17 @@
 ///   wireSeq: sentinel.wireSeq,
 /// );
 ///
-/// // 5. Announce ONCE, at the very end, so every carrier is included.
-/// canaries.announce(debugPrint);
+/// // 5. Announce ONCE, at the very end, so every carrier is included. This
+/// //    goes over the proxy's control channel to a `.canaries.json` sidecar
+/// //    the lane never uploads — never the drive log (see below).
+/// await logNeedles.announceCanaryManifest(canaries.manifest().toJson());
 /// ```
 ///
 /// The lane then runs, on the host:
 ///
 /// ```sh
 /// dart tooling/e2e/ci/check-wire-canaries.dart \
-///      --journal <C1's journal> --manifest <the drive log>
+///      --journal <C1's journal> --manifest <role>.canaries.json
 /// ```
 ///
 /// Exit codes are the five `tooling/e2e/ci/check-wire-journal.sh` uses, so a
@@ -114,21 +116,30 @@
 ///
 /// ## Where the manifest may be written, and what may go in it
 ///
-/// [WireCanaryPlant.announce] takes a sink, so the manifest can go to the
-/// drive log (convenient — the lane already captures it) or to a dedicated
-/// file. That choice is a disclosure decision, not a plumbing one: the drive
-/// log is a CI artifact with weeks of retention.
+/// The manifest travels over the proxy's control channel —
+/// `LogNeedles.announceCanaryManifest` (`log_needles.dart`), the
+/// `HAVEN_WIRE_CANARY_MANIFEST` sibling of the needle-declaration verb — to
+/// a per-role `.canaries.json` sidecar the lane never uploads. It used to
+/// go to the drive log
+/// ([WireCanaryPlant.announce] took a log sink because "the lane already
+/// captures it"), and that choice was wrong: the drive log is a CI artifact
+/// with weeks of retention, and the announcement line itself tripped the
+/// runtime log scanner's structural rules on the very values it exists to
+/// prove absent. [WireCanaryPlant.announce] and
+/// [WireCanaryManifest.toAnnouncementLine] still exist — the marker-line form
+/// is what this file's own self-tests and `check-wire-canaries.dart`'s fix
+/// their fixtures to — but no production lane calls them.
 ///
-/// Everything this library plants is a fabricated test value, so the drive log
-/// is fine for C6. It would NOT be fine for every id a host-side oracle might
-/// want. The `nostr_group_id` is published on the wire by design and is
-/// carried here; the **real MLS group id is not**, and Security Rule 4 says it
-/// must never be published. Any oracle that wants to scan the journal for it
-/// needs the literal value on the host — a digest cannot be searched for — so
-/// it must hand it over through a manifest file the lane does NOT upload,
-/// never through logcat. `--manifest` accepts any file carrying the marker
-/// line, so that path already exists; what must not happen is someone adding
-/// a Rule-4 value to the announcement that goes to the drive log.
+/// Everything this library plants is a fabricated test value, so a leftover
+/// drive-log line would have been harmless for C6 specifically. It would NOT
+/// be fine for every id a host-side oracle might want. The `nostr_group_id` is
+/// published on the wire by design and is carried here; the **real MLS group
+/// id is not**, and Security Rule 4 says it must never be published — that
+/// value travels `TestRelay.announceMlsGroupId`'s own sidecar, never this one.
+/// `--manifest` also still accepts a file carrying the marker line (self-test
+/// fixtures); what must not happen is a manifest value re-entering the drive
+/// log or any workflow's upload/echo path
+/// (`scripts/ci/check_wire_proxy_test_only.sh`).
 library;
 
 import 'dart:convert';
@@ -635,8 +646,11 @@ class WireCanaryManifest {
   String toAnnouncementLine() =>
       '$kCanaryManifestMarker${jsonEncode(toJson())}';
 
-  /// Extracts every manifest from [text] (a drive log, or a file holding
-  /// nothing but manifest lines).
+  /// Extracts every manifest from [text] — either a drive log carrying
+  /// [kCanaryManifestMarker] lines (self-test fixtures only, since Phase 0b:
+  /// see "Where the manifest may be written" above) or the per-role
+  /// `.canaries.json` sidecar the recording proxy writes, one bare manifest
+  /// object per line, no marker.
   ///
   /// Multi-process scenarios announce once per role; all of them are returned.
   /// A line carrying the marker but unparseable JSON throws, because silently
@@ -647,7 +661,10 @@ class WireCanaryManifest {
     final out = <WireCanaryManifest>[];
     for (final line in const LineSplitter().convert(text)) {
       final at = line.indexOf(kCanaryManifestMarker);
-      if (at < 0) continue;
+      if (at < 0) {
+        out.addAll(_bareManifestLine(line));
+        continue;
+      }
       final payload = line.substring(at + kCanaryManifestMarker.length).trim();
       final Object? decoded;
       try {
@@ -666,6 +683,26 @@ class WireCanaryManifest {
       out.add(WireCanaryManifest.fromJson(decoded));
     }
     return out;
+  }
+
+  /// One line of the `<role>.canaries.json` sidecar: a bare JSON object, no
+  /// marker prefix, because that file never carries drive-log prose to
+  /// disambiguate a manifest from. An ordinary line that is not JSON at all,
+  /// or JSON that is not an object, is simply not a manifest and is skipped
+  /// — unlike the marker path, where the marker itself is the caller's
+  /// promise that a manifest follows, so a decode failure there is thrown
+  /// rather than swallowed.
+  static List<WireCanaryManifest> _bareManifestLine(String line) {
+    final trimmed = line.trim();
+    if (trimmed.isEmpty) return const <WireCanaryManifest>[];
+    final Object? decoded;
+    try {
+      decoded = jsonDecode(trimmed);
+    } on FormatException {
+      return const <WireCanaryManifest>[];
+    }
+    if (decoded is! Map<String, dynamic>) return const <WireCanaryManifest>[];
+    return <WireCanaryManifest>[WireCanaryManifest.fromJson(decoded)];
   }
 }
 

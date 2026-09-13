@@ -41,13 +41,15 @@
 #
 # # What this file is, and is not
 #
-# This file is the key-material floor; identifier policy (pubkeys, event ids,
-# group ids, relay URLs, names, coordinates — CLAUDE.md Security Rule 15) lives
-# in the source guards (`scripts/ci/check_no_identifier_logging.sh` and its
-# siblings) and, once the logscan phase lands, in `tooling/logscan/policy.toml`.
-# The clean fixture below deliberately passes a full pubkey, event id and npub:
-# that permissiveness is a statement of THIS scanner's scope, not a licence to
-# log them.
+# This file is the key-material floor; identifier policy lives in
+# `tooling/logscan/policy.toml`; the clean fixture's permissiveness is
+# deliberate, not a licence. Identifiers (pubkeys, event ids, group ids, relay
+# URLs, names, coordinates — CLAUDE.md Security Rule 15) are the source guards'
+# (`scripts/ci/check_no_identifier_logging.sh` and its siblings) and, at
+# runtime, `haven-logscan`'s, which `tooling/e2e/ci/scan-logs.sh` runs beside
+# this floor. The clean fixture below deliberately passes a full pubkey, event
+# id and npub: that permissiveness is a statement of THIS scanner's scope, not
+# a licence to log them.
 #
 # Usage:
 #   bash tooling/e2e/ci/scan-logs-for-secrets.sh [--ext <list>] <log-file-or-dir> [more...]

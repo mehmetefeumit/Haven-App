@@ -1,0 +1,10 @@
+09-12 10:00:00.001  1234  1234 D HavenApplication: logscan-plant-kotlin-open-QRSTUVWXYZ
+09-12 10:00:00.112  1234  1301 D haven_core: logscan-plant-rust-open-MNPQRSTUVW
+09-12 10:00:00.220  1234  1301 D haven_core::relay::man: dialing relay#0b12cc, attempt 2 of 3
+09-12 10:00:00.330  1234  1290 I flutter: logscan-plant-dart-open-ABCDEFGHJK
+09-12 10:00:01.440  1234  1290 I flutter: [LocationSharing] published to relay#0b12cc at t+0s
+09-12 10:00:02.550  1234  1301 D haven_core::mls::session: circle#a91f3c advanced to epoch+1
+09-12 10:00:03.660  1234  1290 I flutter: [Circle] member peer#77ab21 joined
+09-12 10:00:04.770   999   999 I WifiService: CMD_START_SCAN source 5f3a9c2e1b7d408695a4c3e2f1d0b9a85f3a9c2e1b7d408695a4c3e2f1d0b9a8
+09-12 10:00:05.880  1234  1290 I flutter: [Map] marker layer rebuilt in 12 ms
+09-12 10:00:06.990  1234  1290 I flutter: logscan-plant-dart-close-KMNPQRSTUV

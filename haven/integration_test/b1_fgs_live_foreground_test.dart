@@ -246,7 +246,13 @@
 ///     [kPauseDeliveredMarker] if the shell wants the narrowest possible
 ///     window.
 ///   * [kHoldCompleteMarker] (`[b1] HOLD_COMPLETE`) — printed the instant the
-///     FIRST hold ends, so it closes the window the two markers above open.
+///     FIRST hold ends, so it closes the proof window. The shell OPENS that
+///     window at the FGS's own `[BackgroundTask] session acquired` line after
+///     [kPauseDeliveredMarker] (falling back to [kHandoffConfirmedMarker]
+///     only when the FGS acquired at `onStart`): the confirmation above is an
+///     observer's poll, and the FGS publishes the instant the key flips, so a
+///     publish can legitimately precede the marker by the poll's latency
+///     (CI run 34740325027: 38 ms).
 ///     The steady-state P2a assertions belong to that window and to nothing
 ///     else: after it come the forced-idle phase (a deliberately abnormal
 ///     span) and then teardown, where the FGS is EXPECTED to be destroyed —
@@ -359,8 +365,10 @@ const String kHandoffConfirmedMarker = '[b1] HANDOFF_CONFIRMED';
 /// BEFORE the lifecycle is restored to `resumed`.
 ///
 /// Everything the shell asserts about the FGS — that it published, and that it
-/// stayed alive to do so — belongs to `[kHandoffConfirmedMarker,
-/// kHoldCompleteMarker)`. After it, teardown legitimately destroys the service
+/// stayed alive to do so — belongs to the window from the FGS's own
+/// `[BackgroundTask] session acquired` line (after [kPauseDeliveredMarker];
+/// [kHandoffConfirmedMarker] only in the onStart-acquire variant) up to
+/// `kHoldCompleteMarker`. After it, teardown legitimately destroys the service
 /// twice over: `_onResumed()` takes the MLS session back (stopping the service
 /// to get it), and `flutter_test`'s post-test unmount disposes the
 /// `ProviderScope`, whose `onDispose` stops it again. Both emit

@@ -1,9 +1,11 @@
 # Reusable workflow: Rust checks
-# Verifies formatting, linting, and tests for all three Rust crates:
+# Verifies formatting, linting, and tests for all four Rust crates:
 #   - haven-core: the protocol/crypto library (pure Rust)
 #   - haven/rust_builder: the flutter_rust_bridge FFI surface
 #   - tooling/e2e/local-relay: the hermetic E2E relay + the recording wire proxy
 #     (harness-only; never part of a shipped build)
+#   - tooling/logscan: the runtime log-privacy scanner the E2E lanes run over
+#     every captured log (harness-only; never part of a shipped build)
 #
 # Both must pass clippy individually. Until 2026-05-24, rust_builder
 # was not clippy-checked, which masked a `too_many_arguments` issue
@@ -191,3 +193,135 @@ jobs:
       # debug twin of it.
       - name: Wire-proxy self-test (release binary)
         run: cargo run --release --bin haven-wire-proxy -- --self-test
+
+  # ============================================================================
+  # logscan-tooling — tooling/logscan: the runtime log-privacy scanner.
+  #
+  # Same shape as e2e-tooling, for the same reason: a separate Cargo project
+  # (never a member of haven-core, never in a shipped build) that a lane
+  # release-builds and then trusts as an oracle. Its `--self-test` runs the
+  # shipped binary over its fixture set — every encoding, every structural
+  # rule, plants, segments, rc aggregation — because the tests prove the code
+  # and the self-test proves the ARTIFACT the lane launches.
+  # ============================================================================
+  logscan-tooling:
+    name: logscan tooling (runtime log-privacy scanner)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tooling/logscan
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tooling/logscan
+          key: logscan-tooling
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      # `--all-targets`, matching the other three jobs, so the `#[cfg(test)]`
+      # modules — where the ledger, plant and path-discipline proofs live —
+      # are compiled and linted too.
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Run tests
+        run: |
+          set -o pipefail
+          cargo test 2>&1 | tee "${RUNNER_TEMP}/logscan-tooling-cargo-test.log"
+
+      - name: No undeclared test skips
+        run: bash ../../scripts/ci/check_no_undeclared_skips.sh cargo logscan "${RUNNER_TEMP}/logscan-tooling-cargo-test.log"
+
+      # The RELEASE binary is what the lanes build and run; prove that one.
+      - name: Scanner self-test (release binary)
+        run: cargo run --release -- --self-test
+
+      # MUTATION CHECK: the shipped wrapper (tooling/e2e/ci/scan-logs.sh) and
+      # the shipped binary, together, with the release build the step above
+      # just produced. repo-guards.yml runs the wrapper's own --self-test with
+      # a FAKE scanner, because that job is toolchain-free by design; this is
+      # the one place the real binary and the real wrapper meet before a lane
+      # does. A manifest is sealed from a synthetic declaration sidecar
+      # (repeating-hex values — never a real key; the declared plants are the
+      # Dart open/close pair a `drive` sink requires), then three synthetic
+      # sinks prove the three verdicts a lane acts on: a clean sink with both
+      # plants is rc 0 and kept; the same sink plus an 8-character PREFIX of
+      # the group id is rc 1 and DELETED; the clean sink minus its closing
+      # plant is rc 3 and kept. The manifest is written where the contract
+      # requires (/tmp/haven-soak/needles/) and removed at the end.
+      - name: Runtime log scanner mutation check
+        run: |
+          set -euo pipefail
+          root="$(cd ../.. && pwd)"
+          work="${RUNNER_TEMP}/logscan-mutation"
+          rm -rf "${work}"
+          mkdir -p "${work}"
+          decl="${work}/default.needles.decl"
+          gid=b5e0c1d2b5e0c1d2b5e0c1d2b5e0c1d2b5e0c1d2b5e0c1d2b5e0c1d2b5e0c1d2
+          open=logscan-plant-dart-open-ABCDEFGHJK
+          close=logscan-plant-dart-close-LMNPQRSTUV
+          printf '%s\n' \
+            '{"class":"pubkey","value":"3f1c9a2e3f1c9a2e3f1c9a2e3f1c9a2e3f1c9a2e3f1c9a2e3f1c9a2e3f1c9a2e","role":"default","seq":1}' \
+            "{\"class\":\"nostr_group_id\",\"value\":\"${gid}\",\"role\":\"default\",\"seq\":2}" \
+            "{\"class\":\"plant\",\"sink\":\"dart\",\"phase\":\"open\",\"value\":\"${open}\",\"role\":\"default\",\"seq\":3}" \
+            "{\"class\":\"plant\",\"sink\":\"dart\",\"phase\":\"close\",\"value\":\"${close}\",\"role\":\"default\",\"seq\":4}" \
+            > "${decl}"
+          mkdir -m 0700 -p /tmp/haven-soak/needles
+          run_id="mutation-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-local}"
+          manifest="/tmp/haven-soak/needles/${run_id}.needles.json"
+          rm -f "${manifest}"
+          target/release/haven-logscan seal --run-id "${run_id}" --decl "${decl}" \
+            --expect pubkey=1 --expect nostr_group_id=1 --floor drive=4 \
+            --out "${manifest}"
+          export HAVEN_LOGSCAN_BIN="${PWD}/target/release/haven-logscan"
+          scan_drive() { # scan_drive <sink> -> prints the wrapper's rc
+            local rc=0
+            bash "${root}/tooling/e2e/ci/scan-logs.sh" --manifest "${manifest}" --sink "drive=$1" >&2 || rc=$?
+            echo "${rc}"
+          }
+          clean="${work}/clean.log"
+          printf '%s\n' "00:01 +0: ${open}" '00:02 +1: a scenario ran' \
+            '00:03 +2: another scenario ran' '00:04 +3: All tests passed!' \
+            "00:05 +3: ${close}" > "${clean}"
+          rc="$(scan_drive "${clean}")"
+          if [[ "${rc}" != 0 || ! -f "${clean}" ]]; then
+            echo "::error::a clean sink carrying both plants: wanted rc 0 and the file kept, got rc ${rc}"
+            exit 1
+          fi
+          leak="${work}/leak.log"
+          cp "${clean}" "${leak}"
+          printf '00:04 +3: joined circle %s\n' "${gid:0:8}" >> "${leak}"
+          rc="$(scan_drive "${leak}")"
+          if [[ "${rc}" != 1 || -e "${leak}" ]]; then
+            echo "::error::an 8-character prefix of the declared group id: wanted rc 1 and the file DELETED, got rc ${rc} with the file $([[ -e "${leak}" ]] && echo kept || echo deleted)"
+            exit 1
+          fi
+          truncated="${work}/truncated.log"
+          grep -vF "${close}" "${clean}" > "${truncated}"
+          rc="$(scan_drive "${truncated}")"
+          if [[ "${rc}" != 3 || ! -f "${truncated}" ]]; then
+            echo "::error::the closing plant missing from the sink: wanted rc 3 and the file kept, got rc ${rc}"
+            exit 1
+          fi
+          echo "runtime log scanner mutation check: clean kept (rc 0), prefix leak deleted (rc 1), missed plant unusable (rc 3)"
+
+      # The sealed manifest holds the synthetic declarations verbatim and lives
+      # under the banned directory; the declaration sidecar sits beside the
+      # sinks. Both go on EVERY outcome — a mutation-check failure exits before
+      # any cleanup line of its own would run.
+      - name: Discard the mutation check's manifest
+        if: always()
+        run: |
+          rm -f /tmp/haven-soak/needles/mutation-*.needles.json
+          rm -rf "${RUNNER_TEMP}/logscan-mutation"

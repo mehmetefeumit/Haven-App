@@ -20,6 +20,15 @@
 //! thing on this runner more sensitive than the journal, and the same guard
 //! keeps it out of every artifact.
 //!
+//! The NEEDLE SIDECARS (`/tmp/haven-soak/needles/<instance>.needles.decl` and
+//! `.canaries.json`) are the same shape of hazard for the runtime log scanner:
+//! the values a run declares so the host can assert they are ABSENT from every
+//! captured log. Their paths come from the instance marker in argv and from
+//! nothing else — deliberately not from the environment, because the guard that
+//! keeps them out of artifacts has to be able to name them. The directory they
+//! live in must be owner-only and not a symlink, checked at STARTUP
+//! ([`needle_role`]), because either would publish or redirect the declarations.
+//!
 //! # Usage
 //!
 //! ```text
@@ -34,13 +43,21 @@
 //! `--haven-wire-proxy-instance=<name>` marker so teardown can `pkill -f` ONE
 //! instance out of several — the same convention `haven-local-relay` uses.
 //! Unrecognised arguments are therefore inert rather than fatal.
+//!
+//! The ONE exception is that marker carrying a value that cannot be a path
+//! component: it names the needle sidecars, so a bad value is refused at startup
+//! rather than sanitised into a path the artifact guard does not watch.
+//! `start-wire-proxy.sh` validates the same charset before launching, so a lane
+//! cannot reach this — and the same startup gate refuses an unsafe needle
+//! directory, which a lane CAN reach by leaving one behind.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
 use haven_local_relay::journal::WireJournal;
-use haven_local_relay::proxy::{MlsGroupIdSink, Proxy};
+use haven_local_relay::needles::{self, CanarySink, NeedleSink};
+use haven_local_relay::proxy::{ControlSinks, MlsGroupIdSink, Proxy};
 use haven_local_relay::{config, selftest, summarize, ENV_JOURNAL, ENV_MLS_GROUP_ID_FILE};
 
 /// Exit code for a usage error (a mistyped routing table, a missing file).
@@ -66,7 +83,7 @@ async fn main() -> ExitCode {
         return run_summarize(&args, index);
     }
 
-    serve().await
+    serve(&args).await
 }
 
 /// Reads a journal and writes its redacted, upload-safe form.
@@ -129,8 +146,45 @@ fn run_summarize(args: &[String], index: usize) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// The instance role the needle sidecars are keyed on, or `None` when this
+/// process must not write them at all.
+///
+/// Two refusals, both LOUD and both at startup rather than at the first
+/// declaration:
+///
+/// * a role that cannot be a path component — it names the sidecars, so a bad
+///   value would be sanitised into a path the artifact guard does not watch;
+/// * a needle directory that is a symlink or is not owner-only — it holds every
+///   value a run declares, so the first discloses them and the second redirects
+///   them out from under the guard's extension bans. The scanner refuses
+///   anything but 0700 too, so accepting more would write files it declines to
+///   read.
+///
+/// The paths themselves come from the instance marker in argv and from nothing
+/// else: a ban whose subject a caller can relocate is no ban, and that defeat
+/// was found twice against the MLS sidecar.
+fn needle_role(args: &[String]) -> Option<String> {
+    let role = match needles::role_from_args(args) {
+        Ok(role) => role,
+        Err(reason) => {
+            eprintln!(
+                "haven-wire-proxy: refusing to derive a needle sidecar path from the instance \
+                 marker ({}); no needle or canary declaration will be recorded.",
+                reason.as_str()
+            );
+            return None;
+        }
+    };
+    let dir = Path::new(needles::NEEDLE_DIR);
+    if let Err(reason) = needles::verify_dir(dir) {
+        eprintln!("{}", needles::dir_refusal_notice(dir, reason));
+        return None;
+    }
+    Some(role)
+}
+
 /// Binds every route and serves until Ctrl-C / SIGTERM.
-async fn serve() -> ExitCode {
+async fn serve(args: &[String]) -> ExitCode {
     let config = match config::from_env() {
         Ok(config) => config,
         Err(err) => {
@@ -154,10 +208,22 @@ async fn serve() -> ExitCode {
     );
     warn_if_sidecar_is_stale(&mls_group_id_path);
 
+    let Some(role) = needle_role(args) else {
+        return ExitCode::from(RC_USAGE);
+    };
+    let decl_path = needles::decl_path(&role);
+    let canaries_path = needles::canaries_path(&role);
+
     let journal = Arc::new(WireJournal::open(&journal_path));
     let mls_group_ids = Arc::new(MlsGroupIdSink::new(mls_group_id_path.clone()));
-    let proxy = match Proxy::start(&config, Arc::clone(&journal), Arc::clone(&mls_group_ids)).await
-    {
+    let needle_sink = Arc::new(NeedleSink::new(role.clone(), decl_path.clone()));
+    let canary_sink = Arc::new(CanarySink::new(canaries_path.clone()));
+    let sinks = ControlSinks {
+        mls_group_ids: Arc::clone(&mls_group_ids),
+        needles: Arc::clone(&needle_sink),
+        canaries: Arc::clone(&canary_sink),
+    };
+    let proxy = match Proxy::start_with_sinks(&config, Arc::clone(&journal), sinks).await {
         Ok(proxy) => proxy,
         Err(err) => {
             // NOT fail-open: a proxy that cannot listen leaves the app pointed
@@ -185,6 +251,12 @@ async fn serve() -> ExitCode {
         "[haven-wire-proxy] mls-group-id sidecar: {} \
          (NEVER an artifact — it holds the values Security Rule 4 forbids on the wire)",
         mls_group_id_path.display()
+    );
+    eprintln!(
+        "[haven-wire-proxy] needle sidecars: {} and {} \
+         (NEVER an artifact — they hold the declared values the log scanner asserts are absent)",
+        decl_path.display(),
+        canaries_path.display()
     );
     eprintln!(
         "[haven-wire-proxy] journal: {} ({})",
@@ -220,7 +292,43 @@ async fn serve() -> ExitCode {
          {} refused, {} lost, {} restored after an external rotation",
         mls_stats.distinct, mls_stats.refused, mls_stats.lost, mls_stats.restored,
     );
+    report_needle_channel(&needle_sink, &canary_sink);
     ExitCode::SUCCESS
+}
+
+/// The needle channel's half of the shutdown summary.
+///
+/// COUNTS ONLY (Security Rule 15). `stop-wire-proxy.sh` tails the LAST lines of
+/// this log into the step output, so this is where a run says whether its
+/// declarations reached the host — a refused or lost one leaves the scanner with
+/// less ground truth than the run believed it had.
+fn report_needle_channel(needles: &NeedleSink, canaries: &CanarySink) {
+    let needle_stats = needles.stats();
+    eprintln!(
+        "[haven-wire-proxy] needle sidecar: {} declaration(s) recorded, {} refused, {} lost{}",
+        needle_stats.recorded,
+        needle_stats.refused,
+        needle_stats.lost,
+        if needle_stats.stale {
+            " — STALE (a previous run's file was appended to)"
+        } else {
+            ""
+        },
+    );
+    let canary_stats = canaries.stats();
+    eprintln!(
+        "[haven-wire-proxy] canary sidecar: {} manifest(s) recorded, {} repeat(s), {} refused, \
+         {} lost{}",
+        canary_stats.recorded,
+        canary_stats.repeats,
+        canary_stats.refused,
+        canary_stats.lost,
+        if canary_stats.stale {
+            " — STALE (a previous run's file was appended to)"
+        } else {
+            ""
+        },
+    );
 }
 
 /// Blocks until SIGINT **or SIGTERM**.

@@ -115,6 +115,24 @@ const String _mlsGroupIdVerb = 'HAVEN_WIRE_MLS_GROUP_ID';
 /// `MLS_GROUP_ID_ACK_VERB` in `tooling/e2e/local-relay/src/frame.rs`.
 const String _mlsGroupIdAckVerb = 'HAVEN_WIRE_MLS_GROUP_ID_ACK';
 
+/// Frame verb declaring one log needle to the recording proxy
+/// ([TestRelay.declareNeedle]). Must match `NEEDLE_DECL_VERB` in
+/// `tooling/e2e/local-relay/src/frame.rs`.
+const String _needleDeclVerb = 'HAVEN_NEEDLE_DECL';
+
+/// Frame verb the proxy answers a needle declaration with. Must match
+/// `NEEDLE_DECL_ACK_VERB` in `tooling/e2e/local-relay/src/frame.rs`.
+const String _needleDeclAckVerb = 'HAVEN_NEEDLE_DECL_ACK';
+
+/// Frame verb announcing the run's wire-canary manifest
+/// ([TestRelay.announceCanaryManifest]). Must match `CANARY_MANIFEST_VERB` in
+/// `tooling/e2e/local-relay/src/frame.rs`.
+const String _canaryManifestVerb = 'HAVEN_WIRE_CANARY_MANIFEST';
+
+/// Frame verb the proxy answers an accepted manifest with. Must match
+/// `CANARY_MANIFEST_ACK_VERB` in `tooling/e2e/local-relay/src/frame.rs`.
+const String _canaryManifestAckVerb = 'HAVEN_WIRE_CANARY_MANIFEST_ACK';
+
 /// Shortest MLS group id [encodeWireMlsGroupId] accepts, in bytes.
 ///
 /// The floor is EXACT, not generous: OpenMLS mints a 16-byte group id
@@ -341,6 +359,13 @@ class TestRelay {
   final List<_PendingOk> _pendingOks = <_PendingOk>[];
   final List<_PendingSentinel> _pendingSentinels = <_PendingSentinel>[];
   final List<_PendingMlsGroupId> _pendingMlsGroupIds = <_PendingMlsGroupId>[];
+  // Neither ack echoes anything to match on (`NEEDLE_DECL_ACK_VERB` and
+  // `CANARY_MANIFEST_ACK_VERB` in `frame.rs` carry only a count) — FIFO is
+  // what correlates a reply to its declaration, and it is safe because the
+  // proxy answers one connection's frames strictly in the order they arrive
+  // (`proxy.rs`'s `pump` loop replies before it reads the next message).
+  final List<Completer<void>> _pendingNeedleDecls = <Completer<void>>[];
+  final List<Completer<void>> _pendingCanaryManifests = <Completer<void>>[];
   final Random _rng = Random.secure();
 
   /// The ping interval the LIVE socket carries.
@@ -458,6 +483,24 @@ class TestRelay {
       }
       return;
     }
+    if (tag == _needleDeclAckVerb && frame.length >= 2) {
+      // The count itself carries nothing to match on (see
+      // [_pendingNeedleDecls]'s doc); only its presence and shape matter here.
+      if (frame[1] is! int) return;
+      if (_pendingNeedleDecls.isNotEmpty) {
+        final pending = _pendingNeedleDecls.removeAt(0);
+        if (!pending.isCompleted) pending.complete();
+      }
+      return;
+    }
+    if (tag == _canaryManifestAckVerb && frame.length >= 2) {
+      if (frame[1] is! int) return;
+      if (_pendingCanaryManifests.isNotEmpty) {
+        final pending = _pendingCanaryManifests.removeAt(0);
+        if (!pending.isCompleted) pending.complete();
+      }
+      return;
+    }
     if (tag == 'EVENT' && frame.length >= 3) {
       final subId = frame[1] as String?;
       final eventJson = frame[2];
@@ -544,6 +587,30 @@ class TestRelay {
       if (!pending.completer.isCompleted) {
         pending.completer.completeError(
           _SocketDied('the MLS group id announcement was acked'),
+        );
+      }
+    }
+
+    // Same reasoning again: a needle declaration or a canary manifest whose
+    // ack was lost in transit must not be reported as "the recorder never
+    // held it" — the frame may already be on the sidecar, only the reply
+    // never arrived — so surface the loss at the disconnect and let
+    // `_reissuingAcrossReconnect` re-send it on the fresh socket.
+    final pendingNeedleDecls = _pendingNeedleDecls.toList(growable: false);
+    _pendingNeedleDecls.clear();
+    for (final pending in pendingNeedleDecls) {
+      if (!pending.isCompleted) {
+        pending.completeError(_SocketDied('the needle declaration was acked'));
+      }
+    }
+    final pendingCanaryManifests = _pendingCanaryManifests.toList(
+      growable: false,
+    );
+    _pendingCanaryManifests.clear();
+    for (final pending in pendingCanaryManifests) {
+      if (!pending.isCompleted) {
+        pending.completeError(
+          _SocketDied('the wire-canary manifest was acked'),
         );
       }
     }
@@ -955,6 +1022,134 @@ class TestRelay {
       // By identity, not by value: a re-announcement of the SAME circle must
       // not have its still-pending twin cancelled out from under it.
       _pendingMlsGroupIds.remove(pending);
+    }
+  }
+
+  /// Declares one log needle to the recording proxy — a value the runtime
+  /// log-privacy scanner (`tooling/logscan`, Security Rule 15 / the Log
+  /// anonymity pillar) must assert is ABSENT from every captured sink.
+  ///
+  /// Mirrors [announceMlsGroupId]'s shape — same frame family (an object in
+  /// place of the bare hex string), same intercepted-never-forwarded-never-
+  /// journalled contract, same ack wait, same [_reissuingAcrossReconnect] —
+  /// with ONE deliberate difference: the recorder gate. An unproxied lane has
+  /// no sidecar for the value to reach, and unlike a real MLS group id a
+  /// needle declaration reaching an actual relay is merely pointless traffic
+  /// (an unknown command with no effect the relay would take), never a
+  /// Security Rule 4 violation — so this is a silent no-op rather than a
+  /// [StateError].
+  ///
+  /// [payload] becomes the frame's second element verbatim
+  /// (`NEEDLE_DECL_VERB` in `frame.rs`); the proxy never echoes it back
+  /// (`NEEDLE_DECL_ACK_VERB` carries only a line number), so nothing this
+  /// method returns or throws can carry a declared value.
+  ///
+  /// Throws [StateError] if the frame could not be written or went unacked
+  /// within [timeout] on a lane that DID declare a recorder: that silence
+  /// means the declaration was lost, and the scanner would then assert an
+  /// absence it was never given the ground truth for.
+  Future<void> declareNeedle(
+    Map<String, Object?> payload, {
+    Duration timeout = const Duration(seconds: 15),
+  }) => _reissuingAcrossReconnect(() => _declareNeedleOnce(payload, timeout));
+
+  Future<void> _declareNeedleOnce(
+    Map<String, Object?> payload,
+    Duration timeout,
+  ) async {
+    // FIRST statement, before validation or the writability poll — same
+    // placement as [_announceMlsGroupIdOnce]'s gate, for the same reason: the
+    // ack timeout fires only after the frame has already been written.
+    if (!wireRecorderDeclared) return;
+    if (_closed) {
+      throw StateError('TestRelay is closed; the needle was never declared.');
+    }
+    if (!_writable && !await _awaitWritable()) {
+      throw StateError(
+        'TestRelay never became writable; the needle was never declared, so '
+        'the runtime log scanner would assert an absence it was never given '
+        'the ground truth for.',
+      );
+    }
+    final pending = Completer<void>();
+    _pendingNeedleDecls.add(pending);
+    _channel.sink.add(jsonEncode(<dynamic>[_needleDeclVerb, payload]));
+    try {
+      await pending.future.timeout(timeout);
+    } on TimeoutException {
+      throw StateError(
+        'no needle-declaration ack within ${timeout.inSeconds}s. Either this '
+        'connection does not run through the recording proxy, or the proxy '
+        'refused the declaration (an unparseable or oversized payload is '
+        'refused rather than acked).',
+      );
+    } finally {
+      _pendingNeedleDecls.remove(pending);
+    }
+  }
+
+  /// Announces the run's wire-canary manifest to the recording proxy, so
+  /// `check-wire-canaries.dart` reads it from the `.canaries.json` sidecar
+  /// instead of the drive log.
+  ///
+  /// Mirrors [announceMlsGroupId]'s contract IN FULL, including the recorder
+  /// gate — unlike [declareNeedle]. The manifest carries fabricated canary
+  /// values (a circle name, a petname, a coordinate) meant only for the
+  /// host-side content-canary oracle; there is no legitimate reason to send
+  /// it to an actual relay, so an absent recorder throws rather than
+  /// silently discarding it.
+  ///
+  /// [manifest] is `WireCanaryManifest.toJson()` verbatim
+  /// (`CANARY_MANIFEST_VERB` in `frame.rs`). The proxy APPENDS every distinct
+  /// manifest to the sidecar (a byte-identical repeat — e.g. the connect-flake
+  /// retry re-issuing after a reconnect — is idempotent, not a second line)
+  /// and answers `["HAVEN_WIRE_CANARY_MANIFEST_ACK",<n>]`, `n` being how many
+  /// lines the sidecar now holds; this method does not inspect `n`, only that
+  /// an ack arrived.
+  ///
+  /// Throws [StateError] if no recorder is declared, the frame could not be
+  /// written, or it went unacked within [timeout].
+  Future<void> announceCanaryManifest(
+    Map<String, Object?> manifest, {
+    Duration timeout = const Duration(seconds: 15),
+  }) => _reissuingAcrossReconnect(
+    () => _announceCanaryManifestOnce(manifest, timeout),
+  );
+
+  Future<void> _announceCanaryManifestOnce(
+    Map<String, Object?> manifest,
+    Duration timeout,
+  ) async {
+    if (!wireRecorderDeclared) {
+      throw StateError(
+        'refusing to announce the wire-canary manifest: this build declares '
+        'no recording proxy (HAVEN_WIRE_SENTINEL is the compiled default), '
+        'so the frame would go to the relay itself.',
+      );
+    }
+    if (_closed) {
+      throw StateError(
+        'TestRelay is closed; the wire-canary manifest was never announced.',
+      );
+    }
+    if (!_writable && !await _awaitWritable()) {
+      throw StateError(
+        'TestRelay never became writable; the wire-canary manifest was '
+        'never announced.',
+      );
+    }
+    final pending = Completer<void>();
+    _pendingCanaryManifests.add(pending);
+    _channel.sink.add(jsonEncode(<dynamic>[_canaryManifestVerb, manifest]));
+    try {
+      await pending.future.timeout(timeout);
+    } on TimeoutException {
+      throw StateError(
+        'no wire-canary-manifest ack within ${timeout.inSeconds}s. This '
+        'connection likely does not run through the recording proxy.',
+      );
+    } finally {
+      _pendingCanaryManifests.remove(pending);
     }
   }
 

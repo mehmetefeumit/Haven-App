@@ -1,0 +1,11 @@
+{"class":"pubkey","value":"0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9","role":"alice","seq":1}
+{"class":"nostr_group_id","value":"1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f","role":"alice","seq":2}
+{"class":"event_id","value":"2e3f4a5b6c7d8e9f0a1b2c3d4e5f60712e3f4a5b6c7d8e9f0a1b2c3d4e5f6071","role":"alice","seq":3}
+{"class":"mls_group_id","value":"3f4a5b6c7d8e9f0a1b2c3d4e5f6071823f4a5b6c7d8e9f0a1b2c3d4e5f607182","role":"alice","seq":4}
+{"class":"nsec","value":"4a5b6c7d8e9f0a1b2c3d4e5f607182934a5b6c7d8e9f0a1b2c3d4e5f60718293","role":"alice","seq":5}
+{"class":"circle_name","value":"Kåre's Café","role":"alice","seq":6}
+{"class":"coordinate","value":"-33.865143,151.209901","role":"alice","seq":7}
+{"class":"geohash","value":"r3gx2f7k","role":"alice","seq":8}
+{"class":"relay_url","value":"wss://rëlay.fixture.invalid:7777/","role":"alice","seq":9}
+{"class":"plant","value":"logscan-plant-dart-open-ABCDEFGHJK","sink":"dart","phase":"open","role":"alice","seq":10}
+{"class":"plant","value":"logscan-plant-dart-close-KMNPQRSTUV","sink":"dart","phase":"close","role":"alice","seq":11}

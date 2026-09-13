@@ -112,6 +112,129 @@ pub const MLS_GROUP_ID_VERB: &str = "HAVEN_WIRE_MLS_GROUP_ID";
 /// running a lane whose Rule-4 ground truth was silently discarded.
 pub const MLS_GROUP_ID_ACK_VERB: &str = "HAVEN_WIRE_MLS_GROUP_ID_ACK";
 
+/// The verb a client declares one log needle with.
+///
+/// # Shape (contract)
+///
+/// A TEXT WebSocket message on any connection to the proxy:
+///
+/// ```text
+/// ["HAVEN_NEEDLE_DECL",{"class":"pubkey","value":"…"}]
+/// ```
+///
+/// The payload is OPAQUE to the proxy: it is validated as a JSON object
+/// ([`crate::needles::validate_payload`]) and written verbatim, so a new needle
+/// class needs no change here. Handled exactly like [`MLS_GROUP_ID_VERB`] —
+/// intercepted, never forwarded, journalled NOWHERE — and for the same reason:
+/// the declared value is what the runtime log scanner asserts is ABSENT from
+/// every sink, and the journal is one of the files it reads.
+pub const NEEDLE_DECL_VERB: &str = "HAVEN_NEEDLE_DECL";
+
+/// The verb the proxy answers an accepted needle declaration with.
+///
+/// ```text
+/// ["HAVEN_NEEDLE_DECL_ACK",<sidecar line number>]
+/// ```
+///
+/// Carries a COUNT and nothing else. Echoing the payload back — as the
+/// MLS-group-id ack echoes its normalized value — would put the declared value
+/// on the return path, where a harness that logged the ack would publish the
+/// needle into the very drive log the scanner then reads.
+pub const NEEDLE_DECL_ACK_VERB: &str = "HAVEN_NEEDLE_DECL_ACK";
+
+/// The verb a client announces its wire-canary manifest with.
+///
+/// ```text
+/// ["HAVEN_WIRE_CANARY_MANIFEST",{…the manifest object…}]
+/// ```
+///
+/// The manifest used to be a LOG LINE, which put its canary circle name,
+/// petname and coordinate into a 14-day CI artifact — and made structural rules
+/// fire on the announcement itself. It travels this channel instead, to a file
+/// the lane never uploads.
+pub const CANARY_MANIFEST_VERB: &str = "HAVEN_WIRE_CANARY_MANIFEST";
+
+/// The verb the proxy answers an accepted manifest with.
+///
+/// ```text
+/// ["HAVEN_WIRE_CANARY_MANIFEST_ACK",1]
+/// ```
+///
+/// A COUNT — the manifest lines the sidecar now holds, so a run that announces a
+/// second, DISTINCT manifest (the connect-flake retry re-mints its plant inside
+/// the same proxy instance) is acked with 2. A byte-identical re-announcement is
+/// acked with the count unchanged. The manifest's own values never travel back.
+pub const CANARY_MANIFEST_ACK_VERB: &str = "HAVEN_WIRE_CANARY_MANIFEST_ACK";
+
+/// Prefix every control verb — recognised or not — shares.
+///
+/// A frame whose verb starts with this and is not in [`ControlVerb::ALL`] is a
+/// control frame this build does not know: the connection is TERMINATED rather
+/// than the frame forwarded, because a verb the proxy cannot intercept is a verb
+/// whose payload reaches a relay.
+pub const CONTROL_VERB_NAMESPACE: &str = "HAVEN_";
+
+/// Every verb a CLIENT may send that the proxy intercepts.
+///
+/// ONE table, in the library, shared by every binary that proxies app traffic:
+/// a second proxy binary with its own list would forward the verbs it had not
+/// learned, and a declared needle forwarded upstream is stored by the relay and
+/// lands in a log the lane uploads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlVerb {
+    /// [`SENTINEL_VERB`] — a journal snapshot marker.
+    Sentinel,
+    /// [`MLS_GROUP_ID_VERB`] — the real MLS group id (Security Rule 4).
+    MlsGroupId,
+    /// [`NEEDLE_DECL_VERB`] — one log-needle declaration.
+    NeedleDecl,
+    /// [`CANARY_MANIFEST_VERB`] — the run's wire-canary manifest.
+    CanaryManifest,
+}
+
+impl ControlVerb {
+    /// The whole table. The `const` list every dispatcher is measured against.
+    pub const ALL: [Self; 4] = [
+        Self::Sentinel,
+        Self::MlsGroupId,
+        Self::NeedleDecl,
+        Self::CanaryManifest,
+    ];
+
+    /// The wire token. An exhaustive match, so a new variant cannot be added
+    /// without naming its verb.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Sentinel => SENTINEL_VERB,
+            Self::MlsGroupId => MLS_GROUP_ID_VERB,
+            Self::NeedleDecl => NEEDLE_DECL_VERB,
+            Self::CanaryManifest => CANARY_MANIFEST_VERB,
+        }
+    }
+
+    /// The table entry `verb` names, if any.
+    #[must_use]
+    pub fn from_verb(verb: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|known| known.as_str() == verb)
+    }
+
+    /// The table entry whose token appears anywhere in `raw`, if any.
+    ///
+    /// A BYTE-LEVEL test, deliberately weaker than "parses as that frame": a
+    /// message naming a control verb is a control frame whatever else is wrong
+    /// with it, and must be refused rather than relayed. Interception was once
+    /// keyed on the parsed form, so malformed JSON, a non-array and a Binary
+    /// frame all carried their payload to the relay AND into the journal.
+    #[must_use]
+    pub fn named_in(raw: &[u8]) -> Option<Self> {
+        Self::ALL.into_iter().find(|known| {
+            let token = known.as_str().as_bytes();
+            raw.windows(token.len()).any(|window| window == token)
+        })
+    }
+}
+
 /// Fewest hex characters an MLS group id declaration may carry.
 ///
 /// The oracle's C5.8 is a SUBSTRING scan, and it refuses a needle shorter than
@@ -188,6 +311,44 @@ pub struct Observation {
     /// forwarded, never journalled) exactly like a well-formed one, since the
     /// verb alone is enough to know a Rule-4 value was meant.
     pub mls_group_id: Option<String>,
+    /// `Some(payload)` when this message declares a log needle.
+    ///
+    /// The frame's second element verbatim, unvalidated — validation is
+    /// [`crate::needles::validate_payload`], at the interception point, so a
+    /// refusal can be reported with the connection it came from.
+    pub needle_decl: Option<Value>,
+    /// `Some(payload)` when this message announces the wire-canary manifest.
+    pub canary_manifest: Option<Value>,
+}
+
+/// One classified CONTROL frame, with its payload.
+///
+/// The single dispatch type: [`crate::proxy`] matches it exhaustively, so a verb
+/// added to [`ControlVerb::ALL`] cannot be left un-intercepted — the compiler
+/// refuses the build instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlFrame<'a> {
+    /// A journal snapshot marker, with its opaque token.
+    Sentinel(&'a str),
+    /// A real MLS group id, as declared.
+    MlsGroupId(&'a str),
+    /// One log-needle declaration payload.
+    NeedleDecl(&'a Value),
+    /// The wire-canary manifest payload.
+    CanaryManifest(&'a Value),
+}
+
+impl ControlFrame<'_> {
+    /// Which table entry this frame is.
+    #[must_use]
+    pub const fn verb(&self) -> ControlVerb {
+        match self {
+            Self::Sentinel(_) => ControlVerb::Sentinel,
+            Self::MlsGroupId(_) => ControlVerb::MlsGroupId,
+            Self::NeedleDecl(_) => ControlVerb::NeedleDecl,
+            Self::CanaryManifest(_) => ControlVerb::CanaryManifest,
+        }
+    }
 }
 
 impl Observation {
@@ -196,6 +357,30 @@ impl Observation {
     #[must_use]
     pub const fn is_unparseable(&self) -> bool {
         self.frame.is_none()
+    }
+
+    /// The frame's verb, when the message parsed as a frame at all.
+    #[must_use]
+    pub fn verb(&self) -> Option<&str> {
+        self.frame.as_ref()?.get(0)?.as_str()
+    }
+
+    /// The control frame this message IS, if any.
+    #[must_use]
+    pub fn control(&self) -> Option<ControlFrame<'_>> {
+        if let Some(token) = &self.sentinel {
+            return Some(ControlFrame::Sentinel(token));
+        }
+        if let Some(raw) = &self.mls_group_id {
+            return Some(ControlFrame::MlsGroupId(raw));
+        }
+        if let Some(payload) = &self.needle_decl {
+            return Some(ControlFrame::NeedleDecl(payload));
+        }
+        if let Some(payload) = &self.canary_manifest {
+            return Some(ControlFrame::CanaryManifest(payload));
+        }
+        None
     }
 }
 
@@ -215,6 +400,11 @@ pub fn classify_text(text: &str) -> Observation {
 
     let sentinel = (verb == SENTINEL_VERB).then(|| sentinel_token(array));
     let mls_group_id = (verb == MLS_GROUP_ID_VERB).then(|| second_string(array));
+    // The payload verbatim, `Null` when the frame named the verb without one: a
+    // declaration the proxy cannot read is still a declaration, and is refused
+    // at the interception point rather than forwarded.
+    let needle_decl = (verb == NEEDLE_DECL_VERB).then(|| second_value(array));
+    let canary_manifest = (verb == CANARY_MANIFEST_VERB).then(|| second_value(array));
 
     Observation {
         frame: Some(value),
@@ -222,6 +412,8 @@ pub fn classify_text(text: &str) -> Observation {
         raw_len,
         sentinel,
         mls_group_id,
+        needle_decl,
+        canary_manifest,
     }
 }
 
@@ -276,6 +468,32 @@ pub fn mls_group_id_ack(normalized: &str) -> String {
     .to_string()
 }
 
+/// Builds the ack an ACCEPTED needle declaration is answered with.
+///
+/// `seq` is the sidecar line the declaration landed on — a count, which is all
+/// the harness needs to know the host holds it.
+#[must_use]
+pub fn needle_decl_ack(seq: u64) -> String {
+    Value::Array(vec![
+        Value::String(NEEDLE_DECL_ACK_VERB.to_owned()),
+        Value::from(seq),
+    ])
+    .to_string()
+}
+
+/// Builds the ack an ACCEPTED wire-canary manifest is answered with.
+///
+/// `manifests` is how many manifest lines the sidecar holds — 1 whenever the
+/// host holds exactly this run's manifest.
+#[must_use]
+pub fn canary_manifest_ack(manifests: u64) -> String {
+    Value::Array(vec![
+        Value::String(CANARY_MANIFEST_ACK_VERB.to_owned()),
+        Value::from(manifests),
+    ])
+    .to_string()
+}
+
 /// Classifies a BINARY message.
 ///
 /// Nostr is a text protocol, so a binary message is always a finding. The
@@ -291,6 +509,8 @@ pub fn classify_binary(bytes: &[u8]) -> Observation {
         raw_len: bytes.len(),
         sentinel: None,
         mls_group_id: None,
+        needle_decl: None,
+        canary_manifest: None,
     }
 }
 
@@ -328,6 +548,15 @@ fn second_string(array: &[Value]) -> String {
         .to_owned()
 }
 
+/// The frame's second element, cloned, or `Null` when there is none.
+///
+/// Cloned rather than borrowed because the frame itself moves into the
+/// observation, and `Null` rather than `None` so "the verb arrived with no
+/// payload" stays a declaration the interception point can refuse.
+fn second_value(array: &[Value]) -> Value {
+    array.get(1).cloned().unwrap_or(Value::Null)
+}
+
 fn unparseable(text: &str, raw_len: usize) -> Observation {
     Observation {
         frame: None,
@@ -335,6 +564,8 @@ fn unparseable(text: &str, raw_len: usize) -> Observation {
         raw_len,
         sentinel: None,
         mls_group_id: None,
+        needle_decl: None,
+        canary_manifest: None,
     }
 }
 
@@ -616,5 +847,179 @@ mod tests {
             format!(r#"["{MLS_GROUP_ID_ACK_VERB}","{}"]"#, an_id()),
             "the ack shape is a contract the harness parses"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // The shared control-verb table
+    // -----------------------------------------------------------------------
+
+    /// Every table entry, with the frame a client sends it as and the
+    /// [`ControlFrame`] it must classify to. The ONE place the verbs, the frame
+    /// shapes and the dispatch variants are tied together.
+    fn table_fixtures() -> Vec<(ControlVerb, String)> {
+        ControlVerb::ALL
+            .into_iter()
+            .map(|verb| {
+                let frame = match verb {
+                    ControlVerb::Sentinel => format!(r#"["{}","tok"]"#, verb.as_str()),
+                    ControlVerb::MlsGroupId => format!(r#"["{}","{}"]"#, verb.as_str(), an_id()),
+                    ControlVerb::NeedleDecl | ControlVerb::CanaryManifest => {
+                        format!(r#"["{}",{{"class":"pubkey"}}]"#, verb.as_str())
+                    }
+                };
+                (verb, frame)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_table_entry_classifies_as_its_own_control_frame() {
+        let fixtures = table_fixtures();
+        assert_eq!(
+            fixtures.len(),
+            ControlVerb::ALL.len(),
+            "every table entry needs a frame fixture, or a verb ships unexercised"
+        );
+        for (verb, frame) in fixtures {
+            let observation = classify_text(&frame);
+            let control = observation
+                .control()
+                .unwrap_or_else(|| panic!("{} did not classify as a control frame", verb.as_str()));
+            assert_eq!(
+                control.verb(),
+                verb,
+                "{} classified as the wrong control frame",
+                verb.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn every_table_entry_is_in_the_control_namespace_and_distinct() {
+        let tokens: Vec<&str> = ControlVerb::ALL.iter().map(|v| v.as_str()).collect();
+        for token in &tokens {
+            assert!(
+                token.starts_with(CONTROL_VERB_NAMESPACE),
+                "'{token}' is outside the namespace the unknown-verb rule keys on, so a typo of \
+                 it would be FORWARDED to a relay instead of terminating the connection"
+            );
+            assert_eq!(
+                ControlVerb::from_verb(token).map(ControlVerb::as_str),
+                Some(*token)
+            );
+        }
+        let mut unique = tokens.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), tokens.len(), "two entries share a token");
+    }
+
+    #[test]
+    fn an_unknown_namespaced_verb_is_not_in_the_table() {
+        assert!(ControlVerb::from_verb("HAVEN_WIRE_CHAOS").is_none());
+        assert!(ControlVerb::from_verb("REQ").is_none());
+        // The ACK verbs are proxy-synthesized, never client verbs.
+        assert!(ControlVerb::from_verb(NEEDLE_DECL_ACK_VERB).is_none());
+        assert!(ControlVerb::from_verb(CANARY_MANIFEST_ACK_VERB).is_none());
+    }
+
+    // The byte-level net: a message naming a verb in ANY shape — truncated
+    // JSON, an object, a Binary frame — must still be recognised as a control
+    // frame, or its payload reaches the relay.
+    #[test]
+    fn a_verb_named_in_any_shape_is_found_at_byte_level() {
+        for verb in ControlVerb::ALL {
+            let token = verb.as_str();
+            for raw in [
+                format!(r#"["{token}","truncated"#),
+                format!(r#"{{"verb":"{token}"}}"#),
+                format!("   {token}   "),
+            ] {
+                assert_eq!(
+                    ControlVerb::named_in(raw.as_bytes()),
+                    Some(verb),
+                    "{raw} does not read as a {token} frame"
+                );
+            }
+        }
+        assert!(ControlVerb::named_in(br#"["REQ","s",{}]"#).is_none());
+        assert!(ControlVerb::named_in(b"HAVEN_WIRE_CHAOS").is_none());
+    }
+
+    #[test]
+    fn a_needle_declaration_carries_its_payload_verbatim() {
+        let obs = classify_text(&format!(
+            r#"["{NEEDLE_DECL_VERB}",{{"class":"pubkey","value":"abcd"}}]"#
+        ));
+        let payload = obs.needle_decl.as_ref().expect("a declaration payload");
+        assert_eq!(payload["class"], "pubkey");
+        assert_eq!(payload["value"], "abcd");
+        assert!(
+            obs.sentinel.is_none() && obs.mls_group_id.is_none(),
+            "the verbs must not be confused"
+        );
+    }
+
+    #[test]
+    fn a_declaration_with_no_payload_is_still_recognised_as_one() {
+        // Recognised, so it is intercepted. Refusing it later is right;
+        // FORWARDING it because it was malformed would hand the relay whatever a
+        // fixed version would carry.
+        for verb in [NEEDLE_DECL_VERB, CANARY_MANIFEST_VERB] {
+            let obs = classify_text(&format!(r#"["{verb}"]"#));
+            assert_eq!(
+                obs.control().map(|c| c.verb().as_str()),
+                Some(verb),
+                "a payload-less {verb} must still classify as one"
+            );
+        }
+    }
+
+    #[test]
+    fn a_manifest_announcement_carries_its_object_verbatim() {
+        let obs = classify_text(&format!(
+            r#"["{CANARY_MANIFEST_VERB}",{{"role":"alice","latitude":-47.2}}]"#
+        ));
+        let payload = obs.canary_manifest.as_ref().expect("a manifest payload");
+        assert_eq!(payload["role"], "alice");
+        assert_eq!(payload["latitude"], -47.2);
+    }
+
+    #[test]
+    fn binary_and_unparseable_messages_never_report_a_control_payload() {
+        for obs in [classify_binary(&[0x00, 0x01]), classify_text("not json")] {
+            assert!(obs.needle_decl.is_none());
+            assert!(obs.canary_manifest.is_none());
+            assert!(obs.control().is_none());
+        }
+    }
+
+    #[test]
+    fn the_new_acks_carry_a_count_and_never_a_payload() {
+        assert_eq!(
+            needle_decl_ack(7),
+            format!(r#"["{NEEDLE_DECL_ACK_VERB}",7]"#)
+        );
+        assert_eq!(
+            canary_manifest_ack(1),
+            format!(r#"["{CANARY_MANIFEST_ACK_VERB}",1]"#)
+        );
+    }
+
+    // The harness declares its OWN socket as a sentinel whose token happens to
+    // be `HAVEN_WIRE_CONN` (`test_relay.dart:107,847-854`), which every host
+    // oracle identifies by the intercepted verb. It is a TOKEN, not a verb, so
+    // the Sentinel table entry is what keeps it classifying as it does today —
+    // and the unknown-verb termination must never reach it.
+    #[test]
+    fn the_harness_socket_declaration_still_classifies_as_a_sentinel() {
+        let obs = classify_text(r#"["HAVEN_WIRE_SENTINEL","HAVEN_WIRE_CONN"]"#);
+        assert_eq!(obs.sentinel.as_deref(), Some("HAVEN_WIRE_CONN"));
+        assert_eq!(
+            obs.control().map(|c| c.verb()),
+            Some(ControlVerb::Sentinel),
+            "the harness-socket declaration must keep dispatching as a sentinel"
+        );
+        assert_eq!(obs.verb(), Some(SENTINEL_VERB));
     }
 }

@@ -152,6 +152,9 @@ tooling/e2e/strfry-data/
 
 # Miscellaneous
 *.log
+# haven-logscan's self-test fixtures are synthetic captures compiled in with
+# include_str!; a checkout without them cannot build the scanner.
+!tooling/logscan/fixtures/*.log
 *.tmp
 *.temp
 *.cache

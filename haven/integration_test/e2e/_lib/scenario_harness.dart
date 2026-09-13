@@ -88,7 +88,9 @@ abstract final class ScenarioHarness {
     );
     final relay = await TestRelay.connect(url: relayUrl);
     final role = ScenarioRole.fromEnvironment();
-    debugPrint('[ScenarioHarness] bootstrapped role=$role relay=$relayUrl');
+    // No relay URL here (Log anonymity pillar: no relay URLs, the hermetic
+    // pool included) — `role` alone is enough to confirm bootstrap ran.
+    debugPrint('[ScenarioHarness] bootstrapped role=$role');
     return ScenarioContext._(role: role, relay: relay);
   }
 

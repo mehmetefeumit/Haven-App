@@ -18,7 +18,7 @@ oracle is not.
 
 | Workflow | What it runs | How | Relay |
 |---|---|---|---|
-| `e2e-android.yml` | `e2e_combined.dart` (real Alice UI + synthetic Bob/Carol/Dave FFI peers) | `flutter drive` on an AVD | strfry container, `ws://10.0.2.2:7777` |
+| `e2e-android.yml` | `e2e_combined.dart` (real Alice UI + synthetic Bob/Carol/Dave FFI peers); every captured log is run through `scan-logs.sh` — the key-material floor plus the `haven-logscan` identifier scanner — before it is echoed or uploaded (failure mode 13) | `flutter drive` on an AVD, behind the recording wire proxy | strfry container behind the proxy, `ws://10.0.2.2:7788` → `ws://127.0.0.1:7777` |
 | `e2e-ios.yml` | `e2e_combined.dart` + `ios_bg_mirror_test.dart` | `flutter test -d <udid>` on a booted simulator | host-native relay, `ws://localhost:7777` |
 | `e2e-background-catchup.yml` | M7 background catch-up runtime proof (4 phases + a guest reboot) | `run-m7-background-catchup.sh` under `reactivecircus/android-emulator-runner` | strfry container, `ws://10.0.2.2:7777` |
 | `e2e-live-sync.yml` | The SAME two lanes, flag-ON (`HAVEN_LIVE_SYNC=true`) — a manual re-run of what `ci.yml` already gates on | `workflow_dispatch` only | — |
@@ -675,6 +675,84 @@ device to `sim-unified-full.log` (chronological, so the earliest bytes; the rest
 is discarded with the archive), deletes the archive, and runs both exports —
 with the transcript and the relay logs — through the same delete-on-leak gate
 before the upload step can see them.
+
+## Failure mode 13 — the runtime log scanner fails the Android lane (rc 1, 3 or 4)
+
+**Where it runs.** `e2e-android.yml` sets `HAVEN_LOGSCAN=true`, so after the
+drive `run-single-avd-scenario.sh` seals the run's needle manifest
+(`haven-logscan seal`, from the declaration sidecars the recording proxy wrote
+under `/tmp/haven-soak/needles/`) and hands the logcat and both drive logs to
+`tooling/e2e/ci/scan-logs.sh`, which runs the key-material floor
+(`scan-logs-for-secrets.sh`, failure mode 12) AND `haven-logscan scan` against
+that manifest, before the drive log is echoed. The `Scan captured logs for
+secrets before upload` step runs the same wrapper, against the same manifest,
+over the relay log, the host diagnostics, the proxy log and the wire summary.
+The wrapper folds the two verdicts as `1 > 2 > 3 > 4 > 0`; its last line names
+both scanners' codes, the sink count and the manifest's basename. The failing
+line above it is one of three shapes:
+
+**rc 1 — `LEAK: <sink>:<line> [<class>/<encoding>|<rule>] tag=<tag> ×<n>`,
+then `secret-leak guard tripped … removed the scanned logs`.** A declared
+identifier (a pubkey, group id, event id, name, coordinate or relay URL the run
+minted — in any of the encodings the manifest expands it into) or a structural
+shape (a bare 64-hex run, a bech32 string, a coordinate pair, a URL, an IP, a
+32-element array…) is in a captured log. **Evidence is withheld by design**: the
+wrapper deleted every sink it scanned before returning, so the failure artifact
+carries none of them and the job log names only the sink, the line number, the
+class and the encoding — never the value. Reproduce locally against your own
+emulator (the same runner script and scenario; the proxy started after the
+needle directory was rotated) and run `haven-logscan scan … --disclose-values`
+there to read the matched text; that flag is banned from every workflow and
+runner by `check_wire_proxy_test_only.sh`, and must stay so. Then fix the log
+site (CLAUDE.md, Log anonymity: the value is the leak, whatever the level; use
+a `log_alias` handle, a bucket or a relative offset). Do not re-run: the needle
+set is re-declared on every run and the match is deterministic.
+
+**rc 3 — `positive control missed …`, `absent`, `empty`, a segment-count or
+ledger mismatch.** UNUSABLE: fix the capture, not the app. Every run plants a
+per-run token at the start and the end of the drive (`logscan-plant-dart-open-…`
+/ `…-close-…`, declared over the proxy) and the app's own start-up plants
+(`logscan-plant-rust-open-…`, `…-kotlin-open-…`), and the scanner requires each
+in the sink class it must reach. A missing plant means the sink was not read
+end to end — the capture died, rotated, or was never flushed, or the file
+scanned is not the file the run wrote — so the "no leak" it would otherwise
+report is a statement about nothing. Check the logcat capture (`adb logcat -c`
+and the background `adb logcat` in the runner), the final-attempt slice, and
+whether the drive reached its `close` plant; a run that failed before the end
+of the drive fails here too, and that is the intended second signal, not noise.
+
+**rc 4 — a floor unmet: `declaration floor`, `line floor`, `no manifest`.**
+META-FLOOR: fix the scenario. The seal requires the scenario to have declared
+at least the identities, circles, names, coordinates and event carriers its
+shape implies (`--expect pubkey=3 --expect coordinate=4 --expect circle_name=1
+--expect petname=1 --expect nostr_group_id=1 --expect mls_group_id=1
+--expect event_id=3` in the runner — three roles, the three role fakes plus
+the canary coordinate, one circle name, one petname, at least one circle,
+three deterministic event carriers), and the scan
+requires each sink to be at least its line floor (the policy's per-class
+`min_lines` in `tooling/logscan/policy.toml` — 2000 for a logcat; the runner
+overrides none of them). Below either, the scan proved too little to be called
+clean. `no manifest` means the seal never ran or refused — read its
+error above; a sidecar the drive never wrote (`no needle declaration sidecar`)
+is reported as rc 3 by the runner before the seal, and means the drive never
+reached the proxy's declaration channel (the proxy not running, not the
+recording one, or started before the needle directory was rotated).
+
+rc 2 (`GUARD BROKEN`) is the instrument, not the run: the scanner binary
+absent or not executable (`Build the runtime log scanner` failed, or
+`HAVEN_LOGSCAN_BIN` points elsewhere), a usage error in the wrapper call, a
+mis-shaped manifest, an expired allowlist entry. It is never a skip: an absent
+scanner reds the lane, and the key-material floor has already run and contained
+by the time it is reported.
+
+The declaration sidecars, the sealed manifest and the wire-canary manifest hold
+the run's identifiers verbatim. They are never uploaded, never read into a job
+log (`check_wire_proxy_test_only.sh` bans every read of them from a workflow or
+runner), and are removed by the lane's final `Discard needle manifests` step on
+every outcome. The scanner's findings reports (`/tmp/logscan-report*.ndjson`,
+sink:line and class only) are not uploaded either — the same guard bans every
+`.ndjson` from an upload path — so the LEAK lines in the two scanning steps'
+logs are the record.
 
 ## What these lanes do NOT cover
 
