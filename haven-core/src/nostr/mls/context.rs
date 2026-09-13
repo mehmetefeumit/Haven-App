@@ -11,6 +11,7 @@ use nostr::prelude::{Event, UnsignedEvent};
 
 use super::manager::SessionManager;
 use super::types::{GroupId, ScreenedIngest};
+use crate::log_alias::{self, LogAliasClass};
 use crate::nostr::error::{NostrError, Result};
 use cgka_session::SessionEffects;
 
@@ -125,8 +126,17 @@ impl MlsGroupContext {
 
 impl std::fmt::Debug for MlsGroupContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The `nostr_group_id` is the `#h` every relay serving this circle
+        // sees, so it is aliased, not printed (Rule 15); the MLS group id never
+        // renders at all (Rule 4).
+        // The generic entry rather than `log_alias::circle`, because the id is
+        // in hand as hex here: `log_alias` normalises both spellings to the same
+        // canonical bytes, so the handle equals the one minted from the array.
         f.debug_struct("MlsGroupContext")
-            .field("nostr_group_id", &self.nostr_group_id)
+            .field(
+                "circle",
+                &log_alias::alias(LogAliasClass::Circle, self.nostr_group_id.as_bytes()),
+            )
             .field("group_id", &"<redacted>")
             .finish_non_exhaustive()
     }
@@ -178,16 +188,18 @@ mod tests {
         cleanup(&dir);
     }
 
+    /// Neither group id renders: the MLS one never has (Rule 4), and the
+    /// `nostr_group_id` — the `#h` every relay serving this circle sees — is now
+    /// an alias handle instead (Rule 15).
     #[test]
-    fn debug_redacts_group_id() {
+    fn debug_redacts_both_group_ids() {
         let (manager, dir) = test_manager();
-        let group_id = GroupId::new(vec![1, 2, 3]);
-        let ctx = MlsGroupContext::new(manager, group_id, "my-group");
+        let group_hex = "a".repeat(64);
+        let ctx = MlsGroupContext::new(manager, GroupId::new(vec![1, 2, 3]), &group_hex);
         let out = format!("{ctx:?}");
-        assert!(out.contains("MlsGroupContext"));
-        assert!(out.contains("my-group"));
-        assert!(out.contains("<redacted>"));
+        assert!(out.contains("circle#"), "expected an alias handle: {out}");
         assert!(!out.contains("010203"));
+        crate::assert_debug_redacted!(ctx, "MlsGroupContext", &[&group_hex]);
         cleanup(&dir);
     }
 

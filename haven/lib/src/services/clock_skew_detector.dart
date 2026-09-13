@@ -57,6 +57,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/services/relay_service.dart';
+import 'package:haven/src/utils/log_alias.dart';
 
 /// What the evidence says about the direction of this device's clock error.
 enum DeviceClockComplaint {
@@ -478,10 +479,11 @@ class ClockSkewDetector {
     final next = _evaluate();
     if (next == _status) return;
     _status = next;
+    // log-scan-ok: signal/complaint are enum variant names, sources bucketed
     debugPrint(
       '[ClockSkew] verdict: ${next.signal.name} '
       'complaint=${next.complaint?.name ?? "-"} '
-      'sources=${next.corroboratingSources}',
+      'sources=${magnitudeBucket(next.corroboratingSources)}',
     );
     if (!_changes.isClosed) _changes.add(next);
   }

@@ -4,6 +4,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use flutter_rust_bridge::frb;
+// The newtypes of the log-alias contract: they exist so a real MLS `GroupId`
+// or a secret can never be passed where a pseudonym-able value belongs.
+use haven_core::log_alias::{EventIdHex, LogAliasClass, PeerPubkey, RelayUrl};
 
 /// Initializes the Rust runtime (logging, panic hooks).
 ///
@@ -29,60 +32,210 @@ use flutter_rust_bridge::frb;
 ///   and honors the "no internal state in production logs" posture
 ///   (CLAUDE.md security rules #6/#8).
 ///
-/// Independently of the level cap, the `keyring_core` crate logs
-/// `created entry {:?}` / `get secret from entry {:?}` at `DEBUG`, and the
-/// credential's `Debug` is the store's to define — the mock store's embeds the
-/// raw secret bytes (the SQLCipher DB keys). In a debug build that level is
-/// active, so those bytes would reach a world-readable logcat / the unified
-/// log (and CI log artifacts). We therefore preempt EVERY backend FRB would
-/// install — `android_logger` on Android, `oslog` on iOS/macOS — with an
-/// identical one that drops the `keyring_core` target, installed BEFORE
-/// `setup_default_user_utils` so FRB's own call no-ops. Haven's `log::debug!`
-/// output is untouched.
+/// Independently of the level cap, a DEPENDENCY's records are the ones that
+/// carry identifiers: `keyring_core` logs `created entry {:?}` /
+/// `get secret from entry {:?}` at `DEBUG` and the credential's `Debug` is the
+/// store's to define (the mock store's embeds the raw SQLCipher DB keys);
+/// `tungstenite` logs the `Host:` request header — a relay's host and port — at
+/// `TRACE`; `nostr-relay-pool` logs relay URLs at `DEBUG`. All three reach a
+/// world-readable logcat / the unified log (and every CI log artifact) in a
+/// debug build through the same `log` facade Haven uses.
+///
+/// So the backends are installed behind [`HavenTargetFilter`], an ALLOWLIST:
+/// only Haven's own crates may log at all, and a newly added dependency is
+/// silent by default rather than until somebody notices it. It preempts EVERY
+/// backend FRB would install — `android_logger` on Android, `oslog` on
+/// iOS/macOS — by being installed BEFORE `setup_default_user_utils`, whose own
+/// `set_logger` then fails and no-ops. Haven's `log::debug!` output is
+/// untouched.
 ///
 /// Filtering only Android would key a confidentiality property to one target:
 /// the same records reach the Apple unified log with nothing dropping them.
 #[frb(init)]
 pub fn init_app() {
-    // Install our own backend FIRST so its per-target filter wins:
-    // `android_logger::init_once` is first-call-wins (shared `OnceLock`) and
-    // `oslog`'s `init` goes through `log::set_boxed_logger`, which is also
-    // first-call-wins, so FRB's identical calls inside
-    // `setup_default_user_utils` below become no-ops. The filter drops the
-    // `keyring_core` target, which would otherwise log raw DB-key bytes at
-    // DEBUG (Security Rule #6); every other target stays at the build-profile
-    // level capped below.
+    // Install our own backend FIRST so the allowlist wins: `log::set_boxed_logger`
+    // is first-call-wins, and `android_logger::init_once` / `oslog`'s `init` both
+    // go through `log::set_logger`, so FRB's calls inside
+    // `setup_default_user_utils` below fail to install and become no-ops.
+    //
+    // The backend's OWN filter is set to the same allowlist for defence in
+    // depth, and names `keyring_core` explicitly: `env_filter` prefix-matches, so
+    // a denied target is denied twice, and the one dependency that logged raw
+    // DB-key bytes stays visible at the install site (Security Rule 6).
     #[cfg(target_os = "android")]
-    android_logger::init_once(
-        android_logger::Config::default()
-            .with_max_level(log::LevelFilter::Trace)
-            .with_filter(
-                android_logger::FilterBuilder::new()
-                    .filter_level(log::LevelFilter::Trace)
-                    .filter_module("keyring_core", log::LevelFilter::Off)
-                    .build(),
-            ),
-    );
+    let _ = log::set_boxed_logger(Box::new(HavenTargetFilter(
+        android_logger::AndroidLogger::new(
+            android_logger::Config::default()
+                .with_max_level(log::LevelFilter::Trace)
+                .with_filter(
+                    android_logger::FilterBuilder::new()
+                        .filter_level(log::LevelFilter::Off)
+                        .filter_module(HAVEN_CORE_LOG_TARGET, log::LevelFilter::Trace)
+                        .filter_module(HAVEN_FFI_LOG_TARGET, log::LevelFilter::Trace)
+                        .filter_module("keyring_core", log::LevelFilter::Off)
+                        .build(),
+                ),
+        ),
+    )));
 
-    // Same subsystem FRB uses, so routing is unchanged. `category_level_filter`
-    // matches a record's target EXACTLY (unlike `android_logger`'s prefix
-    // match), and every `debug!` in keyring-core lives in its crate root, so
-    // `keyring_core` is the whole target set.
+    // Same subsystem FRB uses, so routing is unchanged. The wrapper is what
+    // enforces the allowlist here: `oslog`'s `category_level_filter` matches a
+    // record's target EXACTLY, so it cannot express one (a category for
+    // `haven_core` would never match `haven_core::relay::manager`). It still
+    // names `keyring_core`, whose `debug!`s all sit in its crate root and so ARE
+    // that exact target — a second, independent drop of the one dependency that
+    // logged key bytes.
     #[cfg(any(target_os = "ios", target_os = "macos"))]
-    let _ = oslog::OsLogger::new("frb_user")
-        .level_filter(log::LevelFilter::Trace)
-        .category_level_filter("keyring_core", log::LevelFilter::Off)
-        .init();
+    let _ = log::set_boxed_logger(Box::new(HavenTargetFilter(
+        oslog::OsLogger::new("frb_user")
+            .category_level_filter("keyring_core", log::LevelFilter::Off),
+    )));
 
     flutter_rust_bridge::setup_default_user_utils();
-    // Cap the global `log` level by build profile. The `android_logger`
-    // backend FRB installs is itself release-present (feature-gated, not
-    // `debug_assertions`-gated), so the level cap is the control point.
-    #[cfg(debug_assertions)]
-    log::set_max_level(log::LevelFilter::Debug);
-    #[cfg(not(debug_assertions))]
-    log::set_max_level(log::LevelFilter::Warn);
+    // The backend FRB installs is release-present (feature-gated, not
+    // `debug_assertions`-gated), so this cap is the control point.
+    log::set_max_level(max_log_level(cfg!(debug_assertions)));
 }
+
+/// The global `log` cap for this build: `Debug`, where developers and the E2E
+/// lanes read Haven's own `debug!` lines, or `Warn` in release.
+///
+/// Release keeps `Warn` instead of going silent the way Dart's `debugPrint` does,
+/// and that is sound only because every `warn!`/`error!` site in both crates is
+/// identifier-free (Security Rule 15, enforced by
+/// `scripts/ci/check_no_identifier_logging.sh`) and every backend sits behind
+/// [`HavenTargetFilter`], so a dependency cannot reach the sink at `Warn`
+/// either: what a shipped build can emit is a failure's type and nothing that
+/// tells one user, circle or device from another.
+const fn max_log_level(debug_build: bool) -> log::LevelFilter {
+    if debug_build {
+        log::LevelFilter::Debug
+    } else {
+        log::LevelFilter::Warn
+    }
+}
+
+/// The `log` target every `haven-core` record is rooted at.
+#[cfg(any(target_os = "android", target_os = "ios", target_os = "macos", test))]
+const HAVEN_CORE_LOG_TARGET: &str = "haven_core";
+
+/// The `log` target every record from THIS crate is rooted at — its own crate
+/// name, which is what `module_path!()` prefixes each one with.
+#[cfg(any(target_os = "android", target_os = "ios", target_os = "macos", test))]
+const HAVEN_FFI_LOG_TARGET: &str = "rust_lib_haven";
+
+/// Whether `target` belongs to one of Haven's own crates, and so may reach a log.
+///
+/// An ALLOWLIST, not a denylist: every dependency is silent, including one added
+/// later, because a dependency's records are the ones that carry identifiers —
+/// `tungstenite` logs the `Host:` header (a relay's host and port) at `TRACE`,
+/// `nostr-relay-pool` logs relay URLs at `DEBUG`, `keyring_core` logged raw
+/// DB-key bytes. Matching ends on a `::` boundary, so a crate merely NAMED like
+/// one of ours (`haven_core_extra`) does not inherit the allowance.
+#[cfg(any(target_os = "android", target_os = "ios", target_os = "macos", test))]
+fn log_target_allowed(target: &str) -> bool {
+    [HAVEN_CORE_LOG_TARGET, HAVEN_FFI_LOG_TARGET]
+        .iter()
+        .any(|own| {
+            target == *own
+                || target
+                    .strip_prefix(own)
+                    .is_some_and(|rest| rest.starts_with("::"))
+        })
+}
+
+/// A `log::Log` that passes only Haven's own records through to `L`.
+///
+/// The allowlist lives here rather than in each backend's own filter because the
+/// two backends cannot express the same rule: `env_filter` prefix-matches module
+/// paths, while `oslog` matches a category EXACTLY — a category for `haven_core`
+/// would never match `haven_core::relay::manager`, so an oslog-side allowlist
+/// would silently drop every Haven line instead of every dependency's. One
+/// wrapper over one predicate is one thing to review and one thing to test.
+#[cfg(any(target_os = "android", target_os = "ios", target_os = "macos", test))]
+struct HavenTargetFilter<L>(L);
+
+#[cfg(any(target_os = "android", target_os = "ios", target_os = "macos", test))]
+impl<L: log::Log> log::Log for HavenTargetFilter<L> {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        log_target_allowed(metadata.target()) && self.0.enabled(metadata)
+    }
+
+    fn log(&self, record: &log::Record<'_>) {
+        // Re-checked rather than delegated to `enabled`: the `log!` macros call
+        // it only against the facade's max level, so a backend that trusted
+        // them would still emit a denied target.
+        if log_target_allowed(record.target()) {
+            self.0.log(record);
+        }
+    }
+
+    fn flush(&self) {
+        self.0.flush();
+    }
+}
+
+// ============================================================================
+// Log Aliases (per-process, non-reversible log handles)
+// ============================================================================
+
+/// Which kind of value a [`log_alias`] call is aliasing.
+///
+/// Mirrors [`haven_core::log_alias::LogAliasClass`]. The class is part of the
+/// hashed input, so the same value aliased in two classes yields two unrelated
+/// handles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogAliasClassFfi {
+    /// A circle, keyed by its `nostr_group_id` as 64-char hex.
+    Circle,
+    /// A member or peer, keyed by their Nostr public key (hex or `npub1…`).
+    Peer,
+    /// A Nostr event, keyed by its hex id.
+    Event,
+    /// A relay, keyed by its URL.
+    Relay,
+    /// A published `KeyPackage`, keyed by its `d` slot.
+    KeyPackage,
+    /// A relay subscription, keyed by its id.
+    Subscription,
+}
+
+impl From<LogAliasClassFfi> for haven_core::log_alias::LogAliasClass {
+    fn from(class: LogAliasClassFfi) -> Self {
+        match class {
+            LogAliasClassFfi::Circle => Self::Circle,
+            LogAliasClassFfi::Peer => Self::Peer,
+            LogAliasClassFfi::Event => Self::Event,
+            LogAliasClassFfi::Relay => Self::Relay,
+            LogAliasClassFfi::KeyPackage => Self::KeyPackage,
+            LogAliasClassFfi::Subscription => Self::Subscription,
+        }
+    }
+}
+
+/// Returns the per-process log handle for `value`, e.g. `circle#a91f3c`.
+///
+/// The handle is a salted, non-reversible stand-in: without the process salt —
+/// which is never persisted, exported or logged — no handle can be computed
+/// from, or matched to, a real value (Security Rule 15). Dart calls this rather
+/// than hashing on its own so a line about a circle reads the same on both
+/// sides of the boundary; the per-class normalisation makes `npub1…` and hex
+/// alias to one handle.
+#[frb(sync)]
+#[must_use]
+pub fn log_alias(class: LogAliasClassFfi, value: String) -> String {
+    haven_core::log_alias::alias(class.into(), value.as_bytes()).to_string()
+}
+
+/// Re-mints the process salt, so no handle already emitted survives a wipe.
+///
+/// Called from the identity-wipe paths in this file, and exposed so Dart's
+/// logout can invalidate its own memoized handles at the same moment.
+#[frb(sync)]
+pub fn rotate_log_alias_salt() {
+    haven_core::log_alias::rotate_salt();
+}
+
 use haven_core::nostr::identity::{
     IdentityError, IdentityManager, PublicIdentity as CorePublicIdentity,
     SecureKeyStorage as CoreSecureKeyStorage,
@@ -294,7 +447,7 @@ impl CoreSecureKeyStorage for InMemoryStorage {
 /// Public identity information (FFI-friendly).
 ///
 /// Contains only public data that can be safely stored and shared.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PublicIdentity {
     /// Public key as 64-character hex string.
     pub pubkey_hex: String,
@@ -302,6 +455,19 @@ pub struct PublicIdentity {
     pub npub: String,
     /// When this identity was created (Unix timestamp).
     pub created_at: i64,
+}
+
+/// Presence-only `Debug`: this struct IS the device's identity, so neither
+/// encoding of the key nor the creation instant may render — not even as a
+/// handle, which would still tell this install apart from another across a
+/// process's log (Security Rule 15).
+impl std::fmt::Debug for PublicIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PublicIdentity")
+            .field("pubkey_hex", &"<redacted>")
+            .field("npub", &"<redacted>")
+            .finish()
+    }
 }
 
 impl From<CorePublicIdentity> for PublicIdentity {
@@ -442,8 +608,15 @@ impl NostrIdentityManager {
     }
 
     /// Deletes the identity.
+    ///
+    /// Re-mints the log-alias salt on the way out: every handle this process
+    /// already emitted must stop being linkable to the identity that produced
+    /// it (Security Rule 15). Unconditional, because a failed delete can still
+    /// have destroyed the stored secret.
     pub fn delete_identity(&self) -> Result<(), String> {
-        self.inner.delete_identity().map_err(|e| e.to_string())
+        let deleted = self.inner.delete_identity().map_err(|e| e.to_string());
+        haven_core::log_alias::rotate_salt();
+        deleted
     }
 
     /// Clears the in-memory cache.
@@ -477,7 +650,7 @@ impl std::fmt::Debug for NostrIdentityManager {
 ///
 /// This is the outer event ready for relay transmission.
 /// Contains encrypted content signed with an ephemeral keypair.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SignedLocationEventFfi {
     /// Event ID (SHA256 hash, 64 hex chars).
     pub id: String,
@@ -495,6 +668,23 @@ pub struct SignedLocationEventFfi {
     pub content: String,
     /// Schnorr signature (128 hex chars).
     pub sig: String,
+}
+
+/// Redacting `Debug`: the event is named by a salted handle and nothing else
+/// prints but the protocol kind. `tags` carries the `h` tag (the circle),
+/// `pubkey` the per-message ephemeral key, `content` the ciphertext and `sig`
+/// a value derived from all of it (Security Rules 4/6/15).
+impl std::fmt::Debug for SignedLocationEventFfi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SignedLocationEventFfi")
+            .field("event", &haven_core::log_alias::event(EventIdHex(&self.id)))
+            .field("pubkey", &"<redacted>")
+            .field("kind", &self.kind)
+            .field("tags", &"<redacted>")
+            .field("content", &"<redacted>")
+            .field("sig", &"<redacted>")
+            .finish()
+    }
 }
 
 impl From<haven_core::nostr::SignedLocationEvent> for SignedLocationEventFfi {
@@ -796,13 +986,15 @@ fn get_or_create_circle_db_key() -> Result<zeroize::Zeroizing<String>, String> {
     // On iOS, migrate the circles.db key (born `WhenUnlocked`) to
     // `AfterFirstUnlockThisDeviceOnly` so a locked-device background wake can
     // open the database. No-op on every other target. Non-fatal: the migration
-    // restores the key on any failure, so we log a redacted warning and return
-    // the (unchanged) key.
-    if let Err(e) = haven_core::keyring_policy::ensure_db_key_after_first_unlock(
+    // restores the key on any failure, so we note the deferral and return the
+    // (unchanged) key. The keyring error itself names the service/key id and
+    // the backend, so only the fact is logged (Rule 15).
+    let migrated = haven_core::keyring_policy::ensure_db_key_after_first_unlock(
         CIRCLES_DB_SERVICE,
         CIRCLES_DB_KEY_ID,
-    ) {
-        log::warn!("circles.db key access-policy migration deferred: {e}");
+    );
+    if migrated.is_err() {
+        log::warn!("circles.db key access-policy migration deferred");
     }
 
     Ok(key)
@@ -979,6 +1171,10 @@ pub async fn wipe_all_mls_state(data_dir: String) -> Result<(), String> {
         failed |= delete_mls_session_db_files(&data_dir).is_err();
         failed |= remove_circles_db_key().is_err();
         failed |= remove_mls_session_db_key().is_err();
+        // Unconditional, and after the teardown rather than before it: the
+        // handles this process emitted must stop being linkable to the wiped
+        // state even when a step failed (Security Rule 15).
+        haven_core::log_alias::rotate_salt();
         if failed {
             Err("failed to fully wipe local MLS state".to_string())
         } else {
@@ -1518,21 +1714,20 @@ pub struct CircleFfi {
 
 impl std::fmt::Debug for CircleFfi {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The pseudonymous group id is as good a circle identifier as the MLS
+        // one, the name is user-authored text, the relay list fingerprints a
+        // customised pool and the two instants date the circle — so a salted
+        // handle stands in for all of it and only the closed `circle_type`
+        // discriminator prints (Rule 15).
         f.debug_struct("CircleFfi")
             .field("mls_group_id", &"<redacted>")
             .field(
-                "nostr_group_id",
-                &self
-                    .nostr_group_id
-                    .iter()
-                    .map(|b| format!("{b:02x}"))
-                    .collect::<String>(),
+                "circle",
+                &haven_core::log_alias::alias(LogAliasClass::Circle, &self.nostr_group_id),
             )
-            .field("display_name", &self.display_name)
+            .field("display_name", &"<redacted>")
             .field("circle_type", &self.circle_type)
-            .field("relays", &self.relays)
-            .field("created_at", &self.created_at)
-            .field("updated_at", &self.updated_at)
+            .field("has_relays", &!self.relays.is_empty())
             .finish()
     }
 }
@@ -1570,26 +1765,15 @@ pub struct ContactFfi {
     pub updated_at: i64,
 }
 
-/// The first `max` CHARACTERS of `value`, for the redacting `Debug` impls.
-///
-/// By chars, never `&s[..max]`: a byte slice panics on a char boundary, and a
-/// panic inside a `Debug` impl unwinds through whatever was logging — which at
-/// this layer is a call that must never unwind across the FFI boundary.
-fn truncate_chars(value: &str, max: usize) -> String {
-    value.chars().take(max).collect()
-}
-
 impl std::fmt::Debug for ContactFfi {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ContactFfi")
             .field(
-                "pubkey",
-                &format_args!("{}...", truncate_chars(&self.pubkey, 16)),
+                "peer",
+                &haven_core::log_alias::peer(PeerPubkey(&self.pubkey)),
             )
             .field("display_name", &"<redacted>")
             .field("notes", &"<redacted>")
-            .field("created_at", &self.created_at)
-            .field("updated_at", &self.updated_at)
             .finish()
     }
 }
@@ -1629,20 +1813,17 @@ pub struct CircleMemberFfi {
 }
 
 /// Redacting `Debug` that mirrors the core [`CoreCircleMember`] impl
-/// (see `haven-core/src/circle/types.rs`): public keys are truncated to a short
-/// prefix and the local `display_name` is elided. Even though `pubkey`/`npub`
-/// are PUBLIC keys, we never print them in full (Security Rule 6: no key
-/// material in logs) so accidental `{:?}` formatting cannot leak identifiers.
+/// (see `haven-core/src/circle/types.rs`): the member is named by a salted
+/// per-process handle and the local `display_name` is elided. `pubkey`/`npub`
+/// are PUBLIC keys and the same 32 bytes, but they are the one value that tells
+/// this member apart from every other, so neither is printed at any truncation
+/// (Security Rules 6/15) — both aliases collapse onto one handle.
 impl std::fmt::Debug for CircleMemberFfi {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CircleMemberFfi")
             .field(
-                "pubkey",
-                &format_args!("{}...", truncate_chars(&self.pubkey, 16)),
-            )
-            .field(
-                "npub",
-                &format_args!("{}...", truncate_chars(&self.npub, 16)),
+                "peer",
+                &haven_core::log_alias::peer(PeerPubkey(&self.pubkey)),
             )
             .field("display_name", &"<redacted>")
             .field("is_admin", &self.is_admin)
@@ -1705,18 +1886,14 @@ pub struct DirectoryEntryFfi {
 }
 
 /// Redacting `Debug`, mirroring [`CircleMemberFfi`]: these are PUBLIC keys, but
-/// they are never printed in full so accidental `{:?}` formatting cannot leak a
-/// list of the user's contacts (Security Rule 6).
+/// a rendering of the picker's rows is a list of the user's contacts, so each
+/// row is named by a salted handle only (Security Rules 6/15).
 impl std::fmt::Debug for DirectoryEntryFfi {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DirectoryEntryFfi")
             .field(
-                "pubkey_hex",
-                &format_args!("{}...", truncate_chars(&self.pubkey_hex, 16)),
-            )
-            .field(
-                "npub",
-                &format_args!("{}...", truncate_chars(&self.npub, 16)),
+                "peer",
+                &haven_core::log_alias::peer(PeerPubkey(&self.pubkey_hex)),
             )
             .field("tier", &self.tier)
             .finish()
@@ -1769,7 +1946,7 @@ fn hex_to_npub(hex: &str) -> String {
 }
 
 /// Circle with its membership and member list (FFI-friendly).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CircleWithMembersFfi {
     /// The circle.
     pub circle: CircleFfi,
@@ -1779,6 +1956,25 @@ pub struct CircleWithMembersFfi {
     pub inviter_pubkey: Option<String>,
     /// Members with resolved contact info.
     pub members: Vec<CircleMemberFfi>,
+}
+
+/// Redacting `Debug`: the nested [`CircleFfi`] and [`CircleMemberFfi`] impls
+/// alias themselves, the inviter gets a handle, and the roster SIZE — an exact
+/// member count, which is a per-circle fingerprint — does not print (Rule 15).
+/// `membership_status` is a closed three-value discriminator.
+impl std::fmt::Debug for CircleWithMembersFfi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let inviter = self
+            .inviter_pubkey
+            .as_deref()
+            .map(|hex| haven_core::log_alias::peer(PeerPubkey(hex)));
+        f.debug_struct("CircleWithMembersFfi")
+            .field("circle", &self.circle)
+            .field("membership_status", &self.membership_status)
+            .field("inviter", &inviter)
+            .field("has_members", &!self.members.is_empty())
+            .finish()
+    }
 }
 
 impl From<&CoreCircleWithMembers> for CircleWithMembersFfi {
@@ -1814,25 +2010,19 @@ pub struct InvitationFfi {
 }
 
 /// Redacting `Debug` matching the sibling `*Ffi` types (`ContactFfi`,
-/// [`CircleMemberFfi`]): `inviter_pubkey`/`inviter_npub` are PUBLIC keys but,
-/// per Security Rule 6 (no key material in logs), are truncated to a short
-/// prefix so accidental `{:?}` formatting cannot leak a full identifier. Both
-/// encodings are truncated — they are the same 32 bytes, so redacting one alone
-/// would redact nothing.
+/// [`CircleMemberFfi`]): the inviter is named by a salted handle, and the
+/// circle's name and the invitation instant do not print. `inviter_pubkey` and
+/// `inviter_npub` are the same 32 bytes, so both collapse onto one handle —
+/// aliasing one alone would alias nothing (Security Rules 6/15).
 impl std::fmt::Debug for InvitationFfi {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("InvitationFfi")
             .field("mls_group_id", &"<redacted>")
-            .field("circle_name", &self.circle_name)
+            .field("circle_name", &"<redacted>")
             .field(
-                "inviter_pubkey",
-                &format_args!("{}...", truncate_chars(&self.inviter_pubkey, 16)),
+                "inviter",
+                &haven_core::log_alias::peer(PeerPubkey(&self.inviter_pubkey)),
             )
-            .field(
-                "inviter_npub",
-                &format_args!("{}...", truncate_chars(&self.inviter_npub, 16)),
-            )
-            .field("invited_at", &self.invited_at)
             .finish()
     }
 }
@@ -1873,10 +2063,12 @@ pub struct MemberKeyPackageFfi {
 
 impl std::fmt::Debug for MemberKeyPackageFfi {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // A relay-list SIZE is a fingerprint of a customised pool (Rule 15),
+        // so presence is all that renders.
         f.debug_struct("MemberKeyPackageFfi")
             .field("key_package_json", &"<redacted>")
-            .field("inbox_relays_count", &self.inbox_relays.len())
-            .field("nip65_relays_count", &self.nip65_relays.len())
+            .field("has_inbox_relays", &!self.inbox_relays.is_empty())
+            .field("has_nip65_relays", &!self.nip65_relays.is_empty())
             .finish()
     }
 }
@@ -1898,8 +2090,11 @@ pub struct GiftWrappedWelcomeFfi {
 impl std::fmt::Debug for GiftWrappedWelcomeFfi {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GiftWrappedWelcomeFfi")
-            .field("recipient_pubkey", &"<redacted>")
-            .field("recipient_relays_count", &self.recipient_relays.len())
+            .field(
+                "recipient",
+                &haven_core::log_alias::peer(PeerPubkey(&self.recipient_pubkey)),
+            )
+            .field("has_recipient_relays", &!self.recipient_relays.is_empty())
             .field("event_json", &"<redacted>")
             .finish()
     }
@@ -1974,7 +2169,8 @@ impl std::fmt::Debug for AddMembersResultFfi {
         // redact it. Welcome events redact themselves via their own Debug impl.
         f.debug_struct("AddMembersResultFfi")
             .field("commit_event_json", &"<redacted>")
-            .field("welcome_events_count", &self.welcome_events.len())
+            // A welcome count is the number of people added (Rule 15).
+            .field("has_welcome_events", &!self.welcome_events.is_empty())
             .field("pending", &self.pending)
             .finish()
     }
@@ -2042,13 +2238,15 @@ pub struct DeferredSendFfi {
 impl std::fmt::Debug for DeferredSendFfi {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Both event lists carry `h` tags (the nostr_group_id) and group
-        // ciphertext, so only counts are printed (Rules 4/6/8).
+        // ciphertext (Rules 4/6/8), and a count of gating rows, discarded
+        // intents or staged events tells one circle from another (Rule 15), so
+        // every field here is a boolean.
         f.debug_struct("DeferredSendFfi")
-            .field("unresolved_inputs", &self.unresolved_inputs)
-            .field("discarded_intents", &self.discarded_intents)
+            .field("gated", &(self.unresolved_inputs > 0))
+            .field("discarded_any_intent", &(self.discarded_intents > 0))
             .field("repaired", &self.repaired)
-            .field("commits_count", &self.commits.len())
-            .field("proposals_count", &self.proposals.len())
+            .field("has_commits", &!self.commits.is_empty())
+            .field("has_proposals", &!self.proposals.is_empty())
             .finish()
     }
 }
@@ -2077,9 +2275,9 @@ pub struct EncryptLocationOutcomeFfi {
 
 impl std::fmt::Debug for EncryptLocationOutcomeFfi {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // `EncryptedLocationFfi`'s own Debug prints the event JSON and the
-        // group id; keep this wrapper presence-only so a stray `{:?}` on the
-        // outcome cannot widen that exposure.
+        // `EncryptedLocationFfi` aliases its own circle; this wrapper stays
+        // presence-only, so a stray `{:?}` on the outcome says only whether the
+        // engine encrypted, which is the whole diagnostic question here.
         f.debug_struct("EncryptLocationOutcomeFfi")
             .field("sent", &self.sent.as_ref().map(|_| "<redacted>"))
             .field("deferred_send", &self.deferred_send)
@@ -2243,7 +2441,7 @@ impl std::fmt::Debug for RepairRotationOutcomeFfi {
 /// Encrypted location event ready for relay publishing (FFI-friendly).
 ///
 /// Contains the signed kind 445 event and routing metadata.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct EncryptedLocationFfi {
     /// JSON-serialized signed Nostr event (kind 445).
     pub event_json: String,
@@ -2251,6 +2449,22 @@ pub struct EncryptedLocationFfi {
     pub nostr_group_id: Vec<u8>,
     /// Relay URLs to publish to.
     pub relays: Vec<String>,
+}
+
+/// Redacting `Debug`: the circle gets a salted handle; the event JSON (which
+/// embeds that same group id in its `h` tag, plus the ciphertext) and the
+/// publish fan-out do not print (Security Rules 4/6/15).
+impl std::fmt::Debug for EncryptedLocationFfi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EncryptedLocationFfi")
+            .field("event_json", &"<redacted>")
+            .field(
+                "circle",
+                &haven_core::log_alias::alias(LogAliasClass::Circle, &self.nostr_group_id),
+            )
+            .field("has_relays", &!self.relays.is_empty())
+            .finish()
+    }
 }
 
 /// Decrypted location from a peer (FFI-friendly).
@@ -2274,13 +2488,13 @@ pub struct DecryptedLocationFfi {
 
 impl std::fmt::Debug for DecryptedLocationFfi {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The capture/expiry instants are a movement timeline for one person
+        // (Rule 15), so they do not render either.
         f.debug_struct("DecryptedLocationFfi")
             .field("sender_pubkey", &"<redacted>")
             .field("latitude", &"<redacted>")
             .field("longitude", &"<redacted>")
             .field("geohash", &"<redacted>")
-            .field("timestamp", &self.timestamp)
-            .field("expires_at", &self.expires_at)
             .finish()
     }
 }
@@ -2338,10 +2552,6 @@ impl std::fmt::Debug for LastKnownLocationFfi {
             .field("longitude", &"<redacted>")
             .field("geohash", &"<redacted>")
             .field("display_name", &"<redacted>")
-            .field("timestamp", &self.timestamp)
-            .field("expires_at", &self.expires_at)
-            .field("purge_after", &self.purge_after)
-            .field("updated_at", &self.updated_at)
             .finish()
     }
 }
@@ -2405,14 +2615,14 @@ pub struct LocationMessageResultFfi {
 }
 
 impl std::fmt::Debug for LocationMessageResultFfi {
-    /// Redacts payloads (location, raw group id) and exposes only presence;
-    /// `epoch` is a non-secret counter.
+    /// Redacts payloads (location, raw group id) and exposes only presence. The
+    /// absolute epoch is withheld too: it counts one circle's commits, so it
+    /// tells that circle apart from every other (Rule 15).
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LocationMessageResultFfi")
             .field("kind", &self.kind)
             .field("has_location", &self.location.is_some())
             .field("mls_group_id", &"<redacted>")
-            .field("epoch", &self.epoch)
             .finish()
     }
 }
@@ -2589,16 +2799,17 @@ pub struct LeavePlanFfi {
 }
 
 impl std::fmt::Debug for LeavePlanFfi {
-    /// Redacts `successor_hex` to an 8-char prefix so log lines cannot be
-    /// used to correlate a user to a specific handoff.
+    /// Names the successor by a salted handle: an 8-char prefix of their key is
+    /// still their key, so it would correlate a user to a specific handoff
+    /// (Rule 15).
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let redacted = self
+        let successor = self
             .successor_hex
             .as_deref()
-            .map(|h| h.chars().take(8).collect::<String>() + "…");
+            .map(|hex| haven_core::log_alias::peer(PeerPubkey(hex)));
         f.debug_struct("LeavePlanFfi")
             .field("kind", &self.kind)
-            .field("successor_hex", &redacted)
+            .field("successor", &successor)
             .finish()
     }
 }
@@ -2770,7 +2981,7 @@ fn build_relay_list_unpublish_for(
 /// rests on the fact that Dart cannot get an event without first calling
 /// this method, which short-circuits to `suppressed=true` when the toggle
 /// is off.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct BuiltRelayListEventFfi {
     /// Signed event JSON, ready for `RelayManagerFfi::publish_event`.
     /// `None` when `suppressed` is `true`.
@@ -2796,12 +3007,34 @@ pub struct BuiltRelayListEventFfi {
     pub suppressed: bool,
 }
 
+/// Redacting `Debug`: the event is named by a salted handle, and the event JSON
+/// (a list of this account's relays), the target fan-out and the publish
+/// instant do not print (Rule 15). The Nostr kind is a protocol constant.
+impl std::fmt::Debug for BuiltRelayListEventFfi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let event = self
+            .event_id_hex
+            .as_deref()
+            .map(|hex| haven_core::log_alias::event(EventIdHex(hex)));
+        f.debug_struct("BuiltRelayListEventFfi")
+            .field(
+                "event_json",
+                &self.event_json.as_ref().map(|_| "<redacted>"),
+            )
+            .field("event", &event)
+            .field("has_targets", &!self.targets.is_empty())
+            .field("kind", &self.kind)
+            .field("suppressed", &self.suppressed)
+            .finish()
+    }
+}
+
 /// Outcome of [`CircleManagerFfi::build_unpublish_relay_list`].
 ///
 /// Two events: the empty-replacement (always populated when not suppressed)
 /// and the optional NIP-09 deletion (populated only when a previously
 /// published event is on record).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct BuiltUnpublishFfi {
     /// Empty-replacement event JSON. Always populated when `suppressed`
     /// is false.
@@ -2816,6 +3049,23 @@ pub struct BuiltUnpublishFfi {
     /// `true` when nothing should be published (no prior record AND
     /// toggle was already off — there's nothing to unpublish).
     pub suppressed: bool,
+}
+
+/// Presence-only `Debug`: both event JSONs enumerate this account's relays and
+/// carry its event ids, and the target list is that enumeration again, so only
+/// which of the two events exist renders (Rule 15).
+impl std::fmt::Debug for BuiltUnpublishFfi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BuiltUnpublishFfi")
+            .field(
+                "has_replacement_event",
+                &self.replacement_event_json.is_some(),
+            )
+            .field("has_deletion_event", &self.deletion_event_json.is_some())
+            .field("has_targets", &!self.targets.is_empty())
+            .field("suppressed", &self.suppressed)
+            .finish()
+    }
 }
 
 /// Serializes a group-evolving commit event to JSON for the Dart publish path.
@@ -3717,7 +3967,11 @@ impl CircleManagerFfi {
         let ids: Vec<nostr::EventId> = event_ids
             .iter()
             .map(|id| {
-                nostr::EventId::from_hex(id).map_err(|e| format!("Invalid event ID '{id}': {e}"))
+                // Neither the id nor the parse detail: an event id is an
+                // identifier, and an FFI error string is a place Rule 15 names
+                // explicitly. The caller knows which ids it passed.
+                nostr::EventId::from_hex(id)
+                    .map_err(|_| "Invalid event ID in the deletion list".to_string())
             })
             .collect::<Result<Vec<_>, String>>()?;
 
@@ -3866,10 +4120,12 @@ impl CircleManagerFfi {
                 repaired,
                 work,
             }) => {
+                // An exact count of gating rows or staged commits tells circles
+                // apart (Rule 15); `repaired` already carries whether anything
+                // is still gating, so the magnitude adds nothing triage needs.
                 log::debug!(
-                    "[FFI encrypt] send deferred (gating={unresolved_inputs}, \
-                     repaired={repaired}, staged_commits={})",
-                    work.commits.len()
+                    "[FFI encrypt] send deferred (repaired={repaired}, has_staged_commits={})",
+                    !work.commits.is_empty()
                 );
                 return Ok(EncryptLocationOutcomeFfi {
                     sent: None,
@@ -3887,12 +4143,13 @@ impl CircleManagerFfi {
         let event_json =
             serde_json::to_string(&event).map_err(|e| format!("Failed to serialize event: {e}"))?;
 
-        // Event id prefix for correlating publish → fetch → decrypt across
-        // the two devices. Public on relays, so no privacy cost.
-        let evt_prefix: String = event.id.to_hex().chars().take(8).collect();
+        // A salted per-process handle, so a re-publish of the same event is
+        // still recognisable in one log without the event id appearing in it
+        // (Rule 15). The relay fan-out is dropped: its size fingerprints a
+        // customised pool.
         log::debug!(
-            "[FFI encrypt] evt={evt_prefix} → kind:445 ready (relays={})",
-            relays.len()
+            "[FFI encrypt] {} → kind:445 ready",
+            haven_core::log_alias::event(EventIdHex(&event.id.to_hex()))
         );
 
         Ok(EncryptLocationOutcomeFfi {
@@ -3967,6 +4224,7 @@ impl CircleManagerFfi {
                 })
             }
             Outcome::Skipped(reason) => {
+                // log-scan-ok: SkipReason Debug redacts (fieldless: a variant name only)
                 log::debug!("[FFI repair] declined: {reason:?}");
                 Ok(RepairRotationOutcomeFfi {
                     rotated: None,
@@ -3981,9 +4239,8 @@ impl CircleManagerFfi {
                 work,
             } => {
                 log::debug!(
-                    "[FFI repair] send-gated (gating={unresolved_inputs}, \
-                     repaired={repaired}, staged_commits={})",
-                    work.commits.len()
+                    "[FFI repair] send-gated (repaired={repaired}, has_staged_commits={})",
+                    !work.commits.is_empty()
                 );
                 // The REAL counters, never placeholders: `unresolved_inputs`
                 // reaches the sharing-health model, where `0` is read as "the
@@ -4075,9 +4332,9 @@ impl CircleManagerFfi {
         let event: nostr::Event =
             serde_json::from_str(&event_json).map_err(|e| format!("Invalid event JSON: {e}"))?;
 
-        // Event id prefix for correlating diagnostic logs across publish /
-        // fetch / decrypt. Nostr event ids are public on relays, so no cost.
-        let evt_prefix: String = event.id.to_hex().chars().take(8).collect();
+        // A salted per-process handle: it distinguishes a duplicate delivery of
+        // one event from two events without the id reaching the log (Rule 15).
+        let event_handle = haven_core::log_alias::event(EventIdHex(&event.id.to_hex()));
 
         // Defense-in-depth: the core `decrypt_location` already redacts its
         // error strings; re-redact at the boundary so the invariant is local.
@@ -4090,7 +4347,10 @@ impl CircleManagerFfi {
         let out: Vec<LocationMessageResultFfi> =
             results.into_iter().map(convert_location_result).collect();
 
-        log::debug!("[FFI decrypt] evt={evt_prefix} → {} result(s)", out.len());
+        log::debug!(
+            "[FFI decrypt] {event_handle} ingested (any_result={})",
+            !out.is_empty()
+        );
 
         Ok(out)
     }
@@ -4122,7 +4382,7 @@ impl CircleManagerFfi {
     ) -> Result<DecryptLocationOutcomeFfi, String> {
         let event: nostr::Event =
             serde_json::from_str(&event_json).map_err(|e| format!("Invalid event JSON: {e}"))?;
-        let evt_prefix: String = event.id.to_hex().chars().take(8).collect();
+        let event_handle = haven_core::log_alias::event(EventIdHex(&event.id.to_hex()));
 
         let ingest = self
             .inner
@@ -4162,9 +4422,9 @@ impl CircleManagerFfi {
         }
 
         log::debug!(
-            "[FFI decrypt] evt={evt_prefix} → {} result(s), {} auto-commit(s)",
-            results.len(),
-            auto_commits.len()
+            "[FFI decrypt] {event_handle} ingested (any_result={}, any_auto_commit={})",
+            !results.is_empty(),
+            !auto_commits.is_empty()
         );
 
         Ok(DecryptLocationOutcomeFfi {
@@ -4598,7 +4858,10 @@ impl CircleManagerFfi {
     /// Adds a relay to one category (idempotent).
     ///
     /// The URL is normalized via `nostr::RelayUrl::parse`; duplicates are
-    /// silent no-ops. `ws://` and credential-bearing URLs are rejected.
+    /// silent no-ops. `ws://` and credential-bearing URLs are rejected with a
+    /// `CircleError::InvalidRelayInput`, whose `RelayInputRejection` sentence
+    /// reaches Dart verbatim and is what `_mapStorageError` routes the
+    /// user-facing message on — the sentence itself is never displayed.
     pub async fn add_user_relay(
         &self,
         url: String,
@@ -4617,8 +4880,12 @@ impl CircleManagerFfi {
     /// Removes a relay from one category.
     ///
     /// Returns `true` when a row was removed, `false` when the URL was not
-    /// in the user's list. Refuses to delete the last relay in a category
-    /// (returns `Err` so the UI can show "you need at least one relay").
+    /// in the user's list. Refuses to delete the last relay in a category with
+    /// `CircleError::InvalidRelayInput(RelayInputRejection::LastInCategory)`,
+    /// whose sentence — "At least one relay is required per category" — is the
+    /// `Err(String)` Dart's `_mapStorageError` routes its own user-facing
+    /// message on. It is the one `CircleError` payload that survives the
+    /// flattening, because it is Haven-authored and value-free.
     pub async fn remove_user_relay(
         &self,
         url: String,
@@ -5401,29 +5668,27 @@ pub struct ProfileMetadataFfi {
     pub picture_sha256_hex: Option<String>,
 }
 
-/// Redacting `Debug`: `pubkey_hex`/`npub` are PUBLIC keys but, per Security Rule
-/// #6 (no key material in logs), never printed in full — both pass through
-/// `redact_hex_sequences` and the free-text display fields are elided.
+/// Redacting `Debug`: the profile's owner is named by a salted handle and every
+/// kind-0 free-text field is elided. `redact_hex_sequences` is deliberately no
+/// longer the mechanism — it collapses the 64-hex key but leaves the `npub1…`
+/// spelling of the same 32 bytes intact, which is bech32, not hex (Rule 15).
+/// The fetch instant does not print either: it dates this device's last lookup
+/// of that person.
 impl std::fmt::Debug for ProfileMetadataFfi {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ProfileMetadataFfi")
             .field(
-                "pubkey_hex",
-                &haven_core::util::redact_hex_sequences(&self.pubkey_hex),
+                "peer",
+                &haven_core::log_alias::peer(PeerPubkey(&self.pubkey_hex)),
             )
-            .field("npub", &haven_core::util::redact_hex_sequences(&self.npub))
             .field("display_name", &"<redacted>")
             .field("name", &"<redacted>")
             .field("about", &"<redacted>")
             .field("has_picture", &self.has_picture)
             .field("is_known", &self.is_known)
-            .field("fetched_at", &self.fetched_at)
             .field(
                 "picture_sha256_hex",
-                &self
-                    .picture_sha256_hex
-                    .as_deref()
-                    .map(haven_core::util::redact_hex_sequences),
+                &self.picture_sha256_hex.as_ref().map(|_| "<redacted>"),
             )
             .finish()
     }
@@ -5490,19 +5755,17 @@ pub struct ProfilePictureRefFfi {
     pub sha256_hex: String,
 }
 
-/// Redacting `Debug`: neither the pubkey nor the content hash is printed in full
-/// (Security Rules #6/#8).
+/// Redacting `Debug`: the owner is named by a salted handle and the content
+/// hash — which IS the Blossom address the upload resolves to — never prints
+/// (Security Rules 6/8/15).
 impl std::fmt::Debug for ProfilePictureRefFfi {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ProfilePictureRefFfi")
             .field(
-                "pubkey_hex",
-                &haven_core::util::redact_hex_sequences(&self.pubkey_hex),
+                "peer",
+                &haven_core::log_alias::peer(PeerPubkey(&self.pubkey_hex)),
             )
-            .field(
-                "sha256_hex",
-                &haven_core::util::redact_hex_sequences(&self.sha256_hex),
-            )
+            .field("sha256_hex", &"<redacted>")
             .finish()
     }
 }
@@ -6033,9 +6296,10 @@ impl CircleManagerFfi {
                 .await
             {
                 Ok(Ok(())) => reconciled.push(pubkey_hex.clone()),
-                // Already redacted by `download_member_picture`; logged, never
-                // surfaced, and never fatal to the rest of the batch.
-                Ok(Err(e)) => log::debug!("[profile] picture download failed: {e}"),
+                // Never surfaced, never fatal to the rest of the batch, and the
+                // error itself carries the Blossom host, so only the fact of
+                // the failure is logged (Rule 15).
+                Ok(Err(_)) => log::debug!("[profile] picture download failed"),
                 Err(_) => {
                     log::debug!("[profile] picture download timed out; remainder deferred");
                     break;
@@ -7017,7 +7281,7 @@ use haven_core::relay::{
 };
 
 /// Relay connection status (FFI-friendly).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RelayConnectionStatusFfi {
     /// The relay URL.
     pub url: String,
@@ -7025,6 +7289,18 @@ pub struct RelayConnectionStatusFfi {
     pub status: String,
     /// Last time the relay was seen (Unix timestamp), if known.
     pub last_seen: Option<i64>,
+}
+
+/// Redacting `Debug`: a relay URL is a fingerprint of a customised pool, and
+/// `last_seen` dates this device's traffic to it, so the relay is named by a
+/// salted handle and only the closed status discriminator prints (Rule 15).
+impl std::fmt::Debug for RelayConnectionStatusFfi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RelayConnectionStatusFfi")
+            .field("relay", &haven_core::log_alias::relay(RelayUrl(&self.url)))
+            .field("status", &self.status)
+            .finish()
+    }
 }
 
 impl From<CoreRelayConnectionStatus> for RelayConnectionStatusFfi {
@@ -7059,7 +7335,7 @@ pub struct PublishResultFfi {
 }
 
 /// Relay rejection info (FFI-friendly).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RelayRejectionFfi {
     /// Relay URL that rejected.
     pub url: String,
@@ -7067,8 +7343,21 @@ pub struct RelayRejectionFfi {
     pub reason: String,
 }
 
+/// Redacting `Debug`: the relay is named by a salted handle and its `reason` is
+/// withheld outright — that string is REMOTE-AUTHORED, so a relay can write
+/// this account's own npub (or anything else) into a log line through it
+/// (Rule 8 + Rule 15).
+impl std::fmt::Debug for RelayRejectionFfi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RelayRejectionFfi")
+            .field("relay", &haven_core::log_alias::relay(RelayUrl(&self.url)))
+            .field("reason", &"<redacted>")
+            .finish()
+    }
+}
+
 /// Result of checking whether events exist on a specific relay (FFI-friendly).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RelayEventCheckFfi {
     /// The relay URL that was checked.
     pub relay_url: String,
@@ -7078,6 +7367,21 @@ pub struct RelayEventCheckFfi {
     pub event_count: u32,
     /// Newest event timestamp (Unix seconds), if any.
     pub newest_timestamp: Option<i64>,
+}
+
+/// Redacting `Debug`: a salted relay handle plus the one boolean the check
+/// exists to answer. The exact event count and the newest event's instant are
+/// this account's traffic on that relay (Rule 15).
+impl std::fmt::Debug for RelayEventCheckFfi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RelayEventCheckFfi")
+            .field(
+                "relay",
+                &haven_core::log_alias::relay(RelayUrl(&self.relay_url)),
+            )
+            .field("found", &self.found)
+            .finish()
+    }
 }
 
 impl From<CoreRelayEventCheck> for RelayEventCheckFfi {
@@ -7098,7 +7402,7 @@ impl From<CoreRelayEventCheck> for RelayEventCheckFfi {
 /// events is `responded == true` with an empty `events` list — distinct from
 /// an unreachable relay (`responded == false`). `events` holds the gift-wrap
 /// event JSON strings fetched from this relay.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RelayGiftWrapFetchFfi {
     /// The relay URL that was queried.
     pub relay_url: String,
@@ -7106,6 +7410,22 @@ pub struct RelayGiftWrapFetchFfi {
     pub responded: bool,
     /// Gift-wrap event JSON strings fetched from this relay.
     pub events: Vec<String>,
+}
+
+/// Redacting `Debug`: a salted relay handle, whether the relay answered, and
+/// whether it returned anything. The gift-wrap JSONs are whole events and their
+/// COUNT is how many invitations this account is holding (Rule 15).
+impl std::fmt::Debug for RelayGiftWrapFetchFfi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RelayGiftWrapFetchFfi")
+            .field(
+                "relay",
+                &haven_core::log_alias::relay(RelayUrl(&self.relay_url)),
+            )
+            .field("responded", &self.responded)
+            .field("has_events", &!self.events.is_empty())
+            .finish()
+    }
 }
 
 impl From<CorePublishResult> for PublishResultFfi {
@@ -7798,25 +8118,16 @@ impl RelayManagerFfi {
             self.inner.fetch_nip65_relays(&pubkey),
         );
 
-        let keypackage_relays = keypackage_result.unwrap_or_else(|e| {
-            log::debug!(
-                "[fetch_member_keypackage] kind 10051 fetch failed: {}",
-                haven_core::nostr::mls::redact_hex_sequences(&e.to_string())
-            );
+        let keypackage_relays = keypackage_result.unwrap_or_else(|_| {
+            log::debug!("[fetch_member_keypackage] kind 10051 fetch failed");
             Vec::new()
         });
-        let inbox_relays = inbox_result.unwrap_or_else(|e| {
-            log::debug!(
-                "[fetch_member_keypackage] kind 10050 fetch failed: {}",
-                haven_core::nostr::mls::redact_hex_sequences(&e.to_string())
-            );
+        let inbox_relays = inbox_result.unwrap_or_else(|_| {
+            log::debug!("[fetch_member_keypackage] kind 10050 fetch failed");
             Vec::new()
         });
-        let nip65_relays = nip65_result.unwrap_or_else(|e| {
-            log::debug!(
-                "[fetch_member_keypackage] kind 10002 fetch failed: {}",
-                haven_core::nostr::mls::redact_hex_sequences(&e.to_string())
-            );
+        let nip65_relays = nip65_result.unwrap_or_else(|_| {
+            log::debug!("[fetch_member_keypackage] kind 10002 fetch failed");
             Vec::new()
         });
 
@@ -8119,14 +8430,11 @@ impl RelayManagerFfi {
         let mut relay_errors: usize = 0;
         let per_relay = match self.inner.fetch_events_per_relay(filter, &own_relays).await {
             Ok(v) => v,
-            Err(e) => {
+            Err(_) => {
                 // Fail-closed: a top-level probe error yields NO responders ⇒
                 // decide_kp_maintenance returns NoOp.
                 relay_errors += 1;
-                log::debug!(
-                    "[maintain_key_package] probe failed: {}",
-                    haven_core::nostr::mls::redact_hex_sequences(&e.to_string())
-                );
+                log::debug!("[maintain_key_package] probe failed");
                 Vec::new()
             }
         };
@@ -8379,11 +8687,8 @@ impl RelayManagerFfi {
         }
 
         let superseded = haven_core::nostr::mls::types::KeyPackage::new(row.key_package.clone());
-        if let Err(e) = circle_mgr.delete_key_package(&superseded).await {
-            log::debug!(
-                "[maintain_key_package] expired init-key delete failed: {}",
-                haven_core::nostr::mls::redact_hex_sequences(&e.to_string())
-            );
+        if circle_mgr.delete_key_package(&superseded).await.is_err() {
+            log::debug!("[maintain_key_package] expired init-key delete failed");
             return Ok((Some(row), lifetime, false));
         }
         // Blank the cached bytes so no later path can re-advertise material the
@@ -8401,11 +8706,8 @@ impl RelayManagerFfi {
             }
         })
         .await;
-        if let Err(e) = recorded {
-            log::debug!(
-                "[maintain_key_package] expired KP row blanking failed: {}",
-                haven_core::nostr::mls::redact_hex_sequences(&e)
-            );
+        if recorded.is_err() {
+            log::debug!("[maintain_key_package] expired KP row blanking failed");
         }
         log::info!(
             "[maintain_key_package] deleted a KeyPackage init key that reached \
@@ -8501,12 +8803,9 @@ impl RelayManagerFfi {
         // `published` means acked, never merely sent.
         let published = match self.inner.publish_event(&events.event, targets).await {
             Ok(_) => true,
-            Err(e) => {
+            Err(_) => {
                 *relay_errors += 1;
-                log::debug!(
-                    "[maintain_key_package] 30443 publish failed: {}",
-                    haven_core::nostr::mls::redact_hex_sequences(&e.to_string())
-                );
+                log::debug!("[maintain_key_package] 30443 publish failed");
                 false
             }
         };
@@ -8540,11 +8839,12 @@ impl RelayManagerFfi {
         } else if minted_fresh {
             // FAILED publish of freshly-minted material: delete it so a retry
             // loop against a failing relay never leaks private init keys (mdk#160).
-            if let Err(e) = circle_mgr.delete_key_package(&events.key_package).await {
-                log::debug!(
-                    "[maintain_key_package] minted-on-failure KP delete failed: {}",
-                    haven_core::nostr::mls::redact_hex_sequences(&e.to_string())
-                );
+            if circle_mgr
+                .delete_key_package(&events.key_package)
+                .await
+                .is_err()
+            {
+                log::debug!("[maintain_key_package] minted-on-failure KP delete failed");
             }
         }
 
@@ -8579,11 +8879,8 @@ impl RelayManagerFfi {
             return;
         }
         let dead = haven_core::nostr::mls::types::KeyPackage::new(row.key_package.clone());
-        if let Err(e) = circle_mgr.delete_key_package(&dead).await {
-            log::debug!(
-                "[maintain_key_package] superseded KP delete failed: {}",
-                haven_core::nostr::mls::redact_hex_sequences(&e.to_string())
-            );
+        if circle_mgr.delete_key_package(&dead).await.is_err() {
+            log::debug!("[maintain_key_package] superseded KP delete failed");
         }
     }
 
@@ -8740,12 +9037,9 @@ impl RelayManagerFfi {
                 };
                 let events = match events {
                     Ok(e) => e,
-                    Err(e) => {
+                    Err(_) => {
                         *relay_errors += 1;
-                        log::debug!(
-                            "[maintain_key_package] slot repoint build failed: {}",
-                            haven_core::nostr::mls::redact_hex_sequences(&e.to_string())
-                        );
+                        log::debug!("[maintain_key_package] slot repoint build failed");
                         return Some(KpRetirementTick {
                             action: KpMaintenanceAction::RepublishedFreshD,
                             relays_healed: 0,
@@ -8756,19 +9050,24 @@ impl RelayManagerFfi {
                 let minted_fresh = events.key_package.bytes() != tracked_bytes;
 
                 // PUBLISH-FIRST: nothing destructive happens until a relay acked.
-                if let Err(e) = self.inner.publish_event(&events.event, &targets).await {
+                if self
+                    .inner
+                    .publish_event(&events.event, &targets)
+                    .await
+                    .is_err()
+                {
                     *relay_errors += 1;
-                    log::debug!(
-                        "[maintain_key_package] slot repoint publish failed: {}",
-                        haven_core::nostr::mls::redact_hex_sequences(&e.to_string())
-                    );
+                    log::debug!("[maintain_key_package] slot repoint publish failed");
                     if minted_fresh {
                         // Freshly minted and unpublished: delete it so a retry
                         // loop never leaks private init keys (mdk#160).
-                        if let Err(e) = circle_mgr.delete_key_package(&events.key_package).await {
+                        if circle_mgr
+                            .delete_key_package(&events.key_package)
+                            .await
+                            .is_err()
+                        {
                             log::debug!(
-                                "[maintain_key_package] unpublished repoint KP delete failed: {}",
-                                haven_core::nostr::mls::redact_hex_sequences(&e.to_string())
+                                "[maintain_key_package] unpublished repoint KP delete failed"
                             );
                         }
                     }
@@ -8879,11 +9178,8 @@ impl RelayManagerFfi {
             }
         })
         .await;
-        if let Err(e) = recorded {
-            log::debug!(
-                "[maintain_key_package] slot retirement record failed: {}",
-                haven_core::nostr::mls::redact_hex_sequences(&e)
-            );
+        if recorded.is_err() {
+            log::debug!("[maintain_key_package] slot retirement record failed");
             return false;
         }
         if let Some(retired) = retired {
@@ -8897,13 +9193,10 @@ impl RelayManagerFfi {
                     }
                 })
                 .await;
-                if let Err(e) = dropped {
+                if dropped.is_err() {
                     // Harmless if it fails: the replacement row is newer, so it
                     // is the one every read resolves to.
-                    log::debug!(
-                        "[maintain_key_package] retired slot row drop failed: {}",
-                        haven_core::nostr::mls::redact_hex_sequences(&e)
-                    );
+                    log::debug!("[maintain_key_package] retired slot row drop failed");
                 }
             }
         }
@@ -8943,23 +9236,17 @@ impl RelayManagerFfi {
             keys, orphans, &observed,
         ) {
             Ok(ev) => ev,
-            Err(e) => {
+            Err(_) => {
                 *relay_errors += 1;
-                log::debug!(
-                    "[maintain_key_package] slot retraction build failed: {}",
-                    haven_core::nostr::mls::redact_hex_sequences(&e.to_string())
-                );
+                log::debug!("[maintain_key_package] slot retraction build failed");
                 return false;
             }
         };
         match self.inner.publish_event(&deletion, targets).await {
             Ok(_) => true,
-            Err(e) => {
+            Err(_) => {
                 *relay_errors += 1;
-                log::debug!(
-                    "[maintain_key_package] slot retraction publish failed: {}",
-                    haven_core::nostr::mls::redact_hex_sequences(&e.to_string())
-                );
+                log::debug!("[maintain_key_package] slot retraction publish failed");
                 false
             }
         }
@@ -8980,12 +9267,9 @@ impl RelayManagerFfi {
             }
         })
         .await;
-        if let Err(e) = marked {
+        if marked.is_err() {
             *relay_errors += 1;
-            log::debug!(
-                "[maintain_key_package] slot retirement sentinel write failed: {}",
-                haven_core::nostr::mls::redact_hex_sequences(&e)
-            );
+            log::debug!("[maintain_key_package] slot retirement sentinel write failed");
         }
     }
 
@@ -9067,12 +9351,9 @@ impl RelayManagerFfi {
             .limit(64);
         let events = match self.inner.fetch_events(filter, &own_relays, None).await {
             Ok(v) => v,
-            Err(e) => {
+            Err(_) => {
                 outcome.relay_errors += 1;
-                log::debug!(
-                    "[retract_legacy] probe failed: {}",
-                    haven_core::nostr::mls::redact_hex_sequences(&e.to_string())
-                );
+                log::debug!("[retract_legacy] probe failed");
                 Vec::new()
             }
         };
@@ -9092,21 +9373,13 @@ impl RelayManagerFfi {
                                     outcome.legacy_443_scrubbed += 1;
                                     any_acked = true;
                                 }
-                                Err(e) => {
+                                Err(_) => {
                                     outcome.relay_errors += 1;
-                                    log::debug!(
-                                        "[retract_legacy] 443 deletion publish failed: {}",
-                                        haven_core::nostr::mls::redact_hex_sequences(
-                                            &e.to_string()
-                                        )
-                                    );
+                                    log::debug!("[retract_legacy] 443 deletion publish failed");
                                 }
                             }
                         }
-                        Err(e) => log::debug!(
-                            "[retract_legacy] 443 deletion build skipped: {}",
-                            haven_core::nostr::mls::redact_hex_sequences(&e.to_string())
-                        ),
+                        Err(_) => log::debug!("[retract_legacy] 443 deletion build skipped"),
                     }
                 }
                 nostr::Kind::MlsKeyPackageRelays => {
@@ -9131,12 +9404,9 @@ impl RelayManagerFfi {
                             outcome.relay_list_retracted = true;
                             any_acked = true;
                         }
-                        Err(e) => {
+                        Err(_) => {
                             outcome.relay_errors += 1;
-                            log::debug!(
-                                "[retract_legacy] 10051 retraction publish failed: {}",
-                                haven_core::nostr::mls::redact_hex_sequences(&e.to_string())
-                            );
+                            log::debug!("[retract_legacy] 10051 retraction publish failed");
                         }
                     }
                     // Best-effort coordinate deletion (never fatal).
@@ -9148,10 +9418,7 @@ impl RelayManagerFfi {
                         let _ = self.inner.publish_event(&deletion, &own_relays).await;
                     }
                 }
-                Err(e) => log::debug!(
-                    "[retract_legacy] 10051 retraction build skipped: {}",
-                    haven_core::nostr::mls::redact_hex_sequences(&e.to_string())
-                ),
+                Err(_) => log::debug!("[retract_legacy] 10051 retraction build skipped"),
             }
         }
 
@@ -9309,12 +9576,9 @@ impl RelayManagerFfi {
         let filter = nostr::Filter::new().kind(kind).author(*own_pk).limit(4);
         let per_relay = match self.inner.fetch_events_per_relay(filter, &configured).await {
             Ok(v) => v,
-            Err(e) => {
+            Err(_) => {
                 relay_errors += 1;
-                log::debug!(
-                    "[maintain_relay_list] probe failed: {}",
-                    haven_core::nostr::mls::redact_hex_sequences(&e.to_string())
-                );
+                log::debug!("[maintain_relay_list] probe failed");
                 Vec::new()
             }
         };
@@ -9421,11 +9685,8 @@ impl RelayManagerFfi {
                             relay_errors,
                         }
                     }
-                    Err(e) => {
-                        log::debug!(
-                            "[maintain_relay_list] publish failed: {}",
-                            haven_core::nostr::mls::redact_hex_sequences(&e.to_string())
-                        );
+                    Err(_) => {
+                        log::debug!("[maintain_relay_list] publish failed");
                         RelayListCategoryOutcome {
                             action: RelayListAction::Suppressed,
                             responders_probed,
@@ -9806,15 +10067,17 @@ mod tests {
             "debug output must not contain the display name: {dbg}"
         );
 
-        // A truncated prefix (16 chars + ellipsis) must still be present for
-        // both identifiers so the value is diagnosable without being complete.
+        // Not even a prefix: a 16-character head of a pubkey is still that
+        // pubkey (Rule 15). The member is named by a salted per-process handle
+        // instead, which is what keeps two members distinguishable in one log
+        // without either being identifiable from it.
         assert!(
-            dbg.contains(&format!("{}...", &hex[..16])),
-            "debug output must contain the truncated hex prefix: {dbg}"
+            !dbg.contains(&hex[..16]) && !dbg.contains(&npub[..16]),
+            "debug output must not contain a truncated key prefix: {dbg}"
         );
         assert!(
-            dbg.contains(&format!("{}...", &npub[..16])),
-            "debug output must contain the truncated npub prefix: {dbg}"
+            dbg.contains("peer#"),
+            "debug output must carry the member's alias handle: {dbg}"
         );
         assert!(dbg.contains("is_admin: true"), "debug output: {dbg}");
     }
@@ -9888,12 +10151,12 @@ mod tests {
             "debug output must not contain the full npub: {dbg}"
         );
         assert!(
-            dbg.contains(&format!("{}...", &hex[..16])),
-            "debug output must contain the truncated hex prefix: {dbg}"
+            !dbg.contains(&hex[..16]) && !dbg.contains(&npub[..16]),
+            "debug output must not contain a truncated key prefix: {dbg}"
         );
         assert!(
-            dbg.contains(&format!("{}...", &npub[..16])),
-            "debug output must contain the truncated npub prefix: {dbg}"
+            dbg.contains("inviter: peer#"),
+            "debug output must carry the inviter's alias handle: {dbg}"
         );
         assert!(
             dbg.contains("mls_group_id: \"<redacted>\""),
@@ -9903,13 +10166,15 @@ mod tests {
 
     #[test]
     fn a_redacting_debug_impl_never_panics_on_a_multibyte_identifier() {
-        // Nothing in these types constrains an identifier to ASCII, and a
-        // byte-sliced truncation panics when the bound lands mid-character
-        // (`田` is three bytes, so byte 16 does). A panic here unwinds through
-        // whatever was logging — at this layer, a call that must never unwind
-        // across the FFI boundary.
+        // Nothing in these types constrains an identifier to ASCII, and the
+        // aliasing path now takes the whole string: a pubkey that does not
+        // parse is hashed verbatim, and every byte boundary it walks must hold
+        // (`田` is three bytes). A panic here unwinds through whatever was
+        // logging — at this layer, a call that must never unwind across the FFI
+        // boundary — so each rendering is produced AND checked for a fragment
+        // of the value it was handed.
         let wide = "田".repeat(64);
-        let expected = format!("{}...", "田".repeat(16));
+        let fragment = "田".repeat(4);
 
         let contact = ContactFfi {
             pubkey: wide.clone(),
@@ -9918,7 +10183,11 @@ mod tests {
             created_at: 0,
             updated_at: 0,
         };
-        assert!(format!("{contact:?}").contains(&expected));
+        let rendered = format!("{contact:?}");
+        assert!(
+            rendered.contains("peer#") && !rendered.contains(&fragment),
+            "{rendered}"
+        );
 
         let member = CircleMemberFfi {
             npub: wide.clone(),
@@ -9926,7 +10195,11 @@ mod tests {
             display_name: None,
             is_admin: false,
         };
-        assert!(format!("{member:?}").matches(&expected).count() >= 2);
+        let rendered = format!("{member:?}");
+        assert!(
+            rendered.contains("peer#") && !rendered.contains(&fragment),
+            "{rendered}"
+        );
 
         let invitation = InvitationFfi {
             mls_group_id: vec![7u8; 32],
@@ -9935,7 +10208,11 @@ mod tests {
             inviter_npub: wide,
             invited_at: 42,
         };
-        assert!(format!("{invitation:?}").matches(&expected).count() >= 2);
+        let rendered = format!("{invitation:?}");
+        assert!(
+            rendered.contains("peer#") && !rendered.contains(&fragment),
+            "{rendered}"
+        );
     }
 
     /// Verifies that `init_keyring_store()` succeeds when a keyring backend
@@ -10541,15 +10818,17 @@ mod tests {
             !debug_str.to_lowercase().contains("sender_pk_secret"),
             "Debug must not leak the sender pubkey: {debug_str}"
         );
-        // Presence flags + the non-secret epoch counter DO render.
+        // Presence flags DO render.
         assert!(debug_str.contains("has_location: true"));
         assert!(
             debug_str.contains("<redacted>"),
             "group id must render redacted: {debug_str}"
         );
+        // Rule 15: an absolute epoch counts one circle's commits, so it is as
+        // good a circle discriminator as the group id itself.
         assert!(
-            debug_str.contains("1700000000"),
-            "epoch is a non-secret counter: {debug_str}"
+            !debug_str.contains("1700000000"),
+            "the absolute epoch must not render: {debug_str}"
         );
     }
 
@@ -11076,15 +11355,15 @@ pub struct FfiRelayEvent {
 }
 
 impl std::fmt::Debug for FfiRelayEvent {
-    /// Presence-only: no coordinates, group-id bytes, content, or JSON
-    /// (Security Rule 8). Relay-public timestamps + the closed status enum print.
+    /// Presence-only: no coordinates, group-id bytes, content, JSON, or source
+    /// instant (Security Rule 8, and Rule 15 for the instant — a receive time
+    /// is one device's timeline). Only the closed status enum prints.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FfiRelayEvent")
             .field("kind", &self.kind)
             .field("has_nostr_group_id", &self.nostr_group_id.is_some())
             .field("has_sender_pubkey", &self.sender_pubkey.is_some())
             .field("has_content", &self.content.is_some())
-            .field("event_created_at_secs", &self.event_created_at_secs)
             .field("has_evolution_event", &self.evolution_event_json.is_some())
             .field("has_gift_wrap", &self.gift_wrap_json.is_some())
             .field("status_reason", &self.status_reason)
@@ -11911,7 +12190,9 @@ mod live_sync_ffi_tests {
             !dbg.contains("abcd") && !dbg.contains("ABCD"),
             "leaked group id: {dbg}"
         );
-        assert!(dbg.contains("42"), "relay-public ts should show");
+        // Rule 15: the source `created_at` is one device's receive timeline, so
+        // it must not render even though the relay saw it.
+        assert!(!dbg.contains("42"), "source instant must not show: {dbg}");
         assert!(dbg.contains("Location"));
 
         // GroupUpdate: the outbound commit JSON MUST be redacted, but its
@@ -15434,9 +15715,9 @@ mod member_directory_real_ffi_tests {
     #[test]
     fn a_directory_failure_carries_no_identifier_across_the_boundary() {
         // Both directory entry points map their failures through this one
-        // helper. A roster read fails per-CIRCLE, so its message can carry an
+        // helper. A roster read fails per-CIRCLE, so its payload can carry an
         // MLS group id, and `e.to_string()` would hand it to Dart verbatim
-        // (Security Rules #6/#8).
+        // (Security Rules 6/8/15).
         let group_id = "ab".repeat(32);
         let redacted = super::redact_directory_err(haven_core::circle::CircleError::Mls(format!(
             "roster read failed for group {group_id}"
@@ -15445,9 +15726,24 @@ mod member_directory_real_ffi_tests {
             !redacted.contains(&group_id),
             "the group id survived redaction: {redacted}"
         );
+        // Since L0 the PROSE goes too, not just the hex inside it: a message is
+        // where an identifier hides, so the boundary carries the failure's class
+        // and nothing the payload contributed. Two different payloads rendering
+        // identically is that contract without pinning an incidental string.
         assert!(
-            redacted.contains("roster read failed"),
-            "the diagnosis must survive, only the identifier goes: {redacted}"
+            !redacted.contains("roster read failed"),
+            "the payload's prose must not cross the boundary: {redacted}"
+        );
+        assert_eq!(
+            redacted,
+            super::redact_directory_err(haven_core::circle::CircleError::Mls(
+                "something else entirely".to_string()
+            )),
+            "the payload must contribute nothing to what Dart is handed"
+        );
+        assert!(
+            !redacted.trim().is_empty(),
+            "Dart must still be handed a typed diagnosis, not an empty string"
         );
     }
 }
@@ -15482,6 +15778,15 @@ mod repair_rotation_ffi_tests {
         ];
         for (core, expected) in cases {
             assert_eq!(SkipReasonFfi::from(core), expected);
+            // `[FFI repair] declined: {reason:?}` renders this value straight
+            // into a log line under a `log-scan-ok` suppression whose stated
+            // reason is that the enum is fieldless. This is that reason's pin: a
+            // variant carrying a payload renders punctuation.
+            let rendered = format!("{core:?}");
+            assert!(
+                rendered.chars().all(char::is_alphabetic),
+                "a payload variant would put its payload in a log line: {rendered}"
+            );
             // Exhaustiveness: this match has no wildcard.
             let _routed = match core {
                 SkipReason::NotSoleAdmin | SkipReason::EpochUnrecoverable => "terminal",
@@ -15611,8 +15916,14 @@ mod deferred_send_ffi_tests {
         )
         .expect("convert");
         let debug = format!("{ffi:?}");
-        assert!(debug.contains("commits_count: 1"));
-        assert!(debug.contains("proposals_count: 1"));
+        assert!(debug.contains("has_commits: true"));
+        assert!(debug.contains("has_proposals: true"));
+        // Rule 15: presence, never a magnitude — `1` staged commit vs `4` is a
+        // per-circle discriminator.
+        assert!(
+            !debug.contains('1') && !debug.contains('0'),
+            "no count may reach a Debug line: {debug}"
+        );
         assert!(
             !debug.contains("secret-ciphertext") && !debug.contains("another-secret"),
             "event payloads must never reach a Debug line: {debug}"
@@ -15661,5 +15972,819 @@ mod deferred_send_ffi_tests {
             (d.unresolved_inputs, d.discarded_intents, d.repaired),
             (1, 2, true)
         );
+    }
+}
+
+/// Log-anonymity coverage for every hand-written `Debug` impl in this file.
+///
+/// Each test builds a fully populated instance from the needle set below and
+/// hands it to `haven_core::assert_debug_redacted!`, which fails on the needle
+/// verbatim, upper/lower-cased, hex-encoded, or truncated to 8 or 16 characters
+/// — a prefix of an identifier is still an identifier (Security Rule 15) — and
+/// on a rendering that does not name its type, so none of these assertions can
+/// pass on an empty string. Magnitudes are covered separately by
+/// [`assert_magnitude_invisible`], because a `Vec::len()` is too short to be a
+/// needle.
+#[cfg(test)]
+mod log_anonymity_tests {
+    use haven_core::assert_debug_redacted;
+
+    use super::{
+        AddMembersResultFfi, BuiltRelayListEventFfi, BuiltUnpublishFfi, CircleFfi, CircleMemberFfi,
+        CircleWithMembersFfi, CommitToPublishFfi, ContactFfi, DecryptedLocationFfi,
+        DeferredSendFfi, DirectoryEntryFfi, DirectoryTierFfi, EncryptLocationOutcomeFfi,
+        EncryptedLocationFfi, FfiRelayEvent, FfiRelayEventKind, FfiSyncStatusReason,
+        GiftWrappedWelcomeFfi, HavenTargetFilter, InMemoryStorage, InvitationFfi,
+        LastKnownLocationFfi, LeavePlanFfi, LeavePlanKindFfi, LocationMessage,
+        LocationMessageResultFfi, LocationMessageResultKindFfi, LogAliasClassFfi,
+        MemberKeyPackageFfi, NostrIdentityManager, PendingStateRefFfi, ProfileMetadataFfi,
+        ProfilePictureRefFfi, PublicIdentity, RelayConnectionStatusFfi, RelayEventCheckFfi,
+        RelayGiftWrapFetchFfi, RelayManagerFfi, RelayRejectionFfi, RepairRotationOutcomeFfi,
+        SignedLocationEventFfi, SkipReasonFfi,
+    };
+
+    /// The NIP-19 spec vector, so the hex and the npub below are one key.
+    const HEX_ID: &str = "7e7e9c42a91bfef19fa929e5fda1b72e0ebc1a4c1141673e2794234d86addf4e";
+    const NPUB: &str = "npub10elfcs4fr0l0r8af98jlmgdh9c8tcxjvz9qkw038js35mp4dma8qzvjptg";
+    /// A second 64-hex value, so a leaked content hash is distinguishable from
+    /// a leaked key in the failure message.
+    const HASH_HEX: &str = "b3a1f0c95d8e47261baf3c0d59e8a7146fd2b09c83e5a61d7402fbc9e8d35a17";
+    const NAME: &str = "Marthas Hideaway";
+    const TEXT: &str = "Notes about the neighbours";
+    const RELAY: &str = "wss://relay.needlehost.example";
+    const GEOHASH: &str = "9q8yyk8yu";
+    const LAT: f64 = 37.7749123;
+    const LON: f64 = -122.4194567;
+    const INSTANT: i64 = 1_757_000_123;
+    /// A magnitude long enough to be a needle, so a leaked counter fails the
+    /// same scan a leaked identifier does.
+    const COUNTER: u32 = 12_345_678;
+
+    /// Every value class §1 forbids, in the form a `Debug` would print it.
+    ///
+    /// Passed whole to every assertion: a needle a given type cannot hold costs
+    /// one absent-substring check and keeps the call sites uniform, so a field
+    /// added to a type later is covered without editing its test.
+    const NEEDLES: &[&str] = &[
+        HEX_ID,
+        NPUB,
+        HASH_HEX,
+        NAME,
+        TEXT,
+        RELAY,
+        GEOHASH,
+        "37.7749123",
+        "-122.4194567",
+        "1757000123",
+        "12345678",
+    ];
+
+    /// Fails when a rendering VARIES with the magnitudes in the value.
+    ///
+    /// A count of members, relays or staged events tells one circle apart from
+    /// another (§1), and a `Vec::len()` is too short to be a needle. Comparing
+    /// two renderings that differ only in those magnitudes is what makes the
+    /// assertion deterministic: an alias handle is six random hex characters,
+    /// so scanning a rendering for the decimal of a small count would sometimes
+    /// match the handle instead — a flake, not a finding.
+    fn assert_magnitude_invisible(small: &str, large: &str, type_name: &str) {
+        assert_eq!(
+            without_handle_digests(small),
+            without_handle_digests(large),
+            "{type_name}'s rendering varies with a magnitude, so it carries one"
+        );
+    }
+
+    /// Blanks the six hex characters after every `#`, i.e. the digest of every
+    /// alias handle.
+    ///
+    /// Two renderings taken a moment apart must be comparable, and any test in
+    /// this binary may re-mint the process salt between them (a wipe does), so
+    /// the digest is normalised away while the handle's presence and class are
+    /// kept — which is what the comparison is actually about.
+    fn without_handle_digests(rendered: &str) -> String {
+        let mut out = String::with_capacity(rendered.len());
+        let mut chars = rendered.chars();
+        while let Some(c) = chars.next() {
+            out.push(c);
+            if c == '#' {
+                out.push_str("<digest>");
+                for _ in 0..6 {
+                    chars.next();
+                }
+            }
+        }
+        out
+    }
+
+    fn group_id_bytes() -> Vec<u8> {
+        hex::decode(HEX_ID).expect("the needle is valid hex")
+    }
+
+    fn commit() -> CommitToPublishFfi {
+        CommitToPublishFfi {
+            commit_event_json: format!(r#"{{"tags":[["h","{HEX_ID}"]]}}"#),
+            pending: PendingStateRefFfi { token: 7 },
+        }
+    }
+
+    fn welcome(relays: usize) -> GiftWrappedWelcomeFfi {
+        GiftWrappedWelcomeFfi {
+            recipient_pubkey: HEX_ID.to_string(),
+            recipient_relays: vec![RELAY.to_string(); relays],
+            event_json: TEXT.to_string(),
+        }
+    }
+
+    fn circle(relays: usize) -> CircleFfi {
+        CircleFfi {
+            mls_group_id: vec![7u8; 32],
+            nostr_group_id: group_id_bytes(),
+            display_name: NAME.to_string(),
+            circle_type: "location_sharing".to_string(),
+            relays: vec![RELAY.to_string(); relays],
+            created_at: INSTANT,
+            updated_at: INSTANT,
+        }
+    }
+
+    fn member() -> CircleMemberFfi {
+        CircleMemberFfi {
+            pubkey: HEX_ID.to_string(),
+            npub: NPUB.to_string(),
+            display_name: Some(NAME.to_string()),
+            is_admin: true,
+        }
+    }
+
+    fn key_package(relays: usize) -> MemberKeyPackageFfi {
+        MemberKeyPackageFfi {
+            key_package_json: TEXT.to_string(),
+            inbox_relays: vec![RELAY.to_string(); relays],
+            nip65_relays: vec![RELAY.to_string(); relays],
+        }
+    }
+
+    fn added(welcomes: usize) -> AddMembersResultFfi {
+        AddMembersResultFfi {
+            commit_event_json: format!(r#"{{"tags":[["h","{HEX_ID}"]]}}"#),
+            welcome_events: (0..welcomes).map(|_| welcome(2)).collect(),
+            pending: PendingStateRefFfi { token: 7 },
+        }
+    }
+
+    fn deferred(magnitude: u32, staged: usize) -> DeferredSendFfi {
+        DeferredSendFfi {
+            unresolved_inputs: magnitude,
+            discarded_intents: magnitude,
+            repaired: false,
+            commits: (0..staged).map(|_| commit()).collect(),
+            proposals: vec![TEXT.to_string(); staged],
+        }
+    }
+
+    fn encrypted(relays: usize) -> EncryptedLocationFfi {
+        EncryptedLocationFfi {
+            event_json: format!(r#"{{"tags":[["h","{HEX_ID}"]]}}"#),
+            nostr_group_id: group_id_bytes(),
+            relays: vec![RELAY.to_string(); relays],
+        }
+    }
+
+    fn decrypted() -> DecryptedLocationFfi {
+        DecryptedLocationFfi {
+            sender_pubkey: HEX_ID.to_string(),
+            latitude: LAT,
+            longitude: LON,
+            geohash: GEOHASH.to_string(),
+            timestamp: INSTANT,
+            expires_at: INSTANT,
+        }
+    }
+
+    fn with_members(members: usize) -> CircleWithMembersFfi {
+        CircleWithMembersFfi {
+            circle: circle(3),
+            membership_status: "accepted".to_string(),
+            inviter_pubkey: Some(HEX_ID.to_string()),
+            members: (0..members).map(|_| member()).collect(),
+        }
+    }
+
+    fn built_relay_list(targets: usize) -> BuiltRelayListEventFfi {
+        BuiltRelayListEventFfi {
+            event_json: Some(format!(r#"{{"id":"{HEX_ID}"}}"#)),
+            event_id_hex: Some(HEX_ID.to_string()),
+            targets: vec![RELAY.to_string(); targets],
+            kind: Some(10_002),
+            created_at_secs: Some(INSTANT),
+            suppressed: false,
+        }
+    }
+
+    fn built_unpublish(targets: usize) -> BuiltUnpublishFfi {
+        BuiltUnpublishFfi {
+            replacement_event_json: Some(format!(r#"{{"id":"{HEX_ID}"}}"#)),
+            deletion_event_json: Some(format!(r#"{{"id":"{HASH_HEX}"}}"#)),
+            targets: vec![RELAY.to_string(); targets],
+            suppressed: false,
+        }
+    }
+
+    fn gift_wrap_fetch(events: usize) -> RelayGiftWrapFetchFfi {
+        RelayGiftWrapFetchFfi {
+            relay_url: RELAY.to_string(),
+            responded: true,
+            events: vec![TEXT.to_string(); events],
+        }
+    }
+
+    /// An inner backend that records the targets it was handed, so the wrapper's
+    /// forwarding can be observed rather than inferred.
+    struct RecordingLogger(std::sync::Mutex<Vec<String>>);
+
+    impl log::Log for RecordingLogger {
+        fn enabled(&self, _metadata: &log::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn log(&self, record: &log::Record<'_>) {
+            self.0
+                .lock()
+                .expect("a fresh lock is never poisoned")
+                .push(record.target().to_string());
+        }
+
+        fn flush(&self) {}
+    }
+
+    /// Offers one `TRACE` record under `target` to `logger`, returning what its
+    /// `enabled` said. `format_args!` cannot outlive a `let`, so the record is
+    /// built and passed in one expression.
+    fn offer_record(logger: &impl log::Log, target: &str) -> bool {
+        let metadata = log::Metadata::builder()
+            .target(target)
+            .level(log::Level::Trace)
+            .build();
+        let enabled = logger.enabled(&metadata);
+        logger.log(
+            &log::Record::builder()
+                .metadata(metadata)
+                .args(format_args!("a record"))
+                .build(),
+        );
+        enabled
+    }
+
+    #[test]
+    fn the_ffi_log_target_is_this_crates_own_name() {
+        // The allowlist is keyed to the crate name, and a rename in Cargo.toml
+        // would silence every FFI log line rather than fail to compile.
+        assert_eq!(
+            super::HAVEN_FFI_LOG_TARGET,
+            env!("CARGO_PKG_NAME").replace('-', "_"),
+            "this crate's log target must be its own crate name"
+        );
+    }
+
+    #[test]
+    fn the_release_log_cap_is_warn_and_the_debug_cap_is_debug() {
+        // Both arms are exercised from either profile because the cap is a
+        // function of `cfg!(debug_assertions)` rather than two `#[cfg]` bodies —
+        // a release-only body could not be tested by a dev-profile `cargo test`.
+        assert_eq!(
+            super::max_log_level(true),
+            log::LevelFilter::Debug,
+            "a debug build must still show Haven's own `debug!` lines — the E2E \
+             lanes read them"
+        );
+        assert_eq!(
+            super::max_log_level(false),
+            log::LevelFilter::Warn,
+            "a shipped build must emit nothing below `warn!`, which is what makes \
+             the surviving level's identifier-freedom the whole guarantee"
+        );
+    }
+
+    #[test]
+    fn log_target_allowed_admits_only_havens_own_crates() {
+        for target in [
+            "haven_core",
+            "haven_core::relay::live_sync",
+            "rust_lib_haven",
+            "rust_lib_haven::api",
+        ] {
+            assert!(
+                super::log_target_allowed(target),
+                "{target} is Haven's own and must keep logging"
+            );
+        }
+        for target in [
+            // A dependency that logs a relay host at TRACE, one that logs relay
+            // URLs at DEBUG, the one that logged raw DB-key bytes, a transitive
+            // HTTP stack, the bridge itself — and an empty target.
+            "tungstenite",
+            "tungstenite::handshake::client",
+            "nostr_relay_pool",
+            "nostr_relay_pool::relay::inner",
+            "keyring_core",
+            "hyper",
+            "flutter_rust_bridge",
+            "",
+            // The `::` boundary: a crate merely named like ours is not ours.
+            "haven_core_extra",
+            "rust_lib_haven_extra",
+        ] {
+            assert!(
+                !super::log_target_allowed(target),
+                "{target} is not Haven's own and must be silent"
+            );
+        }
+    }
+
+    #[test]
+    fn the_target_filter_forwards_only_havens_own_records() {
+        let filter = HavenTargetFilter(RecordingLogger(std::sync::Mutex::new(Vec::new())));
+
+        for (target, expected) in [
+            ("haven_core::relay::manager", true),
+            ("tungstenite::handshake::client", false),
+            ("nostr_relay_pool::relay::inner", false),
+            ("keyring_core", false),
+            ("rust_lib_haven::api", true),
+        ] {
+            assert_eq!(
+                offer_record(&filter, target),
+                expected,
+                "`enabled` disagreed with the allowlist for {target}"
+            );
+        }
+
+        assert_eq!(
+            *filter.0 .0.lock().expect("a fresh lock is never poisoned"),
+            vec![
+                "haven_core::relay::manager".to_string(),
+                "rust_lib_haven::api".to_string(),
+            ],
+            "only Haven's own records may reach the backend: `log` is re-checked \
+             there because the macros only consult the facade's max level"
+        );
+    }
+
+    #[test]
+    fn location_message_debug_redacts_the_fix() {
+        let message = LocationMessage {
+            inner: haven_core::location::LocationMessage::new(LAT, LON),
+        };
+        assert_debug_redacted!(message, "LocationMessage", NEEDLES);
+    }
+
+    #[test]
+    fn in_memory_storage_debug_redacts_stored_secrets() {
+        let storage = InMemoryStorage::default();
+        storage
+            .data
+            .write()
+            .expect("a fresh lock is never poisoned")
+            .insert(HEX_ID.to_string(), NPUB.as_bytes().to_vec());
+        assert_debug_redacted!(storage, "InMemoryStorage", NEEDLES);
+    }
+
+    #[test]
+    fn nostr_identity_manager_debug_redacts_the_identity() {
+        let manager = NostrIdentityManager::new();
+        let identity = manager.create_identity().expect("create identity");
+        assert_debug_redacted!(
+            manager,
+            "NostrIdentityManager",
+            &[identity.pubkey_hex.as_str(), identity.npub.as_str()]
+        );
+    }
+
+    #[test]
+    fn public_identity_debug_redacts_both_key_encodings() {
+        let identity = PublicIdentity {
+            pubkey_hex: HEX_ID.to_string(),
+            npub: NPUB.to_string(),
+            created_at: INSTANT,
+        };
+        assert_debug_redacted!(identity, "PublicIdentity", NEEDLES);
+    }
+
+    #[test]
+    fn signed_location_event_ffi_debug_redacts_the_wire_event() {
+        let event = SignedLocationEventFfi {
+            id: HEX_ID.to_string(),
+            pubkey: HASH_HEX.to_string(),
+            created_at: INSTANT,
+            kind: 445,
+            tags: vec![vec!["h".to_string(), HEX_ID.to_string()]],
+            content: TEXT.to_string(),
+            sig: HASH_HEX.to_string(),
+        };
+        assert_debug_redacted!(event, "SignedLocationEventFfi", NEEDLES);
+    }
+
+    #[test]
+    fn circle_ffi_debug_redacts_the_circle() {
+        let subject: CircleFfi = circle(3);
+        assert_debug_redacted!(subject, "CircleFfi", NEEDLES);
+        assert_magnitude_invisible(
+            &format!("{:?}", circle(1)),
+            &format!("{:?}", circle(5)),
+            "CircleFfi",
+        );
+    }
+
+    #[test]
+    fn contact_ffi_debug_redacts_the_contact() {
+        let contact = ContactFfi {
+            pubkey: HEX_ID.to_string(),
+            display_name: Some(NAME.to_string()),
+            notes: Some(TEXT.to_string()),
+            created_at: INSTANT,
+            updated_at: INSTANT,
+        };
+        assert_debug_redacted!(contact, "ContactFfi", NEEDLES);
+    }
+
+    #[test]
+    fn circle_member_ffi_debug_redacts_the_member() {
+        let subject: CircleMemberFfi = member();
+        assert_debug_redacted!(subject, "CircleMemberFfi", NEEDLES);
+    }
+
+    #[test]
+    fn directory_entry_ffi_debug_redacts_the_row() {
+        let entry = DirectoryEntryFfi {
+            pubkey_hex: HEX_ID.to_string(),
+            npub: NPUB.to_string(),
+            tier: DirectoryTierFfi::Current,
+        };
+        assert_debug_redacted!(entry, "DirectoryEntryFfi", NEEDLES);
+    }
+
+    #[test]
+    fn invitation_ffi_debug_redacts_the_invitation() {
+        let invitation = InvitationFfi {
+            mls_group_id: vec![7u8; 32],
+            circle_name: NAME.to_string(),
+            inviter_pubkey: HEX_ID.to_string(),
+            inviter_npub: NPUB.to_string(),
+            invited_at: INSTANT,
+        };
+        assert_debug_redacted!(invitation, "InvitationFfi", NEEDLES);
+    }
+
+    #[test]
+    fn member_key_package_ffi_debug_redacts_the_relay_lists() {
+        let subject: MemberKeyPackageFfi = key_package(3);
+        assert_debug_redacted!(subject, "MemberKeyPackageFfi", NEEDLES);
+        assert_magnitude_invisible(
+            &format!("{:?}", key_package(1)),
+            &format!("{:?}", key_package(5)),
+            "MemberKeyPackageFfi",
+        );
+    }
+
+    #[test]
+    fn gift_wrapped_welcome_ffi_debug_redacts_the_recipient() {
+        let subject: GiftWrappedWelcomeFfi = welcome(3);
+        assert_debug_redacted!(subject, "GiftWrappedWelcomeFfi", NEEDLES);
+        assert_magnitude_invisible(
+            &format!("{:?}", welcome(1)),
+            &format!("{:?}", welcome(5)),
+            "GiftWrappedWelcomeFfi",
+        );
+    }
+
+    #[test]
+    fn add_members_result_ffi_debug_redacts_the_welcomes() {
+        let subject: AddMembersResultFfi = added(3);
+        assert_debug_redacted!(subject, "AddMembersResultFfi", NEEDLES);
+        assert_magnitude_invisible(
+            &format!("{:?}", added(1)),
+            &format!("{:?}", added(5)),
+            "AddMembersResultFfi",
+        );
+    }
+
+    #[test]
+    fn commit_to_publish_ffi_debug_redacts_the_commit() {
+        let subject: CommitToPublishFfi = commit();
+        assert_debug_redacted!(subject, "CommitToPublishFfi", NEEDLES);
+    }
+
+    #[test]
+    fn deferred_send_ffi_debug_redacts_every_magnitude() {
+        let subject: DeferredSendFfi = deferred(COUNTER, 3);
+        assert_debug_redacted!(subject, "DeferredSendFfi", NEEDLES);
+        assert_magnitude_invisible(
+            &format!("{:?}", deferred(1, 1)),
+            &format!("{:?}", deferred(COUNTER, 5)),
+            "DeferredSendFfi",
+        );
+    }
+
+    #[test]
+    fn encrypted_location_ffi_debug_redacts_the_event() {
+        let subject: EncryptedLocationFfi = encrypted(3);
+        assert_debug_redacted!(subject, "EncryptedLocationFfi", NEEDLES);
+        assert_magnitude_invisible(
+            &format!("{:?}", encrypted(1)),
+            &format!("{:?}", encrypted(5)),
+            "EncryptedLocationFfi",
+        );
+    }
+
+    #[test]
+    fn encrypt_location_outcome_ffi_debug_redacts_the_send() {
+        let outcome = EncryptLocationOutcomeFfi {
+            sent: Some(encrypted(3)),
+            deferred_send: Some(deferred(COUNTER, 3)),
+        };
+        assert_debug_redacted!(outcome, "EncryptLocationOutcomeFfi", NEEDLES);
+    }
+
+    #[test]
+    fn repair_rotation_outcome_ffi_debug_redacts_the_commit() {
+        let outcome = RepairRotationOutcomeFfi {
+            rotated: Some(commit()),
+            skipped: Some(SkipReasonFfi::NotSoleAdmin),
+            deferred_send: Some(deferred(COUNTER, 3)),
+        };
+        assert_debug_redacted!(outcome, "RepairRotationOutcomeFfi", NEEDLES);
+    }
+
+    #[test]
+    fn decrypted_location_ffi_debug_redacts_the_fix() {
+        let subject: DecryptedLocationFfi = decrypted();
+        assert_debug_redacted!(subject, "DecryptedLocationFfi", NEEDLES);
+    }
+
+    #[test]
+    fn last_known_location_ffi_debug_redacts_the_fix() {
+        let last = LastKnownLocationFfi {
+            nostr_group_id: group_id_bytes(),
+            sender_pubkey: HEX_ID.to_string(),
+            latitude: LAT,
+            longitude: LON,
+            geohash: GEOHASH.to_string(),
+            display_name: Some(NAME.to_string()),
+            timestamp: INSTANT,
+            expires_at: INSTANT,
+            purge_after: INSTANT,
+            updated_at: INSTANT,
+        };
+        assert_debug_redacted!(last, "LastKnownLocationFfi", NEEDLES);
+    }
+
+    #[test]
+    fn location_message_result_ffi_debug_redacts_the_epoch() {
+        let result = LocationMessageResultFfi {
+            kind: LocationMessageResultKindFfi::Location,
+            location: Some(decrypted()),
+            mls_group_id: group_id_bytes(),
+            epoch: 1_757_000_123,
+        };
+        assert_debug_redacted!(result, "LocationMessageResultFfi", NEEDLES);
+    }
+
+    #[test]
+    fn leave_plan_ffi_debug_redacts_the_successor() {
+        let plan = LeavePlanFfi {
+            kind: LeavePlanKindFfi::AdminHandoff,
+            successor_hex: Some(HEX_ID.to_string()),
+        };
+        assert_debug_redacted!(plan, "LeavePlanFfi", NEEDLES);
+    }
+
+    #[test]
+    fn profile_metadata_ffi_debug_redacts_the_profile() {
+        let profile = ProfileMetadataFfi {
+            pubkey_hex: HEX_ID.to_string(),
+            npub: NPUB.to_string(),
+            display_name: Some(NAME.to_string()),
+            name: Some(NAME.to_string()),
+            about: Some(TEXT.to_string()),
+            has_picture: true,
+            is_known: true,
+            fetched_at: INSTANT,
+            picture_sha256_hex: Some(HASH_HEX.to_string()),
+        };
+        assert_debug_redacted!(profile, "ProfileMetadataFfi", NEEDLES);
+    }
+
+    #[test]
+    fn profile_picture_ref_ffi_debug_redacts_the_hash() {
+        let reference = ProfilePictureRefFfi {
+            pubkey_hex: HEX_ID.to_string(),
+            sha256_hex: HASH_HEX.to_string(),
+        };
+        assert_debug_redacted!(reference, "ProfilePictureRefFfi", NEEDLES);
+    }
+
+    #[test]
+    fn circle_with_members_ffi_debug_redacts_the_roster() {
+        let subject: CircleWithMembersFfi = with_members(4);
+        assert_debug_redacted!(subject, "CircleWithMembersFfi", NEEDLES);
+        assert_magnitude_invisible(
+            &format!("{:?}", with_members(1)),
+            &format!("{:?}", with_members(5)),
+            "CircleWithMembersFfi",
+        );
+    }
+
+    #[test]
+    fn built_relay_list_event_ffi_debug_redacts_the_event() {
+        let subject: BuiltRelayListEventFfi = built_relay_list(3);
+        assert_debug_redacted!(subject, "BuiltRelayListEventFfi", NEEDLES);
+        assert_magnitude_invisible(
+            &format!("{:?}", built_relay_list(1)),
+            &format!("{:?}", built_relay_list(5)),
+            "BuiltRelayListEventFfi",
+        );
+    }
+
+    #[test]
+    fn built_unpublish_ffi_debug_redacts_the_events() {
+        let subject: BuiltUnpublishFfi = built_unpublish(3);
+        assert_debug_redacted!(subject, "BuiltUnpublishFfi", NEEDLES);
+        assert_magnitude_invisible(
+            &format!("{:?}", built_unpublish(1)),
+            &format!("{:?}", built_unpublish(5)),
+            "BuiltUnpublishFfi",
+        );
+    }
+
+    #[test]
+    fn relay_connection_status_ffi_debug_redacts_the_url() {
+        let status = RelayConnectionStatusFfi {
+            url: RELAY.to_string(),
+            status: "connected".to_string(),
+            last_seen: Some(INSTANT),
+        };
+        assert_debug_redacted!(status, "RelayConnectionStatusFfi", NEEDLES);
+    }
+
+    #[test]
+    fn relay_rejection_ffi_debug_redacts_the_url_and_reason() {
+        let rejection = RelayRejectionFfi {
+            url: RELAY.to_string(),
+            // Relay-authored prose: a relay may write anything here, including
+            // this account's own npub back at it (§1).
+            reason: format!("blocked: {NPUB}"),
+        };
+        assert_debug_redacted!(rejection, "RelayRejectionFfi", NEEDLES);
+    }
+
+    #[test]
+    fn relay_event_check_ffi_debug_redacts_the_url_and_count() {
+        let check = RelayEventCheckFfi {
+            relay_url: RELAY.to_string(),
+            found: true,
+            event_count: COUNTER,
+            newest_timestamp: Some(INSTANT),
+        };
+        assert_debug_redacted!(check, "RelayEventCheckFfi", NEEDLES);
+    }
+
+    #[test]
+    fn relay_gift_wrap_fetch_ffi_debug_redacts_the_url() {
+        let subject: RelayGiftWrapFetchFfi = gift_wrap_fetch(3);
+        assert_debug_redacted!(subject, "RelayGiftWrapFetchFfi", NEEDLES);
+        assert_magnitude_invisible(
+            &format!("{:?}", gift_wrap_fetch(1)),
+            &format!("{:?}", gift_wrap_fetch(5)),
+            "RelayGiftWrapFetchFfi",
+        );
+    }
+
+    #[test]
+    fn ffi_relay_event_debug_redacts_the_source_instant() {
+        let event = FfiRelayEvent {
+            kind: FfiRelayEventKind::Location,
+            nostr_group_id: Some(group_id_bytes()),
+            sender_pubkey: Some(HEX_ID.to_string()),
+            content: Some(format!("{LAT},{LON}")),
+            event_created_at_secs: Some(INSTANT),
+            evolution_event_json: Some(TEXT.to_string()),
+            gift_wrap_json: Some(TEXT.to_string()),
+            status_reason: Some(FfiSyncStatusReason::Connected),
+            unrecoverable_nostr_group_id: Some(group_id_bytes()),
+        };
+        assert_debug_redacted!(event, "FfiRelayEvent", NEEDLES);
+    }
+
+    /// The one impl here whose subject cannot be built field-by-field: a real
+    /// `CircleManagerFfi` needs the keyring and both databases, so this reuses
+    /// the maintenance module's data-dir and test-seam helpers instead of a
+    /// second copy of them, and takes the shared keyring lock they take.
+    #[test]
+    fn circle_manager_ffi_debug_redacts_its_state() {
+        let _guard = super::SHARED_KEYRING_TEST_LOCK.blocking_lock();
+        super::maintenance_real_ffi_tests::install_test_seams();
+        let dir = super::maintenance_real_ffi_tests::DataDir::new("alias_manager");
+        let secret = nostr::Keys::generate()
+            .secret_key()
+            .to_secret_bytes()
+            .to_vec();
+        let manager =
+            super::CircleManagerFfi::new(dir.as_str(), secret).expect("CircleManagerFfi::new");
+        assert_debug_redacted!(manager, "CircleManagerFfi", NEEDLES);
+    }
+
+    /// Takes the shared keyring lock like every salt-sensitive test here: a
+    /// rotation landing between the two calls below would fail the equality on
+    /// a correct implementation.
+    #[test]
+    fn log_alias_is_stable_per_value_and_separated_per_class() {
+        let _guard = super::SHARED_KEYRING_TEST_LOCK.blocking_lock();
+        let first = super::log_alias(LogAliasClassFfi::Circle, HEX_ID.to_string());
+        assert_eq!(
+            first,
+            super::log_alias(LogAliasClassFfi::Circle, HEX_ID.to_string()),
+            "one value must render one handle for as long as the salt lives, or \
+             no log line can say `the same circle as above`"
+        );
+        assert_ne!(
+            first,
+            super::log_alias(LogAliasClassFfi::Peer, HEX_ID.to_string()),
+            "the class must separate two handles for one value"
+        );
+        let digest = first
+            .strip_prefix("circle#")
+            .expect("the handle names its class");
+        assert_eq!(
+            digest.chars().count(),
+            6,
+            "the handle is six characters wide: {first}"
+        );
+        assert!(
+            digest.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')),
+            "the handle is lowercase hex, so it cannot carry the value: {first}"
+        );
+    }
+
+    #[test]
+    fn rotating_the_salt_invalidates_every_handle() {
+        let _guard = super::SHARED_KEYRING_TEST_LOCK.blocking_lock();
+        let before = super::log_alias(LogAliasClassFfi::Peer, HEX_ID.to_string());
+        super::rotate_log_alias_salt();
+        assert_ne!(
+            before,
+            super::log_alias(LogAliasClassFfi::Peer, HEX_ID.to_string()),
+            "a rotation must re-mint the salt, or a handle outlives the identity"
+        );
+    }
+
+    #[test]
+    fn deleting_the_identity_rotates_the_salt() {
+        let _guard = super::SHARED_KEYRING_TEST_LOCK.blocking_lock();
+        let manager = NostrIdentityManager::new();
+        manager.create_identity().expect("create identity");
+        let before = super::log_alias(LogAliasClassFfi::Peer, HEX_ID.to_string());
+
+        manager.delete_identity().expect("delete identity");
+
+        assert_ne!(
+            before,
+            super::log_alias(LogAliasClassFfi::Peer, HEX_ID.to_string()),
+            "after a logout no handle already in a log may still be linkable to \
+             the identity that produced it"
+        );
+    }
+
+    #[test]
+    fn wiping_mls_state_rotates_the_salt() {
+        let _guard = super::SHARED_KEYRING_TEST_LOCK.blocking_lock();
+        super::maintenance_real_ffi_tests::install_test_seams();
+        let dir = super::maintenance_real_ffi_tests::DataDir::new("alias_wipe");
+        let before = super::log_alias(LogAliasClassFfi::Circle, HEX_ID.to_string());
+
+        // An empty slate: "already gone" is success, and the rotation has to
+        // happen on that path too — a logout retry must not be the only run
+        // that re-mints the salt.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build current-thread runtime for the wipe");
+        runtime
+            .block_on(super::wipe_all_mls_state(dir.as_str()))
+            .expect("wiping an empty slate is idempotent");
+
+        assert_ne!(
+            before,
+            super::log_alias(LogAliasClassFfi::Circle, HEX_ID.to_string()),
+            "a wipe must re-mint the salt, or its log handles survive it"
+        );
+    }
+
+    #[tokio::test]
+    async fn relay_manager_ffi_debug_redacts_its_state() {
+        let manager = RelayManagerFfi::new_instance()
+            .await
+            .expect("the relay manager constructor never fails");
+        assert_debug_redacted!(manager, "RelayManagerFfi", NEEDLES);
     }
 }

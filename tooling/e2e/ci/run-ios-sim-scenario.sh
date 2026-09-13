@@ -275,6 +275,24 @@ run_ios_test_with_watchdog() {
   wait "${follower_pid}" 2>/dev/null || true
 }
 
+# scan_log_or_contain <log>... — the secret-leak gate (Security Rules 6 and 15)
+# over the transcript the workflows upload `if: failure()`. A leak (rc 1) fails
+# the lane, and that failure is what triggers the upload — so the gate REMOVES
+# every log it scanned before returning. rc 3 (absent/empty) keeps them:
+# nothing there to contain. Reads SECRET_SCAN at call time so --self-test can
+# hand it a fake scanner.
+scan_log_or_contain() {
+  local rc=0
+  bash "${SECRET_SCAN}" "$@" || rc=$?
+  if (( rc == 1 )); then
+    rm -f -- "$@"
+    echo "ERROR: secret-leak guard tripped (see the LEAK line(s) above); removed" \
+         "the scanned log(s) so the failure-artifact upload cannot publish" \
+         "them: $*" >&2
+  fi
+  return "${rc}"
+}
+
 # ---------------------------------------------------------------------------
 # --self-test — exercise THE WIRING, not the predicate.
 #
@@ -563,17 +581,80 @@ run_self_test() {
     fail=1
   fi
 
+  # (S1) THE SECRET-LEAK GATE CONTAINS. The workflows upload the transcript
+  #      `if: failure()` and a leak is a failure, so unless the gate removes
+  #      what it flagged the lane publishes the line it went red on. Driven
+  #      with a FAKE scanner: rc 1 removes the log, rc 3 (nothing scannable)
+  #      and rc 0 leave it, and the verdict comes back unchanged.
+  local fake_scan="${tmp}/fake-scan.sh" SECRET_SCAN gate_log want rc
+  printf '%s\n' '#!/usr/bin/env bash' 'exit "${FAKE_SCAN_RC}"' > "${fake_scan}"
+  SECRET_SCAN="${fake_scan}"
+  gate_log="${tmp}/gate.log"
+  for want in 1 3 0; do
+    printf 'transcript\n' > "${gate_log}"
+    export FAKE_SCAN_RC="${want}"
+    rc=0
+    scan_log_or_contain "${gate_log}" 2>/dev/null || rc=$?
+    if (( rc != want )); then
+      echo "SELF-TEST FAIL (S1): the gate returned ${rc} for a scanner rc of ${want}" >&2
+      fail=1
+    fi
+    if (( want == 1 )) && [[ -e "${gate_log}" ]]; then
+      echo "SELF-TEST FAIL (S1): a leak (rc 1) left the transcript on disk for" \
+           "the failure-artifact upload to publish" >&2
+      fail=1
+    elif (( want != 1 )) && [[ ! -e "${gate_log}" ]]; then
+      echo "SELF-TEST FAIL (S1): scanner rc ${want} removed a log it had no" \
+           "leak to contain" >&2
+      fail=1
+    fi
+  done
+  unset FAKE_SCAN_RC
+
+  # (S2) THE GATE IS HARD. Read from the real run (everything from the
+  #      scanner's definition down, comments stripped): the scanner's presence
+  #      is asserted with the `! -f` hard-fail form, the scan is invoked
+  #      through the containing gate at top level, and the former soft gate —
+  #      `-x "${SECRET_SCAN}"`, under which a non-executable scanner was
+  #      silently skipped and the lane went green having scanned nothing — is
+  #      gone.
+  local real_run
+  real_run="$(sed -n '/^readonly SECRET_SCAN=/,$p' "${BASH_SOURCE[0]}" \
+                | grep -v '^[[:space:]]*#')"
+  if [[ -z "${real_run}" ]]; then
+    echo "SELF-TEST FAIL (S2): cannot find the real run's SECRET_SCAN definition" >&2
+    fail=1
+  fi
+  if grep -qF -- '-x "${SECRET_SCAN}"' <<<"${real_run}"; then
+    echo "SELF-TEST FAIL (S2): the soft \`-x\` scanner gate is back — a" \
+         "non-executable scanner would be skipped, not fatal" >&2
+    fail=1
+  fi
+  if ! grep -qF -- '[[ ! -f "${SECRET_SCAN}" ]]' <<<"${real_run}"; then
+    echo "SELF-TEST FAIL (S2): the scanner's presence is no longer asserted" \
+         "with the hard-fail form" >&2
+    fail=1
+  fi
+  if ! grep -qE '^scan_log_or_contain "\$\{LOG_FILE\}"' <<<"${real_run}"; then
+    echo "SELF-TEST FAIL (S2): the real run no longer scans the transcript" \
+         "through the containing gate" >&2
+    fail=1
+  fi
+
   if (( fail != 0 )); then
     echo "run-ios-sim-scenario.sh --self-test: FAILED" >&2
     return 1
   fi
-  echo "run-ios-sim-scenario.sh --self-test: all 8 watchdog fixtures passed" \
+  echo "run-ios-sim-scenario.sh --self-test: all 8 watchdog fixtures and both" \
+       "secret-gate fixtures passed" \
        "(a post-build stall is caught, marked and accepted by the classifier," \
        "and stays retryable even when the process we kill overwrites the marker" \
        "on its way out; a running suite, a genuine failure, a slow build, a kill" \
        "this watchdog did not perform, and a previous attempt's stale verdict" \
-       "are all correctly NOT retried; and the streaming reporter the whole" \
-       "deadline rests on is still passed to flutter test)."
+       "are all correctly NOT retried; the streaming reporter the whole" \
+       "deadline rests on is still passed to flutter test; and the secret-leak" \
+       "gate is unconditional, hard-fails on a missing scanner, and removes the" \
+       "transcript on a leak and on nothing else)."
   return 0
 }
 
@@ -626,6 +707,11 @@ readonly LOG_FILE="/tmp/flutter-ios-test.log"
 readonly REPO_ROOT="${SCRIPT_DIR}/../../.."
 readonly HAVEN_DIR="${REPO_ROOT}/haven"
 readonly SECRET_SCAN="${SCRIPT_DIR}/scan-logs-for-secrets.sh"
+
+if [[ ! -f "${SECRET_SCAN}" ]]; then
+  echo "ERROR: secret-leak guard missing at ${SECRET_SCAN}" >&2
+  exit 1
+fi
 
 if [[ ! -f "${HAVEN_DIR}/${SCENARIO_FILE}" ]]; then
   echo "ERROR: scenario file not found: ${HAVEN_DIR}/${SCENARIO_FILE}" >&2
@@ -800,12 +886,13 @@ set -e
 # infrastructure, and must never be re-rolled in the hope the next attempt keeps
 # it out of the log.
 # ---------------------------------------------------------------------------
-if [[ -x "${SECRET_SCAN}" ]]; then
-  if ! bash "${SECRET_SCAN}" "${LOG_FILE}"; then
-    ios_retry_record "${VERDICT_FILE}" genuine 1 "secret-leak scan flagged the test log"
-    echo "ERROR: secret-leak scan flagged the iOS test log" >&2
-    exit 1
-  fi
+scan_rc=0
+scan_log_or_contain "${LOG_FILE}" || scan_rc=$?
+if (( scan_rc != 0 )); then
+  ios_retry_record "${VERDICT_FILE}" genuine 1 "secret-leak scan failed the test log (rc=${scan_rc})"
+  echo "ERROR: secret-leak scan failed for the iOS test log (rc=${scan_rc}:" \
+       "1 = leak, now removed; 3 = nothing scannable)" >&2
+  exit 1
 fi
 
 if [[ "${TEST_RC}" -ne 0 ]]; then

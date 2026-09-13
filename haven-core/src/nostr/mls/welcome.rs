@@ -30,6 +30,8 @@ use std::sync::Mutex;
 
 use nostr::{Event, EventId};
 
+use crate::log_alias::{self, bucket, EventIdHex};
+
 /// Non-secret preview shown to the user before they accept a welcome.
 ///
 /// Derived from a transient peel of the gift wrap that reads only the NIP-59
@@ -96,10 +98,14 @@ impl PendingWelcome {
 
 impl std::fmt::Debug for PendingWelcome {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Present the gift-wrap id (public, its own event id) but never the
-        // encrypted body.
+        // The store is keyed by the gift-wrap id, so the alias handle keeps two
+        // renderings of the same held welcome comparable without naming the
+        // event any relay also saw (Rule 15). The body is never decrypted here.
         f.debug_struct("PendingWelcome")
-            .field("gift_wrap_id", &self.gift_wrap.id)
+            .field(
+                "gift_wrap",
+                &log_alias::event(EventIdHex(&self.gift_wrap.id.to_hex())),
+            )
             .field("gift_wrap_body", &"<redacted>")
             .field("preview", &self.preview)
             .finish()
@@ -185,8 +191,10 @@ impl PendingWelcomeStore {
 
 impl std::fmt::Debug for PendingWelcomeStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Bucketed: how many invitations are pending is how many circles are
+        // inviting this device right now (Rule 15).
         f.debug_struct("PendingWelcomeStore")
-            .field("held", &self.len())
+            .field("held", &bucket(self.len()))
             .finish()
     }
 }
@@ -269,15 +277,53 @@ mod tests {
     }
 
     #[test]
-    fn debug_redacts_body_and_preview() {
-        let store = PendingWelcomeStore::new();
-        let w = pending("secret-body");
+    fn pending_welcome_debug_redacts_the_body_the_id_and_the_inviter() {
+        let w: PendingWelcome = pending("secret-body");
+        let gift_wrap_id = w.id().to_hex();
+        let inviter = w.preview().inviter_pubkey.clone();
         let debug_pending = format!("{w:?}");
-        assert!(debug_pending.contains("PendingWelcome"));
-        assert!(debug_pending.contains("<redacted>"));
-        // The store Debug only exposes a count.
-        store.insert(w);
-        let debug_store = format!("{store:?}");
-        assert!(debug_store.contains("held: 1"));
+        assert!(debug_pending.contains("event#"), "expected an alias handle");
+        crate::assert_debug_redacted!(
+            w,
+            "PendingWelcome",
+            &["secret-body", &gift_wrap_id, &inviter]
+        );
+    }
+
+    /// How many invitations are pending is how many circles are inviting this
+    /// device right now, so the store reports a BUCKET (Rule 15).
+    #[test]
+    fn pending_welcome_store_debug_redacts_what_it_holds() {
+        let store = PendingWelcomeStore::new();
+        let held = pending("SECRET_GIFTWRAP_BODY");
+        let gift_wrap_id = held.id().to_hex();
+        let inviter = held.preview().inviter_pubkey.clone();
+        store.insert(held);
+        assert!(format!("{store:?}").contains("held: \"1\""));
+        // Nothing ABOUT the held welcomes, only how many: not the bodies, not
+        // the gift-wrap ids it is keyed by, not the inviters.
+        crate::assert_debug_redacted!(
+            store,
+            "PendingWelcomeStore",
+            &["SECRET_GIFTWRAP_BODY", &gift_wrap_id, &inviter]
+        );
+
+        for tag in ["two", "three", "four", "five", "six"] {
+            store.insert(pending(tag));
+        }
+        let rendered = format!("{store:?}");
+        assert!(
+            rendered.contains("held: \"5+\""),
+            "six held welcomes must render as the 5+ bucket: {rendered}"
+        );
+    }
+
+    #[test]
+    fn welcome_preview_debug_redacts_the_inviter() {
+        let inviter = Keys::generate().public_key().to_hex();
+        let preview = WelcomePreview {
+            inviter_pubkey: inviter.clone(),
+        };
+        crate::assert_debug_redacted!(preview, "WelcomePreview", &[&inviter]);
     }
 }

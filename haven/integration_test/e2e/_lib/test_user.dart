@@ -174,7 +174,7 @@ class TestUser {
     // service touches the Rust validator. Without this, every Rust call
     // site that goes through `validate_relay_urls` hard-rejects
     // `ws://10.0.2.2:7777` (Android) or `ws://localhost:7777` (host) with
-    // "Plaintext ws:// not allowed for security". The opt-in is
+    // "plaintext ws:// not allowed for security". The opt-in is
     // debug-only; release builds physically cannot reach this path. See
     // `haven-core/src/relay/manager.rs::allow_ws_loopback_for_test`.
     allowWsLoopbackForTest();

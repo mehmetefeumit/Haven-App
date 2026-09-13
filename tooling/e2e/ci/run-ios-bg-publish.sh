@@ -826,6 +826,26 @@ bgp_wait_until() {
   done
 }
 
+# bgp_scan_or_contain <log>... — the secret-leak gate (Security Rules 6 and 15)
+# over the logs the workflow uploads `if: failure()`. The delegate scans the
+# shared transcript at ITS end; this is the belt over the copy this lane
+# preserves, for the case where the delegate was killed before it got there.
+# A leak (rc 1) fails the lane, and that failure is what triggers the upload —
+# so the gate REMOVES every log it scanned before returning. rc 3
+# (absent/empty) keeps them: nothing there to contain. Reads SECRET_SCAN at
+# call time so --self-test can hand it a fake scanner.
+bgp_scan_or_contain() {
+  local rc=0
+  bash "${SECRET_SCAN}" "$@" || rc=$?
+  if (( rc == 1 )); then
+    rm -f -- "$@"
+    echo "ERROR: secret-leak guard tripped (see the LEAK line(s) above); removed" \
+         "the scanned log(s) so the failure-artifact upload cannot publish" \
+         "them: $*" >&2
+  fi
+  return "${rc}"
+}
+
 # ---------------------------------------------------------------------------
 # --self-test — hermetic. Fixtures are the ways this lane can go vacuously
 # green or wedge unbounded, because those are the failures nothing else would
@@ -837,7 +857,7 @@ run_self_test() {
   # check_ios_background_publish.sh's SELF_TEST_FIXTURES enforces). A count in
   # the summary line alone reports whatever ran: a fixture deleted with the
   # code it covered would print a smaller number and still say "all passed".
-  local -r SELF_TEST_FIXTURES=64
+  local -r SELF_TEST_FIXTURES=68
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
   trap "rm -rf '${tmp}'" RETURN
@@ -1538,6 +1558,55 @@ Usage: simctl location <device> <action> [<arguments>]
   _check "H8 the DISABLE deadline is per-leg and selected from LIVE_SYNC" \
     0 "${rc}"
 
+  # --- (G1-G3) The secret-leak gate CONTAINS. The workflow uploads this lane's
+  #     log `if: failure()` and a leak is a failure, so unless the gate removes
+  #     what it flagged the lane publishes the line it went red on. Driven with
+  #     a FAKE scanner: rc 1 removes every scanned log, rc 3 (nothing scannable)
+  #     and rc 0 leave them, and the verdict comes back unchanged.
+  local fake_scan="${tmp}/fake-scan.sh" SECRET_SCAN gate_a gate_b want got
+  printf '%s\n' '#!/usr/bin/env bash' 'exit "${FAKE_SCAN_RC}"' > "${fake_scan}"
+  SECRET_SCAN="${fake_scan}"
+  gate_a="${tmp}/gate-a.log"
+  gate_b="${tmp}/gate-b.log"
+  for want in 1 3 0; do
+    printf 'a\n' > "${gate_a}"
+    printf 'b\n' > "${gate_b}"
+    export FAKE_SCAN_RC="${want}"
+    rc=0
+    bgp_scan_or_contain "${gate_a}" "${gate_b}" 2>/dev/null || rc=$?
+    # One observation per verdict: "<rc> <a present> <b present>".
+    got="${rc} $([[ -e "${gate_a}" ]] && echo 1 || echo 0) $([[ -e "${gate_b}" ]] && echo 1 || echo 0)"
+    if (( want == 1 )); then
+      _check "G1 a leak (rc 1) removes every scanned log" "1 0 0" "${got}"
+    elif (( want == 3 )); then
+      _check "G2 nothing scannable (rc 3) keeps the logs" "3 1 1" "${got}"
+    else
+      _check "G3 a clean scan (rc 0) keeps the logs" "0 1 1" "${got}"
+    fi
+  done
+  unset FAKE_SCAN_RC
+
+  # --- (G4) STRUCTURAL: the real run asserts the scanner's presence with the
+  #     hard-fail form and passes the preserved log AND the shared transcript
+  #     through the gate — after the copy that preserves it, before the drive's
+  #     exit code can end the script. Scoped to the real run so this fixture's
+  #     own needles cannot satisfy it.
+  body="$(sed -n '/^# Real run$/,$p' "${BASH_SOURCE[0]}" \
+            | grep -v '^[[:space:]]*#')"
+  rc=0
+  [[ -n "${body}" ]] || rc=1
+  grep -qF '[[ -f "${SECRET_SCAN}" ]]' <<<"${body}" || rc=1
+  local cp_line gate_line exit_line
+  cp_line="$(grep -nF 'cp "${SHARED_LOG}" "${BG_LOG}"' <<<"${body}" | cut -d: -f1 | head -n 1)"
+  gate_line="$(grep -nF 'bgp_scan_or_contain "${BG_LOG}" "${SHARED_LOG}"' <<<"${body}" | cut -d: -f1 | head -n 1)"
+  exit_line="$(grep -nF 'exit "${DRIVE_RC}"' <<<"${body}" | cut -d: -f1 | head -n 1)"
+  [[ -n "${cp_line}" && -n "${gate_line}" && -n "${exit_line}" ]] || rc=1
+  if [[ -n "${cp_line}" && -n "${gate_line}" && -n "${exit_line}" ]]; then
+    (( cp_line < gate_line && gate_line < exit_line )) || rc=1
+  fi
+  _check "G4 the real run gates the preserved log between the copy and the drive's exit" \
+    0 "${rc}"
+
   if (( checked != SELF_TEST_FIXTURES )); then
     echo "SELF-TEST FAIL: ran ${checked} fixture(s), expected ${SELF_TEST_FIXTURES}" >&2
     fail=1
@@ -1569,7 +1638,9 @@ Usage: simctl location <device> <action> [<arguments>]
        "grant, the uninstall" \
        "skip, the tier threaded to the delegate, the single validated tier" \
        "input, the per-leg DISABLE deadline and the moving location drip are" \
-       "structurally pinned)."
+       "structurally pinned; and the secret-leak gate removes what it flags" \
+       "and nothing else, and sits between the log's preservation and the" \
+       "drive's exit)."
   return 0
 }
 
@@ -1642,11 +1713,14 @@ readonly EXPECT_TIER
 readonly REPO_ROOT="${SCRIPT_DIR}/../../.."
 readonly HAVEN_DIR="${REPO_ROOT}/haven"
 readonly SIM_RUNNER="${SCRIPT_DIR}/run-ios-sim-scenario.sh"
+readonly SECRET_SCAN="${SCRIPT_DIR}/scan-logs-for-secrets.sh"
 
 [[ -f "${HAVEN_DIR}/${SCENARIO_FILE}" ]] \
   || { echo "ERROR: drive target not found: ${HAVEN_DIR}/${SCENARIO_FILE}" >&2; exit 2; }
 [[ -f "${SIM_RUNNER}" ]] \
   || { echo "ERROR: shared runner not found: ${SIM_RUNNER}" >&2; exit 2; }
+[[ -f "${SECRET_SCAN}" ]] \
+  || { echo "ERROR: secret-leak guard missing at ${SECRET_SCAN}" >&2; exit 2; }
 
 echo "iOS bg-publish lane — udid=${SIM_UDID} relay=${RELAY_URL}" \
      "live_sync=${LIVE_SYNC} tier=${AUTH_TIER} (grant=${PRIVACY_SERVICE}," \
@@ -2017,9 +2091,25 @@ set -e
 # anything else can overwrite the shared path.
 cp "${SHARED_LOG}" "${BG_LOG}" 2>/dev/null || true
 
+# Both copies go through the gate BEFORE the drive's own verdict: a leak
+# outranks whatever the drive reported, and a drive the outer timeout killed
+# before its own scan leaves an unscanned transcript that the upload step would
+# otherwise publish. On rc 1 the gate has removed both files; on rc 3 (nothing
+# scannable) a failed drive keeps its own, more useful, exit code below.
+SCAN_RC=0
+bgp_scan_or_contain "${BG_LOG}" "${SHARED_LOG}" || SCAN_RC=$?
+if (( SCAN_RC == 1 )); then
+  exit 1
+fi
+
 if (( DRIVE_RC != 0 )); then
   echo "ERROR: the iOS bg-publish drive failed (rc=${DRIVE_RC})." >&2
   exit "${DRIVE_RC}"
+fi
+if (( SCAN_RC != 0 )); then
+  echo "ERROR: ${BG_LOG} / ${SHARED_LOG} could not be scanned (rc=${SCAN_RC});" >&2
+  echo "       a log the guard could not read is not a clean log." >&2
+  exit 1
 fi
 
 # --- The completion gate (A3b). ----------------------------------------------

@@ -1358,13 +1358,10 @@ mod tests {
             pic.url.contains(&pic.sha256_hex),
             "descriptor url is content-addressed"
         );
-        eprintln!("[live] upload OK sha256={} url={}", pic.sha256_hex, pic.url);
-
         let round = download_profile_picture(&pic.url)
             .await
             .expect("live download + re-validate succeeds");
         assert_eq!(round.sha256_hex, pic.sha256_hex, "round-trip sha matches");
         assert!(!round.canonical.is_empty(), "re-validated canonical bytes");
-        eprintln!("[live] round-trip OK for {}", pic.url);
     }
 }

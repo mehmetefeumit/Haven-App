@@ -274,6 +274,24 @@ is_connect_flake() {
   return 0
 }
 
+# scan_logs_or_contain <log>... — the secret-leak gate (Security Rules 6 and
+# 15) over the logs e2e-android.yml uploads `if: failure()`. A leak (rc 1)
+# fails the lane, and that failure is what triggers the upload — so the gate
+# REMOVES every log it scanned before returning, or the run would publish the
+# leak it just caught. rc 3 (absent/empty) keeps them: nothing there to
+# contain. Reads SECRET_SCAN at call time so --self-test can hand it a fake.
+scan_logs_or_contain() {
+  local rc=0
+  bash "${SECRET_SCAN}" "$@" || rc=$?
+  if (( rc == 1 )); then
+    rm -f -- "$@"
+    echo "ERROR: secret-leak guard tripped (see the LEAK line(s) above); removed" \
+         "the scanned logs so the failure-artifact upload cannot publish them:" \
+         "$*" >&2
+  fi
+  return "${rc}"
+}
+
 # --self-test — validate is_connect_flake against synthetic drive logs WITHOUT
 # a device/emulator (mirrors scan-logs-for-secrets.sh --self-test). CI gates
 # the predicate through this in a fast, hermetic job so it can never silently
@@ -581,11 +599,75 @@ wlan0	0002000A	00000000	0000	0	0	0	00FFFFFF	0	0	0" 10.0.2.2; then
     fail=1
   fi
 
+  # ---------------------------------------------------------------
+  # (9) The secret-leak gate CONTAINS as well as detects. e2e-android.yml
+  # uploads the drive log and the logcat `if: failure()`, and a leak is a
+  # failure — so unless the gate removes what it flagged, the lane publishes
+  # exactly the line it went red on. Driven with a FAKE scanner (no device):
+  # the gate's own logic is what is under test, not the patterns.
+  # ---------------------------------------------------------------
+  local fake_scan="${tmp}/fake-scan.sh" SECRET_SCAN log_a log_b want rc
+  printf '%s\n' '#!/usr/bin/env bash' 'exit "${FAKE_SCAN_RC}"' > "${fake_scan}"
+  SECRET_SCAN="${fake_scan}"
+  log_a="${tmp}/gate-a.log"
+  log_b="${tmp}/gate-b.log"
+  # (9a) rc 1 removes EVERY scanned log; rc 3 (nothing scannable) and rc 0
+  #      leave them; the scanner's verdict is returned unchanged in all three.
+  for want in 1 3 0; do
+    printf 'a\n' > "${log_a}"
+    printf 'b\n' > "${log_b}"
+    export FAKE_SCAN_RC="${want}"
+    rc=0
+    scan_logs_or_contain "${log_a}" "${log_b}" 2>/dev/null || rc=$?
+    if (( rc != want )); then
+      echo "SELF-TEST FAIL (9a): the gate returned ${rc} for a scanner rc of ${want}" >&2
+      fail=1
+    fi
+    if (( want == 1 )); then
+      if [[ -e "${log_a}" || -e "${log_b}" ]]; then
+        echo "SELF-TEST FAIL (9a): a leak (rc 1) left a scanned log on disk for" \
+             "the failure-artifact upload to publish" >&2
+        fail=1
+      fi
+    elif [[ ! -e "${log_a}" || ! -e "${log_b}" ]]; then
+      echo "SELF-TEST FAIL (9a): scanner rc ${want} removed a log it had no" \
+           "leak to contain" >&2
+      fail=1
+    fi
+  done
+  unset FAKE_SCAN_RC
+
+  # (9b) THE ORDER. The drive log is echoed into the job log — world-readable
+  #      on a public repository — so the echo must sit AFTER the gate, and
+  #      there must be exactly one. Both are read from this file's top-level
+  #      lines (the fixture's own mentions are indented, so `^` skips them).
+  local gate_line cat_line cat_count
+  gate_line="$(grep -n '^scan_logs_or_contain /tmp/adb-logcat.log /tmp/flutter-drive.log' \
+                 "${BASH_SOURCE[0]}" | cut -d: -f1 | head -n 1)"
+  cat_line="$(grep -n '^cat /tmp/flutter-drive.log' "${BASH_SOURCE[0]}" \
+                | cut -d: -f1 | head -n 1)"
+  cat_count="$(grep -c '^cat /tmp/flutter-drive.log' "${BASH_SOURCE[0]}" || true)"
+  if [[ -z "${gate_line}" || -z "${cat_line}" ]]; then
+    echo "SELF-TEST FAIL (9b): cannot find the top-level gate call and/or the" \
+         "drive-log echo (gate='${gate_line}', cat='${cat_line}')" >&2
+    fail=1
+  elif (( cat_line < gate_line )); then
+    echo "SELF-TEST FAIL (9b): the drive log is echoed at line ${cat_line}," \
+         "before the secret-leak gate at line ${gate_line}: a leak would reach" \
+         "the job log before the guard could fail" >&2
+    fail=1
+  fi
+  if (( cat_count != 1 )); then
+    echo "SELF-TEST FAIL (9b): expected exactly one top-level drive-log echo," \
+         "found ${cat_count}" >&2
+    fail=1
+  fi
+
   if (( fail )); then
     echo "run-single-avd-scenario: SELF-TEST FAILED" >&2
     return 1
   fi
-  echo "run-single-avd-scenario: self-test passed (connect flake caught; clean pass, real post-connect failure, and non-connect failure all correctly NOT retried; app-failure check scoped to the final attempt; the network gate admits a guest whose on-link routes cover the relay, still rejects one with no route to it, and is satisfied by neither loopback, a foreign subnet, a downed interface, nor adb noise; the Wi-Fi read-back accepts only a literal 0, never 'null' or adb noise; a connect-flake retry restores the app through install_app and re-grants. Phase 2's install barrier is app-install-lib.sh's, and its own --self-test pins it)."
+  echo "run-single-avd-scenario: self-test passed (connect flake caught; clean pass, real post-connect failure, and non-connect failure all correctly NOT retried; app-failure check scoped to the final attempt; the network gate admits a guest whose on-link routes cover the relay, still rejects one with no route to it, and is satisfied by neither loopback, a foreign subnet, a downed interface, nor adb noise; the Wi-Fi read-back accepts only a literal 0, never 'null' or adb noise; a connect-flake retry restores the app through install_app and re-grants; the secret-leak gate removes what it flags and nothing else, and the drive log is echoed only after it. Phase 2's install barrier is app-install-lib.sh's, and its own --self-test pins it)."
   return 0
 }
 
@@ -1213,7 +1295,6 @@ while (( attempt <= DRIVE_MAX_ATTEMPTS )); do
   rm -f "${attempt_log}"
   break
 done
-cat /tmp/flutter-drive.log || true
 
 if (( preconnect_stall == 1 )); then
   echo "ERROR: flutter drive for ${SCENARIO_FILE} never connected within" \
@@ -1229,15 +1310,19 @@ fi
 # logcat + drive logs for key material (e.g. keyring-core dumping the
 # SQLCipher DB-key bytes at DEBUG). This runs REGARDLESS of the test's
 # own pass/fail, so a leak can't ride along on a green run — a hit fails
-# the scenario even when the test itself passed.
+# the scenario even when the test itself passed. A hit also REMOVES both
+# logs (scan_logs_or_contain), and the drive log is echoed only below it:
+# the job log is world-readable, and the upload that a failure triggers
+# must find nothing to publish.
 # -----------------------------------------------------------------
 echo "Scanning E2E logs for secret material..."
 scan_rc=0
-bash "${SECRET_SCAN}" /tmp/adb-logcat.log /tmp/flutter-drive.log || scan_rc=$?
+scan_logs_or_contain /tmp/adb-logcat.log /tmp/flutter-drive.log || scan_rc=$?
 if (( scan_rc != 0 )); then
-  echo "ERROR: secret-leak guard tripped — see LEAK line(s) above." >&2
+  echo "ERROR: secret-leak guard tripped — see the line(s) above." >&2
   exit 1
 fi
+cat /tmp/flutter-drive.log || true
 
 # -----------------------------------------------------------------
 # Trust the APP, not the exit code.

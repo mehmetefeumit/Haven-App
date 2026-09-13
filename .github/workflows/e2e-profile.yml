@@ -136,6 +136,7 @@ jobs:
 
     steps:
       - name: Checkout
+        id: checkout
         uses: actions/checkout@v6
 
       # Reclaim runner disk BEFORE the Gradle/Rust build — the multi-GB debug
@@ -390,8 +391,12 @@ jobs:
             docker logs "${c}" > "/tmp/${c}.log" 2>&1 || true
           done
 
+      # `if: always()` and `.log`, not `.txt`: the scan step below runs on every
+      # outcome and refuses an absent file, and the scanner's directory walk
+      # only ever picks up `*.log` — a `.txt` here would be the one uploaded
+      # path the guard cannot see.
       - name: Capture host + emulator diagnostics
-        if: failure()
+        if: always()
         run: |
           {
             echo "=== df -h ==="
@@ -408,7 +413,25 @@ jobs:
             echo
             echo "=== top (1 sample) ==="
             top -bn1 | head -40 || true
-          } > /tmp/diag.txt 2>&1
+          } > /tmp/diag.log 2>&1
+
+      # The logcat and the drive log were scanned by the runner (which deletes
+      # them on a leak); these are the uploaded logs it never sees. Scan-before-
+      # upload, as its OWN step on every outcome short of a cancellation: a
+      # leak (rc 1) deletes them and fails the lane even on an otherwise green
+      # run, so the `if: failure()` upload finds nothing to publish; an
+      # unscannable log (rc 3) fails it and leaves the files as they are. The
+      # standard guard condition (not `always()`) is what lets
+      # docs/privacy/privacy_invariants.json cite this step as the runtime
+      # scanner's enforcing run.
+      - name: Scan captured logs for secrets before upload
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: |
+          logs=(/tmp/strfry.log /tmp/strfry-profile-*.log /tmp/blossom.log /tmp/diag.log)
+          rc=0
+          bash tooling/e2e/ci/scan-logs-for-secrets.sh "${logs[@]}" || rc=$?
+          if [ "${rc}" -eq 1 ]; then rm -f -- "${logs[@]}"; fi
+          exit "${rc}"
 
       - name: Upload failure artifacts
         if: failure()
@@ -421,7 +444,7 @@ jobs:
             /tmp/strfry.log
             /tmp/strfry-profile-*.log
             /tmp/blossom.log
-            /tmp/diag.txt
+            /tmp/diag.log
             /tmp/scenario.apk
           retention-days: 14
           if-no-files-found: ignore
@@ -458,7 +481,9 @@ jobs:
     runs-on: macos-latest # Apple Silicon; arm64 simulator (no Linux Docker).
     # Clears the sum of its step caps, by the rule stated on the Android job:
     # Boot iOS simulator 15 + the drive step 65 + at most 6.0 min of work no
-    # step cap bounds (the cold relay builds included) over 52 runs (ci.yml,
+    # step cap bounds (the cold relay builds included; since 2026-09-12 the
+    # diagnostics step also runs two `log show` passes over the archive and
+    # the secret scan, unmeasured yet: re-measure) over 52 runs (ci.yml,
     # 2026-07-29..09-10; run 34488512808), taken as 6 = 86 -> 90.
     # job-uncapped-minutes: 6.0 (52 runs, worst 34488512808)
     timeout-minutes: 90
@@ -492,6 +517,7 @@ jobs:
 
     steps:
       - name: Checkout
+        id: checkout
         uses: actions/checkout@v6
 
       - name: Setup Rust
@@ -581,16 +607,49 @@ jobs:
       # (start-local-relay.sh keys the log file on the instance name), collected
       # here alongside the circle relay's so triage can tell WHICH plane a
       # kind-0 landed on.
+      # The unified-log archive is a full-device capture (binary tracev3,
+      # multi-GB) that the scanner cannot read, so it never leaves the runner:
+      # two `log show` exports replace it — Haven's own lines (the Rust
+      # `frb_user` oslog subsystem and the Runner process), uncapped, and the
+      # whole device under SIM_LOG_FULL_CAP_BYTES. `log show` emits in
+      # chronological order, so the cap keeps the EARLIEST bytes; the residual
+      # past it is discarded with the archive — evidence lost, nothing
+      # published. Every log the upload step names is scanned by the next
+      # step, before that step can see it.
       - name: Collect simulator diagnostics
         if: always()
+        env:
+          SIM_LOG_FULL_CAP_BYTES: "67108864"
         run: |
           xcrun simctl spawn booted log collect --output /tmp/sim.logarchive 2>/dev/null || true
+          log show --archive /tmp/sim.logarchive --style syslog --info --debug \
+            --predicate 'subsystem == "frb_user" OR process == "Runner"' \
+            > /tmp/sim-unified.log 2>/dev/null || true
+          log show --archive /tmp/sim.logarchive --style syslog 2>/dev/null \
+            | head -c "${SIM_LOG_FULL_CAP_BYTES}" > /tmp/sim-unified-full.log || true
+          rm -rf /tmp/sim.logarchive
           cp /tmp/haven-local-relay.log /tmp/relay.log 2>/dev/null || true
           for f in /tmp/haven-local-relay-profile-*.log; do
             [ -f "${f}" ] || continue
             cp "${f}" "/tmp/relay-$(basename "${f}" .log | sed 's/^haven-local-relay-//').log" || true
           done
           cp /tmp/haven-local-blossom.log /tmp/blossom.log 2>/dev/null || true
+
+      # Scan-before-upload, as its OWN step: every `.log` the upload step names
+      # goes through the scanner here on every outcome short of a cancellation,
+      # so a leak (rc 1) deletes the scanned files and fails the lane even on an
+      # otherwise green run, and an unscannable log (rc 3) fails it and leaves
+      # them as they are. The standard guard condition (not `always()`) is what
+      # lets docs/privacy/privacy_invariants.json cite this step as the runtime
+      # scanner's enforcing run.
+      - name: Scan captured logs for secrets before upload
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: |
+          logs=(/tmp/sim-unified.log /tmp/sim-unified-full.log /tmp/flutter-ios-test.log /tmp/relay.log /tmp/relay-profile-*.log /tmp/blossom.log)
+          rc=0
+          bash tooling/e2e/ci/scan-logs-for-secrets.sh "${logs[@]}" || rc=$?
+          if [ "${rc}" -eq 1 ]; then rm -f -- "${logs[@]}"; fi
+          exit "${rc}"
 
       - name: Upload failure artifacts
         if: failure()
@@ -602,7 +661,8 @@ jobs:
             /tmp/relay.log
             /tmp/relay-profile-*.log
             /tmp/blossom.log
-            /tmp/sim.logarchive
+            /tmp/sim-unified.log
+            /tmp/sim-unified-full.log
           retention-days: 14
           if-no-files-found: ignore
 

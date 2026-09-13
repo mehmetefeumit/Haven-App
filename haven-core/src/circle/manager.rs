@@ -41,6 +41,7 @@ use super::types::{
     GiftWrappedWelcome, Invitation, MemberKeyPackage, MembershipStatus,
 };
 use crate::location::LocationMessage;
+use crate::log_alias::{self, bucket, EventIdHex};
 use crate::nostr::mls::types::{
     ConvergedRoster, ConvergenceSweep, GroupEvent, GroupId, GroupIdExt, KeyPackage,
     LocationGroupConfig, LocationMessageResult, PendingStateRef, PublishWork, SessionEffects,
@@ -82,20 +83,6 @@ fn secs_from_ms(at_ms: Option<i64>) -> Option<u64> {
 /// circle it broke on.
 fn redact_storage_error(err: &CircleError) -> CircleError {
     CircleError::Storage(redact_hex_sequences(&err.to_string()))
-}
-
-/// Formats the first 8 hex chars of an event ID for diagnostic logging.
-///
-/// Safe to log: gives operators enough to correlate a log line with a relay
-/// event without exposing the full ID.
-#[must_use]
-pub fn short_id(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-    let mut out = String::with_capacity(8);
-    for b in bytes.iter().take(4) {
-        let _ = write!(out, "{b:02x}");
-    }
-    out
 }
 
 /// High-level API for circle management.
@@ -262,10 +249,13 @@ impl CircleManager {
     fn backfill_contamination_ledger(storage: &CircleStorage) {
         match storage.refresh_contamination_ledger(chrono::Utc::now().timestamp()) {
             Ok(0) => {}
-            Ok(n) => log::info!("contamination ledger: backfilled {n} relay(s) at startup"),
+            Ok(n) => log::info!(
+                "contamination ledger: backfilled {} relay(s) at startup",
+                bucket(n)
+            ),
             Err(e) => log::warn!(
                 "contamination ledger backfill failed (retries next launch): {}",
-                redact_hex_sequences(&e.to_string())
+                e.code()
             ),
         }
     }
@@ -285,10 +275,13 @@ impl CircleManager {
     fn prune_retired_profile_pool(storage: &CircleStorage) {
         match storage.prune_retired_profile_relays() {
             Ok(0) => {}
-            Ok(n) => log::info!("profile pool: pruned {n} retired relay row(s) at startup"),
+            Ok(n) => log::info!(
+                "profile pool: pruned {} retired relay row(s) at startup",
+                bucket(n)
+            ),
             Err(e) => log::warn!(
                 "retired profile-relay prune failed (retries next launch): {}",
-                redact_hex_sequences(&e.to_string())
+                e.code()
             ),
         }
     }
@@ -317,10 +310,13 @@ impl CircleManager {
     fn sweep_expired_directory_members(storage: &CircleStorage) {
         match storage.prune_expired_directory_members(chrono::Utc::now().timestamp()) {
             Ok(0) => {}
-            Ok(n) => log::info!("member directory: purged {n} expired row(s) at startup"),
+            Ok(n) => log::info!(
+                "member directory: purged {} expired row(s) at startup",
+                bucket(n)
+            ),
             Err(e) => log::warn!(
                 "member directory retention sweep failed (retries next launch): {}",
-                redact_hex_sequences(&e.to_string())
+                e.code()
             ),
         }
     }
@@ -1008,7 +1004,7 @@ impl CircleManager {
         if let Err(e) = self.resync_circle_relays_from_mdk(mls_group_id).await {
             log::warn!(
                 "finalize_relay_update: relay re-sync failed (will self-heal): {}",
-                redact_hex_sequences(&e.to_string())
+                e.code()
             );
         }
         Ok(())
@@ -1142,7 +1138,7 @@ impl CircleManager {
                 log::warn!(
                     "epoch-rotation repair: reading the proposal window failed; \
                      declining the repair: {}",
-                    redact_hex_sequences(&e.to_string())
+                    e.code()
                 );
                 true
             }
@@ -1227,9 +1223,9 @@ impl CircleManager {
             log::warn!(
                 "epoch-rotation repair deferred: {} input(s) still gating, \
                  {} queued rotation(s) taken back, {} staged commit(s) handed back",
-                report.unresolved_inputs,
-                discarded,
-                report.work.commits.len()
+                bucket(report.unresolved_inputs),
+                bucket(discarded),
+                bucket(report.work.commits.len())
             );
             return Ok(RepairRotationOutcome::Deferred {
                 unresolved_inputs: report.unresolved_inputs,
@@ -1301,7 +1297,7 @@ impl CircleManager {
                 log::warn!(
                     "epoch-rotation repair: taking the queued rotation back failed; one \
                      extra epoch bump may land when the circle unblocks: {}",
-                    redact_hex_sequences(&e.to_string())
+                    e.code()
                 );
                 0
             })
@@ -1345,11 +1341,14 @@ impl CircleManager {
     /// Returns an error if the engine rejects the leave (e.g. the caller is
     /// still an admin — `AdminCannotSelfRemove`).
     pub async fn propose_leave(&self, mls_group_id: &GroupId) -> Result<Event> {
+        // Through the boundary conversion, not a flattening closure: it is what
+        // keeps `AdminSelfDemoteRequired` a typed variant, so the caller sees the
+        // self-demote remediation on `Display` instead of a bare "MLS error".
         let effects = self
             .session
             .leave_group(mls_group_id)
             .await
-            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
+            .map_err(CircleError::from)?;
         let event = take_proposal(effects)?;
         // Recorded only once the engine has accepted the departure, and durably,
         // because a peer may commit this `SelfRemove` before the local teardown
@@ -1363,7 +1362,7 @@ impl CircleManager {
             log::warn!(
                 "leave-intent marker not recorded; this circle's co-members may be \
                  dropped from the directory instead of ageing out: {}",
-                redact_hex_sequences(&e.to_string())
+                e.code()
             );
         }
         Ok(event)
@@ -1482,7 +1481,7 @@ impl CircleManager {
                 log::warn!(
                     "epoch-rotation repair: recording the rate limit failed; the circle may \
                      accept another repair sooner than intended: {}",
-                    redact_hex_sequences(&e.to_string())
+                    e.code()
                 );
             }
         }
@@ -1543,7 +1542,7 @@ impl CircleManager {
             if let Err(e) = self.storage.delete_circle(&group_id) {
                 log::warn!(
                     "create rollback: circle-row cleanup failed (self-heals on logout wipe): {}",
-                    redact_hex_sequences(&e.to_string())
+                    e.code()
                 );
             }
         }
@@ -1689,7 +1688,7 @@ impl CircleManager {
                 log::warn!(
                     "member directory: removal row not deleted (the next reconcile \
                      demotes it instead of deleting it): {}",
-                    redact_hex_sequences(&e.to_string())
+                    e.code()
                 );
             }
         }
@@ -2064,7 +2063,7 @@ impl CircleManager {
             if let Err(e) = self.reconcile_member_directory(next, now_unix_secs).await {
                 log::warn!(
                     "member directory reconcile failed (retries on the next membership change): {}",
-                    redact_hex_sequences(&e.to_string())
+                    e.code()
                 );
             }
         }
@@ -2137,16 +2136,13 @@ impl CircleManager {
                         .storage
                         .note_inbound_group_event(&circle.nostr_group_id, now_ms)
                     {
-                        log::warn!(
-                            "inbound group-event observation not recorded: {}",
-                            redact_hex_sequences(&e.to_string())
-                        );
+                        log::warn!("inbound group-event observation not recorded: {}", e.code());
                     }
                 }
                 Ok(None) => {}
                 Err(e) => log::warn!(
                     "inbound group-event observation: circle lookup failed: {}",
-                    redact_hex_sequences(&e.to_string())
+                    e.code()
                 ),
             }
         }
@@ -2179,10 +2175,7 @@ impl CircleManager {
                         .storage
                         .note_epoch_change_seen(&circle.nostr_group_id, now_ms)
                     {
-                        log::warn!(
-                            "epoch-change observation not recorded: {}",
-                            redact_hex_sequences(&e.to_string())
-                        );
+                        log::warn!("epoch-change observation not recorded: {}", e.code());
                     }
                     // An epoch move discharges an ORPHANED obligation, and
                     // only an orphaned one. Whatever moved the epoch merged some
@@ -2221,7 +2214,7 @@ impl CircleManager {
                 Ok(None) => {}
                 Err(e) => log::warn!(
                     "epoch-change observation: circle lookup failed: {}",
-                    redact_hex_sequences(&e.to_string())
+                    e.code()
                 ),
             }
         }
@@ -2348,10 +2341,7 @@ impl CircleManager {
             // The durable half is what makes the obligation loud if this process
             // dies. Without it, holding the commit would be exactly the silent
             // wedge OD4-c names, so report the failure to the caller.
-            log::warn!(
-                "removal publish obligation not recorded: {}",
-                redact_hex_sequences(&e.to_string())
-            );
+            log::warn!("removal publish obligation not recorded: {}", e.code());
             return false;
         }
         self.removal_deferrals
@@ -2569,10 +2559,7 @@ impl CircleManager {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(nostr_group_id);
         if let Err(e) = self.storage.clear_deferred_removal_commit(nostr_group_id) {
-            log::warn!(
-                "deferred removal commit not cleared: {}",
-                redact_hex_sequences(&e.to_string())
-            );
+            log::warn!("deferred removal commit not cleared: {}", e.code());
         }
     }
 
@@ -2600,10 +2587,9 @@ impl CircleManager {
         _recipient_keys: &Keys,
         gift_wrap_event: &Event,
     ) -> Result<Invitation> {
-        let wrapper_id_prefix = short_id(gift_wrap_event.id.as_bytes());
         log::debug!(
-            "[CircleManager] process_gift_wrapped_invitation: wrapper_id={wrapper_id_prefix} \
-             kind={}",
+            "[CircleManager] process_gift_wrapped_invitation: wrapper={} kind={}",
+            log_alias::event(EventIdHex(&gift_wrap_event.id.to_hex())),
             gift_wrap_event.kind.as_u16(),
         );
 
@@ -2952,10 +2938,7 @@ impl CircleManager {
         {
             Ok(sweep) => sweep,
             Err(e) => {
-                log::warn!(
-                    "deferred send: convergence sweep failed: {}",
-                    redact_hex_sequences(&e.to_string())
-                );
+                log::warn!("deferred send: convergence sweep failed: {}", e.code());
                 ConvergenceSweep::default()
             }
         };
@@ -2966,20 +2949,18 @@ impl CircleManager {
                 work.commits.extend(advanced.commits);
                 work.proposals.extend(advanced.proposals);
             }
-            Err(e) => log::warn!(
-                "deferred send: advancing convergence failed: {}",
-                redact_hex_sequences(&e.to_string())
-            ),
+            Err(e) => log::warn!("deferred send: advancing convergence failed: {}", e.code()),
         }
 
         let unresolved_inputs = self.gating_input_count(mls_group_id).await;
         log::warn!(
-            "send deferred by the MLS engine: {unresolved_inputs} input(s) still gating after \
-             repair ({} queued location intent(s) discarded, {} stale input(s) retired, \
+            "send deferred by the MLS engine: {} input(s) still gating after repair \
+             ({} queued location intent(s) discarded, {} stale input(s) retired, \
              {} staged commit(s) handed back)",
-            sweep.discarded_intents,
-            sweep.disposed_messages,
-            work.commits.len()
+            bucket(unresolved_inputs),
+            bucket(sweep.discarded_intents),
+            bucket(sweep.disposed_messages),
+            bucket(work.commits.len())
         );
         DeferredSendReport {
             unresolved_inputs,
@@ -3051,7 +3032,7 @@ impl CircleManager {
                         Ok(event) => out.proposals.push(event),
                         Err(e) => log::warn!(
                             "deferred send: dropping an unserializable proposal: {}",
-                            redact_hex_sequences(&e.to_string())
+                            e.code()
                         ),
                     }
                 }
@@ -3074,7 +3055,7 @@ impl CircleManager {
             .unwrap_or_else(|e| {
                 log::warn!(
                     "deferred send: discarding the queued location intent failed: {}",
-                    redact_hex_sequences(&e.to_string())
+                    e.code()
                 );
                 0
             })
@@ -3092,10 +3073,7 @@ impl CircleManager {
             .gating_input_count(mls_group_id)
             .await
             .unwrap_or_else(|e| {
-                log::warn!(
-                    "deferred send: reading the send gate failed: {}",
-                    redact_hex_sequences(&e.to_string())
-                );
+                log::warn!("deferred send: reading the send gate failed: {}", e.code());
                 0
             })
     }
@@ -3232,7 +3210,7 @@ impl CircleManager {
             if let Err(e) = self.resync_circle_relays_from_mdk(&gid).await {
                 log::debug!(
                     "decrypt_location: relay re-sync failed (will retry on next commit): {}",
-                    redact_hex_sequences(&e.to_string())
+                    e.code()
                 );
             }
         }
@@ -3604,8 +3582,8 @@ impl CircleManager {
     ///
     /// # Errors
     ///
-    /// Returns [`CircleError::InvalidData`] for malformed URLs and database
-    /// errors otherwise.
+    /// Returns [`CircleError::InvalidRelayInput`] for malformed URLs and
+    /// database errors otherwise.
     pub fn add_user_relay(
         &self,
         url: &str,
@@ -3618,8 +3596,9 @@ impl CircleManager {
     ///
     /// # Errors
     ///
-    /// Returns [`CircleError::InvalidData`] when the URL is invalid or would
-    /// empty the category. Database errors otherwise.
+    /// Returns [`CircleError::InvalidRelayInput`] when the URL is invalid
+    /// ([`RelayInputRejection::LastInCategory`] when the removal would empty the
+    /// category). Database errors otherwise.
     pub fn remove_user_relay(
         &self,
         url: &str,
@@ -4206,8 +4185,9 @@ fn note_dropped_resync_events(events: &[GroupEvent]) {
         .count();
     if dropped > 0 {
         log::debug!(
-            "send/create drain observed {dropped} resync signal(s); \
-             resync is authoritatively driven by the receive path"
+            "send/create drain observed {} resync signal(s); \
+             resync is authoritatively driven by the receive path",
+            bucket(dropped)
         );
     }
 }
@@ -4342,7 +4322,7 @@ impl std::fmt::Debug for CircleCreationResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CircleCreationResult")
             .field("circle", &"<redacted>")
-            .field("welcome_events_count", &self.welcome_events.len())
+            .field("welcome_events", &bucket(self.welcome_events.len()))
             .field("pending", &self.pending)
             .finish()
     }
@@ -4366,7 +4346,7 @@ impl std::fmt::Debug for AddMembersResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AddMembersResult")
             .field("commit_event", &"<redacted>")
-            .field("welcome_events_count", &self.welcome_events.len())
+            .field("welcome_events", &bucket(self.welcome_events.len()))
             .field("pending", &self.pending)
             .finish()
     }
@@ -4399,8 +4379,8 @@ pub struct DecryptedIngest {
 impl std::fmt::Debug for DecryptedIngest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DecryptedIngest")
-            .field("results_count", &self.results.len())
-            .field("auto_commits_count", &self.auto_commits.len())
+            .field("results", &bucket(self.results.len()))
+            .field("auto_commits", &bucket(self.auto_commits.len()))
             .finish()
     }
 }
@@ -4464,8 +4444,8 @@ impl std::fmt::Debug for RepairRotationOutcome {
                 work,
             } => f
                 .debug_struct("Deferred")
-                .field("unresolved_inputs", unresolved_inputs)
-                .field("discarded_intents", discarded_intents)
+                .field("unresolved_inputs", &bucket(*unresolved_inputs))
+                .field("discarded_intents", &bucket(*discarded_intents))
                 .field("repaired", repaired)
                 .field("work", work)
                 .finish(),
@@ -4543,8 +4523,8 @@ impl DeferredWork {
 impl std::fmt::Debug for DeferredWork {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DeferredWork")
-            .field("commits_count", &self.commits.len())
-            .field("proposals_count", &self.proposals.len())
+            .field("commits", &bucket(self.commits.len()))
+            .field("proposals", &bucket(self.proposals.len()))
             .finish()
     }
 }
@@ -4697,28 +4677,41 @@ mod tests {
             has_hex_run_ge16(&group_id_hex),
             "detector sanity: a 32-byte id is a >=16 hex run"
         );
-        let raw = CircleError::Storage(format!(
+        let sqlite_prose = format!(
             "no such column in UPDATE circle_health SET ... WHERE nostr_group_id = \
              x'{group_id_hex}'"
-        ));
+        );
+        // Fixture sanity on the SYNTHETIC prose, not on an error's rendering:
+        // `CircleError`'s `Display` no longer carries a payload at all, so a
+        // control that required one would forbid the stronger guarantee.
         assert!(
-            has_hex_run_ge16(&raw.to_string()),
-            "fixture sanity: the unredacted error DOES carry the id"
+            has_hex_run_ge16(&sqlite_prose),
+            "fixture sanity: the raw SQLite prose DOES carry the id"
+        );
+        assert!(
+            !has_hex_run_ge16(&redact_hex_sequences(&sqlite_prose)),
+            "redactor sanity: the run is collapsed"
         );
 
-        let surfaced = redact_storage_error(&raw).to_string();
+        let raw = CircleError::Storage(sqlite_prose);
+        let surfaced = redact_storage_error(&raw);
+        let rendered = surfaced.to_string();
 
-        assert!(
-            !surfaced.contains(&group_id_hex),
-            "the circle id crossed the boundary: {surfaced}"
+        // Two independent layers, both asserted: the variant still says a
+        // storage failure happened (what the two async siblings read as "the
+        // map_err is on the path"), and NEITHER rendering carries the id — the
+        // detail now lives only in the payload, which nothing renders.
+        assert!(matches!(surfaced, CircleError::Storage(_)), "{rendered}");
+        crate::assert_display_redacted!(
+            &surfaced,
+            "CircleError",
+            marker = "Storage error",
+            &[&group_id_hex, "circle_health"]
         );
+        crate::assert_debug_redacted!(&surfaced, "CircleError", &[&group_id_hex, "circle_health"]);
         assert!(
-            !has_hex_run_ge16(&surfaced),
-            "a long hex run survived redaction: {surfaced}"
-        );
-        assert!(
-            surfaced.contains("circle_health"),
-            "redaction must keep what broke, not blank the message: {surfaced}"
+            !has_hex_run_ge16(&rendered),
+            "a long hex run survived redaction: {rendered}"
         );
     }
 
@@ -6939,12 +6932,20 @@ mod tests {
     #[tokio::test]
     async fn update_circle_relays_rejects_plaintext_ws() {
         let tp = setup_two_party_circle().await;
-        assert!(matches!(
-            tp.alice
-                .update_circle_relays(&tp.mls_group_id, &["ws://relay.test.com".to_string()])
-                .await,
-            Err(CircleError::InvalidData(_))
-        ));
+        // Shares `normalize_url` with the user relay list, so the rejection is
+        // the typed, user-presentable one rather than the opaque bucket.
+        let err = tp
+            .alice
+            .update_circle_relays(&tp.mls_group_id, &["ws://relay.test.com".to_string()])
+            .await
+            .expect_err("a plaintext ws:// circle relay must be rejected");
+        assert!(
+            matches!(
+                err,
+                CircleError::InvalidRelayInput(crate::circle::RelayInputRejection::PlaintextWs)
+            ),
+            "expected the plaintext-ws rejection, got {err:?}"
+        );
     }
 
     #[tokio::test]
@@ -7332,8 +7333,24 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_repair_outcome_debug_carries_no_identifier() {
+    /// A proposal event whose content and `h` tag are recognisable, so a
+    /// `Debug` that printed the wrapped event would be caught by the needles.
+    const PROPOSAL_CONTENT: &str = "PROPOSAL-CIPHERTEXT-8f1c2d3e4a5b6c7d";
+    const PROPOSAL_H_TAG: &str = "5e4d3c2b1a0f9e8d7c6b5a4938271605f4e3d2c1b0a99887766554433221100f";
+
+    fn leaky_proposal() -> Event {
+        let keys = Keys::generate();
+        nostr::EventBuilder::new(nostr::Kind::Custom(445), PROPOSAL_CONTENT)
+            .tag(nostr::Tag::custom(
+                nostr::TagKind::custom("h"),
+                [PROPOSAL_H_TAG],
+            ))
+            .sign_with_keys(&keys)
+            .expect("sign the fixture proposal")
+    }
+
+    #[tokio::test]
+    async fn repair_rotation_outcome_debug_redacts_the_staged_work() {
         // `Rotated` wraps a `CommitToPublish` whose commit event's `h` tag is the
         // circle's `nostr_group_id`; a derived `Debug` would print it through any
         // stray log line (Rules 4/8). Structural, so a later payload addition has
@@ -7345,19 +7362,121 @@ mod tests {
             ),
             "Skipped(NotSoleAdmin)"
         );
-        assert_eq!(
-            format!(
-                "{:?}",
-                RepairRotationOutcome::Deferred {
-                    unresolved_inputs: 2,
-                    discarded_intents: 1,
-                    repaired: false,
-                    work: DeferredWork::default(),
-                }
-            ),
-            "Deferred { unresolved_inputs: 2, discarded_intents: 1, repaired: false, \
-             work: DeferredWork { commits_count: 0, proposals_count: 0 } }"
+        let deferred = RepairRotationOutcome::Deferred {
+            unresolved_inputs: 2,
+            discarded_intents: 1,
+            repaired: false,
+            work: DeferredWork {
+                commits: vec![],
+                proposals: vec![leaky_proposal()],
+            },
+        };
+        crate::assert_debug_redacted!(
+            &deferred,
+            "RepairRotationOutcome",
+            marker = "Deferred",
+            &[PROPOSAL_CONTENT, PROPOSAL_H_TAG]
         );
+        // Counts are bucketed: how many rows gate a circle is a per-circle
+        // magnitude, and the bucket carries the triage signal (Rule 15).
+        assert_eq!(
+            format!("{deferred:?}"),
+            "Deferred { unresolved_inputs: \"2-4\", discarded_intents: \"1\", repaired: false, \
+             work: DeferredWork { commits: \"0\", proposals: \"1\" } }"
+        );
+        let work = DeferredWork {
+            commits: vec![],
+            proposals: vec![leaky_proposal()],
+        };
+        crate::assert_debug_redacted!(&work, "DeferredWork", &[PROPOSAL_CONTENT, PROPOSAL_H_TAG]);
+    }
+
+    #[test]
+    fn decrypted_ingest_debug_redacts_the_fold_it_carries() {
+        // The fold it carries holds a sender pubkey, the decrypted location
+        // JSON and the MLS group id; only the magnitude may render, and
+        // bucketed, because a result count is how many peers just moved.
+        let sender = "3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a2b";
+        let ingest = DecryptedIngest {
+            results: vec![LocationMessageResult::Location {
+                sender_pubkey: sender.to_string(),
+                content: r#"{"latitude":37.7749,"longitude":-122.4194}"#.to_string(),
+                group_id: GroupId::from_slice(&[0x7A; 32]),
+                epoch: 14,
+            }],
+            auto_commits: vec![],
+        };
+        crate::assert_debug_redacted!(
+            &ingest,
+            "DecryptedIngest",
+            &[sender, "37.7749", "122.4194", &hex::encode([0x7Au8; 32])]
+        );
+        assert_eq!(
+            format!("{ingest:?}"),
+            "DecryptedIngest { results: \"1\", auto_commits: \"0\" }"
+        );
+    }
+
+    #[tokio::test]
+    async fn publish_work_debug_redacts_the_circle_it_belongs_to() {
+        // These three are what the FFI logs after a create / an add / a
+        // handoff, and each wraps a real event whose `h` tag is the circle's
+        // `nostr_group_id` and whose welcomes name the invitee.
+        let relays = vec!["wss://relay.test.com".to_string()];
+        let dir = TempDir::new().unwrap();
+        let keys = Keys::generate();
+        let manager = CircleManager::new_unencrypted(dir.path(), &keys).unwrap();
+
+        let first = make_member_with_relays(relays.clone(), vec![]).await;
+        let first_hex = first.key_package_event.pubkey.to_hex();
+        let config = CircleConfig::new("Bramble Family").with_relays(relays.clone());
+        let creation: CircleCreationResult = manager
+            .create_circle(&keys, vec![first], &config, &relays)
+            .await
+            .expect("create circle");
+        let group_hex = hex::encode(creation.circle.nostr_group_id);
+        let needles = [
+            "Bramble Family",
+            "wss://relay.test.com",
+            first_hex.as_str(),
+            group_hex.as_str(),
+        ];
+        crate::assert_debug_redacted!(&creation, "CircleCreationResult", &needles);
+        let group_id = creation.circle.mls_group_id.clone();
+        manager
+            .confirm_published(creation.pending)
+            .await
+            .expect("confirm create");
+
+        let second = make_member_with_relays(relays.clone(), vec![]).await;
+        let second_hex = second.key_package_event.pubkey.to_hex();
+        let added: AddMembersResult = manager
+            .add_members_with_welcomes(&keys, &group_id, vec![second], &relays)
+            .await
+            .expect("add a member");
+        crate::assert_debug_redacted!(
+            &added,
+            "AddMembersResult",
+            &[
+                "Bramble Family",
+                "wss://relay.test.com",
+                second_hex.as_str(),
+                group_hex.as_str(),
+            ]
+        );
+        manager
+            .confirm_published(added.pending)
+            .await
+            .expect("confirm add");
+
+        let handoff: CommitToPublish = manager
+            .propose_admin_handoff(
+                &group_id,
+                &PublicKey::parse(&first_hex).expect("hex pubkey"),
+            )
+            .await
+            .expect("stage a handoff commit");
+        crate::assert_debug_redacted!(&handoff, "CommitToPublish", &needles);
     }
 
     #[tokio::test]
@@ -8557,16 +8676,20 @@ mod tests {
             .propose_leave(&tp.mls_group_id)
             .await
             .expect_err("sole-admin proposeLeave must be rejected");
-        assert!(matches!(err, CircleError::Mls(_)));
-        let msg = err.to_string().to_lowercase();
+        // Asserted on the TYPED variant and on DISPLAY — what the FFI stringifies
+        // for Dart. A payload would not do: `Mls`'s payload renders nowhere, so a
+        // remediation hidden there never reaches the user (Rule 15).
         assert!(
-            msg.contains("self-demote"),
-            "admin-gate error must name the self-demote remediation"
+            matches!(err, CircleError::AdminSelfDemoteRequired),
+            "the admin gate must surface the typed self-demote variant, not {err:?}"
+        );
+        let surfaced = err.to_string().to_lowercase();
+        assert!(
+            surfaced.contains("self-demote"),
+            "admin-gate error must name the self-demote remediation: {surfaced}"
         );
         assert!(
-            !err.to_string()
-                .to_lowercase()
-                .contains(&hex::encode(tp.mls_group_id.as_slice())),
+            !surfaced.contains(&hex::encode(tp.mls_group_id.as_slice())),
             "admin-gate error must not embed the MLS group id"
         );
     }

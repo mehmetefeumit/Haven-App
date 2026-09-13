@@ -15,6 +15,7 @@ import 'package:haven/src/services/clock_skew_detector.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/location_auto_commit.dart';
 import 'package:haven/src/services/relay_service.dart';
+import 'package:haven/src/utils/log_alias.dart';
 
 /// A circle member's location.
 @immutable
@@ -422,16 +423,14 @@ class LocationSharingService {
       case LocationEncrypted(encrypted: final e):
         encrypted = e;
     }
-    // Surface the event id prefix (8 hex chars, public on relays) so that
-    // when a receiver later logs an `evt=<prefix>` line we can correlate
-    // it back to the originating publish. The full event id never lands in
-    // the log — a prefix collision space of ~4 billion is plenty for
-    // session-level correlation and far too small to be a tracking vector.
+    // Surface the event's log-alias handle so that when a receiver later
+    // logs an `evt=<handle>` line we can correlate it back to the
+    // originating publish, WITHOUT ever printing the event id itself
+    // (Security Rule 15 — a prefix of an identifier is still an identifier).
     final encryptedEventId = _extractEventId(encrypted.eventJson);
-    final encryptedEvtTag = _evtTag(encryptedEventId);
     debugPrint(
-      '[LocationService] evt=$encryptedEvtTag encrypted OK — '
-      'publishing to ${encrypted.relays.length} relay(s)',
+      '[LocationService] evt=${_evtHandle(encryptedEventId)} encrypted OK — '
+      'publishing to ${magnitudeBucket(encrypted.relays.length)} relay(s)',
     );
 
     // Step 2: Publish to relays.
@@ -456,15 +455,21 @@ class LocationSharingService {
       );
     } on RelayClockRejectionException catch (e) {
       _clockSkewDetector?.recordPublishClockRejection(e.complaintToken);
+      // `complaintToken` is a fixed Haven-authored vocabulary
+      // (ahead/behind/unspecified) — `classify_relay_rejection` on the Rust
+      // side discards the relay's own words before this exception is ever
+      // built, so this is a typed code, not remote-authored prose (Security
+      // Rule 8/15 both allow it, the same way `e.code` is allowed).
+      // log-scan-ok: complaintToken is a closed Haven-authored token, not e
       debugPrint(
-        '[LocationService] evt=$encryptedEvtTag publish refused — the relays '
-        'judged the device clock wrong (${e.complaintToken})',
+        '[LocationService] evt=${_evtHandle(encryptedEventId)} publish '
+        'refused — the relays judged the device clock ${e.complaintToken}',
       );
       rethrow;
     } on Object catch (e) {
       _clockSkewDetector?.recordPublishError(e);
       debugPrint(
-        '[LocationService] evt=$encryptedEvtTag publish failed: '
+        '[LocationService] evt=${_evtHandle(encryptedEventId)} publish failed: '
         '${e.runtimeType}',
       );
       rethrow;
@@ -481,10 +486,10 @@ class LocationSharingService {
       );
     }
     debugPrint(
-      '[LocationService] evt=$encryptedEvtTag publish done — '
-      'accepted=${publishResult.acceptedBy.length}, '
-      'rejected=${publishResult.rejectedBy.length}, '
-      'failed=${publishResult.failed.length}',
+      '[LocationService] evt=${_evtHandle(encryptedEventId)} publish done — '
+      'accepted=${magnitudeBucket(publishResult.acceptedBy.length)}, '
+      'rejected=${magnitudeBucket(publishResult.rejectedBy.length)}, '
+      'failed=${magnitudeBucket(publishResult.failed.length)}',
     );
     return LocationPublishSent(publishResult);
   }
@@ -505,10 +510,11 @@ class LocationSharingService {
   }) async {
     debugPrint(
       '[LocationService] send DEFERRED by the MLS engine — '
-      'gating=${deferred.unresolvedInputs}, repaired=${deferred.repaired}, '
-      'discardedIntents=${deferred.discardedIntents}, '
-      'stagedCommits=${deferred.commits.length}, '
-      'proposals=${deferred.proposals.length}',
+      'gating=${magnitudeBucket(deferred.unresolvedInputs)}, '
+      'repaired=${deferred.repaired}, '
+      'discardedIntents=${magnitudeBucket(deferred.discardedIntents)}, '
+      'stagedCommits=${magnitudeBucket(deferred.commits.length)}, '
+      'proposals=${magnitudeBucket(deferred.proposals.length)}',
     );
 
     // The staged work needs the circle's CURRENT relays, and a deferral is the
@@ -634,7 +640,8 @@ class LocationSharingService {
         );
       }
       debugPrint(
-        '[LocationService] Hydrated ${rows.length} cached entry(ies) for circle',
+        '[LocationService] Hydrated '
+        '${magnitudeBucket(rows.length)} cached entry(ies) for circle',
       );
     } on Object catch (e) {
       debugPrint('[LocationService] Hydration failed: ${e.runtimeType}');
@@ -695,6 +702,12 @@ class LocationSharingService {
     // Deferred-eviction state is irrelevant after a cache wipe — the
     // post-resume rehydrate reconciles against the then-current roster.
     _pendingEvictionRetries.clear();
+    // The log-alias memo is process-wide (not per-service), but this is the
+    // one reliable "app went to background" signal every pause reaches
+    // (`MapShell`'s lifecycle observer) — the same boundary the caches above
+    // already clear on. It holds every raw circle/peer/relay/event id it has
+    // been asked to alias for as long as the process lives otherwise.
+    clearLogAliasMemo();
     debugPrint('[LocationService] in-memory caches cleared on pause');
   }
 
@@ -961,10 +974,18 @@ class LocationSharingService {
       return const LocationFetchResult(locations: []);
     }
 
+    // Relative to a fresh process-observed "now", never an absolute
+    // wall-clock value (Security Rule 15) — "none" on a circle's first-ever
+    // fetch. `LogOrigin.now()` rather than the earlier-captured `fetchTime`:
+    // the origin a log line measures against must be this process's own
+    // observation of the current instant, not a value reused from elsewhere.
+    final sinceOffset = adjustedSince == null
+        ? 'none'
+        : relativeSecs(LogOrigin.now(), adjustedSince);
     debugPrint(
-      '[LocationService] Fetched ${eventJsons.length} event(s) from '
-      '${circle.relays.length} relay(s) '
-      '(since=$adjustedSince, cached=${cache.length})',
+      '[LocationService] Fetched ${magnitudeBucket(eventJsons.length)} '
+      'event(s) from ${magnitudeBucket(circle.relays.length)} relay(s) '
+      '(since=$sinceOffset, cached=${magnitudeBucket(cache.length)})',
     );
 
     // Step 2: Decrypt only new events, merge into cache.
@@ -1033,10 +1054,11 @@ class LocationSharingService {
       // processed — the classic "member joins, admin can't see their
       // location" regression.
       final eventId = _extractEventId(eventJson);
-      final evtTag = _evtTag(eventId);
       if (eventId != null && _seenEventIds.contains(eventId)) {
         skippedSeen++;
-        debugPrint('[LocationService] evt=$evtTag → seen (skipped)');
+        debugPrint(
+          '[LocationService] evt=${_evtHandle(eventId)} → seen (skipped)',
+        );
         continue;
       }
 
@@ -1070,7 +1092,9 @@ class LocationSharingService {
         final results = outcome.results;
         if (results.isEmpty) {
           decryptNull++;
-          debugPrint('[LocationService] evt=$evtTag → empty');
+          debugPrint(
+            '[LocationService] evt=${_evtHandle(eventId)} → empty',
+          );
           continue;
         }
 
@@ -1089,12 +1113,13 @@ class LocationSharingService {
             case LocationEventKind.invalidated:
               groupUpdated = true;
               debugPrint(
-                '[LocationService] evt=$evtTag → ${result.kind.name}',
+                '[LocationService] evt=${_evtHandle(eventId)} → '
+                '${result.kind.name}',
               );
             case LocationEventKind.unrecoverable:
               groupUpdated = true;
               debugPrint(
-                '[LocationService] evt=$evtTag → unrecoverable '
+                '[LocationService] evt=${_evtHandle(eventId)} → unrecoverable '
                 '(circle blocked)',
               );
             case LocationEventKind.location:
@@ -1108,18 +1133,17 @@ class LocationSharingService {
               // Skip echoed self-broadcasts: never persist our own location
               // to the local last-known store, and never surface it on the
               // map as a peer marker. Lowercase compare is defensive.
-              final senderPrefix = _evtTag(decrypted.senderPubkey);
               if (ownPubkeyHex != null &&
                   decrypted.senderPubkey.toLowerCase() == ownPubkeyHex) {
                 debugPrint(
-                  '[LocationService] evt=$evtTag → location '
+                  '[LocationService] evt=${_evtHandle(eventId)} → location '
                   '(self-echo, dropped)',
                 );
                 continue;
               }
               debugPrint(
-                '[LocationService] evt=$evtTag → location '
-                '(sender=$senderPrefix)',
+                '[LocationService] evt=${_evtHandle(eventId)} → location '
+                '(sender=${_peerHandle(decrypted.senderPubkey)})',
               );
               newEvents++;
               await _persistDecryptedLocation(
@@ -1139,9 +1163,12 @@ class LocationSharingService {
       }
     }
 
+    // log-scan-ok: groupUpdated is a bool, not a group identifier
     debugPrint(
-      '[LocationService] Results: $newEvents new, $skippedSeen seen, '
-      '$decryptNull null, $decryptFailed failed'
+      '[LocationService] Results: ${magnitudeBucket(newEvents)} new, '
+      '${magnitudeBucket(skippedSeen)} seen, '
+      '${magnitudeBucket(decryptNull)} null, '
+      '${magnitudeBucket(decryptFailed)} failed'
       '${groupUpdated ? ', group updated' : ''}',
     );
 
@@ -1170,7 +1197,10 @@ class LocationSharingService {
     // retention.
     final evicted = _evictStaleLocations(cache);
     if (evicted > 0) {
-      debugPrint('[LocationService] Evicted $evicted stale cache entry(ies)');
+      debugPrint(
+        '[LocationService] Evicted ${magnitudeBucket(evicted)} stale cache '
+        'entry(ies)',
+      );
     }
 
     // Step 3: Return all cached locations for this circle
@@ -1332,8 +1362,8 @@ class LocationSharingService {
       }
     }
     debugPrint(
-      '[LocationService] Evicted ${departed.length} departed member(s) '
-      'from cache and persistent store',
+      '[LocationService] Evicted ${magnitudeBucket(departed.length)} '
+      'departed member(s) from cache and persistent store',
     );
   }
 
@@ -1515,9 +1545,14 @@ class LocationSharingService {
         return false;
       }
 
+      // Relative to a fresh process-observed "now" — see the identical
+      // comment in fetchMemberLocations above.
+      final sinceOffset = adjustedSince == null
+          ? 'none'
+          : relativeSecs(LogOrigin.now(), adjustedSince);
       debugPrint(
-        '[EvolutionPoller] ${eventJsons.length} event(s) fetched for circle '
-        '(since=$adjustedSince)',
+        '[EvolutionPoller] ${magnitudeBucket(eventJsons.length)} event(s) '
+        'fetched for circle (since=$sinceOffset)',
       );
 
       // Sort ascending by created_at so commits precede dependent
@@ -1546,13 +1581,14 @@ class LocationSharingService {
 
         final eventJson = eventJsons[idx];
         final eventId = _extractEventId(eventJson);
-        final evtTag = _evtTag(eventId);
 
         // Skip events already processed by a prior location-fetch cycle
         // or a previous evolution-poll run.
         if (eventId != null && _seenEventIds.contains(eventId)) {
           skipped++;
-          debugPrint('[EvolutionPoller] evt=$evtTag → seen (skipped)');
+          debugPrint(
+            '[EvolutionPoller] evt=${_evtHandle(eventId)} → seen (skipped)',
+          );
           continue;
         }
 
@@ -1563,7 +1599,8 @@ class LocationSharingService {
           );
         } on Object catch (e) {
           debugPrint(
-            '[EvolutionPoller] evt=$evtTag → decrypt error: ${e.runtimeType}',
+            '[EvolutionPoller] evt=${_evtHandle(eventId)} → decrypt error: '
+            '${e.runtimeType}',
           );
           continue;
         }
@@ -1586,7 +1623,7 @@ class LocationSharingService {
 
         final results = outcome.results;
         if (results.isEmpty) {
-          debugPrint('[EvolutionPoller] evt=$evtTag → empty');
+          debugPrint('[EvolutionPoller] evt=${_evtHandle(eventId)} → empty');
           continue;
         }
 
@@ -1604,7 +1641,8 @@ class LocationSharingService {
               anyGroupUpdated = true;
               circleGroupUpdated = true;
               debugPrint(
-                '[EvolutionPoller] evt=$evtTag → ${result.kind.name}',
+                '[EvolutionPoller] evt=${_evtHandle(eventId)} → '
+                '${result.kind.name}',
               );
             case LocationEventKind.location:
               // Location decoded inside the evolution poll path — common
@@ -1620,11 +1658,10 @@ class LocationSharingService {
               // location to the UI.
               final decrypted = result.location;
               if (decrypted == null) continue;
-              final senderPrefix = _evtTag(decrypted.senderPubkey);
               if (ownPubkeyHex != null &&
                   decrypted.senderPubkey.toLowerCase() == ownPubkeyHex) {
                 debugPrint(
-                  '[EvolutionPoller] evt=$evtTag → location '
+                  '[EvolutionPoller] evt=${_evtHandle(eventId)} → location '
                   '(self-echo, dropped)',
                 );
                 continue;
@@ -1638,13 +1675,13 @@ class LocationSharingService {
                 );
                 anyLocationPersisted = true;
                 debugPrint(
-                  '[EvolutionPoller] evt=$evtTag → location persisted '
-                  '(sender=$senderPrefix)',
+                  '[EvolutionPoller] evt=${_evtHandle(eventId)} → location '
+                  'persisted (sender=${_peerHandle(decrypted.senderPubkey)})',
                 );
               } on Object catch (e) {
                 debugPrint(
-                  '[EvolutionPoller] evt=$evtTag → persist failed: '
-                  '${e.runtimeType}',
+                  '[EvolutionPoller] evt=${_evtHandle(eventId)} → persist '
+                  'failed: ${e.runtimeType}',
                 );
               }
           }
@@ -1659,8 +1696,8 @@ class LocationSharingService {
       }
 
       debugPrint(
-        '[EvolutionPoller] circle done: $processed processed, '
-        '$skipped already-seen',
+        '[EvolutionPoller] circle done: ${magnitudeBucket(processed)} '
+        'processed, ${magnitudeBucket(skipped)} already-seen',
       );
 
       // After a roster-changing result the engine already applied the
@@ -1703,18 +1740,18 @@ class LocationSharingService {
     return anyGroupUpdated || anyLocationPersisted;
   }
 
-  /// 8-char prefix of an event id or pubkey for diagnostic logging.
-  ///
-  /// Returns `'????????'` when the input is null, and pads short inputs
-  /// (test fixtures, malformed events) so callers can `evt=$_evtTag(...)`
-  /// unconditionally without a runtime `substring` range error. Real
-  /// 64-char hex ids/pubkeys are truncated to their first 8 chars; the
-  /// prefix is public on relays and carries no privacy cost.
-  static String _evtTag(String? hex) {
-    if (hex == null) return '????????';
-    if (hex.length >= 8) return hex.substring(0, 8);
-    return hex.padRight(8, '?');
-  }
+  /// Per-process log-alias handle for an event id, for diagnostic
+  /// correlation across log lines (Security Rule 15 — a truncated event id
+  /// is still an event id, unlike an opaque salted handle).
+  static String _evtHandle(String? eventId) => eventId == null
+      ? 'event#unknown'
+      : logAliasHandle(LogAliasClass.event, eventId);
+
+  /// Per-process log-alias handle for a sender pubkey. A different
+  /// [LogAliasClass] than [_evtHandle] so an event id and a pubkey that
+  /// happen to share bytes never alias to the same handle.
+  static String _peerHandle(String pubkeyHex) =>
+      logAliasHandle(LogAliasClass.peer, pubkeyHex);
 
   /// Extracts the event ID from a JSON-serialized Nostr event.
   ///

@@ -26,11 +26,11 @@ use nostr_sdk::{Client, Relay, RelayOptions, SubscribeAutoCloseOptions, Subscrib
 
 use super::clock_skew;
 use super::discovery::discovery_relays;
-use super::error::{RelayError, RelayResult};
+use super::error::{InvalidUrlReason, RelayError, RelayResult};
 use super::types::{
     PublishResult, RelayConnectionStatus, RelayEventCheck, RelayFetchOutcome, RelayStatus,
 };
-use crate::nostr::mls::redact_hex_sequences;
+use crate::log_alias::{self, bucket, RelayUrl as AliasRelayUrl};
 
 /// Default timeout for relay operations.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -341,9 +341,10 @@ async fn recover_wedged_publish_sockets(client: &Client, relay_urls: &[RelayUrl]
             }
         }
     }
-    // A count only: which relay a device publishes to is linkable metadata.
+    // Presence only: both which relay a device publishes to and how many it
+    // keeps are linkable metadata (Security Rule 15).
     if freed > 0 {
-        log::warn!("[RelayManager] freed {freed} wedged publish socket(s)");
+        log::warn!("[RelayManager] freed wedged publish socket(s)");
     }
 }
 
@@ -491,10 +492,13 @@ fn profile_attempt_outcome(result: PublishResult) -> RelayResult<PublishResult> 
     if result.is_success() || result.failed.is_empty() {
         return Ok(result);
     }
-    Err(RelayError::Timeout(format!(
-        "{} relay(s) did not answer the publish",
-        result.failed.len()
-    )))
+    // A fixed literal, not the silent relays' count: `Timeout`'s payload is
+    // excluded from both renderings and no caller reads it, so a formatted count
+    // would be an allocation nothing can observe — and one more place a
+    // magnitude could leak from later (Security Rule 15).
+    Err(RelayError::Timeout(
+        "relays did not answer the publish".to_string(),
+    ))
 }
 
 /// Manager for Nostr relay connections.
@@ -545,12 +549,17 @@ impl RelayManager {
                 .await
             {
                 Ok(newly_added) => {
-                    log::debug!("[RelayManager] add_relay({url}): newly_added={newly_added}");
-                }
-                Err(e) => {
                     log::debug!(
-                        "[RelayManager] add_relay({url}) failed: {}",
-                        redact_hex_sequences(&e.to_string())
+                        "[RelayManager] add_relay {}: newly_added={newly_added}",
+                        log_alias::relay(AliasRelayUrl(url.as_str()))
+                    );
+                }
+                // The reason is the pool's own prose and can quote the URL, so
+                // only the failure's presence is logged (Security Rule 15).
+                Err(_) => {
+                    log::debug!(
+                        "[RelayManager] add_relay {} failed",
+                        log_alias::relay(AliasRelayUrl(url.as_str()))
                     );
                 }
             }
@@ -563,12 +572,15 @@ impl RelayManager {
                 .await
             {
                 Ok(()) => {
-                    log::debug!("[RelayManager] connected to {url}");
-                }
-                Err(e) => {
                     log::debug!(
-                        "[RelayManager] failed to connect to {url}: {}",
-                        redact_hex_sequences(&e.to_string())
+                        "[RelayManager] connected to {}",
+                        log_alias::relay(AliasRelayUrl(url.as_str()))
+                    );
+                }
+                Err(_) => {
+                    log::debug!(
+                        "[RelayManager] failed to connect to {}",
+                        log_alias::relay(AliasRelayUrl(url.as_str()))
                     );
                 }
             }
@@ -606,9 +618,9 @@ impl RelayManager {
         let relay_urls = Self::validate_relay_urls(relays)?;
 
         log::debug!(
-            "[RelayManager] publish_event: sending kind {} to {} relays",
+            "[RelayManager] publish_event: sending kind {} to {} relay(s)",
             event.kind.as_u16(),
-            relay_urls.len()
+            bucket(relay_urls.len())
         );
 
         // Retry the connect+send a bounded number of times so the first
@@ -672,21 +684,22 @@ impl RelayManager {
                 RelayError::Timeout("Event publish timed out".to_string())
             })?
             .map_err(|e| {
-                log::debug!(
-                    "[RelayManager] publish_event: send_event error: {}",
-                    redact_hex_sequences(&e.to_string())
-                );
+                // The type only: a pool error's prose quotes relay URLs and the
+                // relay's own refusal text (Security Rule 15 / Rule 8).
+                log::debug!("[RelayManager] publish_event: send_event failed");
                 RelayError::Publish(e.to_string())
             })?;
         log::debug!(
             "[RelayManager] publish_event: success={}, failed={}",
-            send_result.success.len(),
-            send_result.failed.len()
+            bucket(send_result.success.len()),
+            bucket(send_result.failed.len())
         );
-        for (url, err) in &send_result.failed {
+        for url in send_result.failed.keys() {
+            // The relay's own words are remote-authored prose, so the handle
+            // says WHICH relay failed and nothing says what it claimed.
             log::debug!(
-                "[RelayManager] publish_event: relay {url} failed: {}",
-                redact_hex_sequences(err)
+                "[RelayManager] publish_event: relay {} failed",
+                log_alias::relay(AliasRelayUrl(url.as_str()))
             );
         }
 
@@ -744,9 +757,9 @@ impl RelayManager {
         let relay_urls = Self::validate_relay_urls(relays)?;
 
         log::debug!(
-            "[RelayManager] publish_profile_event: sending kind {} to {} relays",
+            "[RelayManager] publish_profile_event: sending kind {} to {} relay(s)",
             event.kind.as_u16(),
-            relay_urls.len()
+            bucket(relay_urls.len())
         );
 
         let client = self.client.clone();
@@ -818,9 +831,9 @@ impl RelayManager {
         let relay_urls = Self::validate_relay_urls(relays)?;
 
         log::debug!(
-            "[RelayManager] publish_location_event: sending kind {} to {} relays",
+            "[RelayManager] publish_location_event: sending kind {} to {} relay(s)",
             event.kind.as_u16(),
-            relay_urls.len()
+            bucket(relay_urls.len())
         );
 
         let client = self.client.clone();
@@ -902,9 +915,9 @@ impl RelayManager {
         // a reason is logged here (matching the per-relay fetch probe).
         log::debug!(
             "[RelayManager] publish harvest: accepted={}, refused={}, silent={}",
-            accepted_by.len(),
-            rejected_by.len(),
-            failed.len()
+            bucket(accepted_by.len()),
+            bucket(rejected_by.len()),
+            bucket(failed.len())
         );
 
         PublishResult {
@@ -954,15 +967,12 @@ impl RelayManager {
                 Ok(Ok(result)) => {
                     log::debug!(
                         "[RelayManager] background publish: {} accepted, {} failed",
-                        result.success.len(),
-                        result.failed.len()
+                        bucket(result.success.len()),
+                        bucket(result.failed.len())
                     );
                 }
-                Ok(Err(e)) => {
-                    log::debug!(
-                        "[RelayManager] background publish error: {}",
-                        redact_hex_sequences(&e.to_string())
-                    );
+                Ok(Err(_)) => {
+                    log::debug!("[RelayManager] background publish failed");
                 }
                 Err(_) => {
                     log::debug!("[RelayManager] background publish timed out");
@@ -1036,10 +1046,7 @@ impl RelayManager {
             )
             .await
             .map_err(|e| {
-                log::debug!(
-                    "[RelayManager] fetch_events error: {}",
-                    redact_hex_sequences(&e.to_string())
-                );
+                log::debug!("[RelayManager] fetch_events failed");
                 RelayError::Fetch(e.to_string())
             })?;
 
@@ -1397,10 +1404,7 @@ impl RelayManager {
             )
             .await
             .map_err(|e| {
-                log::debug!(
-                    "[RelayManager] check_event_on_relay error: {}",
-                    redact_hex_sequences(&e.to_string())
-                );
+                log::debug!("[RelayManager] check_event_on_relay failed");
                 RelayError::Fetch(e.to_string())
             })?;
 
@@ -1628,13 +1632,12 @@ impl RelayManager {
         // the pool's long-lived subscription map and the socket can still sleep.
         // The marker is what `check_engine_client_options.sh` check 7 allows it
         // by; an unmarked subscribe anywhere in this file is a standing REQ.
-        if let Err(e) = relay.subscribe_with_id(id.clone(), filter, opts).await {
-            // Presence-only: no own-relay URL at debug (may be sensitive),
-            // matching the branches above.
-            log::debug!(
-                "[RelayManager] per-relay REQ failed (one own relay): {}",
-                redact_hex_sequences(&e.to_string())
-            );
+        // auto-closing REQ
+        let issued = relay.subscribe_with_id(id.clone(), filter, opts).await;
+        if issued.is_err() {
+            // Presence-only: neither the own-relay URL nor the relay's own
+            // words (Security Rule 15), matching the branches above.
+            log::debug!("[RelayManager] per-relay REQ failed (one own relay)");
             return (false, Vec::new());
         }
 
@@ -1737,12 +1740,12 @@ impl RelayManager {
     /// the debug loopback opt-in) or an unparseable URL.
     fn validate_single_relay_url(relay: &str) -> RelayResult<RelayUrl> {
         if relay.starts_with("ws://") && !Self::is_allowed_ws_loopback(relay) {
-            return Err(RelayError::InvalidUrl(format!(
-                "Plaintext ws:// not allowed for security: {relay}"
-            )));
+            return Err(RelayError::InvalidUrl(InvalidUrlReason::PlaintextWs));
         }
 
-        RelayUrl::parse(relay).map_err(|e| RelayError::InvalidUrl(format!("{relay}: {e}")))
+        // The rejected URL is deliberately not carried: this error crosses the
+        // FFI and reaches a log line (Security Rule 15).
+        RelayUrl::parse(relay).map_err(|_| RelayError::InvalidUrl(InvalidUrlReason::Unparseable))
     }
 
     /// Returns `true` iff `relay` is a `ws://` URL targeting a known
@@ -1815,13 +1818,16 @@ impl RelayManager {
         // Defense in depth: validate before passing to nostr-sdk so that
         // operators reading logs cannot see surprising URL strings.
         let _ = Self::validate_relay_urls(&[url.to_string()])?;
-        if let Err(e) = self.client.remove_relay(url).await {
+        if self.client.remove_relay(url).await.is_err() {
             log::debug!(
-                "[RelayManager] remove_relay({url}) failed: {}",
-                redact_hex_sequences(&e.to_string())
+                "[RelayManager] remove_relay {} failed",
+                log_alias::relay(AliasRelayUrl(url))
             );
         } else {
-            log::debug!("[RelayManager] remove_relay({url}) ok");
+            log::debug!(
+                "[RelayManager] remove_relay {} ok",
+                log_alias::relay(AliasRelayUrl(url))
+            );
         }
         Ok(())
     }
@@ -1921,10 +1927,10 @@ mod tests {
         let relays = vec!["ws://insecure.relay.com".to_string()];
         let result = RelayManager::validate_relay_urls(&relays);
 
-        assert!(result.is_err());
-        if let Err(RelayError::InvalidUrl(msg)) = result {
-            assert!(msg.contains("Plaintext ws://"));
-        }
+        assert!(matches!(
+            result,
+            Err(RelayError::InvalidUrl(InvalidUrlReason::PlaintextWs))
+        ));
     }
 
     #[test]
@@ -2066,10 +2072,10 @@ mod tests {
         let result = manager
             .check_event_on_relay("ws://insecure.relay.com", filter)
             .await;
-        assert!(result.is_err());
-        if let Err(RelayError::InvalidUrl(msg)) = result {
-            assert!(msg.contains("Plaintext ws://"));
-        }
+        assert!(matches!(
+            result,
+            Err(RelayError::InvalidUrl(InvalidUrlReason::PlaintextWs))
+        ));
     }
 
     #[tokio::test]

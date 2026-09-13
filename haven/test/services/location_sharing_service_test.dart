@@ -8,6 +8,7 @@ import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/clock_skew_detector.dart';
 import 'package:haven/src/services/location_sharing_service.dart';
 import 'package:haven/src/services/relay_service.dart';
+import 'package:haven/src/utils/log_alias.dart';
 import '../mocks/circle_service_retention_stubs.dart';
 import '../mocks/mock_circle_service.dart';
 import '../mocks/mock_relay_service.dart';
@@ -2234,6 +2235,42 @@ void main() {
           expect(mockCircle.lastKnownRows, hasLength(1));
         },
       );
+
+      test('also clears the process-wide log-alias memo', () async {
+        // The memo is a top-level module cache in log_alias.dart, not owned
+        // by any one LocationSharingService instance — this proves the
+        // service's pause hook still reaches it.
+        final originalFfiCall = logAliasFfiCall;
+        addTearDown(() {
+          logAliasFfiCall = originalFfiCall;
+          clearLogAliasMemo();
+        });
+        var calls = 0;
+        logAliasFfiCall = ({required class_, required value}) {
+          calls++;
+          return '${class_.name}#fake$calls';
+        };
+        clearLogAliasMemo();
+
+        logAliasHandle(LogAliasClass.circle, 'deadbeef');
+        expect(calls, 1);
+        logAliasHandle(LogAliasClass.circle, 'deadbeef');
+        expect(calls, 1, reason: 'memo hit before pause');
+
+        LocationSharingService(
+          circleService: MockCircleService(),
+          relayService: MockRelayService(),
+        ).onAppPaused();
+
+        logAliasHandle(LogAliasClass.circle, 'deadbeef');
+        expect(
+          calls,
+          2,
+          reason: 'onAppPaused must drop the log-alias memo too, or a '
+              'handle minted before backgrounding keeps answering for the '
+              'rest of the process',
+        );
+      });
 
       test(
         'rehydrates from the persistent store on the next fetch after pause',

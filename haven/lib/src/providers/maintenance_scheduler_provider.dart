@@ -116,6 +116,7 @@ import 'package:haven/src/providers/member_profile_refresh_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/providers/sharing_health_provider.dart';
 import 'package:haven/src/services/relay_service.dart';
+import 'package:haven/src/utils/log_alias.dart';
 
 // ---------------------------------------------------------------------------
 // Interval constants
@@ -603,9 +604,9 @@ class MaintenanceSchedulerNotifier extends Notifier<void>
           .maintainSubscriptionHealth();
       debugPrint(
         '[Maintenance] health tick: ${result.action.name} '
-        '(relays=${result.relaysTotal}, '
-        'stillConnecting=${result.relaysStillConnecting}, '
-        'disconnected=${result.relaysDisconnected})',
+        '(relays=${magnitudeBucket(result.relaysTotal)}, '
+        'stillConnecting=${magnitudeBucket(result.relaysStillConnecting)}, '
+        'disconnected=${magnitudeBucket(result.relaysDisconnected)})',
       );
       // Clear the sharing-health model's lost-subscription latch when this
       // tick proves the receive plane is whole again.

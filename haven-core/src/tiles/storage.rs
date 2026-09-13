@@ -75,13 +75,13 @@ pub struct TileEntry {
 
 impl std::fmt::Debug for TileEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Never print the raw bytes; the byte length is a benign size hint.
+        // Presence only. The byte length narrows down WHICH tile this is, and
+        // the two instants say when the user was looking at a map (Rule 15).
         f.debug_struct("TileEntry")
-            .field("bytes", &format_args!("<{} bytes>", self.bytes.len()))
-            .field("stale_at_ms", &self.stale_at_ms)
-            .field("last_modified_ms", &self.last_modified_ms)
+            .field("bytes", &"<redacted>")
+            .field("has_last_modified", &self.last_modified_ms.is_some())
             .field("has_etag", &self.etag.is_some())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -997,5 +997,39 @@ mod tests {
             .unwrap();
         assert_eq!(fetched, 9_000, "a bytes-write resets the fetched_at anchor");
         assert_eq!(storage.count().unwrap(), 1, "upsert, not a second row");
+    }
+
+    #[test]
+    fn tile_entry_debug_redacts_bytes_and_instants() {
+        let entry: TileEntry = TileEntry {
+            bytes: b"PNG-imagery-of-a-neighbourhood".to_vec(),
+            stale_at_ms: 1_757_000_123_456,
+            last_modified_ms: Some(1_756_900_000_000),
+            etag: Some("W/\"8f1c2d3e\"".to_string()),
+        };
+        crate::assert_debug_redacted!(
+            &entry,
+            "TileEntry",
+            &[
+                "PNG-imagery-of-a-neighbourhood",
+                "1757000123456",
+                "1756900000000",
+                "8f1c2d3e",
+            ]
+        );
+        let debug = format!("{entry:?}");
+        assert!(debug.contains("has_etag: true"), "{debug}");
+        assert!(debug.contains("has_last_modified: true"), "{debug}");
+    }
+
+    #[test]
+    fn tile_cache_storage_debug_redacts_its_connections() {
+        let (_dir, storage): (TempDir, TileCacheStorage) = open_temp();
+        crate::assert_debug_redacted!(
+            &storage,
+            "TileCacheStorage",
+            &[TEST_KEY, "tiles.db", "PRAGMA"]
+        );
+        assert_eq!(format!("{storage:?}"), "TileCacheStorage { .. }");
     }
 }

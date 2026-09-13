@@ -2830,7 +2830,123 @@
         }
       ],
       "guards": [
-        "scripts/ci/check_no_key_logging.sh"
+        "scripts/ci/check_no_key_logging.sh",
+        "tooling/e2e/ci/scan-logs-for-secrets.sh#workflow=e2e-android.yml"
+      ]
+    },
+    {
+      "id": "INV-K-NO-IDENTIFIER-IN-LOGS",
+      "title": "No identifier of any shape reaches a log",
+      "statement": "Nothing that could tell one user, circle or device apart from another — a pubkey or npub, an MLS or Nostr group id, an event id, a KeyPackage slot, a subscription id, a relay URL or host (the default pool included), an IP, a circle/display name or petname, a coordinate or geohash, an absolute epoch, an exact count of circles/members/relays/events, an absolute publish/receive instant, or remote-authored prose — is interpolated into a log, print or panic call in haven-core, rust_builder or haven/lib, in any build, encoding or truncation; where a line must say 'the same circle/peer/relay as that other line' it renders a per-process salted alias handle, magnitudes are bucketed and instants are relative. This becomes false the first time such a value, or a prefix of one, or an unreviewed {:?} rendering of one, reaches a log call — in Rust, Dart, Kotlin or Swift.",
+      "status": "enforced",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [],
+      "doc_anchors": [
+        "CLAUDE.md#log-anonymity-owner-directed-2026-09-10"
+      ],
+      "symbols": [
+        {
+          "file": "haven-core/src/log_alias.rs",
+          "symbol": "LogHandle"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "symbol": "log_alias"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "symbol": "rotate_log_alias_salt"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "symbol": "LogAliasClassFfi"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/src/nostr/event.rs",
+          "name": "signed_event_debug_redacts_every_identifying_field"
+        },
+        {
+          "file": "haven-core/src/circle/types.rs",
+          "name": "circle_debug_redacts_mls_group_id"
+        },
+        {
+          "file": "haven-core/src/nostr/mls/context.rs",
+          "name": "debug_redacts_both_group_ids"
+        },
+        {
+          "file": "haven-core/src/relay/error.rs",
+          "name": "publish_error_display_redacts_inner_detail"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "name": "circle_member_ffi_debug_redacts_keys_and_name"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "name": "invitation_ffi_debug_redacts_both_inviter_key_encodings"
+        },
+        {
+          "file": "haven/test/services/publish_wake_lock_test.dart",
+          "name": "a PlatformException is logged by CODE, never by message"
+        },
+        {
+          "file": "haven-core/tests/log_anonymity_live_sync.rs",
+          "name": "a_two_engine_receive_path_logs_no_identifier"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "name": "log_alias_is_stable_per_value_and_separated_per_class"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "name": "rotating_the_salt_invalidates_every_handle"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "name": "deleting_the_identity_rotates_the_salt"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "name": "wiping_mls_state_rotates_the_salt"
+        }
+      ],
+      "guards": [
+        "scripts/ci/check_no_identifier_logging.sh",
+        "scripts/ci/check_debug_impls_covered.sh",
+        "scripts/ci/check_release_log_silencer.sh",
+        "scripts/ci/check_native_log_allowlist.sh",
+        "tooling/e2e/ci/scan-logs-for-secrets.sh#workflow=e2e-android.yml"
+      ]
+    },
+    {
+      "id": "INV-K-RELEASE-LOG-SILENCER-INSTALLED",
+      "title": "Release builds log nothing from any isolate",
+      "statement": "main() and every @pragma('vm:entry-point') isolate entry point under haven/lib install the kReleaseMode debugPrint silencer (debugPrint = (_, {wrapWidth}) {}) as their FIRST statement, so a release build writes no debugPrint line to logcat or the unified log from the UI isolate, the foreground-task isolate or the WorkManager isolate — neither of which ever runs main(). This becomes false when a statement is placed ahead of the silencer, when a new entry point omits it, or when the guard flag is anything but kReleaseMode.",
+      "status": "enforced",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [],
+      "doc_anchors": [
+        "CLAUDE.md#log-anonymity-owner-directed-2026-09-10"
+      ],
+      "symbols": [
+        {
+          "file": "haven/lib/main.dart",
+          "symbol": "main"
+        },
+        {
+          "file": "haven/lib/src/services/background_location_task.dart",
+          "symbol": "backgroundCallback"
+        },
+        {
+          "file": "haven/lib/src/services/background_catchup_worker.dart",
+          "symbol": "callbackDispatcher"
+        }
+      ],
+      "tests": [],
+      "guards": [
+        "scripts/ci/check_release_log_silencer.sh"
       ]
     },
     {

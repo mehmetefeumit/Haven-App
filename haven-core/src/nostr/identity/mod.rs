@@ -43,7 +43,7 @@
 //! // Create or load identity
 //! if !manager.has_identity()? {
 //!     let identity = manager.create_identity()?;
-//!     println!("Created identity: {}", identity.npub);
+//!     // `identity.npub` goes to the user's screen, never to a log line.
 //! }
 //!
 //! // Get pubkey for MDK operations
@@ -66,10 +66,17 @@ pub use storage::{SecureKeyStorage, NOSTR_IDENTITY_KEY};
 pub use storage::tests::MockStorage;
 
 /// Errors that can occur during identity operations.
-#[derive(Error, Debug)]
+///
+/// # Neither rendering discloses a payload (Security Rule 15)
+///
+/// Every `String` below is an upstream `nostr` / bech32 / keystore message.
+/// `InvalidNsec`'s can quote the rejected nsec itself (Rule 6), and the others
+/// quote keys, `npub`s and keystore entry names — so `Display` renders the
+/// variant's own sentence and `Debug` renders [`code`](IdentityError::code).
+#[derive(Error)]
 pub enum IdentityError {
     /// Invalid nsec format or content.
-    #[error("Invalid nsec: {0}")]
+    #[error("Invalid nsec")]
     InvalidNsec(String),
 
     /// No identity has been created or imported.
@@ -81,24 +88,60 @@ pub enum IdentityError {
     IdentityExists,
 
     /// Key derivation failed.
-    #[error("Key derivation failed: {0}")]
+    #[error("Key derivation failed")]
     KeyDerivation(String),
 
     /// Signing operation failed.
-    #[error("Signing failed: {0}")]
+    #[error("Signing failed")]
     Signing(String),
 
     /// Bech32 encoding/decoding failed.
-    #[error("Bech32 error: {0}")]
+    #[error("Bech32 error")]
     Bech32(String),
 
     /// Storage operation failed.
-    #[error("Storage error: {0}")]
+    #[error("Storage error")]
     Storage(String),
 
     /// Lock acquisition failed (internal error).
-    #[error("Lock error: {0}")]
+    #[error("Lock error")]
     Lock(String),
+
+    /// A secret-key byte slice of the wrong length.
+    ///
+    /// Its own variant because the LENGTH is both safe and diagnosable — 32 is a
+    /// protocol constant, not a property of this user — while no payload renders
+    /// any more, so a `Storage(format!(…))` could no longer say it.
+    #[error("secret key must be 32 bytes, got {0}")]
+    SecretKeyLength(usize),
+}
+
+impl IdentityError {
+    /// A stable, Haven-authored token naming the variant and nothing else.
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::InvalidNsec(_) => "invalid-nsec",
+            Self::NoIdentity => "no-identity",
+            Self::IdentityExists => "identity-exists",
+            Self::KeyDerivation(_) => "key-derivation",
+            Self::Signing(_) => "signing",
+            Self::Bech32(_) => "bech32",
+            Self::Storage(_) => "storage",
+            Self::Lock(_) => "lock",
+            Self::SecretKeyLength(_) => "secret-key-length",
+        }
+    }
+}
+
+/// Prints the variant's [`code`](IdentityError::code) and nothing else.
+///
+/// An identity error is the one whose payload can be the rejected nsec, and a
+/// `{:?}` is what an `unwrap` panic renders.
+impl std::fmt::Debug for IdentityError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "IdentityError({})", self.code())
+    }
 }
 
 /// Public identity information (safe to store and share).
@@ -154,7 +197,6 @@ impl PublicIdentity {
 ///
 /// // Create a new identity
 /// let identity = manager.create_identity().unwrap();
-/// println!("Created: {}", identity.npub);
 ///
 /// // Later, retrieve it
 /// let loaded = manager.get_identity().unwrap().unwrap();
@@ -579,10 +621,7 @@ impl<S: SecureKeyStorage> IdentityManager<S> {
     /// Returns an error if the bytes are invalid or storage fails.
     pub fn store_secret_bytes(&self, secret_bytes: &[u8]) -> Result<(), IdentityError> {
         if secret_bytes.len() != 32 {
-            return Err(IdentityError::Storage(format!(
-                "Invalid secret key length: expected 32, got {}",
-                secret_bytes.len()
-            )));
+            return Err(IdentityError::SecretKeyLength(secret_bytes.len()));
         }
 
         // Validate the secret bytes are valid (use Zeroizing for temp copy)
@@ -663,6 +702,64 @@ mod tests {
     fn new_manager_has_no_identity() {
         let manager = IdentityManager::new(MockStorage::new());
         assert!(!manager.has_identity().unwrap());
+    }
+
+    /// The manager holds the loaded identity, so its rendering is presence-only:
+    /// neither the pubkey nor the npub of a cached identity may appear
+    /// (Rule 15).
+    #[test]
+    fn identity_error_display_redacts_every_payload() {
+        // The nsec is the worst case: `Keys::parse` quotes what it rejected, so
+        // `InvalidNsec`'s payload can BE the secret key (Rule 6 as well as 15).
+        const NSEC: &str = "nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5";
+        const NPUB: &str = "npub1sn0wdenkukak0d9dfczzeacvhkrgz92ak56egt7vdgzn8pv2wfqqhrjdv9";
+
+        for needle in [NSEC, NPUB] {
+            for (err, sentence) in [
+                (
+                    IdentityError::InvalidNsec(needle.to_owned()),
+                    "Invalid nsec",
+                ),
+                (
+                    IdentityError::KeyDerivation(needle.to_owned()),
+                    "Key derivation failed",
+                ),
+                (IdentityError::Signing(needle.to_owned()), "Signing failed"),
+                (IdentityError::Bech32(needle.to_owned()), "Bech32 error"),
+                (IdentityError::Storage(needle.to_owned()), "Storage error"),
+                (IdentityError::Lock(needle.to_owned()), "Lock error"),
+            ] {
+                assert_eq!(err.to_string(), sentence);
+                crate::assert_display_redacted!(err, "IdentityError", marker = sentence, &[needle]);
+            }
+        }
+    }
+
+    #[test]
+    fn identity_error_debug_redacts_every_payload() {
+        const NSEC: &str = "nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5";
+
+        for (err, code) in [
+            (IdentityError::InvalidNsec(NSEC.to_owned()), "invalid-nsec"),
+            (IdentityError::Storage(NSEC.to_owned()), "storage"),
+            (IdentityError::Lock(NSEC.to_owned()), "lock"),
+        ] {
+            assert_eq!(format!("{err:?}"), format!("IdentityError({code})"));
+            crate::assert_debug_redacted!(err, "IdentityError", marker = code, &[NSEC]);
+        }
+    }
+
+    #[test]
+    fn identity_manager_debug_redacts_the_cached_identity() {
+        let manager: IdentityManager<MockStorage> = IdentityManager::new(MockStorage::new());
+        let identity = manager.create_identity().unwrap();
+        let rendered = format!("{manager:?}");
+        assert!(rendered.contains("has_cached_identity: true"));
+        crate::assert_debug_redacted!(
+            manager,
+            "IdentityManager",
+            &[&identity.pubkey_hex, &identity.npub]
+        );
     }
 
     #[test]
@@ -852,11 +949,11 @@ mod tests {
 
         // Too short
         let result = manager.store_secret_bytes(&[0u8; 16]);
-        assert!(matches!(result, Err(IdentityError::Storage(_))));
+        assert!(matches!(result, Err(IdentityError::SecretKeyLength(16))));
 
         // Too long
         let result = manager.store_secret_bytes(&[0u8; 64]);
-        assert!(matches!(result, Err(IdentityError::Storage(_))));
+        assert!(matches!(result, Err(IdentityError::SecretKeyLength(64))));
     }
 
     #[test]

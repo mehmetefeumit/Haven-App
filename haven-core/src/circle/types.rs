@@ -12,6 +12,7 @@
 
 use std::sync::OnceLock;
 
+use crate::log_alias::{self, EventIdHex, NostrGroupId, PeerPubkey};
 use crate::nostr::mls::types::GroupId;
 
 /// Production **account-creation seed** relay URLs.
@@ -236,15 +237,18 @@ pub struct Circle {
 
 impl std::fmt::Debug for Circle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The handle keeps cross-line correlation; the name, the relay set and
+        // the timestamps are all per-circle fingerprints (Security Rule 15).
         f.debug_struct("Circle")
             .field("mls_group_id", &"<redacted>")
-            .field("nostr_group_id", &hex::encode(self.nostr_group_id))
-            .field("display_name", &self.display_name)
+            .field(
+                "nostr_group_id",
+                &log_alias::circle(NostrGroupId(&self.nostr_group_id)),
+            )
+            .field("display_name", &"<redacted>")
             .field("circle_type", &self.circle_type)
-            .field("relays", &self.relays)
-            .field("created_at", &self.created_at)
-            .field("updated_at", &self.updated_at)
-            .finish()
+            .field("relays", &log_alias::bucket(self.relays.len()))
+            .finish_non_exhaustive()
     }
 }
 
@@ -271,10 +275,16 @@ impl std::fmt::Debug for CircleMembership {
         f.debug_struct("CircleMembership")
             .field("mls_group_id", &"<redacted>")
             .field("status", &self.status)
-            .field("inviter_pubkey", &self.inviter_pubkey)
-            .field("invited_at", &self.invited_at)
-            .field("responded_at", &self.responded_at)
-            .finish()
+            .field(
+                "inviter_pubkey",
+                &self
+                    .inviter_pubkey
+                    .as_deref()
+                    .map(|pubkey| log_alias::peer(PeerPubkey(pubkey))),
+            )
+            // Whether we answered, never when: an invite instant is a timeline.
+            .field("responded", &self.responded_at.is_some())
+            .finish_non_exhaustive()
     }
 }
 
@@ -304,15 +314,10 @@ pub struct Contact {
 impl std::fmt::Debug for Contact {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Contact")
-            .field(
-                "pubkey",
-                &format_args!("{}...", &self.pubkey[..16.min(self.pubkey.len())]),
-            )
+            .field("pubkey", &log_alias::peer(PeerPubkey(&self.pubkey)))
             .field("display_name", &"<redacted>")
             .field("notes", &"<redacted>")
-            .field("created_at", &self.created_at)
-            .field("updated_at", &self.updated_at)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -335,10 +340,7 @@ pub struct CircleMember {
 impl std::fmt::Debug for CircleMember {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CircleMember")
-            .field(
-                "pubkey",
-                &format_args!("{}...", &self.pubkey[..16.min(self.pubkey.len())]),
-            )
+            .field("pubkey", &log_alias::peer(PeerPubkey(&self.pubkey)))
             .field("display_name", &"<redacted>")
             .field("is_admin", &self.is_admin)
             .finish()
@@ -362,7 +364,13 @@ impl std::fmt::Debug for CircleUiState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CircleUiState")
             .field("mls_group_id", &"<redacted>")
-            .field("last_read_message_id", &self.last_read_message_id)
+            .field(
+                "last_read_message_id",
+                &self
+                    .last_read_message_id
+                    .as_deref()
+                    .map(|id| log_alias::event(EventIdHex(id))),
+            )
             .field("pin_order", &self.pin_order)
             .field("is_muted", &self.is_muted)
             .finish()
@@ -409,18 +417,19 @@ pub struct LastKnownLocation {
 
 impl std::fmt::Debug for LastKnownLocation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The four instants are omitted, not redacted: a capture/receive moment
+        // is a position in a timeline even without the position itself.
         f.debug_struct("LastKnownLocation")
-            .field("nostr_group_id", &hex::encode(self.nostr_group_id))
+            .field(
+                "nostr_group_id",
+                &log_alias::circle(NostrGroupId(&self.nostr_group_id)),
+            )
             .field("sender_pubkey", &"<redacted>")
             .field("latitude", &"<redacted>")
             .field("longitude", &"<redacted>")
             .field("geohash", &"<redacted>")
             .field("display_name", &"<redacted>")
-            .field("timestamp", &self.timestamp)
-            .field("expires_at", &self.expires_at)
-            .field("purge_after", &self.purge_after)
-            .field("updated_at", &self.updated_at)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -502,25 +511,19 @@ pub struct Invitation {
     pub invited_at: i64,
 }
 
-/// The first `max` CHARACTERS of `value`, for the redacting `Debug` impls.
-fn truncate_chars(value: &str, max: usize) -> String {
-    value.chars().take(max).collect()
-}
-
 impl std::fmt::Debug for Invitation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Invitation")
             .field("mls_group_id", &"<redacted>")
-            .field("circle_name", &self.circle_name)
+            .field("circle_name", &"<redacted>")
+            // Aliased, never truncated: a prefix is still an identifier, and
+            // slicing a String nothing guarantees is hex panicked on a char
+            // boundary — inside a `Debug`, i.e. inside whatever was logging.
             .field(
                 "inviter_pubkey",
-                // By CHARS, never `&s[..16]`: a byte slice of a String nothing
-                // guarantees is hex panics on a char boundary, and a Debug impl
-                // that panics takes the log line's caller with it.
-                &format_args!("{}...", truncate_chars(&self.inviter_pubkey, 16)),
+                &log_alias::peer(PeerPubkey(&self.inviter_pubkey)),
             )
-            .field("invited_at", &self.invited_at)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -545,8 +548,8 @@ impl std::fmt::Debug for MemberKeyPackage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MemberKeyPackage")
             .field("key_package_event", &"<redacted>")
-            .field("inbox_relays_count", &self.inbox_relays.len())
-            .field("nip65_relays_count", &self.nip65_relays.len())
+            .field("inbox_relays", &log_alias::bucket(self.inbox_relays.len()))
+            .field("nip65_relays", &log_alias::bucket(self.nip65_relays.len()))
             .finish()
     }
 }
@@ -569,7 +572,10 @@ impl std::fmt::Debug for GiftWrappedWelcome {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GiftWrappedWelcome")
             .field("recipient_pubkey", &"<redacted>")
-            .field("relay_count", &self.recipient_relays.len())
+            .field(
+                "recipient_relays",
+                &log_alias::bucket(self.recipient_relays.len()),
+            )
             .field("event", &"<redacted>")
             .finish()
     }
@@ -677,22 +683,83 @@ mod tests {
     }
 
     #[test]
-    fn circle_member_debug() {
+    fn contact_debug_redacts_pubkey_notes_and_instants() {
+        let contact: Contact = Contact {
+            pubkey: "b7e2d1c0a9f8e7d6c5b4a3928170f6e5d4c3b2a1908f7e6d5c4b3a2918070f6e5".to_string(),
+            display_name: Some("Ada Bramble".to_string()),
+            notes: Some("met at the allotment".to_string()),
+            created_at: 1_757_000_000,
+            updated_at: 1_757_000_900,
+        };
+
+        crate::assert_debug_redacted!(
+            &contact,
+            "Contact",
+            &[
+                &contact.pubkey,
+                "Ada Bramble",
+                "met at the allotment",
+                "1757000000",
+                "1757000900",
+            ]
+        );
+        let debug_str = format!("{contact:?}");
+        assert!(debug_str.contains("peer#"), "{debug_str}");
+        assert!(debug_str.contains("<redacted>"), "{debug_str}");
+    }
+
+    #[test]
+    fn last_known_location_debug_redacts_position_and_instants() {
+        let cached: LastKnownLocation = LastKnownLocation {
+            nostr_group_id: [0x42; 32],
+            sender_pubkey: "d1c0b9a8978685746352413f2e1d0c9b8a79685746352413f2e1d0c9b8a79685"
+                .to_string(),
+            latitude: 37.774_929_5,
+            longitude: -122.419_415_5,
+            geohash: "9q8yyk8y".to_string(),
+            display_name: Some("Ada Bramble".to_string()),
+            timestamp: 1_757_000_000,
+            expires_at: 1_757_000_228,
+            purge_after: 1_757_086_400,
+            updated_at: 1_757_000_001,
+        };
+
+        crate::assert_debug_redacted!(
+            &cached,
+            "LastKnownLocation",
+            &[
+                &hex::encode(cached.nostr_group_id),
+                &cached.sender_pubkey,
+                "37.774",
+                "122.419",
+                "9q8yyk8y",
+                "Ada Bramble",
+                "1757000000",
+                "1757000228",
+                "1757086400",
+            ]
+        );
+        let debug_str = format!("{cached:?}");
+        assert!(debug_str.contains("circle#"), "{debug_str}");
+        assert!(debug_str.contains("<redacted>"), "{debug_str}");
+    }
+
+    #[test]
+    fn circle_member_debug_redacts_pubkey_and_display_name() {
         let member = CircleMember {
             pubkey: "abc123def456789012345678".to_string(),
-            display_name: Some("Bob".to_string()),
+            display_name: Some("Bob Fossil".to_string()),
             is_admin: true,
         };
 
-        let debug_str = format!("{member:?}");
-        assert!(debug_str.contains("CircleMember"));
-        assert!(debug_str.contains("abc123def4567890..."));
-        assert!(
-            !debug_str.contains("Bob"),
-            "display_name should be redacted"
+        crate::assert_debug_redacted!(
+            &member,
+            "CircleMember",
+            &["abc123def456789012345678", "Bob Fossil"]
         );
-        assert!(debug_str.contains("<redacted>"));
-        assert!(debug_str.contains("is_admin: true"));
+        let debug_str = format!("{member:?}");
+        assert!(debug_str.contains("peer#"), "{debug_str}");
+        assert!(debug_str.contains("is_admin: true"), "{debug_str}");
     }
 
     #[test]
@@ -707,16 +774,31 @@ mod tests {
             updated_at: 2000,
         };
 
+        crate::assert_debug_redacted!(
+            &circle,
+            "Circle",
+            &[
+                "Test Circle",
+                "wss://relay.example.com",
+                &hex::encode(circle.nostr_group_id),
+                "abcdef0123",
+            ]
+        );
         let debug_str = format!("{circle:?}");
         assert!(
             debug_str.contains("<redacted>"),
-            "MLS group ID should be redacted"
+            "MLS group ID should be redacted: {debug_str}"
         );
-        assert!(debug_str.contains("Test Circle"));
-        // nostr_group_id should appear as hex
-        assert!(debug_str.contains("42424242"));
-        // Raw bytes should NOT appear
-        assert!(!debug_str.contains("abcdef0123"));
+        // The circle stays identifiable ACROSS log lines, by handle only.
+        assert!(debug_str.contains("circle#"), "{debug_str}");
+        assert!(
+            !debug_str.contains("1000"),
+            "created_at leaked: {debug_str}"
+        );
+        assert!(
+            !debug_str.contains("2000"),
+            "updated_at leaked: {debug_str}"
+        );
     }
 
     #[test]
@@ -724,29 +806,35 @@ mod tests {
         let membership = CircleMembership {
             mls_group_id: GroupId::from_slice(&[0xDE, 0xAD]),
             status: MembershipStatus::Pending,
-            inviter_pubkey: Some("inviter123".to_string()),
+            inviter_pubkey: Some("inviter1234567890".to_string()),
             invited_at: 5000,
             responded_at: None,
         };
 
+        crate::assert_debug_redacted!(
+            &membership,
+            "CircleMembership",
+            &["inviter1234567890", "5000"]
+        );
         let debug_str = format!("{membership:?}");
         assert!(debug_str.contains("<redacted>"));
         assert!(debug_str.contains("Pending"));
-        assert!(debug_str.contains("inviter123"));
+        assert!(debug_str.contains("peer#"), "{debug_str}");
     }
 
     #[test]
     fn circle_ui_state_debug_redacts_mls_group_id() {
         let state = CircleUiState {
             mls_group_id: GroupId::from_slice(&[0xFF; 16]),
-            last_read_message_id: Some("msg-123".to_string()),
+            last_read_message_id: Some("9f2b7c41d0e5a6b8".to_string()),
             pin_order: Some(1),
             is_muted: false,
         };
 
+        crate::assert_debug_redacted!(&state, "CircleUiState", &["9f2b7c41d0e5a6b8"]);
         let debug_str = format!("{state:?}");
         assert!(debug_str.contains("<redacted>"));
-        assert!(debug_str.contains("msg-123"));
+        assert!(debug_str.contains("event#"), "{debug_str}");
         assert!(debug_str.contains("pin_order: Some(1)"));
         assert!(debug_str.contains("is_muted: false"));
     }
@@ -756,49 +844,56 @@ mod tests {
         let invitation = Invitation {
             mls_group_id: GroupId::from_slice(&[0x11; 8]),
             circle_name: "Family Circle".to_string(),
-            inviter_pubkey: "pubkey456".to_string(),
+            inviter_pubkey: "pubkey456789012345".to_string(),
             invited_at: 9000,
         };
 
+        crate::assert_debug_redacted!(
+            &invitation,
+            "Invitation",
+            &["Family Circle", "pubkey456789012345", "9000"]
+        );
         let debug_str = format!("{invitation:?}");
         assert!(debug_str.contains("<redacted>"));
-        assert!(debug_str.contains("Family Circle"));
-        assert!(debug_str.contains("pubkey456"));
+        assert!(debug_str.contains("peer#"), "{debug_str}");
     }
 
     #[test]
-    fn invitation_debug_truncates_a_real_inviter_pubkey() {
-        // The sibling test's fixture is shorter than the truncation bound, so
-        // it cannot tell a truncating impl from a full-printing one. A real
-        // 64-char hex key can: Rule 6 covers the inviter's identity key just
-        // as `Contact`/`CircleMember` already cover a member's.
-        let pubkey = "a".repeat(64);
+    fn invitation_debug_omits_a_real_inviter_pubkey_entirely() {
+        // A prefix of an identifier is still an identifier (Security Rule 15),
+        // so a real 64-char key must not survive at ANY truncation — which the
+        // sibling test's short fixture cannot tell apart from a prefixing impl.
+        let pubkey = "9c4f1a2b3d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f7081920a1b2c3d4e5f";
+        let invitation = Invitation {
+            mls_group_id: GroupId::from_slice(&[0x11; 8]),
+            circle_name: "Family Circle".to_string(),
+            inviter_pubkey: pubkey.to_string(),
+            invited_at: 9000,
+        };
+
+        crate::assert_debug_redacted!(&invitation, "Invitation", &[pubkey]);
+        let debug_str = format!("{invitation:?}");
+        assert!(!debug_str.contains(&pubkey[..8]), "{debug_str}");
+        assert!(!debug_str.contains(&pubkey[..4]), "{debug_str}");
+    }
+
+    #[test]
+    fn invitation_debug_does_not_panic_on_a_non_ascii_pubkey() {
+        // Nothing in the type constrains `inviter_pubkey` to hex, and the
+        // truncation this impl used to do panicked when byte 16 landed
+        // mid-character (it does here: the ideograph is three bytes) — inside a
+        // `Debug` impl, i.e. inside whatever was logging. Aliasing removes the
+        // slicing, and this test keeps it removed.
+        let pubkey = "\u{7530}".repeat(64);
         let invitation = Invitation {
             mls_group_id: GroupId::from_slice(&[0x11; 8]),
             circle_name: "Family Circle".to_string(),
             inviter_pubkey: pubkey.clone(),
             invited_at: 9000,
         };
-
         let debug_str = format!("{invitation:?}");
-        assert!(!debug_str.contains(&pubkey));
-        assert!(debug_str.contains(&format!("{}...", &pubkey[..16])));
-    }
-
-    #[test]
-    fn invitation_debug_does_not_panic_on_a_non_ascii_pubkey() {
-        // Nothing in the type constrains `inviter_pubkey` to hex, and a
-        // byte-sliced truncation panics when byte 16 lands mid-character (it
-        // does here: `田` is three bytes) — inside a `Debug` impl, i.e. inside
-        // whatever was logging.
-        let invitation = Invitation {
-            mls_group_id: GroupId::from_slice(&[0x11; 8]),
-            circle_name: "Family Circle".to_string(),
-            inviter_pubkey: "田".repeat(64),
-            invited_at: 9000,
-        };
-        let debug_str = format!("{invitation:?}");
-        assert!(debug_str.contains(&format!("{}...", "田".repeat(16))));
+        assert!(debug_str.contains("peer#"), "{debug_str}");
+        assert!(!debug_str.contains(&pubkey), "{debug_str}");
     }
 
     #[test]
@@ -880,7 +975,7 @@ mod tests {
     }
 
     #[test]
-    fn member_key_package_debug() {
+    fn member_key_package_debug_redacts_the_event_and_relays() {
         let keys = nostr::Keys::generate();
         let signed_event = nostr::EventBuilder::new(nostr::Kind::Custom(443), "test-content")
             .sign_with_keys(&keys)
@@ -892,11 +987,22 @@ mod tests {
             nip65_relays: vec!["wss://nip65.example.com".to_string()],
         };
 
+        crate::assert_debug_redacted!(
+            &mkp,
+            "MemberKeyPackage",
+            &[
+                "test-content",
+                "wss://relay.example.com",
+                "wss://nip65.example.com",
+                &mkp.key_package_event.pubkey.to_hex(),
+                &mkp.key_package_event.id.to_hex(),
+            ]
+        );
         let debug_str = format!("{mkp:?}");
         assert!(debug_str.contains("MemberKeyPackage"));
         assert!(debug_str.contains("<redacted>"));
-        assert!(debug_str.contains("inbox_relays_count: 1"));
-        assert!(debug_str.contains("nip65_relays_count: 1"));
+        assert!(debug_str.contains(r#"inbox_relays: "1""#), "{debug_str}");
+        assert!(debug_str.contains(r#"nip65_relays: "1""#), "{debug_str}");
         assert!(
             !debug_str.contains("test-content"),
             "key_package_event content should be redacted"
@@ -911,27 +1017,43 @@ mod tests {
         );
     }
 
+    const RECIPIENT_PUBKEY: &str =
+        "c3f9a1b20d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8";
+
     #[test]
-    fn gift_wrapped_welcome_debug() {
+    fn gift_wrapped_welcome_debug_redacts_recipient_and_event() {
         let keys = nostr::Keys::generate();
         let signed_event = nostr::EventBuilder::new(nostr::Kind::Custom(1059), "wrapped-content")
             .sign_with_keys(&keys)
             .unwrap();
 
         let gww = GiftWrappedWelcome {
-            recipient_pubkey: "recipient-pubkey-hex".to_string(),
+            recipient_pubkey: RECIPIENT_PUBKEY.to_string(),
             recipient_relays: vec!["wss://relay.example.com".to_string()],
             event: signed_event,
         };
 
+        crate::assert_debug_redacted!(
+            &gww,
+            "GiftWrappedWelcome",
+            &[
+                RECIPIENT_PUBKEY,
+                "wrapped-content",
+                "wss://relay.example.com",
+                &gww.event.id.to_hex(),
+            ]
+        );
         let debug_str = format!("{gww:?}");
         assert!(debug_str.contains("GiftWrappedWelcome"));
         assert!(
-            !debug_str.contains("recipient-pubkey-hex"),
+            !debug_str.contains(RECIPIENT_PUBKEY),
             "recipient_pubkey should be redacted"
         );
         assert!(debug_str.contains("<redacted>"));
-        assert!(debug_str.contains("relay_count: 1"));
+        assert!(
+            debug_str.contains(r#"recipient_relays: "1""#),
+            "{debug_str}"
+        );
         assert!(
             !debug_str.contains("wrapped-content"),
             "event content should be redacted"

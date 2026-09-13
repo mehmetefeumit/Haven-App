@@ -144,8 +144,11 @@ abstract class IdentityService {
   /// every implementation, the real one and every test double:
   ///
   /// * Returning a retained buffer hands out something the first caller
-  ///   zeroes; the second call then yields 32 zero bytes, which the FFI
-  ///   rejects as `Invalid secret key: malformed or out-of-range secret key`.
+  ///   zeroes; the second call then yields 32 zero bytes, which fail
+  ///   secp256k1 key derivation on the Rust side (`IdentityError::
+  ///   KeyDerivation`, whose `Display` is now the fixed, payload-free
+  ///   sentence "Key derivation failed" — Security Rule 15; it no longer
+  ///   quotes the rejected bytes or the upstream parser's own message).
   /// * Returning an unmodifiable list (`List.unmodifiable`, `const [...]`) is
   ///   a secret nothing can wipe, so `takeSecretOwnership` throws
   ///   `UnsupportedError` rather than let it live unscrubbed.

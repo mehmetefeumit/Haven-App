@@ -29,13 +29,14 @@ pub type Result<T> = std::result::Result<T, ProfileError>;
 #[derive(Error)]
 pub enum ProfileError {
     /// A Blossom (BUD-02/BUD-11) protocol or upload operation failed. The
-    /// wrapped detail is redacted at `Debug` time.
-    #[error("blossom error: {0}")]
+    /// wrapped detail — SERVER-authored text — is kept for programmatic use and
+    /// rendered by neither `Display` nor `Debug` (Security Rule 15).
+    #[error("blossom error")]
     Blossom(String),
 
     /// A raw HTTP transport failure (connect/read/status). The wrapped detail
-    /// is redacted at `Debug` time.
-    #[error("http error: {0}")]
+    /// carries the host, so neither rendering prints it.
+    #[error("http error")]
     Http(String),
 
     /// A bounded network operation exceeded its deadline.
@@ -59,13 +60,13 @@ pub enum ProfileError {
     TooLarge,
 
     /// Building a Nostr event (kind-0 metadata or kind-24242 auth) failed. The
-    /// wrapped detail is redacted at `Debug` time.
-    #[error("event build error: {0}")]
+    /// wrapped detail is never rendered.
+    #[error("event build error")]
     Build(String),
 
-    /// A relay publish/fetch operation failed. The wrapped detail is redacted
-    /// at `Debug` time.
-    #[error("relay error: {0}")]
+    /// A relay publish/fetch operation failed. The wrapped detail carries the
+    /// relay's URL and its own `NOTICE`/`OK` prose, so it is never rendered.
+    #[error("relay error")]
     Relay(String),
 
     /// The effective relay set was empty (fail-closed — Haven never falls back
@@ -83,14 +84,14 @@ pub enum ProfileError {
     Image(#[from] AvatarError),
 
     /// A local `SQLite` / cache operation failed. The wrapped detail comes from
-    /// the storage layer (never image or key content) and is redacted at
-    /// `Debug` time.
-    #[error("profile cache error: {0}")]
+    /// the storage layer, which can echo a bound parameter, so it is never
+    /// rendered.
+    #[error("profile cache error")]
     Sqlite(String),
 
     /// Structurally invalid non-URL input (currently: a malformed persisted
-    /// relay-assignment salt). Data-free: the rejected value is never echoed.
-    #[error("invalid profile data: {0}")]
+    /// relay-assignment salt). The rejected value is never echoed.
+    #[error("invalid profile data")]
     InvalidData(String),
 
     /// Too few profile-plane relays survived contamination exclusion.
@@ -146,16 +147,40 @@ impl ProfileError {
     }
 }
 
-/// Hand-written redacting `Debug` (NOT derived): the rendered message is passed
-/// through [`redact_hex_sequences`] so a `{:?}` of any variant — including the
-/// string-carrying ones — can never surface a full-length pubkey or sha256 hex.
+impl ProfileError {
+    /// A stable, value-free token naming the variant, for log lines.
+    ///
+    /// `Blossom`, `Http` and `Relay` carry text a SERVER wrote; a relay or a
+    /// Blossom host can therefore choose what a Haven log line says, which is
+    /// why a log line says only this (Security Rule 15, Rule 8).
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::Blossom(_) => "blossom",
+            Self::Http(_) => "http",
+            Self::Timeout => "timeout",
+            Self::HashMismatch => "hash-mismatch",
+            Self::InsecureUrl => "insecure-url",
+            Self::TooLarge => "too-large",
+            Self::Build(_) => "build",
+            Self::Relay(_) => "relay",
+            Self::NoRelays => "no-relays",
+            Self::BadUrl => "bad-url",
+            Self::Image(_) => "image",
+            Self::Sqlite(_) => "sqlite",
+            Self::InvalidData(_) => "invalid-data",
+            Self::PoolUnderflow { .. } => "pool-underflow",
+        }
+    }
+}
+
+/// Hand-written `Debug` (NOT derived): it prints the variant's
+/// [`code`](ProfileError::code) only. The string-carrying variants wrap
+/// server-authored text, which no `{:?}` — in a log, a panic or an `expect` —
+/// may republish (Security Rule 15).
 impl fmt::Debug for ProfileError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "ProfileError({})",
-            redact_hex_sequences(&self.to_string())
-        )
+        write!(f, "ProfileError({})", self.code())
     }
 }
 
@@ -181,35 +206,96 @@ mod tests {
     }
 
     #[test]
-    fn debug_redacts_pubkey_hex() {
+    fn profile_error_debug_redacts_the_wrapped_prose() {
         // A full 64-char pubkey hex embedded in a wrapped detail must be gone
-        // from the Debug output.
+        // from the Debug output — and so must the server's own prose around it.
         let pubkey_hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         assert!(has_hex_run_ge16(pubkey_hex), "detector sanity");
         let err = ProfileError::Blossom(format!("upload failed for {pubkey_hex}"));
+        crate::assert_debug_redacted!(&err, "ProfileError", &[pubkey_hex, "upload failed for"]);
         let debug = format!("{err:?}");
         assert!(
             !has_hex_run_ge16(&debug),
             "Debug must not carry a >=16 hex run: {debug}"
         );
-        assert!(
-            !debug.contains(pubkey_hex),
-            "literal hex must be gone: {debug}"
-        );
-        assert!(
-            debug.contains("[REDACTED]"),
-            "redaction must be marked: {debug}"
-        );
+        assert_eq!(debug, "ProfileError(blossom)");
     }
 
     #[test]
-    fn constructors_redact_display_too() {
-        // The `blossom`/`http`/… constructors pre-redact, so even Display is
-        // safe (belt and braces alongside the redacting Debug).
+    fn error_codes_are_distinct_and_value_free() {
+        let codes = [
+            ProfileError::Blossom(String::new()).code(),
+            ProfileError::Http(String::new()).code(),
+            ProfileError::Timeout.code(),
+            ProfileError::HashMismatch.code(),
+            ProfileError::InsecureUrl.code(),
+            ProfileError::TooLarge.code(),
+            ProfileError::Build(String::new()).code(),
+            ProfileError::Relay(String::new()).code(),
+            ProfileError::NoRelays.code(),
+            ProfileError::BadUrl.code(),
+            ProfileError::Image(AvatarError::UnsupportedFormat).code(),
+            ProfileError::Sqlite(String::new()).code(),
+            ProfileError::InvalidData(String::new()).code(),
+            ProfileError::PoolUnderflow {
+                usable: 0,
+                required: 2,
+            }
+            .code(),
+        ];
+        let unique: std::collections::BTreeSet<&str> = codes.iter().copied().collect();
+        assert_eq!(unique.len(), codes.len(), "a code is reused: {codes:?}");
+        for code in codes {
+            assert!(
+                code.chars().all(|c| c.is_ascii_lowercase() || c == '-'),
+                "a code must be a fixed token, not a value: {code}"
+            );
+        }
+    }
+
+    #[test]
+    fn profile_error_display_redacts_the_wrapped_prose() {
+        // `Display` crosses the FFI into Dart, whose default error handler
+        // prints an exception's message verbatim, so the server-authored detail
+        // (and the host inside it) must be absent from it — the constructors'
+        // `redact_hex_sequences` pre-pass stays as defence in depth, not as the
+        // mechanism (Security Rule 15).
         let sha = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899";
-        let err = ProfileError::http(format!("connect to host {sha} refused"));
-        assert!(!err.to_string().contains(sha));
-        assert!(!has_hex_run_ge16(&err.to_string()));
+        let cases = [
+            (
+                ProfileError::http(format!("connect to blossom.example {sha} refused")),
+                "http error",
+            ),
+            (
+                ProfileError::blossom(format!("507 insufficient storage for {sha}")),
+                "blossom error",
+            ),
+            (
+                ProfileError::relay("wss://relay.example.com: rate-limited".to_string()),
+                "relay error",
+            ),
+            (
+                ProfileError::Sqlite(format!("UNIQUE failed: profiles.{sha}")),
+                "profile cache error",
+            ),
+        ];
+        for (err, expected) in cases {
+            crate::assert_display_redacted!(
+                &err,
+                "ProfileError",
+                marker = expected,
+                &[
+                    sha,
+                    "blossom.example",
+                    "wss://relay.example.com",
+                    "rate-limited"
+                ]
+            );
+            let display = err.to_string();
+            assert_eq!(display, expected);
+            assert!(!display.contains(&sha[..8]), "{display}");
+            assert!(!has_hex_run_ge16(&display));
+        }
     }
 
     #[test]

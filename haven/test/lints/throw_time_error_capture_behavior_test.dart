@@ -16,6 +16,7 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../../integration_test/e2e/_lib/throw_time_error_capture.dart';
+import '../helpers/log_capture.dart';
 
 /// A real, deliberately-triggered `RenderFlex` overflow: a `Row` forced into
 /// less width than its one child needs. `Center` gives its child LOOSE
@@ -111,12 +112,7 @@ void main() {
       'renders FlutterErrorDetails.toString() synchronously, before any '
       'later mutation of the thrown object',
       () {
-        final captured = <String>[];
-        final priorDebugPrint = debugPrint;
-        debugPrint = (String? message, {int? wrapWidth}) {
-          if (message != null) captured.add(message);
-        };
-        addTearDown(() => debugPrint = priorDebugPrint);
+        final captured = LogCapture.install();
 
         final priorHandler = FlutterError.onError;
         FlutterError.onError = (_) {};
@@ -135,19 +131,22 @@ void main() {
         exception.state = 'deactivated-after-throw';
 
         expect(
-          captured,
+          captured.lines,
           isNotEmpty,
           reason: 'the handler must log synchronously inside onError, not '
               'defer to end-of-test',
         );
         expect(
-          captured.single,
+          captured.lines.single,
           contains('live-at-throw-time'),
           reason: 'must have rendered the details at throw time — before '
               'the later mutation — proving a deferred .toString() call '
               'would have produced a different, degraded message',
         );
-        expect(captured.single, isNot(contains('deactivated-after-throw')));
+        expect(
+          captured.lines.single,
+          isNot(contains('deactivated-after-throw')),
+        );
       },
     );
   });
@@ -197,11 +196,7 @@ void main() {
       'installChainedThrowTimeHandler logs the creator-chain detail (widget '
       'type + file:line) for a genuine overflow, at throw time',
       (tester) async {
-        final logged = <String>[];
-        final priorDebugPrint = debugPrint;
-        debugPrint = (String? message, {int? wrapWidth}) {
-          if (message != null) logged.add(message);
-        };
+        final logged = LogCapture();
         final restoreHandler = installChainedThrowTimeHandler();
         // Restored synchronously here, NOT via addTearDown: `testWidgets`
         // checks `debugPrint` is back to its expected value as part of the
@@ -215,22 +210,22 @@ void main() {
           await tester.pumpWidget(_overflowingRow());
 
           expect(
-            logged,
+            logged.lines,
             isNotEmpty,
             reason: 'the overflow must actually have fired and been logged',
           );
           expect(
-            logged.single,
+            logged.lines.single,
             contains('The relevant error-causing widget was'),
           );
           expect(
-            logged.single,
+            logged.lines.single,
             matches(RegExp(r'\.dart:\d+:\d+')),
             reason: 'must include a file:line, not just the widget name',
           );
         } finally {
           restoreHandler();
-          debugPrint = priorDebugPrint;
+          logged.restore();
         }
         // The overflow is a genuine `FlutterError` the SDK's own bookkeeping
         // handler (chained to above) now tracks as pending — acknowledge it
@@ -247,11 +242,7 @@ void main() {
       'throw-time attribution at all; the fix is the one call site removed '
       'here, and restoring it (test above) recovers the detail',
       (tester) async {
-        final logged = <String>[];
-        final priorDebugPrint = debugPrint;
-        debugPrint = (String? message, {int? wrapWidth}) {
-          if (message != null) logged.add(message);
-        };
+        final logged = LogCapture();
 
         // Deliberately NOT calling installChainedThrowTimeHandler(): this IS
         // the mutation. `FlutterError.onError` is left exactly as the
@@ -276,13 +267,13 @@ void main() {
           await tester.pumpWidget(_overflowingRow());
 
           expect(
-            logged,
+            logged.lines,
             isEmpty,
             reason: 'with the fix removed, the overflow produces no '
                 'throw-time attribution',
           );
         } finally {
-          debugPrint = priorDebugPrint;
+          logged.restore();
         }
         expect(tester.takeException(), isNotNull);
       },

@@ -39,9 +39,25 @@
 # never asked. An unusable log is therefore its own FAILURE class with its
 # own exit code, distinct from both "clean" and "leaking".
 #
+# # What this file is, and is not
+#
+# This file is the key-material floor; identifier policy (pubkeys, event ids,
+# group ids, relay URLs, names, coordinates — CLAUDE.md Security Rule 15) lives
+# in the source guards (`scripts/ci/check_no_identifier_logging.sh` and its
+# siblings) and, once the logscan phase lands, in `tooling/logscan/policy.toml`.
+# The clean fixture below deliberately passes a full pubkey, event id and npub:
+# that permissiveness is a statement of THIS scanner's scope, not a licence to
+# log them.
+#
 # Usage:
-#   bash tooling/e2e/ci/scan-logs-for-secrets.sh <log-file-or-dir> [more...]
+#   bash tooling/e2e/ci/scan-logs-for-secrets.sh [--ext <list>] <log-file-or-dir> [more...]
 #   bash tooling/e2e/ci/scan-logs-for-secrets.sh --self-test
+#
+#   --ext <list>  comma-separated extensions the DIRECTORY walk scans (default
+#                 `log`; the list replaces the default rather than extending
+#                 it). A file named explicitly is always scanned, whatever its
+#                 extension. Exists for lanes that must upload a `.txt` they
+#                 cannot rename; the safe default remains to write `.log`.
 #
 # Exit codes:
 #   0 = every named log was present, readable, non-empty and clean
@@ -110,7 +126,7 @@ readonly -a LABELS=(
 # nothing. Tag-anchored keeps the blast radius inside code this repo owns.
 
 usage() {
-  echo "Usage: $0 <log-file-or-dir> [more...]  |  $0 --self-test" >&2
+  echo "Usage: $0 [--ext <list>] <log-file-or-dir> [more...]  |  $0 --self-test" >&2
 }
 
 # scan_file <path> — RC_CLEAN if the file is scannable and clean, RC_LEAK if
@@ -287,9 +303,9 @@ self_test() {
   chmod 000 "${unreadable}"
   mkdir -p "${dir_empty}" "${dir_clean}" "${dir_dirty}"
   # A non-.log file must NOT rescue a logless directory from the UNUSABLE
-  # verdict — the directory walk only ever scans *.log, so anything else there
-  # is unscanned by construction (cf. the `.log`-not-`.txt` note in
-  # e2e-fgs-publish.yml's diag step).
+  # verdict — the directory walk only ever scans the `--ext` list, *.log by
+  # default, so anything else there is unscanned by construction (cf. the
+  # `.log`-not-`.txt` note in e2e-fgs-publish.yml's diag step).
   printf '%s\n' 'not a log' > "${dir_empty}/README.txt"
   cp "${clean}" "${dir_clean}/logcat.log"
   cp "${dirty}" "${dir_dirty}/logcat.log"
@@ -331,6 +347,27 @@ self_test() {
   # Usage error stays distinct from all three verdicts.
   expect_rc 2 "no arguments" || fail=1
 
+  # --ext: the walk scans exactly the listed extensions. A `.txt` diag is
+  # invisible to the default walk (the trap above), visible once listed, and
+  # the list REPLACES the default — `--ext txt` must not quietly keep scanning
+  # *.log too, or a caller could never tell which extensions a scan covered.
+  local dir_txt_dirty dir_txt_clean
+  dir_txt_dirty="${tmp}/dir-txt-dirty"
+  dir_txt_clean="${tmp}/dir-txt-clean"
+  mkdir -p "${dir_txt_dirty}" "${dir_txt_clean}"
+  cp "${dirty}" "${dir_txt_dirty}/diag.txt"
+  cp "${clean}" "${dir_txt_clean}/diag.txt"
+  expect_rc 3 "directory holding only a leaking .txt (default walk)" "${dir_txt_dirty}" || fail=1
+  expect_rc 1 "--ext log,txt walks the leaking .txt" --ext log,txt "${dir_txt_dirty}" || fail=1
+  expect_rc 0 "--ext txt scans a clean .txt" --ext txt "${dir_txt_clean}" || fail=1
+  expect_rc 3 "--ext txt no longer walks *.log (the list replaces the default)" --ext txt "${dir_clean}" || fail=1
+  expect_rc 1 "--ext leaves an explicitly named leaking file scanned" --ext txt "${dirty}" || fail=1
+  expect_rc 2 "--ext without a list" --ext || fail=1
+  expect_rc 2 "--ext with an empty list" --ext '' "${clean}" || fail=1
+  expect_rc 2 "--ext with a malformed list" --ext 'log;txt' "${clean}" || fail=1
+  expect_rc 2 "--ext with no paths after it" --ext log || fail=1
+  expect_rc 2 "an unknown option" --no-such-option "${clean}" || fail=1
+
   # chmod back so the RETURN trap's `rm -rf` cannot be tripped up by an
   # unreadable leftover on hosts with restrictive umasks.
   chmod 644 "${unreadable}" 2>/dev/null || true
@@ -340,7 +377,8 @@ self_test() {
     return 1
   fi
   echo "scan-logs-for-secrets: self-test passed (clean clears, planted secrets caught," \
-       "absent/unreadable/empty logs fail loudly)."
+       "absent/unreadable/empty logs fail loudly, --ext widens the directory walk" \
+       "to exactly the listed extensions)."
   return 0
 }
 
@@ -354,6 +392,38 @@ main() {
     exit $?
   fi
 
+  local exts="log"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --ext)
+        if [[ $# -lt 2 ]]; then usage; exit "${RC_USAGE}"; fi
+        exts="$2"
+        shift 2
+        ;;
+      -*) usage; exit "${RC_USAGE}" ;;
+      *) break ;;
+    esac
+  done
+  if [[ $# -lt 1 ]]; then
+    usage
+    exit "${RC_USAGE}"
+  fi
+  if ! [[ "${exts}" =~ ^[A-Za-z0-9]+(,[A-Za-z0-9]+)*$ ]]; then
+    echo "ERROR: --ext takes a comma-separated list of bare extensions (got '${exts}')." >&2
+    usage
+    exit "${RC_USAGE}"
+  fi
+  # `( -name '*.log' -o -name '*.txt' )` for find(1), and the same list in
+  # prose for the UNUSABLE message.
+  local -a name_args=() ext_list=()
+  local ext globs
+  IFS=',' read -r -a ext_list <<<"${exts}"
+  for ext in "${ext_list[@]}"; do
+    if (( ${#name_args[@]} > 0 )); then name_args+=(-o); fi
+    name_args+=(-name "*.${ext}")
+  done
+  globs="*.${exts//,/, *.}"
+
   local -a files=()
   # Paths the caller asserted would be scannable and were not. Counted, not
   # just flagged, so the final message can say how much evidence is missing.
@@ -365,14 +435,14 @@ main() {
       while IFS= read -r -d '' f; do
         files+=("${f}")
         found=$(( found + 1 ))
-      done < <(find "${arg}" -type f -name '*.log' -print0 2>/dev/null)
+      done < <(find "${arg}" -type f \( "${name_args[@]}" \) -print0 2>/dev/null)
       # A logless directory is the crash case in directory form: the lane was
       # asked to hand over its logs and handed over none. Same reasoning as the
       # absent-file branch in scan_file — an empty evidence set is not an
       # exoneration. (This is why the two orchestrator lanes wired below scan
       # only where they actually deposit logs; see their call sites.)
       if (( found == 0 )); then
-        echo "UNUSABLE: ${arg} [no logs] — directory holds no *.log; nothing was scanned." >&2
+        echo "UNUSABLE: ${arg} [no logs] — directory holds no ${globs}; nothing was scanned." >&2
         unusable+=("${arg}")
       fi
     elif [[ -e "${arg}" ]]; then

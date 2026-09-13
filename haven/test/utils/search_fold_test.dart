@@ -8,16 +8,16 @@
 /// nothing can mistake it for a second implementation.
 library;
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/utils/search_fold.dart';
 
-/// Captures everything [debugPrint] emits for the duration of one test.
-List<String?> _captureDebugPrint() {
-  final logged = <String?>[];
-  final previous = debugPrint;
-  debugPrint = (message, {int? wrapWidth}) => logged.add(message);
-  addTearDown(() => debugPrint = previous);
+import '../helpers/log_capture.dart';
+
+/// Installs a [LogCapture] and resets the fold's once-per-process
+/// degradation log, so each test starts from the same "never yet warned"
+/// state the real process starts from.
+LogCapture _captureDebugPrint() {
+  final logged = LogCapture.install();
   resetSearchFoldDegradationLog();
   return logged;
 }
@@ -54,9 +54,10 @@ void main() {
 
       searchFold('Alice');
 
-      expect(logged, hasLength(1));
-      expect(logged.single, contains('SearchFold'));
-      expect(logged.single, isNot(contains('Alice')));
+      expect(logged.lines, hasLength(1));
+      logged
+        ..assertContains('SearchFold')
+        ..assertNoNeedles(['Alice']);
     });
 
     test('says it once per process, not once per keystroke', () {
@@ -69,7 +70,7 @@ void main() {
         searchFold(query);
       }
 
-      expect(logged, hasLength(1));
+      expect(logged.lines, hasLength(1));
     });
   });
 

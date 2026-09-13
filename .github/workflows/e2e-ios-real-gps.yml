@@ -52,7 +52,9 @@ jobs:
     name: e2e_ios_real_gps
     runs-on: macos-latest # Apple Silicon; arm64 simulator (no Linux Docker).
     # Envelope sized for a COLD first run: setup (~10-15m) + the boot step's
-    # 15m ceiling + the drive step's 75m ceiling. The drive step is the real
+    # 15m ceiling + the drive step's 75m ceiling (+ uncapped diagnostics,
+    # which since 2026-09-12 also run two `log show` passes over the archive
+    # and the secret scan, unmeasured yet: re-measure). The drive step is the real
     # bound; this is the outer backstop that must never fire first, because a
     # job-cap SIGKILL skips every `if: always()` diagnostic — the worst red
     # there is (scripts/ci/check_e2e_step_timeout_ordering.sh).
@@ -83,6 +85,7 @@ jobs:
 
     steps:
       - name: Checkout
+        id: checkout
         uses: actions/checkout@v6
 
       - name: Setup Rust
@@ -152,11 +155,44 @@ jobs:
             bash tooling/e2e/ci/run-b4-ios-real-gps.sh
             ${{ steps.sim.outputs.udid }}
 
+      # The unified-log archive is a full-device capture (binary tracev3,
+      # multi-GB) that the scanner cannot read, so it never leaves the runner:
+      # two `log show` exports replace it — Haven's own lines (the Rust
+      # `frb_user` oslog subsystem and the Runner process), uncapped, and the
+      # whole device under SIM_LOG_FULL_CAP_BYTES. `log show` emits in
+      # chronological order, so the cap keeps the EARLIEST bytes; the residual
+      # past it is discarded with the archive — evidence lost, nothing
+      # published. Every log the upload step names is scanned by the next
+      # step, before that step can see it.
       - name: Collect simulator diagnostics
         if: always()
+        env:
+          SIM_LOG_FULL_CAP_BYTES: "67108864"
         run: |
           xcrun simctl spawn booted log collect --output /tmp/sim.logarchive 2>/dev/null || true
+          log show --archive /tmp/sim.logarchive --style syslog --info --debug \
+            --predicate 'subsystem == "frb_user" OR process == "Runner"' \
+            > /tmp/sim-unified.log 2>/dev/null || true
+          log show --archive /tmp/sim.logarchive --style syslog 2>/dev/null \
+            | head -c "${SIM_LOG_FULL_CAP_BYTES}" > /tmp/sim-unified-full.log || true
+          rm -rf /tmp/sim.logarchive
           cp /tmp/haven-local-relay.log /tmp/relay.log 2>/dev/null || true
+
+      # Scan-before-upload, as its OWN step: every `.log` the upload step names
+      # goes through the scanner here on every outcome short of a cancellation,
+      # so a leak (rc 1) deletes the scanned files and fails the lane even on an
+      # otherwise green run, and an unscannable log (rc 3) fails it and leaves
+      # them as they are. The standard guard condition (not `always()`) is what
+      # lets docs/privacy/privacy_invariants.json cite this step as the runtime
+      # scanner's enforcing run.
+      - name: Scan captured logs for secrets before upload
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: |
+          logs=(/tmp/sim-unified.log /tmp/sim-unified-full.log /tmp/b4-ios-real-gps.log /tmp/flutter-ios-test.log /tmp/relay.log)
+          rc=0
+          bash tooling/e2e/ci/scan-logs-for-secrets.sh "${logs[@]}" || rc=$?
+          if [ "${rc}" -eq 1 ]; then rm -f -- "${logs[@]}"; fi
+          exit "${rc}"
 
       - name: Upload failure artifacts
         if: failure()
@@ -167,7 +203,8 @@ jobs:
             /tmp/b4-ios-real-gps.log
             /tmp/flutter-ios-test.log
             /tmp/relay.log
-            /tmp/sim.logarchive
+            /tmp/sim-unified.log
+            /tmp/sim-unified-full.log
           retention-days: 14
           if-no-files-found: ignore
 

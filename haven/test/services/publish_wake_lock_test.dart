@@ -15,11 +15,12 @@
 @TestOn('vm')
 library;
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/services/publish_wake_lock.dart';
+
+import '../helpers/log_capture.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -124,23 +125,22 @@ void main() {
           message: '/data/user/0/com.oblivioustech.haven denied Haven:publish',
         ),
       );
-      final logged = <String>[];
-      final original = debugPrint;
-      debugPrint = (String? message, {int? wrapWidth}) =>
-          logged.add(message ?? '');
-      addTearDown(() => debugPrint = original);
+      final logged = LogCapture.install();
 
       await wakeLock.acquire();
       await wakeLock.release();
 
-      expect(logged, hasLength(2), reason: 'both methods report');
-      expect(logged.join('\n'), contains('WAKE_LOCK_DENIED'));
+      expect(logged.lines, hasLength(2), reason: 'both methods report');
+      logged.assertContains('WAKE_LOCK_DENIED');
       expect(
-        logged.join('\n'),
+        logged.joined,
         isNot(contains('/data/user/0')),
         reason: 'the native message never reaches a log line, so it can never '
             'reach a bug report either',
       );
+      logged.assertNoNeedles([
+        '/data/user/0/com.oblivioustech.haven denied Haven:publish',
+      ]);
     });
 
     test('an error that is not the channel saying no propagates', () async {

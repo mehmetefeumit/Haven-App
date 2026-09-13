@@ -68,7 +68,7 @@ class MaintenanceService {
           _MaintenancePhase.task => KeyPackageFailureKind.tickErrored,
         },
       ),
-      label: 'KeyPackage',
+      opKind: 'KeyPackage',
     );
   }
 
@@ -83,7 +83,7 @@ class MaintenanceService {
         identitySecretBytes: secret,
       ),
       onFailure: (_) => const RelayListMaintenanceResult.empty(),
-      label: 'relay-list',
+      opKind: 'relay-list',
     );
   }
 
@@ -104,7 +104,7 @@ class MaintenanceService {
         identitySecretBytes: secret,
       ),
       onFailure: (_) => const LegacyRetractionResult.empty(),
-      label: 'legacy-retraction',
+      opKind: 'legacy-retraction',
     );
   }
 
@@ -134,7 +134,7 @@ class MaintenanceService {
   Future<T> _withSecret<T>(
     Future<T> Function(CircleManagerFfi circle, Uint8List secret) op, {
     required T Function(_MaintenancePhase phase) onFailure,
-    required String label,
+    required String opKind,
   }) async {
     // Own the fetched buffer so we can `fillRange` it on exit, minimising the
     // window the secret sits in Dart's managed heap after the FFI has consumed
@@ -154,7 +154,7 @@ class MaintenanceService {
       return await op(circle, secretBuffer);
     } on Object catch (e) {
       debugPrint(
-        '[Maintenance] $label orchestration failed in ${phase.name}: '
+        '[Maintenance] $opKind orchestration failed in ${phase.name}: '
         '${e.runtimeType}',
       );
       return onFailure(phase);

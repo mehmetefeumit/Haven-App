@@ -35,6 +35,7 @@ import 'package:haven/src/providers/member_profile_provider.dart';
 import 'package:haven/src/providers/own_profile_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
+import 'package:haven/src/utils/log_alias.dart';
 
 /// Notifier that owns the batched member-profile refresh trigger.
 ///
@@ -165,7 +166,8 @@ class MemberProfileRefreshNotifier extends Notifier<void> {
           ..invalidate(memberProfileProvider)
           ..invalidate(ownProfileProvider);
         debugPrint(
-          '[Profile] refreshRoster: refreshed ${pubkeyHexes.length} pubkey(s)',
+          '[Profile] refreshRoster: refreshed '
+          '${magnitudeBucket(pubkeyHexes.length)} pubkey(s)',
         );
       } on Object catch (e) {
         debugPrint('[Profile] refreshRoster failed: ${e.runtimeType}');

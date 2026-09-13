@@ -55,6 +55,7 @@ library;
 
 import 'package:flutter/foundation.dart';
 import 'package:haven/src/services/circle_service.dart';
+import 'package:haven/src/utils/log_alias.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// [SharedPreferences] key for the durable pending-MLS-wipe boolean flag.
@@ -183,6 +184,14 @@ class PendingMlsWipeService {
         '— a decryptable circles.db/haven_mdk.db may survive; will retry on '
         'next launch: ${e.runtimeType}',
       );
+    } finally {
+      // The Rust `wipe_all_mls_state` FFI call re-mints the log-alias salt
+      // UNCONDITIONALLY (on both the success and the failure path — it runs
+      // the rotation before returning either `Ok` or `Err`), so the Dart-side
+      // memo must be dropped unconditionally too: this is the ONE Dart entry
+      // point for this call (it runs before `IdentityNotifier` even exists,
+      // at app launch), so nothing else clears it for this path.
+      clearLogAliasMemo();
     }
   }
 }

@@ -72,6 +72,7 @@ use super::types::{
     LocationMessageResult, PreAuthRejection, ScreenedIngest,
 };
 use super::welcome::WelcomePreview;
+use crate::log_alias::bucket;
 use crate::nostr::error::{NostrError, Result};
 use crate::nostr::event::{KIND_LOCATION_UPDATE, LEGACY_KIND_LOCATION_UPDATE};
 
@@ -387,17 +388,18 @@ impl SessionManager {
         // and re-runs at the next open (and on a deferred send).
         match sweep_all_groups(&message_store, Timestamp::now().as_secs()) {
             Ok(sweep) if sweep == ConvergenceSweep::default() => {}
+            // Bucketed magnitudes, never exact ones: the number of gating rows
+            // is the number of circles mid-transition (Security Rule 15).
             Ok(sweep) => log::info!(
                 "MLS convergence sweep at open: {} stale input(s) retired, \
                  {} queued location intent(s) discarded, {} row(s) still gating",
-                sweep.disposed_messages,
-                sweep.discarded_intents,
-                sweep.gating_rows
+                bucket(sweep.disposed_messages),
+                bucket(sweep.discarded_intents),
+                bucket(sweep.gating_rows)
             ),
-            Err(e) => log::warn!(
-                "MLS convergence sweep at open failed (retries next open): {}",
-                redact_hex_sequences(&e.to_string())
-            ),
+            // The engine's own prose can quote a group id, so only the failure
+            // is reported; the sweep retries at the next open either way.
+            Err(_) => log::warn!("MLS convergence sweep at open failed (retries next open)"),
         }
         Ok(Self {
             session: Mutex::new(session),
@@ -2511,6 +2513,25 @@ mod tests {
     // interop proof (a second session applying the resulting commit) lives in
     // `circle::manager::tests::admin_handoff_end_to_end` and
     // `tests/circle_integration_test.rs`.
+
+    /// The session holds this account's identity key; its rendering names the
+    /// engine handle and nothing about the account (Rule 15).
+    #[test]
+    fn session_manager_debug_redacts_the_identity_pubkey() {
+        let dir = temp_dir();
+        let keys = Keys::generate();
+        let manager: SessionManager =
+            SessionManager::new_unencrypted(&dir, &keys).expect("open session");
+        crate::assert_debug_redacted!(
+            manager,
+            "SessionManager",
+            &[
+                &keys.public_key().to_hex(),
+                &keys.secret_key().to_secret_hex(),
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn admin_policy_encodes_length_prefixed_sorted_keys() {

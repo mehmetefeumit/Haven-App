@@ -38,7 +38,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1760636868;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -234967442;
 
 // Section: executor
 
@@ -8826,6 +8826,37 @@ fn wire__crate__api__legacy_retraction_outcome_ffi_default_impl(
         },
     )
 }
+fn wire__crate__api__log_alias_impl(
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "log_alias",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_class = <crate::api::LogAliasClassFfi>::sse_decode(&mut deserializer);
+            let api_value = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            transform_result_sse::<_, ()>((move || {
+                let output_ok = Result::<_, ()>::Ok(crate::api::log_alias(api_class, api_value))?;
+                Ok(output_ok)
+            })())
+        },
+    )
+}
 fn wire__crate__api__maintain_subscription_health_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -8893,6 +8924,37 @@ fn wire__crate__api__parse_engine_location_impl(
                     Ok(output_ok)
                 })())
             }
+        },
+    )
+}
+fn wire__crate__api__rotate_log_alias_salt_impl(
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "rotate_log_alias_salt",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            transform_result_sse::<_, ()>((move || {
+                let output_ok = Result::<_, ()>::Ok({
+                    crate::api::rotate_log_alias_salt();
+                })?;
+                Ok(output_ok)
+            })())
         },
     )
 }
@@ -10389,6 +10451,22 @@ impl SseDecode for crate::api::LocationMessageResultKindFfi {
     }
 }
 
+impl SseDecode for crate::api::LogAliasClassFfi {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::LogAliasClassFfi::Circle,
+            1 => crate::api::LogAliasClassFfi::Peer,
+            2 => crate::api::LogAliasClassFfi::Event,
+            3 => crate::api::LogAliasClassFfi::Relay,
+            4 => crate::api::LogAliasClassFfi::KeyPackage,
+            5 => crate::api::LogAliasClassFfi::Subscription,
+            _ => unreachable!("Invalid variant for LogAliasClassFfi: {}", inner),
+        };
+    }
+}
+
 impl SseDecode for crate::api::MemberKeyPackageFfi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -11657,20 +11735,20 @@ fn pde_ffi_dispatcher_primary_impl(
             rust_vec_len,
             data_len,
         ),
-        161 => {
+        162 => {
             wire__crate__api__maintain_subscription_health_impl(port, ptr, rust_vec_len, data_len)
         }
-        162 => wire__crate__api__parse_engine_location_impl(port, ptr, rust_vec_len, data_len),
-        167 => wire__crate__api__tile_cache_evict_impl(port, ptr, rust_vec_len, data_len),
-        168 => wire__crate__api__tile_cache_get_impl(port, ptr, rust_vec_len, data_len),
-        169 => wire__crate__api__tile_cache_init_impl(port, ptr, rust_vec_len, data_len),
-        170 => wire__crate__api__tile_cache_put_impl(port, ptr, rust_vec_len, data_len),
-        171 => wire__crate__api__tile_cache_put_metadata_impl(port, ptr, rust_vec_len, data_len),
-        172 => wire__crate__api__tile_cache_wipe_impl(port, ptr, rust_vec_len, data_len),
-        173 => {
+        163 => wire__crate__api__parse_engine_location_impl(port, ptr, rust_vec_len, data_len),
+        169 => wire__crate__api__tile_cache_evict_impl(port, ptr, rust_vec_len, data_len),
+        170 => wire__crate__api__tile_cache_get_impl(port, ptr, rust_vec_len, data_len),
+        171 => wire__crate__api__tile_cache_init_impl(port, ptr, rust_vec_len, data_len),
+        172 => wire__crate__api__tile_cache_put_impl(port, ptr, rust_vec_len, data_len),
+        173 => wire__crate__api__tile_cache_put_metadata_impl(port, ptr, rust_vec_len, data_len),
+        174 => wire__crate__api__tile_cache_wipe_impl(port, ptr, rust_vec_len, data_len),
+        175 => {
             wire__crate__api__use_in_memory_keyring_for_test_impl(port, ptr, rust_vec_len, data_len)
         }
-        174 => wire__crate__api__wipe_all_mls_state_impl(port, ptr, rust_vec_len, data_len),
+        176 => wire__crate__api__wipe_all_mls_state_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -11729,10 +11807,12 @@ fn pde_ffi_dispatcher_sync_impl(
         152 => wire__crate__api__default_relays_impl(ptr, rust_vec_len, data_len),
         154 => wire__crate__api__discovery_relays_impl(ptr, rust_vec_len, data_len),
         155 => wire__crate__api__fold_for_search_impl(ptr, rust_vec_len, data_len),
-        163 => wire__crate__api__set_blossom_server_for_test_impl(ptr, rust_vec_len, data_len),
-        164 => wire__crate__api__set_default_relays_for_test_impl(ptr, rust_vec_len, data_len),
-        165 => wire__crate__api__set_discovery_relays_for_test_impl(ptr, rust_vec_len, data_len),
-        166 => wire__crate__api__set_profile_relays_for_test_impl(ptr, rust_vec_len, data_len),
+        161 => wire__crate__api__log_alias_impl(ptr, rust_vec_len, data_len),
+        164 => wire__crate__api__rotate_log_alias_salt_impl(ptr, rust_vec_len, data_len),
+        165 => wire__crate__api__set_blossom_server_for_test_impl(ptr, rust_vec_len, data_len),
+        166 => wire__crate__api__set_default_relays_for_test_impl(ptr, rust_vec_len, data_len),
+        167 => wire__crate__api__set_discovery_relays_for_test_impl(ptr, rust_vec_len, data_len),
+        168 => wire__crate__api__set_profile_relays_for_test_impl(ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -12625,6 +12705,28 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::LocationMessageResultKindFfi>
     for crate::api::LocationMessageResultKindFfi
 {
     fn into_into_dart(self) -> crate::api::LocationMessageResultKindFfi {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::LogAliasClassFfi {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::Circle => 0.into_dart(),
+            Self::Peer => 1.into_dart(),
+            Self::Event => 2.into_dart(),
+            Self::Relay => 3.into_dart(),
+            Self::KeyPackage => 4.into_dart(),
+            Self::Subscription => 5.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::LogAliasClassFfi {}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::LogAliasClassFfi>
+    for crate::api::LogAliasClassFfi
+{
+    fn into_into_dart(self) -> crate::api::LogAliasClassFfi {
         self
     }
 }
@@ -13960,6 +14062,26 @@ impl SseEncode for crate::api::LocationMessageResultKindFfi {
                 crate::api::LocationMessageResultKindFfi::GroupUpdate => 2,
                 crate::api::LocationMessageResultKindFfi::Invalidated => 3,
                 crate::api::LocationMessageResultKindFfi::Unrecoverable => 4,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
+    }
+}
+
+impl SseEncode for crate::api::LogAliasClassFfi {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::LogAliasClassFfi::Circle => 0,
+                crate::api::LogAliasClassFfi::Peer => 1,
+                crate::api::LogAliasClassFfi::Event => 2,
+                crate::api::LogAliasClassFfi::Relay => 3,
+                crate::api::LogAliasClassFfi::KeyPackage => 4,
+                crate::api::LogAliasClassFfi::Subscription => 5,
                 _ => {
                     unimplemented!("");
                 }

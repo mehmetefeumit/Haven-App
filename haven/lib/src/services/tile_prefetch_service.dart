@@ -23,6 +23,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:haven/src/constants/tile_prefetch_policy.dart';
 import 'package:haven/src/constants/tiles.dart';
+import 'package:haven/src/utils/log_alias.dart';
 import 'package:haven/src/utils/tile_coordinates.dart';
 import 'package:http/http.dart' as http;
 import 'package:latlong2/latlong.dart';
@@ -110,8 +111,8 @@ class TilePrefetchServiceImpl implements TilePrefetchService {
     if (tiles.isEmpty) return;
 
     debugPrint(
-      '[TilePrefetch] Starting burst: ${tiles.length} tile(s) for '
-      '${points.length} point(s)',
+      '[TilePrefetch] Starting burst: ${magnitudeBucket(tiles.length)} '
+      'tile(s) for ${magnitudeBucket(points.length)} point(s)',
     );
 
     // Process with bounded concurrency.
@@ -193,7 +194,7 @@ class TilePrefetchServiceImpl implements TilePrefetchService {
       if (myGen != _generation) {
         debugPrint(
           '[TilePrefetch] Cancelled '
-          '(${tiles.length - i} tile(s) remaining)',
+          '(${magnitudeBucket(tiles.length - i)} tile(s) remaining)',
         );
         return;
       }
@@ -209,7 +210,10 @@ class TilePrefetchServiceImpl implements TilePrefetchService {
       i += batch.length;
     }
 
-    debugPrint('[TilePrefetch] Burst complete (${tiles.length} tile(s))');
+    debugPrint(
+      '[TilePrefetch] Burst complete (${magnitudeBucket(tiles.length)} '
+      'tile(s))',
+    );
   }
 
   /// Processes one batch concurrently.
@@ -294,6 +298,7 @@ class TilePrefetchServiceImpl implements TilePrefetchService {
         return true; // halt the whole burst
       }
       // Other non-200 responses: soft-skip (log status code only).
+      // log-scan-ok: an HTTP status code, not remote-authored prose
       debugPrint(
         '[TilePrefetch] Non-200 response: ${response.statusCode}',
       );

@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/subscription_service.dart';
+import 'package:haven/src/utils/log_alias.dart';
 
 /// Mirror of `RELAY_LIFECYCLE_OP_TIMEOUT_SECS` in
 /// `haven-core/src/relay/live_sync/config.rs` — the engine's own bound on ONE
@@ -286,8 +287,10 @@ class LiveSyncResubscriber {
       final accepted =
           circles.where((c) => c.membershipStatus.name == 'accepted').length;
       debugPrint(
-        '[LiveSyncResubscriber] onCirclesChanged: ${circles.length} circles '
-        '($accepted accepted) → ${decision.groups.length} group(s), '
+        '[LiveSyncResubscriber] onCirclesChanged: '
+        '${magnitudeBucket(circles.length)} circles '
+        '(${magnitudeBucket(accepted)} accepted) → '
+        '${magnitudeBucket(decision.groups.length)} group(s), '
         'changed=${decision.changed}',
       );
     }
@@ -306,9 +309,10 @@ class LiveSyncResubscriber {
       // mid-session circle-create, the debounce/decide never scheduled it.
       if (kDebugMode) {
         debugPrint(
-          '[LiveSyncResubscriber] delta → +${delta.added.length} added, '
-          '-${delta.removed.length} removed, ~${delta.relayChanged.length} '
-          'relay-rotated',
+          '[LiveSyncResubscriber] delta → '
+          '+${magnitudeBucket(delta.added.length)} added, '
+          '-${magnitudeBucket(delta.removed.length)} removed, '
+          '~${magnitudeBucket(delta.relayChanged.length)} relay-rotated',
         );
       }
       // Serialize behind any in-flight apply so engine calls never interleave.
@@ -323,13 +327,15 @@ class LiveSyncResubscriber {
   /// callback and re-propagates, so a single escaped throw would leave `_chain`
   /// permanently errored — silently disabling every later delta apply AND every
   /// later self-heal for the rest of the session, with nothing observable but a
-  /// map that stops updating. [label] names the leg in the log; the error type
-  /// only (Security Rule 8).
-  Future<void> _chainNext(Future<void> Function() body, String label) {
+  /// map that stops updating. [legKind] names the leg in the log; the error
+  /// type only (Security Rule 8).
+  Future<void> _chainNext(Future<void> Function() body, String legKind) {
     return _chain = _chain
         .then((_) => body())
         .catchError((Object e) {
-          debugPrint('[LiveSyncResubscriber] $label failed: ${e.runtimeType}');
+          debugPrint(
+            '[LiveSyncResubscriber] $legKind failed: ${e.runtimeType}',
+          );
         });
   }
 
@@ -530,7 +536,8 @@ class LiveSyncResubscriber {
     }
     if (kDebugMode) {
       debugPrint(
-        '[LiveSyncResubscriber] full restart → ${groups.length} group(s)',
+        '[LiveSyncResubscriber] full restart → '
+        '${magnitudeBucket(groups.length)} group(s)',
       );
     }
     try {

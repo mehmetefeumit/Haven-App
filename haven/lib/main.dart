@@ -59,7 +59,35 @@ final HavenImageCacheGuard _imageCacheGuard = HavenImageCacheGuard();
 /// mode, installs a zone interceptor to capture print output for the debug
 /// overlay.
 Future<void> main() async {
+  // Defense-in-depth: silence debugPrint in release builds so any future log
+  // regression cannot leak to Android logcat / iOS device console. FIRST
+  // statement, before anything else can log (Security Rule 15) —
+  // `WidgetsFlutterBinding.ensureInitialized()` and the plugin setup below
+  // can themselves emit a `debugPrint` on some platforms/versions.
+  if (kReleaseMode) {
+    debugPrint = (String? message, {int? wrapWidth}) {};
+  }
+
+  // `WidgetsFlutterBinding.ensureInitialized()` must precede the two handler
+  // assignments below: it is what backs `PlatformDispatcher.instance` (and,
+  // on some engine versions, installs a binding-owned `FlutterError.onError`
+  // of its own), so assigning first and initialising the binding after would
+  // risk the binding clobbering ours on the way up.
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Flutter's default `FlutterError.onError` prints `exception.toString()` +
+  // the stack verbatim — an FFI error's `toString()` is exactly the raw
+  // string Security Rule 8 forbids. Redact at the source: type only, plus
+  // the (non-identifying, small fixed-vocabulary) framework library name.
+  FlutterError.onError = (details) => debugPrint(
+    '[FlutterError] ${details.exception.runtimeType} in ${details.library}',
+  );
+  // Same redaction for an uncaught error in an async gap the zone/Flutter
+  // error handler never sees (no `FlutterErrorDetails` wrapper there).
+  PlatformDispatcher.instance.onError = (error, stack) {
+    debugPrint('[UncaughtAsync] ${error.runtimeType}');
+    return true;
+  };
 
   // Force the Android system Photo Picker (scoped, permission-free, per-item
   // access) instead of image_picker's default ACTION_GET_CONTENT document
@@ -70,12 +98,6 @@ Future<void> main() async {
   final imagePickerPlatform = ImagePickerPlatform.instance;
   if (imagePickerPlatform is ImagePickerAndroid) {
     imagePickerPlatform.useAndroidPhotoPicker = true;
-  }
-
-  // Defense-in-depth: silence debugPrint in release builds so any future
-  // log regression cannot leak to Android logcat / iOS device console.
-  if (kReleaseMode) {
-    debugPrint = (String? message, {int? wrapWidth}) {};
   }
 
   // Privacy: bound the decoded-image cache and evict it when backgrounded so

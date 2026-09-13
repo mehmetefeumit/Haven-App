@@ -37,7 +37,7 @@ use chrono::Utc;
 use nostr::{EventId, PublicKey, RelayUrl};
 use rusqlite::{params, Connection, OptionalExtension};
 
-use super::error::{CircleError, Result};
+use super::error::{CircleError, RelayInputRejection, Result};
 use super::relay_prefs::RelayType;
 use super::storage::CircleStorage;
 use super::storage_contamination::record_relay_category_on;
@@ -115,7 +115,7 @@ pub struct PublishedEventRecord {
 /// Performs the following steps:
 ///
 /// 1. Trims surrounding whitespace.
-/// 2. Rejects empty input with [`CircleError::InvalidData`].
+/// 2. Rejects empty input with [`CircleError::InvalidRelayInput`].
 /// 3. Rejects plaintext `ws://` (defense-in-depth — `nostr::RelayUrl` would
 ///    accept it but the relay manager rejects it at publish time). The
 ///    debug-only [`crate::relay::allow_ws_loopback_for_test`] opt-in relaxes
@@ -128,14 +128,13 @@ pub struct PublishedEventRecord {
 ///
 /// # Errors
 ///
-/// Returns [`CircleError::InvalidData`] for any rejected input. The error
-/// message is short and user-presentable; it never includes secret material.
+/// Returns [`CircleError::InvalidRelayInput`] for any rejected input, carrying
+/// the fieldless [`RelayInputRejection`] whose sentence the FFI surfaces
+/// verbatim — Dart routes the user-facing message off it.
 pub fn normalize_url(input: &str) -> Result<String> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
-        return Err(CircleError::InvalidData(
-            "Relay URL must not be empty".to_string(),
-        ));
+        return Err(RelayInputRejection::Empty.into());
     }
     // Reject ws:// (case-insensitive) before parsing — RelayUrl::parse
     // accepts both schemes.
@@ -156,16 +155,12 @@ pub fn normalize_url(input: &str) -> Result<String> {
         .collect::<String>()
         .to_ascii_lowercase();
     if lower_prefix.starts_with("ws://") && !crate::relay::ws_loopback_allowed_for_test(trimmed) {
-        return Err(CircleError::InvalidData(
-            "Use wss:// for security".to_string(),
-        ));
+        return Err(RelayInputRejection::PlaintextWs.into());
     }
     if trimmed.contains('@') {
         // RelayUrl::parse accepts `user:pass@host` — reject up front so
         // credentials never reach storage, logs, or error messages.
-        return Err(CircleError::InvalidData(
-            "Relay URL must not contain credentials".to_string(),
-        ));
+        return Err(RelayInputRejection::Credentials.into());
     }
     // Defense in depth — lowercase the scheme + authority ourselves so
     // case-only differing URLs deduplicate on the UNIQUE (url, relay_type)
@@ -174,7 +169,7 @@ pub fn normalize_url(input: &str) -> Result<String> {
     // preserve a trailing slash on the root path which would also defeat
     // the UNIQUE constraint.
     let canonical = RelayUrl::parse(trimmed)
-        .map_err(|_| CircleError::InvalidData("Invalid relay URL".to_string()))?
+        .map_err(|_| CircleError::from(RelayInputRejection::Unparseable))?
         .to_string();
     // Delegate the final form to the SINGLE shared implementation. Relay URLs
     // are compared as set members both here (the `UNIQUE (url, relay_type)`
@@ -405,7 +400,7 @@ impl CircleStorage {
     ///
     /// Normalizes the URL via [`normalize_url`] and uses `INSERT OR IGNORE`
     /// so a duplicate add is a silent no-op. URLs that fail normalization
-    /// surface as [`CircleError::InvalidData`].
+    /// surface as [`CircleError::InvalidRelayInput`].
     ///
     /// # Contamination
     ///
@@ -417,7 +412,7 @@ impl CircleStorage {
     ///
     /// # Errors
     ///
-    /// Returns [`CircleError::InvalidData`] for invalid URLs and database
+    /// Returns [`CircleError::InvalidRelayInput`] for invalid URLs and database
     /// errors otherwise.
     pub fn add_user_relay(&self, url: &str, relay_type: RelayType) -> Result<()> {
         let normalized = normalize_url(url)?;
@@ -442,9 +437,10 @@ impl CircleStorage {
     /// Removes a relay from one category.
     ///
     /// Refuses to delete the last remaining relay for a category, returning
-    /// [`CircleError::InvalidData`] in that case so the caller can surface
-    /// a friendly UI message. The check and delete happen inside a single
-    /// transaction so a concurrent insert cannot create a TOCTOU window.
+    /// [`RelayInputRejection::LastInCategory`] in that case, whose sentence
+    /// crosses the FFI intact so Dart can route its own user-facing message on
+    /// it. The check and delete happen inside a single transaction so a
+    /// concurrent insert cannot create a TOCTOU window.
     ///
     /// # Returns
     ///
@@ -452,7 +448,7 @@ impl CircleStorage {
     ///
     /// # Errors
     ///
-    /// Returns [`CircleError::InvalidData`] when the URL is invalid or the
+    /// Returns [`CircleError::InvalidRelayInput`] when the URL is invalid or the
     /// removal would leave the category empty. Returns a database error
     /// otherwise.
     pub fn remove_user_relay(&self, url: &str, relay_type: RelayType) -> Result<bool> {
@@ -469,9 +465,7 @@ impl CircleStorage {
         )?;
         if count <= 1 {
             // Tx auto-rolls back on drop.
-            return Err(CircleError::InvalidData(
-                "At least one relay is required per category".to_string(),
-            ));
+            return Err(RelayInputRejection::LastInCategory.into());
         }
         let removed = tx.execute(
             "DELETE FROM user_relays WHERE url = ?1 AND relay_type = ?2",
@@ -803,10 +797,13 @@ mod tests {
     #[test]
     fn normalize_rejects_ws_scheme() {
         let err = normalize_url("ws://relay.example.com").unwrap_err();
-        match err {
-            CircleError::InvalidData(msg) => assert!(msg.to_lowercase().contains("wss")),
-            other => panic!("expected InvalidData, got {other:?}"),
-        }
+        assert!(
+            matches!(
+                err,
+                CircleError::InvalidRelayInput(RelayInputRejection::PlaintextWs)
+            ),
+            "expected the plaintext-ws rejection, got {err:?}"
+        );
     }
 
     #[test]
@@ -842,42 +839,53 @@ mod tests {
         // host allowlist is AND-ed with the flag, so the seam never relaxes
         // ws:// for arbitrary hosts. Robust to flag state.
         for url in ["ws://relay.example.com", "ws://192.168.1.10:7777"] {
-            match normalize_url(url) {
-                Err(CircleError::InvalidData(msg)) => assert!(msg.to_lowercase().contains("wss")),
-                other => {
-                    panic!("non-loopback ws:// {url} must always be rejected, got {other:?}")
-                }
-            }
+            let err = normalize_url(url).expect_err("non-loopback ws:// must be rejected");
+            assert!(
+                matches!(
+                    err,
+                    CircleError::InvalidRelayInput(RelayInputRejection::PlaintextWs)
+                ),
+                "non-loopback ws:// {url} must always be rejected, got {err:?}"
+            );
         }
     }
 
     #[test]
     fn normalize_rejects_credentials() {
         let err = normalize_url("wss://user:pass@relay.example.com").unwrap_err();
-        match err {
-            CircleError::InvalidData(msg) => assert!(msg.to_lowercase().contains("credential")),
-            other => panic!("expected InvalidData, got {other:?}"),
-        }
+        assert!(
+            matches!(
+                err,
+                CircleError::InvalidRelayInput(RelayInputRejection::Credentials)
+            ),
+            "expected the credentials rejection, got {err:?}"
+        );
     }
 
     #[test]
     fn normalize_rejects_empty() {
-        assert!(matches!(
-            normalize_url(""),
-            Err(CircleError::InvalidData(_))
-        ));
-        assert!(matches!(
-            normalize_url("   "),
-            Err(CircleError::InvalidData(_))
-        ));
+        for input in ["", "   "] {
+            let err = normalize_url(input).expect_err("empty input must be rejected");
+            assert!(
+                matches!(
+                    err,
+                    CircleError::InvalidRelayInput(RelayInputRejection::Empty)
+                ),
+                "expected the empty rejection, got {err:?}"
+            );
+        }
     }
 
     #[test]
     fn normalize_rejects_malformed() {
-        assert!(matches!(
-            normalize_url("not-a-url"),
-            Err(CircleError::InvalidData(_))
-        ));
+        let err = normalize_url("not-a-url").expect_err("a malformed URL must be rejected");
+        assert!(
+            matches!(
+                err,
+                CircleError::InvalidRelayInput(RelayInputRejection::Unparseable)
+            ),
+            "expected the unparseable rejection, got {err:?}"
+        );
     }
 
     #[test]
@@ -1340,7 +1348,13 @@ mod tests {
         let err = storage
             .add_user_relay("ws://insecure.example.com", RelayType::Inbox)
             .unwrap_err();
-        assert!(matches!(err, CircleError::InvalidData(_)));
+        assert!(
+            matches!(
+                err,
+                CircleError::InvalidRelayInput(RelayInputRejection::PlaintextWs)
+            ),
+            "expected the plaintext-ws rejection, got {err:?}"
+        );
     }
 
     #[test]
@@ -1367,12 +1381,13 @@ mod tests {
         let err = storage
             .remove_user_relay("wss://only.example.com", RelayType::Inbox)
             .unwrap_err();
-        match err {
-            CircleError::InvalidData(msg) => {
-                assert!(msg.to_lowercase().contains("at least one relay"));
-            }
-            other => panic!("expected InvalidData, got {other:?}"),
-        }
+        assert!(
+            matches!(
+                err,
+                CircleError::InvalidRelayInput(RelayInputRejection::LastInCategory)
+            ),
+            "expected the last-in-category rejection, got {err:?}"
+        );
         // Row must still exist.
         let list = storage.list_user_relays(RelayType::Inbox).unwrap();
         assert_eq!(list.len(), 1);

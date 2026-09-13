@@ -21,6 +21,7 @@ import 'package:haven/src/services/publish_stagger.dart'
     show kMaxCirclesPerAccount;
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
+import 'package:haven/src/utils/log_alias.dart';
 import 'package:haven/src/utils/member_display.dart';
 import 'package:haven/src/utils/npub_validator.dart';
 import 'package:haven/src/utils/profile_refresh_trigger.dart';
@@ -140,8 +141,8 @@ class _InvitationCardState extends ConsumerState<InvitationCard> {
       );
       debugPrint(
         '[Accept] acceptInvitation OK '
-        '(members=${acceptedCircle.members.length}, '
-        'relays=${acceptedCircle.relays.length})',
+        '(members=${magnitudeBucket(acceptedCircle.members.length)}, '
+        'relays=${magnitudeBucket(acceptedCircle.relays.length)})',
       );
 
       // Auto-select the accepted circle so the map immediately shows

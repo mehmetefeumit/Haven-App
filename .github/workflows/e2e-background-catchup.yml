@@ -78,6 +78,7 @@ jobs:
 
     steps:
       - name: Checkout
+        id: checkout
         uses: actions/checkout@v6
 
       # Reclaim runner disk BEFORE the Gradle/Rust build (multi-GB debug build +
@@ -248,8 +249,12 @@ jobs:
           emulator-boot-timeout: 420
           script: bash tooling/e2e/ci/run-with-deadline.sh 30m "e2e-background-catchup phases" -- bash tooling/e2e/ci/run-m7-background-catchup.sh /tmp/integration-apks/m7_worker_setup_test.apk /tmp/integration-apks/m7_worker_pending_wipe_test.apk /tmp/integration-apks/m7_worker_disable_test.apk
 
+      # `if: always()` and `.log`, not `.txt`: the scan step below runs on every
+      # outcome short of a cancellation and refuses an absent file, and the
+      # scanner's directory walk only ever picks up `*.log` — a `.txt` here
+      # would be the one uploaded path the guard cannot see.
       - name: Capture host + emulator diagnostics
-        if: failure()
+        if: always()
         run: |
           mkdir -p /tmp/m7-logs
           # A dropped adb transport (this lane's memory pressure or the Phase-B
@@ -272,7 +277,26 @@ jobs:
             echo
             echo "=== dumpsys jobscheduler (app slice) ==="
             adb shell dumpsys jobscheduler | grep -A3 com.oblivioustech.haven || true
-          } > /tmp/m7-logs/diag.txt 2>&1 || true
+          } > /tmp/m7-logs/diag.log 2>&1 || true
+
+      # The rest of /tmp/m7-logs/ is scanned by run-m7-background-catchup.sh
+      # before this file is written; the diag is the one uploaded log it never
+      # sees.
+      # Scan-before-upload, as its OWN step on every outcome short of a
+      # cancellation: a leak (rc 1) deletes the scanned files and fails the lane
+      # even on an otherwise green run, so the upload finds nothing to publish;
+      # an unscannable log (rc 3) fails it and leaves the files as they are. The
+      # standard guard condition (not `always()`) is what lets
+      # docs/privacy/privacy_invariants.json cite this step as the runtime
+      # scanner's enforcing run.
+      - name: Scan captured logs for secrets before upload
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: |
+          logs=(/tmp/m7-logs/diag.log)
+          rc=0
+          bash tooling/e2e/ci/scan-logs-for-secrets.sh "${logs[@]}" || rc=$?
+          if [ "${rc}" -eq 1 ]; then rm -f -- "${logs[@]}"; fi
+          exit "${rc}"
 
       # Upload all per-phase evidence (logcat, drive logs, strfry logs, diag).
       # if: always() so a green run still surfaces the sweep counters + evidence.

@@ -19,6 +19,7 @@ import 'package:haven/src/services/location_sharing_service.dart';
 import 'package:haven/src/services/profile_service.dart';
 import 'package:haven/src/services/publish_stagger.dart';
 import 'package:haven/src/services/relay_service.dart';
+import 'package:haven/src/utils/log_alias.dart';
 import 'package:haven/src/utils/member_display.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -36,6 +37,7 @@ final memberLocationsProvider = FutureProvider<List<MemberLocation>>((
     return [];
   }
   if (circle.membershipStatus != MembershipStatus.accepted) {
+    // log-scan-ok: MembershipStatus enum variant, not a circle identifier
     debugPrint(
       '[LocationFetch] Circle not accepted (status=${circle.membershipStatus})',
     );
@@ -45,7 +47,8 @@ final memberLocationsProvider = FutureProvider<List<MemberLocation>>((
   final identity = await ref.read(identityProvider.future);
 
   debugPrint(
-    '[LocationFetch] Fetching locations (${circle.relays.length} relays)',
+    '[LocationFetch] Fetching locations '
+    '(${magnitudeBucket(circle.relays.length)} relays)',
   );
 
   final service = ref.read(locationSharingServiceProvider);
@@ -77,6 +80,7 @@ final memberLocationsProvider = FutureProvider<List<MemberLocation>>((
     // refresh the circle list so selectedCircleProvider picks up the
     // updated member roster on the next evaluation.
     if (result.groupUpdated) {
+      // log-scan-ok: groupUpdated is a bool, not a group identifier
       debugPrint(
         '[LocationFetch] Refreshing circles (groupUpdated=${result.groupUpdated})',
       );
@@ -90,8 +94,9 @@ final memberLocationsProvider = FutureProvider<List<MemberLocation>>((
         ? locations
         : locations.where((loc) => loc.pubkey != identity.pubkeyHex).toList();
     debugPrint(
-      '[LocationFetch] Got ${locations.length} member location(s), '
-      'showing ${otherMembers.length} (excluding self)',
+      '[LocationFetch] Got ${magnitudeBucket(locations.length)} member '
+      'location(s), showing ${magnitudeBucket(otherMembers.length)} '
+      '(excluding self)',
     );
     // Awaited inside the try so name resolution is covered by the fallback
     // below: returning the future un-awaited put it outside the catch, and a
@@ -250,8 +255,8 @@ final locationPublisherProvider = FutureProvider<int>((ref) async {
         .toList();
 
     debugPrint(
-      '[LocationPublish] ${circles.length} visible circle(s), '
-      '${accepted.length} accepted',
+      '[LocationPublish] ${magnitudeBucket(circles.length)} visible '
+      'circle(s), ${magnitudeBucket(accepted.length)} accepted',
     );
 
     if (accepted.isEmpty) {
@@ -279,14 +284,16 @@ final locationPublisherProvider = FutureProvider<int>((ref) async {
       }
       if (superseded) {
         debugPrint(
-          '[LocationPublish] Burst superseded — '
-          'stopping after $published/${order.length} circle(s)',
+          '[LocationPublish] Burst superseded — stopping after '
+          '${magnitudeBucket(published)}/${magnitudeBucket(order.length)} '
+          'circle(s)',
         );
         break;
       }
       final circle = order[i];
       debugPrint(
-        '[LocationPublish] Encrypting (${circle.relays.length} relays)',
+        '[LocationPublish] Encrypting '
+        '(${magnitudeBucket(circle.relays.length)} relays)',
       );
       try {
         final outcome = await service.publishLocation(
@@ -307,7 +314,7 @@ final locationPublisherProvider = FutureProvider<int>((ref) async {
           case LocationPublishDeferred():
             debugPrint(
               '[LocationPublish] send deferred by the MLS engine — '
-              'gating=${outcome.unresolvedInputs}, '
+              'gating=${magnitudeBucket(outcome.unresolvedInputs)}, '
               'repaired=${outcome.repaired}',
             );
             _recordDeferredSend(ref, circle);
@@ -329,25 +336,14 @@ final locationPublisherProvider = FutureProvider<int>((ref) async {
         );
         debugPrint(
           '[LocationPublish] Published — '
-          'accepted=${result.acceptedBy.length}, '
-          'rejected=${result.rejectedBy.length}, '
-          'failed=${result.failed.length}',
+          'accepted=${magnitudeBucket(result.acceptedBy.length)}, '
+          'rejected=${magnitudeBucket(result.rejectedBy.length)}, '
+          'failed=${magnitudeBucket(result.failed.length)}',
         );
-        if (result.rejectedBy.isNotEmpty) {
-          for (final r in result.rejectedBy) {
-            // Relay-controlled text — bound its length so a noisy or
-            // hostile relay can't flood the (debug-only) log.
-            final reason = r.reason.length > 100
-                ? '${r.reason.substring(0, 100)}...'
-                : r.reason;
-            debugPrint('[LocationPublish] REJECTED by relay: $reason');
-          }
-        }
-        if (result.failed.isNotEmpty) {
-          debugPrint(
-            '[LocationPublish] FAILED relays: ${result.failed.length}',
-          );
-        }
+        // A relay's rejection reason is remote-authored NIP-01 `OK false
+        // <reason>` prose (Security Rule 8/15) — never logged, by URL or by
+        // reason. The bucketed `rejected=`/`failed=` counts above are already
+        // the whole signal a caller can act on.
         published++;
       } on Object catch (_) {
         debugPrint('[LocationPublish] Publish failed for circle');

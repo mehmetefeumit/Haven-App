@@ -183,13 +183,19 @@ mod tests {
     }
 
     #[test]
-    fn debug_never_leaks_key_material() {
+    fn haven_identity_proof_signer_debug_redacts_both_halves_of_the_key() {
         let keys = Keys::generate();
         let signer = HavenIdentityProofSigner::new(&keys);
         let rendered = format!("{signer:?}");
-        assert!(rendered.contains("HavenIdentityProofSigner"));
         assert!(rendered.contains("<redacted>"));
-        assert!(!rendered.contains(&keys.public_key().to_hex()));
+        crate::assert_debug_redacted!(
+            signer,
+            "HavenIdentityProofSigner",
+            &[
+                &keys.public_key().to_hex(),
+                &keys.secret_key().to_secret_hex(),
+            ]
+        );
     }
 
     #[test]

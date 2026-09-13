@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
+use crate::log_alias::bucket;
 use crate::nostr::error::{NostrError, Result};
 use crate::nostr::keys::{EphemeralKeypair, SECP};
 use crate::nostr::tags::TagBuilder;
@@ -98,12 +99,15 @@ pub struct SignedLocationEvent {
 
 impl std::fmt::Debug for SignedLocationEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The kind is a fixed protocol constant and stays; the publish instant
+        // and the tag magnitude do not — a publish timeline reconstructs the
+        // user's movements without ever naming a coordinate (Rule 15).
         f.debug_struct("SignedLocationEvent")
             .field("id", &"<redacted>")
             .field("pubkey", &"<redacted>")
             .field("kind", &self.kind)
-            .field("created_at", &self.created_at)
-            .field("tag_count", &self.tags.len())
+            .field("created_at", &"<redacted>")
+            .field("tags", &bucket(self.tags.len()))
             .field("content", &"<redacted>")
             .field("sig", &"<redacted>")
             .finish()
@@ -965,13 +969,28 @@ mod tests {
              a circle across every log line it appears in (Rule 4): {rendered}"
         );
         assert!(
-            rendered.contains("tag_count: 2"),
-            "tags must reduce to a count: {rendered}"
+            !rendered.contains("1700000000") && !rendered.contains("1_700_000_000"),
+            "the publish instant reconstructs a movement timeline without naming \
+             a coordinate (Rule 15): {rendered}"
+        );
+        assert!(
+            rendered.contains("tags: \"2-4\""),
+            "tags must reduce to a BUCKET, never an exact magnitude: {rendered}"
         );
         assert!(
             rendered.contains("kind: 445"),
-            "the kind is safe and is the field that makes a log line \
-             identifiable at all: {rendered}"
+            "the kind is a fixed protocol constant and is the field that makes a \
+             log line identifiable at all: {rendered}"
+        );
+        crate::assert_debug_redacted!(
+            event,
+            "SignedLocationEvent",
+            &[
+                "aaaaaaaabbbbbbbbccccccccdddddddd",
+                "deadbeefdeadbeefdeadbeefdeadbeef",
+                "BASE64CIPHERTEXTPAYLOAD",
+                "0123456789abcdef",
+            ]
         );
     }
 }

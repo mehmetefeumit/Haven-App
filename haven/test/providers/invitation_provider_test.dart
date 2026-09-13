@@ -9,7 +9,6 @@ library;
 
 import 'dart:typed_data';
 
-import 'package:flutter/foundation.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -22,6 +21,7 @@ import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/relay_preferences_service.dart';
 import 'package:haven/src/services/relay_service.dart';
 
+import '../helpers/log_capture.dart';
 import '../mocks/circle_service_retention_stubs.dart';
 import '../mocks/mock_circle_service.dart';
 import '../mocks/mock_relay_preferences_service.dart';
@@ -360,12 +360,7 @@ void main() {
             ?.value;
 
         // Capture debug output to verify no error/skip log is emitted.
-        final logs = <String>[];
-        final origPrint = debugPrint;
-        debugPrint = (String? message, {int? wrapWidth}) {
-          if (message != null) logs.add(message);
-        };
-        addTearDown(() => debugPrint = origPrint);
+        final logs = LogCapture.install();
 
         final newCount = await container.read(invitationPollerProvider.future);
 
@@ -386,8 +381,9 @@ void main() {
 
         // The poller must NOT log a "skipped gift-wrap" line for null returns —
         // null is a silent no-op, not a failure.
-        final skipLogs = logs.where(
-          (l) => l.contains('[InvitationPoller] skipped gift-wrap'),
+        final skipLogs = logs.lines.where(
+          (l) =>
+              l != null && l.contains('[InvitationPoller] skipped gift-wrap'),
         );
         expect(
           skipLogs,

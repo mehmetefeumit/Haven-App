@@ -544,6 +544,7 @@ class LocationAccessNotifier extends Notifier<LocationAccessStatus> {
     // byte-identical app logs produce opposite surfacing outcomes with nothing
     // to explain why (runs 30977235075 and 30980908814). Enum names only — no
     // platform error text ever reaches a log line from here (Security Rule 8).
+    // log-scan-ok: LocationAccessStatus enum variant names, not identifiers.
     debugPrint('[LocationAccess] ${previous.name} -> ${next.name}');
     state = next;
 

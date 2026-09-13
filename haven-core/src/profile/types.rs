@@ -203,10 +203,10 @@ pub struct ProfilePicture {
 
 impl fmt::Debug for ProfilePicture {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Redact the byte buffers and the sha256 (a long hex run); keep the URL
-        // scheme/host visible for diagnostics but not the bytes.
+        // The URL is withheld too: it is content-addressed, so it EMBEDS the
+        // sha256 on the next line, and its host is the user's Blossom server.
         f.debug_struct("ProfilePicture")
-            .field("url", &self.url)
+            .field("url", &"<redacted>")
             .field("sha256_hex", &"<redacted>")
             .field("canonical", &"<redacted>")
             .field("thumbnail", &"<redacted>")
@@ -350,16 +350,21 @@ mod tests {
     }
 
     #[test]
-    fn profile_picture_debug_redacts_bytes() {
+    fn profile_picture_debug_redacts_bytes_url_and_hash() {
+        let sha256_hex = "deadbeef".repeat(8);
         let pic = ProfilePicture {
-            url: "https://blossom.example/abc".to_string(),
-            sha256_hex: "deadbeef".repeat(8),
+            url: format!("https://blossom.example/{sha256_hex}"),
+            sha256_hex: sha256_hex.clone(),
             canonical: Zeroizing::new(vec![1, 2, 3]),
             thumbnail: Zeroizing::new(vec![4, 5, 6]),
         };
+        crate::assert_debug_redacted!(
+            &pic,
+            "ProfilePicture",
+            &[&pic.url, &sha256_hex, "blossom.example"]
+        );
         let debug = format!("{pic:?}");
-        assert!(debug.contains("https://blossom.example/abc"));
-        assert!(!debug.contains("deadbeef"));
-        assert!(!debug.contains('1'));
+        assert!(debug.contains("<redacted>"), "{debug}");
+        assert!(!debug.contains('1'), "{debug}");
     }
 }

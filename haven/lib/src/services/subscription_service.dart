@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/fresh_secret.dart';
+import 'package:haven/src/utils/log_alias.dart';
 
 /// Thrown by the live-sync subscription service for setup/teardown failures.
 ///
@@ -238,12 +239,11 @@ class LiveEventRouter {
   final void Function(FfiSyncStatusReason reason) onStatus;
 
   /// Routes one engine event to its side effects. Never throws.
-  /// First 4 bytes of a nostr-group-id as hex (8 chars) — matches the Rust
-  /// engine's `[live_sync::worker] group=…` prefix for cross-log correlation.
-  /// The `nostr_group_id` is pseudonymous (Protocol Rule 4), never the real MLS
-  /// group id — safe to log.
-  static String _shortGroupHex(Uint8List g) =>
-      g.take(4).map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+  /// Per-process log-alias handle for a `nostr_group_id` (Security Rule 15 —
+  /// even the pseudonymous `nostr_group_id` may not reach a log, full or
+  /// truncated; a prefix of an identifier is still an identifier).
+  static String _circleHandle(Uint8List g) =>
+      logAliasHandle(LogAliasClass.circle, _groupKey(g));
 
   /// Full hex of a `nostr_group_id`, for map keys (`Uint8List` has identity
   /// equality, so the bytes themselves cannot key a map).
@@ -263,13 +263,12 @@ class LiveEventRouter {
   Future<void> handleEvent(FfiRelayEvent event) async {
     // Diagnostic (M11 e2e triage): confirm the engine's bus event actually
     // reaches the Dart consumer (the Rust side logs `process_group_event …
-    // Processed`; this proves the FFI stream → router hop). Group prefix only.
+    // Processed`; this proves the FFI stream → router hop). Circle handle
+    // only, never the group id itself (Security Rule 15).
     if (kDebugMode) {
       final g = event.nostrGroupId;
-      debugPrint(
-        '[Subscription] stream event kind=${event.kind}'
-        '${g == null ? '' : ' group=${_shortGroupHex(g)}…'}',
-      );
+      final suffix = g == null ? '' : ' group=${_circleHandle(g)}';
+      debugPrint('[Subscription] stream event kind=${event.kind}$suffix');
     }
     switch (event.kind) {
       case FfiRelayEventKind.location:
@@ -307,11 +306,11 @@ class LiveEventRouter {
       // DROPPED here because its group is not in the circles snapshot — the
       // prime suspect for "engine processed it fast but memberLocationsProvider
       // never surfaces it" after a mid-session circle-create / resubscribe (a
-      // stale snapshot). Group prefix only (pseudonymous).
+      // stale snapshot). Circle handle only, never the group id (Rule 15).
       if (kDebugMode) {
-        final g = _shortGroupHex(nostrGroupId);
         debugPrint(
-          '[Subscription] location DROPPED — group=$g… '
+          '[Subscription] location DROPPED — '
+          'group=${_circleHandle(nostrGroupId)} '
           'not in the circles snapshot (stale resubscribe?)',
         );
       }
@@ -334,8 +333,10 @@ class LiveEventRouter {
       // Diagnostic (M11 e2e triage): the full delivery path completed — engine
       // Processed → stream → router → cache + provider invalidation.
       if (kDebugMode) {
-        final g = _shortGroupHex(nostrGroupId);
-        debugPrint('[Subscription] location INGESTED — group=$g…');
+        debugPrint(
+          '[Subscription] location INGESTED — '
+          'group=${_circleHandle(nostrGroupId)}',
+        );
       }
     } on Object catch (e) {
       debugPrint('[Subscription] location ingest failed: ${e.runtimeType}');
@@ -496,7 +497,7 @@ class LiveEventRouter {
       if (kDebugMode) {
         debugPrint(
           '[Subscription] wedge verdict unconfirmed — '
-          'group=${_shortGroupHex(nostrGroupId)}…',
+          'group=${_circleHandle(nostrGroupId)}',
         );
       }
       return;

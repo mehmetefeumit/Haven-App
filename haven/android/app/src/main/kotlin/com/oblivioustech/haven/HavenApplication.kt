@@ -49,10 +49,13 @@ class HavenApplication : Application() {
         } catch (t: Throwable) {
             // Class name only, the Kotlin twin of the repo's Dart
             // `${e.runtimeType}` convention (Security Rule 8): android.util.Log
-            // is NOT stripped from release builds, so passing `t` here would
-            // print a keyring/JNI message and stack trace into every user's
-            // logcat. The class is what says which failure this was.
-            Log.e(TAG, "onCreate: Keyring.initializeNdkContext failed: ${t::class.java.simpleName}")
+            // is NOT stripped from release builds, so the call is also gated on
+            // BuildConfig.DEBUG (Security Rule 15) — passing `t` here would
+            // otherwise print a keyring/JNI message and stack trace into every
+            // user's logcat. The class is what says which failure this was.
+            if (BuildConfig.DEBUG) {
+                Log.e(TAG, "onCreate: Keyring.initializeNdkContext failed: ${t::class.java.simpleName}")
+            }
         }
     }
 

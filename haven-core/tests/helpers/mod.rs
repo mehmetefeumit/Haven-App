@@ -22,8 +22,11 @@
 
 use std::env;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard, Once, PoisonError};
 
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
 use haven_core::nostr::mls::types::{
     GroupEvent, GroupId, LocationGroupConfig, PendingStateRef, PublishWork, SessionEffects,
     TransportMessage,
@@ -31,7 +34,8 @@ use haven_core::nostr::mls::types::{
 use haven_core::nostr::mls::SessionManager;
 use haven_core::nostr::NostrError;
 use haven_core::relay::maintenance::build_kp_maintenance_events;
-use nostr::{Event, JsonUtil as _, Keys};
+use nostr::prelude::ToBech32 as _;
+use nostr::{Event, JsonUtil as _, Keys, PublicKey};
 
 /// Atomic counter for unique test directory names.
 static HELPER_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -355,4 +359,314 @@ pub fn location_senders(events: &[GroupEvent]) -> Vec<String> {
             _ => None,
         })
         .collect()
+}
+
+// ── In-process log capture (log anonymity, Security Rule 15) ────────────────
+//
+// Promoted out of `od4c_removal_deferral_e2e.rs`, where it began life as a
+// warn-only, `haven_core`-only capture. It captures EVERY target and EVERY
+// level now: the anonymity promise is about what lands in a log, and a line
+// only a dependency emits still lands there. Callers narrow with
+// [`haven_core_lines`] when the assertion is about what THIS crate wrote.
+
+/// One captured log record.
+#[derive(Clone, Debug)]
+pub struct LogLine {
+    /// The record's level, retained so a test can assert WHICH level said it.
+    pub level: log::Level,
+    /// The emitting target (`haven_core::relay::live_sync`, `nostr_relay_pool`, …).
+    pub target: String,
+    /// The rendered message.
+    pub message: String,
+}
+
+/// Records every log line this process emits, for tests that assert what a
+/// diagnostic does and does not say.
+///
+/// Process-wide rather than thread-local: these tests run on multi-thread
+/// runtimes, where the future under test may resume on a different worker than
+/// the one that started it.
+pub struct LogSink;
+
+/// Every line this binary has emitted since the logger went in. Append-only: a
+/// capturing test remembers where its own window began, so two running side by
+/// side each see a superset of their own lines and neither can empty the
+/// other's buffer.
+static CAPTURED: Mutex<Vec<LogLine>> = Mutex::new(Vec::new());
+
+/// Poison-tolerant lock: a test that panics while the capture is armed must not
+/// turn every later capture into a second panic that hides the first.
+fn lock<T>(mutex: &'static Mutex<T>) -> MutexGuard<'static, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+impl log::Log for LogSink {
+    fn enabled(&self, _metadata: &log::Metadata<'_>) -> bool {
+        true
+    }
+
+    fn log(&self, record: &log::Record<'_>) {
+        lock(&CAPTURED).push(LogLine {
+            level: record.level(),
+            target: record.target().to_owned(),
+            message: record.args().to_string(),
+        });
+    }
+
+    fn flush(&self) {}
+}
+
+/// Runs `body` and returns the log lines emitted during it — a superset of
+/// `body`'s own if another test logs alongside it, which is why assertions on
+/// the result look for a line rather than count them.
+pub async fn capture_haven_log(body: impl std::future::Future<Output = ()>) -> Vec<LogLine> {
+    static INSTALL: Once = Once::new();
+    /// Whether OUR logger won the process-wide slot. `log` permits exactly one
+    /// per process and reports the loser only through an `Err` that a `let _ =`
+    /// throws away, so a second installer would leave this capture seeing
+    /// NOTHING and every assertion below vacuously green. Record the verdict and
+    /// fail on it instead.
+    static OWNS_LOGGER: AtomicBool = AtomicBool::new(false);
+
+    INSTALL.call_once(|| {
+        OWNS_LOGGER.store(
+            log::set_boxed_logger(Box::new(LogSink)).is_ok(),
+            Ordering::SeqCst,
+        );
+        log::set_max_level(log::LevelFilter::Trace);
+    });
+    assert!(
+        OWNS_LOGGER.load(Ordering::SeqCst),
+        "another logger already owns this process, so this capture sees nothing \
+         at all. `log` permits exactly one; whoever installed the other one has \
+         to route through LogSink instead."
+    );
+    // The window starts at the current end of the buffer, so the lines returned
+    // are the ones `body` emitted.
+    let from = lock(&CAPTURED).len();
+    body.await;
+    lock(&CAPTURED)[from..].to_vec()
+}
+
+/// The subset of `lines` this crate itself emitted.
+///
+/// A dependency's lines are captured (they reach the same logcat / oslog) but
+/// are not something a change in `haven-core` can fix, so an anonymity
+/// assertion about Haven's own diagnostics narrows to these first.
+#[must_use]
+pub fn haven_core_lines(lines: &[LogLine]) -> Vec<LogLine> {
+    lines
+        .iter()
+        .filter(|l| l.target.starts_with("haven_core"))
+        .cloned()
+        .collect()
+}
+
+/// Every encoding of `needle` a log line could plausibly carry: the value
+/// itself, its case variants, its 8- and 16-character prefixes, and — when it
+/// decodes as hex — its base64 and `npub1…` renderings.
+///
+/// Truncation is not redaction, so the prefixes are needles in their own right:
+/// this is what makes `.get(..8)` a failure rather than a pass.
+fn needle_forms(needle: &str) -> Vec<String> {
+    let mut forms = vec![
+        needle.to_owned(),
+        needle.to_lowercase(),
+        needle.to_uppercase(),
+    ];
+    // Per-width, not gated on the whole needle being >= 16: a 10-15 char
+    // subscription id or `d` slot still has an 8-char prefix worth truncating
+    // to, and never got one under a single all-or-nothing length gate.
+    for base in [needle.to_lowercase(), needle.to_uppercase()] {
+        for width in [8, 16] {
+            if base.chars().count() > width {
+                forms.push(base.chars().take(width).collect());
+            }
+        }
+    }
+    if let Ok(bytes) = hex::decode(needle) {
+        forms.push(BASE64.encode(&bytes));
+        if let Ok(pk) = PublicKey::from_slice(&bytes) {
+            forms.extend(pk.to_bech32().ok());
+        }
+    }
+    forms.sort_unstable();
+    forms.dedup();
+    forms
+}
+
+/// Asserts no line in `lines` carries any `needle`, in any of the encodings
+/// [`needle_forms`] enumerates.
+///
+/// # Panics
+///
+/// Panics if `needles` is empty or holds a needle shorter than four characters
+/// — either would make the assertion vacuous or match arbitrary prose.
+pub fn assert_no_needles(lines: &[LogLine], needles: &[&str]) {
+    assert!(
+        !needles.is_empty(),
+        "assert_no_needles with no needle asserts nothing"
+    );
+    for needle in needles {
+        assert!(
+            needle.chars().count() >= 4,
+            "needle {needle:?} is too short to distinguish an identifier from prose"
+        );
+        for form in needle_forms(needle) {
+            for line in lines {
+                assert!(
+                    !line.message.contains(&form),
+                    "log line from {} carries {form:?} (an encoding of {needle:?}): {}",
+                    line.target,
+                    line.message
+                );
+            }
+        }
+    }
+}
+
+/// Asserts at least one captured line came from a target starting with
+/// `target_prefix` — the anti-vacuity half of [`assert_no_needles`], which a
+/// capture that recorded nothing at all would otherwise pass.
+pub fn assert_some_line_from(lines: &[LogLine], target_prefix: &str) {
+    assert!(
+        lines.iter().any(|l| l.target.starts_with(target_prefix)),
+        "no captured line came from {target_prefix:?}, so an absence assertion \
+         over these {} line(s) proves nothing",
+        lines.len()
+    );
+}
+
+// ── Self-tests for the log-anonymity capture helpers above ──────────────────
+//
+// `LogSink`/`capture_haven_log` back every `assert_no_needles` call across the
+// `log_anonymity_*` suite; a defect here would silently weaken all of them.
+// These exercise the pure assertion logic directly over hand-built `LogLine`s
+// (no real logger install), so they are safe to compile into every binary
+// that pulls in `mod helpers;` without racing anyone's `capture_haven_log`
+// call for the process-wide `log` slot — see `log_anonymity_live_sync.rs` for
+// the one probe (`OWNS_LOGGER` under a competing logger) that genuinely needs
+// an isolated process and lives there instead.
+#[cfg(test)]
+mod log_capture_self_tests {
+    use base64::Engine as _;
+    use nostr::prelude::ToBech32 as _;
+
+    use super::{assert_no_needles, assert_some_line_from, LogLine};
+
+    fn line(target: &str, message: &str) -> LogLine {
+        LogLine {
+            level: log::Level::Debug,
+            target: target.to_owned(),
+            message: message.to_owned(),
+        }
+    }
+
+    const NEEDLE_HEX: &str = "e1d9e8e1e35d8a5a1a1dbe6d3e0aa1b9f5f0f2a3b4c5d6e7f8091a2b3c4d5e6f";
+
+    #[test]
+    #[should_panic(expected = "carries")]
+    fn catches_the_literal_value() {
+        assert_no_needles(
+            &[line("haven_core::x", &format!("leaked {NEEDLE_HEX}"))],
+            &[NEEDLE_HEX],
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "carries")]
+    fn catches_an_upper_case_recasing() {
+        assert_no_needles(
+            &[line(
+                "haven_core::x",
+                &format!("leaked {}", NEEDLE_HEX.to_uppercase()),
+            )],
+            &[NEEDLE_HEX],
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "carries")]
+    fn catches_an_eight_char_prefix() {
+        assert_no_needles(
+            &[line("haven_core::x", &format!("evt={}", &NEEDLE_HEX[..8]))],
+            &[NEEDLE_HEX],
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "carries")]
+    fn catches_a_sixteen_char_prefix() {
+        assert_no_needles(
+            &[line(
+                "haven_core::x",
+                &format!("group={}", &NEEDLE_HEX[..16]),
+            )],
+            &[NEEDLE_HEX],
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "carries")]
+    fn catches_a_base64_encoding_of_a_hex_needle() {
+        // Computed with the SAME encoder `needle_forms` uses internally, not
+        // hand-derived, so this proves the conversion is wired in rather than
+        // asserting a string this test happened to get right by hand.
+        let bytes = hex::decode(NEEDLE_HEX).expect("test vector is hex");
+        let leaked = super::BASE64.encode(&bytes);
+        assert_no_needles(
+            &[line("haven_core::x", &format!("leaked: {leaked}"))],
+            &[NEEDLE_HEX],
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "carries")]
+    fn catches_an_npub_encoding_of_a_hex_needle() {
+        let npub = super::PublicKey::parse(NEEDLE_HEX)
+            .expect("test vector is a valid pubkey")
+            .to_bech32()
+            .expect("encodes as npub");
+        assert_no_needles(
+            &[line("haven_core::x", &format!("peer {npub} connected"))],
+            &[NEEDLE_HEX],
+        );
+    }
+
+    #[test]
+    fn passes_when_the_needle_never_appears() {
+        // Must not panic — the anti-vacuity half of these tests: a helper that
+        // flagged everything would "catch" every case above for the wrong
+        // reason.
+        assert_no_needles(
+            &[line("haven_core::x", "nothing sensitive here")],
+            &[NEEDLE_HEX],
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "asserts nothing")]
+    fn rejects_an_empty_needle_list() {
+        assert_no_needles(&[line("haven_core::x", "anything")], &[]);
+    }
+
+    #[test]
+    #[should_panic(expected = "too short")]
+    fn rejects_a_needle_shorter_than_four_chars() {
+        assert_no_needles(&[line("haven_core::x", "abc")], &["abc"]);
+    }
+
+    #[test]
+    #[should_panic(expected = "no captured line came from")]
+    fn assert_some_line_from_fails_on_an_empty_capture() {
+        assert_some_line_from(&[], "haven_core::relay");
+    }
+
+    #[test]
+    fn assert_some_line_from_passes_when_a_matching_target_exists() {
+        assert_some_line_from(
+            &[line("haven_core::relay::live_sync", "ok")],
+            "haven_core::relay",
+        );
+    }
 }

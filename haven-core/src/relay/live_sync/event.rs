@@ -158,15 +158,15 @@ pub enum LiveSyncEvent {
 impl std::fmt::Debug for LiveSyncEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Location {
-                event_created_at_secs,
-                ..
-            } => f
+            // `event_created_at_secs` goes with the rest: an absolute receive
+            // instant on a location path is a position in this user's day
+            // (Rule 15), and nothing reads it off a rendering.
+            Self::Location { .. } => f
                 .debug_struct("Location")
                 .field("nostr_group_id", &"<redacted>")
                 .field("sender_pubkey", &"<redacted>")
                 .field("content", &"<redacted>")
-                .field("event_created_at_secs", event_created_at_secs)
+                .field("event_created_at_secs", &"<redacted>")
                 .finish(),
             Self::GroupUpdate {
                 evolution_event_json,
@@ -200,7 +200,7 @@ mod tests {
     const GIFTWRAP_JSON: &str = "SECRET_GIFTWRAP_JSON";
 
     #[test]
-    fn live_sync_event_debug_is_presence_only_for_every_variant() {
+    fn live_sync_event_debug_redacts_every_variant() {
         let group_id = vec![0xAB, 0xCD, 0xEF];
 
         let location = LiveSyncEvent::Location {
@@ -236,9 +236,20 @@ mod tests {
             assert!(!dbg.contains("ABCDEF"), "leaked group id bytes: {dbg}");
         }
 
-        // Relay-public timestamps + the closed status enum may render.
-        assert!(format!("{location:?}").contains("1234"));
+        // The receive instant goes with the rest: a per-location arrival time is
+        // a position in the sender's day (Rule 15). Only the presence flag and
+        // the closed status enum still render.
+        assert!(
+            !format!("{location:?}").contains("1234"),
+            "the event's `created_at` must not render"
+        );
         assert!(format!("{group_update:?}").contains("has_evolution_event: true"));
         assert!(format!("{status:?}").contains("Connected"));
+        crate::assert_debug_redacted!(
+            location,
+            "LiveSyncEvent",
+            marker = "Location",
+            &[SECRET_CONTENT, SENDER_PK, "abcdef"]
+        );
     }
 }

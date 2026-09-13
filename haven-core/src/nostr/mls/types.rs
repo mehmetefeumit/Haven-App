@@ -29,6 +29,8 @@ pub use cgka_traits::transport::TransportMessage;
 pub use cgka_traits::types::{EpochId, GroupId, MemberId, MessageId};
 pub use nostr::Event;
 
+use crate::log_alias::{self, LogAliasClass};
+
 // ── Haven-local ingest screening ─────────────────────────────────────────────
 
 /// Why Haven's own receiver-side screen rejected an inbound event BEFORE the
@@ -282,12 +284,18 @@ pub struct LocationGroupInfo {
 
 impl std::fmt::Debug for LocationGroupInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Name and description are user-authored text, the `nostr_group_id` is
+        // the circle's public routing handle, and an absolute epoch pins how far
+        // this circle has evolved — none of the four may render (Rule 15).
         f.debug_struct("LocationGroupInfo")
             .field("mls_group_id", &"<redacted>")
-            .field("nostr_group_id", &self.nostr_group_id)
-            .field("name", &self.name)
-            .field("description", &self.description)
-            .field("epoch", &self.epoch)
+            .field(
+                "circle",
+                &log_alias::alias(LogAliasClass::Circle, self.nostr_group_id.as_bytes()),
+            )
+            .field("name", &"<redacted>")
+            .field("description", &"<redacted>")
+            .field("epoch", &"<redacted>")
             .finish()
     }
 }
@@ -342,12 +350,14 @@ pub enum LocationMessageResult {
 impl std::fmt::Debug for LocationMessageResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Location { epoch, .. } => f
+            // The epoch goes with the rest: an absolute epoch number tells one
+            // circle's history apart from another's (Rule 15).
+            Self::Location { .. } => f
                 .debug_struct("Location")
                 .field("sender_pubkey", &"<redacted>")
                 .field("content", &"<redacted>")
                 .field("group_id", &"<redacted>")
-                .field("epoch", epoch)
+                .field("epoch", &"<redacted>")
                 .finish(),
             Self::Joined { .. } => f
                 .debug_struct("Joined")
@@ -480,6 +490,50 @@ mod tests {
         }
     }
 
+    /// The `Ingested` arm carries the engine's drained `GroupEvent`s (decrypted
+    /// inner locations) and the publish work whose `h` tag is the
+    /// `nostr_group_id`; neither may render (Rule 15). The rejection arm carries
+    /// a fieldless reason, which may.
+    #[test]
+    fn screened_ingest_debug_redacts_the_ingest_effects() {
+        let screened = ScreenedIngest::RejectedBeforeAuth(PreAuthRejection::Expired);
+        let rendered = format!("{screened:?}");
+        assert!(rendered.contains("RejectedBeforeAuth"));
+        assert!(rendered.contains("Expired"));
+
+        // A POPULATED `Ingested`: a drained location payload and the group id
+        // and sender it arrived under. None of the three may render.
+        let ingested = ScreenedIngest::Ingested(IngestEffects {
+            outcome: IngestOutcome::Processed,
+            effects: SessionEffects {
+                events: vec![GroupEvent::MessageReceived {
+                    group_id: GroupId::from_slice(&[0xAB; 32]),
+                    sender: MemberId::new(vec![0xCD; 32]),
+                    epoch: EpochId(1_234_567),
+                    payload: b"SECRET_COORDS_12.3456789".to_vec(),
+                }],
+                publish: Vec::new(),
+                queued: Vec::new(),
+                pending_convergence: Vec::new(),
+            },
+        });
+        crate::assert_debug_redacted!(
+            ingested,
+            "ScreenedIngest",
+            marker = "Ingested",
+            &[
+                "SECRET_COORDS_12.3456789",
+                &"ab".repeat(32),
+                &"cd".repeat(32),
+                "1234567"
+            ]
+        );
+        // Premise, asserted AFTER the rendering (the accessor consumes the
+        // value): the arm really carried effects, so the absences above are
+        // attributable to the impl and not to an empty value.
+        assert!(ingested.ingested().is_some());
+    }
+
     #[test]
     fn group_id_ext_from_slice_matches_new() {
         let a = GroupId::from_slice(&[1, 2, 3, 4]);
@@ -509,42 +563,52 @@ mod tests {
         assert_eq!(config.relays.len(), 2);
     }
 
+    /// The circle's routing id becomes an alias handle, and the name, the
+    /// description and the absolute epoch stop rendering at all (Rule 15); the
+    /// MLS group id never rendered (Rule 4).
     #[test]
-    fn location_group_info_debug_redacts_mls_group_id() {
+    fn location_group_info_debug_redacts_every_identifying_field() {
+        let group_hex = "a".repeat(64);
         let info = LocationGroupInfo {
             mls_group_id: GroupId::from_slice(&[1, 2, 3, 4, 5]),
-            nostr_group_id: "abc123".to_string(),
-            name: "Test Group".to_string(),
+            nostr_group_id: group_hex.clone(),
+            name: "Needle Circle Zephyr".to_string(),
             description: "A test group".to_string(),
-            epoch: 42,
+            epoch: 1_234_567,
         };
 
         let debug_str = format!("{info:?}");
-        assert!(debug_str.contains("LocationGroupInfo"));
-        assert!(debug_str.contains("abc123"));
-        assert!(debug_str.contains("Test Group"));
-        assert!(debug_str.contains("42"));
-        assert!(debug_str.contains("<redacted>"));
+        assert!(debug_str.contains("circle#"), "expected an alias handle");
         assert!(
             !debug_str.contains("0102030405"),
             "MLS group ID bytes must not appear in Debug output"
         );
+        crate::assert_debug_redacted!(
+            info,
+            "LocationGroupInfo",
+            &[
+                &group_hex,
+                "Needle Circle Zephyr",
+                "A test group",
+                "1234567"
+            ]
+        );
     }
 
     #[test]
-    fn location_message_result_debug_redacts_group_id() {
+    fn location_message_result_debug_redacts_group_id_and_epoch() {
         let result = LocationMessageResult::Location {
-            sender_pubkey: "pk".to_string(),
-            content: r#"{"lat":0}"#.to_string(),
+            sender_pubkey: "b".repeat(64),
+            content: r#"{"lat":12.3456789}"#.to_string(),
             group_id: GroupId::from_slice(&[9, 9, 9]),
-            epoch: 7,
+            epoch: 7_654_321,
         };
-        let debug_str = format!("{result:?}");
-        assert!(debug_str.contains("Location"));
-        assert!(debug_str.contains("<redacted>"));
-        assert!(debug_str.contains("epoch: 7"));
-        assert!(!debug_str.contains("090909"));
-        assert!(!debug_str.contains("lat"));
+        crate::assert_debug_redacted!(
+            result,
+            "LocationMessageResult",
+            marker = "Location",
+            &[&"b".repeat(64), "12.3456789", "090909", "7654321"]
+        );
     }
 
     #[test]

@@ -46,7 +46,8 @@ use crate::nostr::keys::SECP;
 ///
 /// // Generate a new identity
 /// let keypair = IdentityKeypair::generate();
-/// println!("Your npub: {}", keypair.npub().unwrap());
+/// // The npub is the user's to see, never a log line's (Security Rule 15).
+/// assert!(keypair.npub().unwrap().starts_with("npub1"));
 ///
 /// // Export for backup (handle with care!)
 /// let nsec = keypair.export_nsec().unwrap();
@@ -314,9 +315,11 @@ impl IdentityKeypair {
 
 impl std::fmt::Debug for IdentityKeypair {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Never print the secret key
+        // The secret is key material (Rule 6); the pubkey IS the user's identity
+        // on the network, so it never reaches a rendering either (Rule 15).
         f.debug_struct("IdentityKeypair")
-            .field("pubkey", &self.pubkey_hex())
+            .field("pubkey", &"<redacted>")
+            .field("secret", &"<redacted>")
             .finish()
     }
 }
@@ -477,19 +480,26 @@ mod tests {
     fn debug_does_not_leak_secret() {
         let keypair = IdentityKeypair::generate();
         let debug_output = format!("{keypair:?}");
+        let nsec = keypair.export_nsec().expect("nsec");
 
-        // Should contain pubkey but be short (no secret)
+        // Names the fields it withholds, and withholds them.
         assert!(debug_output.contains("pubkey"));
+        assert!(debug_output.contains("secret"));
+        assert!(!debug_output.contains(&nsec));
         assert!(debug_output.len() < 200);
     }
 
+    /// The pubkey IS this user's identity on the Nostr network, so it is as
+    /// absent from the rendering as the secret is (Security Rule 15). This test
+    /// used to assert the opposite; the owner's log-anonymity directive reversed
+    /// the requirement, and the value's absence is the stronger promise.
     #[test]
-    fn debug_contains_pubkey_value() {
+    fn debug_redacts_the_pubkey() {
         let keypair = IdentityKeypair::generate();
-        let debug_output = format!("{keypair:?}");
         let pubkey = keypair.pubkey_hex();
+        let npub = keypair.npub().expect("npub");
 
-        assert!(debug_output.contains(&pubkey));
+        crate::assert_debug_redacted!(keypair, "IdentityKeypair", &[&pubkey, &npub]);
     }
 
     #[test]

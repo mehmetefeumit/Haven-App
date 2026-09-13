@@ -13,6 +13,7 @@ import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
+import 'package:haven/src/utils/log_alias.dart';
 
 /// Provider for the list of pending invitations.
 ///
@@ -106,7 +107,8 @@ final invitationPollerProvider = FutureProvider<int>((ref) async {
     );
 
     debugPrint(
-      '[InvitationPoller] fetched ${giftWraps.length} gift-wrap events',
+      '[InvitationPoller] fetched ${magnitudeBucket(giftWraps.length)} '
+      'gift-wrap events',
     );
 
     // Fetch secret bytes once for the batch — each gift wrap creates

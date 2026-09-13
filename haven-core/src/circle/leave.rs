@@ -16,16 +16,16 @@
 //!
 //! # Privacy
 //!
-//! [`LeavePlan`]'s `Debug` impl redacts the successor's public key to a
-//! short 8-char prefix (via [`short_id`]) so log lines cannot be used to
-//! correlate a user to a specific handoff.
+//! [`LeavePlan`]'s `Debug` impl replaces the successor's public key with a
+//! per-process [`log_alias`] handle, so a log line can say "the same peer as
+//! that other line" and nothing more: a prefix of a key would still be the key.
 
 use std::collections::BTreeSet;
 
 use nostr::PublicKey;
 
 use super::error::{CircleError, Result};
-use super::manager::short_id;
+use crate::log_alias::{self, PeerPubkey};
 use crate::nostr::mls::types::GroupId;
 use crate::nostr::mls::SessionManager;
 
@@ -58,7 +58,10 @@ impl std::fmt::Debug for LeavePlan {
             Self::NonAdmin => f.write_str("NonAdmin"),
             Self::AdminHandoff { successor } => f
                 .debug_struct("AdminHandoff")
-                .field("successor", &short_id(&successor.to_bytes()))
+                .field(
+                    "successor",
+                    &log_alias::peer(PeerPubkey(&successor.to_hex())),
+                )
                 .finish(),
             Self::AdminDemote => f.write_str("AdminDemote"),
             Self::Abandon => f.write_str("Abandon"),
@@ -152,6 +155,8 @@ pub fn select_successor(
 
 #[cfg(test)]
 mod tests {
+    use nostr::ToBech32;
+
     use super::*;
 
     fn sorted_pks(n: usize) -> Vec<PublicKey> {
@@ -198,17 +203,18 @@ mod tests {
     }
 
     #[test]
-    fn debug_impl_redacts_successor_pubkey() {
+    fn leave_plan_debug_redacts_successor_pubkey() {
         let keys = sorted_pks(2);
         let plan = LeavePlan::AdminHandoff { successor: keys[0] };
-        let debug_str = format!("{plan:?}");
-        // Only the 8-char short id should appear.
         let full_hex = keys[0].to_hex();
-        assert!(
-            !debug_str.contains(&full_hex),
-            "debug output leaked full pubkey: {debug_str}"
+        crate::assert_debug_redacted!(
+            &plan,
+            "LeavePlan",
+            marker = "AdminHandoff",
+            &[&full_hex, &keys[0].to_bech32().expect("npub renders")]
         );
-        assert!(debug_str.contains("AdminHandoff"));
+        let debug_str = format!("{plan:?}");
+        assert!(debug_str.contains("peer#"), "{debug_str}");
     }
 
     #[test]

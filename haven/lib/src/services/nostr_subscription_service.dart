@@ -120,14 +120,12 @@ class NostrSubscriptionService implements SubscriptionService {
         cancelOnError: false,
       );
     } on Object catch (e) {
+      // Type only, in every build: `redact_hex_sequences` only collapses long
+      // hex runs, so an MLS group id embedded at a shorter width — or an
+      // npub, relay URL or display name — would pass through a raw `$e'
+      // untouched (Security Rule 8/15). No debug/e2e-only detail line either;
+      // a debug capture is still a capture.
       debugPrint('[Subscription] start failed: ${e.runtimeType}');
-      // The underlying FFI error is a Rust `Result` string already sanitized by
-      // `redact_hex_sequences`; surface its (redacted) detail in debug/e2e builds
-      // so an engine-start failure is diagnosable, not an opaque "String" type
-      // (the wrapper thrown below otherwise hides it from MapShell).
-      if (kDebugMode) {
-        debugPrint('[Subscription] start error detail: $e');
-      }
       await stop();
       // `stop()` cannot reach this handle: `_engine` is only assigned once
       // `startSession` has resolved, so a throw before that leaves the engine

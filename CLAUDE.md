@@ -11,9 +11,31 @@ Secure, privacy-first location sharing app using Marmot Protocol (MLS + Nostr) f
 These pillars are never traded off, never "temporarily" degraded, and never
 deferred to a follow-up:
 
-**privacy · security · performance · user experience · documentation accuracy
-(user-visible AND internal) · accessibility · code quality · simplicity · test
-coverage · test reliability**
+**privacy · security · log anonymity · performance · user experience ·
+documentation accuracy (user-visible AND internal) · accessibility · code
+quality · simplicity · test coverage · test reliability**
+
+### Log anonymity (owner-directed 2026-09-10)
+
+Nothing that could identify a user, or tell one user, circle or device apart
+from another, may ever reach a log, a panic message, a `Debug`/`Display`
+rendering or an FFI error string — in any build, at any log level, in any
+encoding, at any truncation. That means: no keys (Rule 6), no pubkeys or npubs,
+no MLS or Nostr group ids, no event ids or KeyPackage slots, no subscription
+ids, **no relay URLs (the default pool included)**, no hosts or IP addresses, no
+circle/display names or petnames, no coordinates or geohashes, no absolute epoch
+numbers, no exact counts of circles/members/relays/events, no absolute
+timestamps on publish/receive paths, and no remote-authored prose. "Redacted"
+means **absent**, never a visible prefix. Where a line must say "the same
+circle/peer/relay as that other line" it uses a per-process salted handle from
+`haven-core/src/log_alias.rs` (`circle#a91f3c`), which cannot be computed or
+reversed without the process salt; magnitudes are bucketed, instants are
+relative. This is enforced on independent CI dimensions (source guards in all
+four languages, the `Debug`/`Display` enumeration test, in-process log capture
+in unit tests, the runtime canary scanner over every lane's sinks before upload,
+mutation tests of the scanner, the privacy manifest) and is **Security Rule 15**
+below. A test that plants an identifier and asserts it is absent from captured
+logs is the required proof for any new log line.
 
 A change that improves one pillar by weakening another is not finished. If you
 believe a pillar genuinely must give, STOP and ask — do not decide it silently.
@@ -155,10 +177,11 @@ scripts/ci/check_coverage_floors.sh --repin <rust|flutter> <lcov>   # raises onl
 ```
 
 **Coverage toolchains are pinned** in `scripts/ci/coverage_toolchain.env` (rustc
-+ Flutter), because a coverage percentage is a ratio whose denominator is
-instrumented lines — a compiler property, not a test property. Every other
-workflow keeps floating on `stable`. Bump the pin and re-pin the floors in ONE
-commit.
++ Flutter + cargo-llvm-cov), because a coverage percentage is a ratio whose
+denominator is instrumented lines — a compiler property, not a test property —
+and cargo-llvm-cov decides which files are counted and how the ratio is
+rendered. Every other workflow keeps floating on `stable`. Bump the pin and
+re-pin the floors in ONE commit.
 
 ## Code Quality
 
@@ -223,6 +246,7 @@ Non-negotiable for this cryptographic application:
 12. **Convergence-Buffer Backpressure**: Rate-limit convergence-buffer ingest with backpressure; NEVER silently drop legitimate offline backlog (future-epoch catch-up is legitimate). Caveat: the engine's stored buffer has no per-group cap and no eviction API (upstream #757 OPEN), so a Haven-side intake cap throttles but does not bound engine storage
 13. **Publish-Before-Apply**: NEVER call `confirm_published` before at least one relay has returned an OK-ack ("acked" means acked, never merely "sent"); call `publish_failed` on failure; treat `PendingCommitRecovered` as a mandatory resync
 14. **Single Session**: Run exactly ONE live `AccountDeviceSession` per MLS DB file across all isolates/processes — a second session diverges in-memory epoch state and risks epoch/exporter-key reuse, i.e. a confidentiality loss, not just DB corruption
+15. **Log Anonymity**: No identifier of any shape — key, pubkey/npub, group id (MLS or Nostr), event id, KeyPackage slot, subscription id, relay URL or host, IP, name/petname, coordinate/geohash, absolute epoch, exact count, absolute publish/receive instant, remote-authored text — may reach any log, panic, `Debug`/`Display` rendering or FFI error string, in any build or encoding, full or truncated (see the Log anonymity pillar above). Use `log_alias` handles, buckets and relative offsets instead. Guarded by `scripts/ci/check_no_identifier_logging.sh`, `check_debug_impls_covered.sh`, `check_release_log_silencer.sh`, `check_native_log_allowlist.sh` and the runtime log scanner; a suppression `// log-scan-ok: <reason>` needs a reason and a reviewer
 
 **Database Encryption**: MLS state is stored in SQLCipher (encrypted SQLite). Keys are stored in system keyring (Keychain/GNOME Keyring/Credential Manager). See `haven-core/SECURITY.md` for details.
 

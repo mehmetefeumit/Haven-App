@@ -1,0 +1,15 @@
+# Reviewed exemptions for scripts/ci/check_debug_impls_covered.sh.
+#
+# Every hand-written `impl Debug/Display for T` under haven-core/src and
+# haven/rust_builder/src must be covered by an `assert_debug_redacted!` /
+# `assert_display_redacted!` invocation or a `*debug_redacts*` /
+# `*display_redacts*` test that names the type (Security Rule 15). A row here
+# is the ONLY other way an impl passes, and it is a reviewed statement that the
+# rendering cannot carry an identifier — not a way to skip writing the test.
+#
+# Row format (three `|`-separated fields, all required):
+#
+#   <repo-relative path>::<Type>|<why the rendering cannot identify anyone>|<owner>
+#
+# A row whose path::Type no longer has an impl is STALE and fails the guard: an
+# allowance that outlives its cause is a proof nobody noticed vanishing.

@@ -32,6 +32,7 @@ use nostr::nips::nip59::UnwrappedGift as NostrUnwrappedGift;
 use nostr::{Event, EventId, Keys, Kind, PublicKey, UnsignedEvent};
 
 use super::error::{NostrError, Result};
+use crate::log_alias::{self, EventIdHex};
 
 /// Kind for Welcome events (MLS group invitation).
 pub const KIND_WELCOME: u16 = 444;
@@ -54,9 +55,14 @@ pub struct UnwrappedWelcome {
 
 impl std::fmt::Debug for UnwrappedWelcome {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The wrapper's id is the handle a relay operator knows this invitation
+        // by, so it is aliased rather than printed (Rule 15).
         f.debug_struct("UnwrappedWelcome")
             .field("sender_pubkey", &"<redacted>")
-            .field("wrapper_event_id", &self.wrapper_event_id)
+            .field(
+                "wrapper_event",
+                &log_alias::event(EventIdHex(&self.wrapper_event_id.to_hex())),
+            )
             .field("rumor", &"<redacted>")
             .finish()
     }
@@ -156,6 +162,29 @@ mod tests {
         assert_eq!(unwrapped.rumor.kind, Kind::Custom(KIND_WELCOME));
         assert_eq!(unwrapped.rumor.content, "test_mls_welcome_bytes");
         assert_eq!(unwrapped.wrapper_event_id, wrapped.id);
+    }
+
+    /// The sender, the inner rumor and the wrapper's own event id are all
+    /// things a relay operator can correlate an invitation by, so an
+    /// [`UnwrappedWelcome`] renders none of them (Rule 15).
+    #[tokio::test]
+    async fn unwrapped_welcome_debug_redacts_sender_rumor_and_wrapper_id() {
+        let sender = Keys::generate();
+        let recipient = Keys::generate();
+        let wrapped = production_shaped_wrap(&sender, &recipient.public_key(), KIND_WELCOME).await;
+        let unwrapped: UnwrappedWelcome = unwrap_welcome(&recipient, &wrapped).await.unwrap();
+
+        let rendered = format!("{unwrapped:?}");
+        assert!(rendered.contains("event#"), "expected an alias handle");
+        crate::assert_debug_redacted!(
+            unwrapped,
+            "UnwrappedWelcome",
+            &[
+                &sender.public_key().to_hex(),
+                &wrapped.id.to_hex(),
+                "test_mls_welcome_bytes",
+            ]
+        );
     }
 
     #[tokio::test]

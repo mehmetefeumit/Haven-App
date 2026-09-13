@@ -22,6 +22,7 @@ pub mod circle;
 pub mod directory;
 pub mod keyring_policy;
 pub mod location;
+pub mod log_alias;
 pub mod nostr;
 pub mod profile;
 pub mod relay;

@@ -233,14 +233,20 @@ impl LiveSessionGuard {
         if inserted {
             Ok(Self { key })
         } else {
-            // The marker leads the message so it survives any outer wrapping
-            // (`thiserror` prefixes "Storage error: ") and stays greppable. It
-            // is a LOG token only — code asks `is_session_live` instead of
-            // matching this prose.
-            Err(NostrError::StorageError(format!(
-                "{SESSION_BUSY_MARKER}: an MLS session is already open on this \
-                 database (Rule 14: exactly one live session per DB file)"
-            )))
+            // Logged HERE because this is the only place the refusal is still
+            // greppable: every log site quotes an error's `code()`, and the one
+            // production caller (`CircleManager::new`) converts to
+            // `CircleError::Mls`, whose payload no rendering shows — so without
+            // this line a Rule-14 violation leaves no trace a human can search
+            // for. A literal and nothing else: no database path, no key, no count
+            // (Security Rule 15). At `warn` so it survives the release log
+            // silencer, because a second live session is a confidentiality risk,
+            // not a debug curiosity.
+            log::warn!("{SESSION_BUSY_MARKER}: a live MLS session already holds this database");
+            // The typed variant's OWN `Display` also leads with the marker, so an
+            // FFI surface that ever stops flattening to a code still carries it.
+            // Code asks `is_session_live` instead of matching this prose.
+            Err(NostrError::SessionBusy)
         }
     }
 }
@@ -346,10 +352,12 @@ impl StorageConfig {
         // background wake can read it. No-op on every other target; non-fatal
         // (the migration restores the key on any failure, so a failure here
         // leaves storage fully functional). The warning carries no key material.
-        if let Err(e) =
-            crate::keyring_policy::ensure_db_key_after_first_unlock(SERVICE_ID, MLS_DB_KEY_ID)
+        if crate::keyring_policy::ensure_db_key_after_first_unlock(SERVICE_ID, MLS_DB_KEY_ID)
+            .is_err()
         {
-            log::warn!("MLS session DB key access-policy migration deferred: {e}");
+            // Presence only: a keyring error's text can name the service and
+            // account entry it failed on (Security Rule 15).
+            log::warn!("MLS session DB key access-policy migration deferred");
         }
 
         // `as_str()` copies into a fresh String that `SqlCipherKey::new` moves
@@ -539,10 +547,13 @@ mod tests {
 
     #[test]
     fn busy_error_stays_greppable_after_the_string_flattening_ffi_does() {
-        // The marker's only job is diagnosability, so pin the shape a human
-        // actually greps: the FFI-flattened string, not the `NostrError`
-        // variant. `thiserror` prefixes "Storage error: ", so anything anchored
-        // at the start of the message would not survive.
+        // The marker's only job is diagnosability, so pin the string form rather
+        // than the variant: this is the rendering an FFI surface that flattens
+        // `Display` would carry. (What a human greps in practice is the `warn!`
+        // at the refusal — pinned by `session_busy_refusal_is_logged_once_with_no_identifier`
+        // in `tests/session_busy_marker_logged.rs`.) Searched for as a substring
+        // rather than a prefix, because where the marker sits in the sentence is
+        // `SessionBusy`'s wording to change; only its presence is the contract.
         let dir = tempfile::tempdir().expect("tempdir");
         let db = dir.path().join("session.sqlite");
         let _held = LiveSessionGuard::acquire(&db).expect("first acquire");

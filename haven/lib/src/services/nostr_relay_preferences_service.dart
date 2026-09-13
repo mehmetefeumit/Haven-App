@@ -250,33 +250,50 @@ class NostrRelayPreferencesService implements RelayPreferencesService {
     }
   }
 
+  /// The five Haven-authored validation sentences
+  /// `CircleError::InvalidRelayInput`'s `Display` renders — see
+  /// `haven-core/src/circle/storage_relay_prefs.rs`. Since Phase L0, every
+  /// `CircleError` variant's `Display` is payload-free (Security Rule 15),
+  /// so these fixed sentences ARE the whole FFI error string, never a
+  /// substring of a larger, input-carrying message. `_mapStorageError`
+  /// matches on the whole sentence for that reason.
+  static const _sentenceUrlEmpty = 'Relay URL must not be empty';
+  static const _sentenceUseWss = 'Use wss:// for security';
+  static const _sentenceHasCredentials =
+      'Relay URL must not contain credentials';
+  static const _sentenceInvalidUrl = 'Invalid relay URL';
+  static const _sentenceAtLeastOneRequired =
+      'At least one relay is required per category';
+
   /// Maps an FFI error into the appropriate Dart exception type.
   ///
-  /// FFI errors arrive as `String`; we inspect a small set of known
-  /// substrings so the caller can distinguish "user typed a bad URL"
-  /// from "the database lock failed". Unknown errors fall through to
-  /// the generic [`RelayPreferencesException`].
+  /// FFI errors arrive as `String`. Since Phase L0 (Security Rule 15) that
+  /// string is always one of Haven's own fixed, payload-free sentences (see
+  /// the `_sentence*` constants above) or an opaque non-validation failure —
+  /// never remote-authored prose or anything carrying the rejected input, so
+  /// matching the whole sentence (case-insensitively, since the FFI string's
+  /// casing is not itself a promise) is safe and cannot be defeated by user
+  /// input. Unknown errors fall through to the generic
+  /// [`RelayPreferencesException`].
   Exception _mapStorageError(Object e) {
     final raw = e.toString().toLowerCase();
-    // Validation messages we explicitly raise from the Rust side. Keep
-    // the matched substrings short and language-agnostic.
-    if (raw.contains('use wss://')) {
+    if (raw.contains(_sentenceUseWss.toLowerCase())) {
       return const RelayValidationError(
         'Use wss:// so traffic to this relay is encrypted.',
       );
     }
-    if (raw.contains('credential')) {
+    if (raw.contains(_sentenceHasCredentials.toLowerCase())) {
       return const RelayValidationError(
         'Relay URL must not contain credentials.',
       );
     }
-    if (raw.contains('invalid relay url') ||
-        raw.contains('relay url must not be empty')) {
+    if (raw.contains(_sentenceUrlEmpty.toLowerCase()) ||
+        raw.contains(_sentenceInvalidUrl.toLowerCase())) {
       return const RelayValidationError(
         'Enter a relay address like wss://relay.example.com.',
       );
     }
-    if (raw.contains('at least one relay')) {
+    if (raw.contains(_sentenceAtLeastOneRequired.toLowerCase())) {
       return const RelayValidationError(
         'You need at least one relay so others can reach you.',
       );

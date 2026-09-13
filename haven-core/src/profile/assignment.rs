@@ -458,6 +458,15 @@ mod tests {
 
     #[test]
     fn salt_debug_is_redacted() {
+        // Named for `check_profile_privacy_boundaries.sh`, which pins this test
+        // by name; the type is named INSIDE the macro call so
+        // `check_debug_impls_covered.sh` (which reads code, not string
+        // literals) can see which impl the proof is about.
+        crate::assert_debug_redacted!(
+            ProfileRelaySalt::from_bytes([0xAB; 32]),
+            "ProfileRelaySalt",
+            &[&hex::encode([0xABu8; 32]), "abababab"]
+        );
         let salt = ProfileRelaySalt::from_bytes([0xAB; 32]);
         let rendered = format!("{salt:?}");
         assert!(

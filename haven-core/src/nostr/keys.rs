@@ -164,9 +164,12 @@ impl EphemeralKeypair {
 
 impl std::fmt::Debug for EphemeralKeypair {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Never print the secret key
+        // Neither half of the pair: the secret is key material (Rule 6) and the
+        // public half is a fresh per-message key whose appearance beside a
+        // group's traffic links that message to this device (Rule 15).
         f.debug_struct("EphemeralKeypair")
-            .field("pubkey", &self.pubkey_hex())
+            .field("pubkey", &"<redacted>")
+            .field("secret", &"<redacted>")
             .finish()
     }
 }
@@ -270,14 +273,15 @@ mod tests {
         assert_eq!(pubkey_hex, hex::encode(pubkey_bytes));
     }
 
+    /// A kind-445's ephemeral pubkey is the handle a relay operator sees beside
+    /// that circle's traffic, so it stays out of every rendering too (Security
+    /// Rule 15). This test used to assert the opposite.
     #[test]
-    fn debug_output_contains_pubkey_value() {
+    fn debug_redacts_the_pubkey() {
         let keypair = EphemeralKeypair::generate();
-        let debug_output = format!("{keypair:?}");
         let pubkey = keypair.pubkey_hex();
 
-        // Debug output should contain the actual pubkey value
-        assert!(debug_output.contains(&pubkey));
+        crate::assert_debug_redacted!(keypair, "EphemeralKeypair", &[&pubkey]);
     }
 
     #[test]

@@ -1294,7 +1294,7 @@ impl CircleStorage {
             log::info!(
                 "avatar_path migration: nulled {} legacy contact avatar path(s) and \
                  best-effort deleted the referenced files (not a secure erase)",
-                paths.len()
+                crate::log_alias::bucket(paths.len())
             );
         }
         Ok(())
@@ -1658,10 +1658,7 @@ impl CircleStorage {
         tx.commit()?;
 
         if !existed {
-            log::debug!(
-                "delete_circle called for non-existent mls_group_id ({} bytes); no-op",
-                mls_group_id.as_slice().len()
-            );
+            log::debug!("delete_circle called for an unknown circle; no-op");
         }
         Ok(existed)
     }
@@ -4084,14 +4081,20 @@ mod tests {
         let db_path = dir.path().join("bad_key.db");
 
         let result = CircleStorage::new(&db_path, Some("abcdef"));
-        let err = match result {
-            Err(e) => e.to_string(),
-            Ok(_) => panic!("Should reject key shorter than 64 chars"),
+        let Err(err) = result else {
+            panic!("Should reject key shorter than 64 chars")
+        };
+        // The expected-format hint lives in the variant's PAYLOAD: `Display`
+        // renders no payload, because on other variants it is SQLite prose that
+        // can echo a bound pubkey (Security Rule 15).
+        let CircleError::InvalidData(detail) = &err else {
+            panic!("a malformed key is invalid data, not {err:?}")
         };
         assert!(
-            err.contains("64 hex characters"),
-            "Error should mention expected format: {err}"
+            detail.contains("64 hex characters"),
+            "Error should mention expected format: {detail}"
         );
+        assert_eq!(err.to_string(), "Invalid data");
     }
 
     #[test]
@@ -4133,14 +4136,19 @@ mod tests {
 
         // Attempt to open with key2 — should fail with clear error, NOT corrupt the DB
         let result = CircleStorage::new(&db_path, Some(&key2));
-        let err = match result {
-            Err(e) => e.to_string(),
-            Ok(_) => panic!("Wrong key should fail"),
+        let Err(err) = result else {
+            panic!("Wrong key should fail")
+        };
+        // Again on the payload, not the rendering (see
+        // `rejects_invalid_hex_key_too_short`).
+        let CircleError::Storage(detail) = &err else {
+            panic!("a wrong key is a storage failure, not {err:?}")
         };
         assert!(
-            err.contains("different key"),
-            "Error should indicate wrong key: {err}"
+            detail.contains("different key"),
+            "Error should indicate wrong key: {detail}"
         );
+        assert_eq!(err.to_string(), "Storage error");
 
         // Verify key1 still works — DB was not corrupted
         {

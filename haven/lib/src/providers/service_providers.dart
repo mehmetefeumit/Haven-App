@@ -332,11 +332,16 @@ final locationSharingServiceProvider = Provider<LocationSharingService>((ref) {
 
 /// Helper: invalidate a provider, swallowing any failure (Security/robustness —
 /// an invalidation throw must never break the stream loop).
-void _safeInvalidate(void Function() invalidate, String label) {
+///
+/// [providerKind] is always a compile-time literal naming which provider this
+/// call targets (e.g. `'circles'`) — never user data.
+void _safeInvalidate(void Function() invalidate, String providerKind) {
   try {
     invalidate();
   } on Object catch (e) {
-    debugPrint('[ServiceProvider] $label invalidation error: ${e.runtimeType}');
+    debugPrint(
+      '[ServiceProvider] $providerKind invalidation error: ${e.runtimeType}',
+    );
   }
 }
 

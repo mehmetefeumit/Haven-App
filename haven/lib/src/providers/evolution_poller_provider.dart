@@ -14,6 +14,7 @@ import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
+import 'package:haven/src/utils/log_alias.dart';
 
 /// Fetches kind-445 evolution events for every accepted circle and routes
 /// them through the existing decrypt/publish/finalize pipeline.
@@ -59,7 +60,10 @@ final evolutionPollerProvider = FutureProvider<bool>((ref) async {
     return false;
   }
 
-  debugPrint('[EvolutionPoller] polling ${accepted.length} accepted circle(s)');
+  debugPrint(
+    '[EvolutionPoller] polling ${magnitudeBucket(accepted.length)} '
+    'accepted circle(s)',
+  );
 
   try {
     final groupUpdated = await locationSharingService.pollEvolutionEvents(

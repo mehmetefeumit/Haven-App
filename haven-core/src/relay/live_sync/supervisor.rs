@@ -45,6 +45,8 @@ use nostr_sdk::RelayPoolNotification;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{broadcast, mpsc, oneshot, watch, RwLock};
 
+use crate::relay::circle_handle;
+
 use super::config::WORKER_QUEUE_CAP;
 use super::event::SyncStatusReason;
 use super::planes::{group::GROUP_EVENT_KIND, PlaneKind};
@@ -561,6 +563,7 @@ pub(crate) fn note_subscription_closed(
     processor.emit_status(SyncStatusReason::RelayError);
     // Presence-only (Security Rules 4/6): never the relay, the sub-id, the `#h`,
     // or the relay's free-text reason.
+    // log-scan-ok: ClosedKind is a fieldless enum; {:?} is a variant name
     log::warn!(
         "[live_sync::worker] a relay ended one of our subscriptions (kind={kind:?}); repair scheduled"
     );
@@ -606,8 +609,8 @@ fn anchor_end_of_stored_events(processor: &EngineProcessor, ctx: &SubCtx, key: &
             for group_hex in &ctx.group_ids_hex {
                 if processor.note_end_of_stored_events(group_hex) {
                     log::debug!(
-                        "[live_sync::worker] EOSE anchored cursor group={}…",
-                        group_hex.get(..8).unwrap_or(group_hex.as_str()),
+                        "[live_sync::worker] EOSE anchored cursor for {}",
+                        circle_handle(group_hex)
                     );
                 }
             }
@@ -807,14 +810,16 @@ pub async fn run_worker(
                 })
                 .await;
 
-                // Diagnostic: log only the pseudonymous group prefix + duration +
-                // presence-only outcome variant (Security Rule 6).
+                // Diagnostic: the circle's per-process alias handle, the
+                // duration, and the outcome VARIANT only (Security Rule 15 —
+                // `GroupProcessOutcome` is payload-free, so its `Debug` is a
+                // variant name and nothing else).
                 let outcome_label = joined
                     .as_ref()
                     .map_or_else(|_| "panic".to_string(), |o| format!("{o:?}"));
                 log::debug!(
-                    "[live_sync::worker] process_group_event group={}… took {}ms → {}",
-                    group_hex.get(..8).unwrap_or(group_hex.as_str()),
+                    "[live_sync::worker] process_group_event {} took {}ms → {}",
+                    circle_handle(&group_hex),
                     process_started.elapsed().as_millis(),
                     outcome_label
                 );

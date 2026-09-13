@@ -290,9 +290,14 @@ no `ForensicRecorder`.
 ### PURE_PLAINTEXT wire format: the confidentiality caveat
 
 The engine uses OpenMLS's `PURE_PLAINTEXT_WIRE_FORMAT_POLICY` — MLS **PublicMessage** in both
-directions (`cgka-engine/src/wire_format.rs`). Consequence: **the kind-445 outer
-ChaCha20-Poly1305 wrap, keyed by the MLS exporter secret, is the SOLE MLS-level confidentiality
-layer** on the wire. Exporter-secret retention is therefore *the* confidentiality boundary
+directions (`cgka-engine/src/wire_format.rs`). That policy governs **handshake** messages only
+(commits and proposals): `MlsGroup::create_message` frames every application message as a
+**PrivateMessage** whatever the policy says (OpenMLS `group/mls_group/application.rs`), so an
+application 445 (the kind-25442 location rumor) is doubly encrypted — MLS PrivateMessage inside
+the exporter-keyed outer wrap. Consequence, for commit and proposal 445s: **the kind-445 outer
+ChaCha20-Poly1305 wrap, keyed by the MLS exporter secret, is their SOLE MLS-level
+confidentiality layer** on the wire. Exporter-secret retention is therefore *the*
+confidentiality boundary for handshake traffic and the outer of two for application traffic
 (Security Rule 5), and the exporter label must never be downgraded (Rule 11; CI guard
 `scripts/ci/check_no_exporter_label_override.sh`). Upstream marks this policy
 `WIRE_FORMAT_POLICY_REVIEW_REQUIRED` ("Revisit Before External Rollout") — track its resolution.

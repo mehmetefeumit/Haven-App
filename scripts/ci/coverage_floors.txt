@@ -136,7 +136,7 @@ rust|src/nostr/mls/welcome.rs|100            # measured 100.00% (124/124)
 rust|src/nostr/encryption/|97                # measured 99.20% (124/125)
 rust|src/nostr/identity/|93                  # measured 95.51% (659/690)
 rust|src/nostr/keys.rs|97                    # measured 99.27% (136/137)
-rust|src/nostr/giftwrap.rs|89                # measured 91.63% (186/203)
+rust|src/nostr/giftwrap.rs|96                # measured 98.41% (124/126)
 rust|src/nostr/event.rs|96                   # measured 98.31% (523/532)
 rust|src/nostr/tags.rs|100                   # measured 100.00% (102/102)
 
@@ -145,7 +145,7 @@ rust|src/nostr/tags.rs|100                   # measured 100.00% (102/102)
 rust|src/keyring_policy.rs|89                # measured 91.49% (172/188)
 
 # --- Circles: group state and its encrypted store ---------------------------
-rust|src/circle/|92                          # measured 94.71% (12346/13035)
+rust|src/circle/|93                          # measured 95.06% (15207/15997)
 rust|src/circle/storage.rs|93                # measured 95.07% (2333/2454)
 rust|src/circle/leave.rs|94                  # measured 96.23% (102/106)
 
@@ -207,10 +207,10 @@ rust|src/directory/|97                       # measured 99.66% (292/293)
 # Pinned exactly (the margin rule cannot ratchet a 100% path — see the guard
 # header). Proofs: tests/selfremove_autopublish_e2e.rs.
 rust|src/relay/live_sync/|95                 # measured 97.24% (2921/3004)
-rust|src/relay/live_sync/session.rs|94       # measured 96.19% (1491/1550)
+rust|src/relay/live_sync/session.rs|95       # measured 97.02% (4002/4125)
 rust|src/relay/publishers.rs|88              # measured 90.28% (260/288)
 rust|src/relay/maintenance/|96               # measured 98.46% (640/650)
-rust|src/relay/manager.rs|88                 # measured 90.52% (1777/1963)
+rust|src/relay/manager.rs|90                 # measured 92.78% (2390/2576)
 rust|src/relay/auto_commit.rs|100            # measured 100.00% (140/140)
 rust|src/relay/catchup.rs|96                 # measured 98.71% (996/1009); was 92 (94.61%) before the
                                              # fetch-window cursor anchor brought its own tests
@@ -232,7 +232,7 @@ rust|src/relay/cursor.rs|100                 # measured 100.00% (174/174)
 # --- Encrypted tile cache ---------------------------------------------------
 # Must never persist the Stadia key (Security Rule 6/10); the static half is
 # check_no_tile_cache_secrets.sh.
-rust|src/tiles/|94                           # measured 96.11% (642/668)
+rust|src/tiles/|95                           # measured 97.87% (690/705)
 
 
 # ===========================================================================

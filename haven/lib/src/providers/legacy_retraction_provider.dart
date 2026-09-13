@@ -13,6 +13,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
+import 'package:haven/src/utils/log_alias.dart';
 
 /// UI-facing outcome of a [legacyRetractionProvider] tick (presence-only,
 /// leak-free — mirrors the leak-free shape of the underlying
@@ -49,11 +50,12 @@ final legacyRetractionProvider = FutureProvider<LegacyRetractionUiStatus>((
 
   final maintenanceService = ref.read(maintenanceServiceProvider);
   final result = await maintenanceService.retractLegacyKeyMaterial();
+  // log-scan-ok: alreadyDone/relayListRetracted are booleans, not identifiers
   debugPrint(
     '[Cutover] legacy retraction tick: alreadyDone=${result.alreadyDone}, '
-    'legacy443Scrubbed=${result.legacy443Scrubbed}, '
+    'legacy443Scrubbed=${magnitudeBucket(result.legacy443Scrubbed)}, '
     'relayListRetracted=${result.relayListRetracted}, '
-    'relayErrors=${result.relayErrors}',
+    'relayErrors=${magnitudeBucket(result.relayErrors)}',
   );
 
   if (result.alreadyDone) return LegacyRetractionUiStatus.done;

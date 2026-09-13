@@ -51,8 +51,8 @@ Then read the **device/driver** logs before the app logs:
 | Lane | Key artifacts |
 |---|---|
 | Android e2e_combined | `flutter-drive.log` (driver/isolate), `adb-logcat.log` |
-| iOS | `flutter-ios-test.log` |
-| m7 background | `diag.txt` (**device state!**), `drive.a.log` (setup test result), `logcat.*.log` |
+| iOS | `flutter-ios-test.log`; `sim-unified.log` (Haven's own unified-log lines: `subsystem == "frb_user" OR process == "Runner"`); `sim-unified-full.log` (the whole device, first 64 MiB — see failure mode 12 for why there is no `sim.logarchive`) |
+| m7 background | `diag.log` (**device state!**), `drive.a.log` (setup test result), `logcat.*.log` |
 
 **A functional assertion cannot be trusted if the device was offline/wedged or a
 second Flutter engine was present.** Check those two things first.
@@ -104,7 +104,7 @@ driver, which is how the later-step failures below (modes 4 and 5) were exposed.
 **This message is usually a MISDIAGNOSIS.** It reads as a product regression;
 the real cause is almost always an unreachable emulator.
 
-**Confirm** by reading `diag.txt` in the `e2e-background-catchup-<run_id>` artifact:
+**Confirm** by reading `diag.log` in the `e2e-background-catchup-<run_id>` artifact:
 
 ```
 === adb devices -l ===
@@ -161,7 +161,7 @@ is silent where you expected live-sync coverage has skipped, not passed.
 ## Failure mode 4 — WorkManager job never appears while the device is ONLINE
 
 **Symptom.** `M7-LANE-FAIL: no WorkManager JobScheduler job ... within 60s ...
-regression` — but `diag.txt` shows the device `online` (mode 2 ruled out) and
+regression` — but `diag.log` shows the device `online` (mode 2 ruled out) and
 `drive.a.log` shows the setup test passed. So the job genuinely is not in
 `dumpsys jobscheduler`.
 
@@ -632,6 +632,49 @@ lane written the ordinary way cannot miss the barrier.
   and is not a broadcast at all. Run 34511084722 switched the navigation-mode
   overlay at 18:23:44 and relaunched the launcher, 23 s before its first target
   launched; a faster first target would have been exposed.
+
+## Failure mode 12 — red on `secret-leak guard tripped`, and the artifact has no drive log
+
+**Symptom:** the drive step ends with `LEAK: /tmp/flutter-drive.log [<label>] at
+line(s): N` (or the same for `adb-logcat.log`, `flutter-ios-test.log`,
+`sim-unified*.log`, a relay/blossom log or `diag.log`) followed by
+`ERROR: secret-leak guard tripped`. The failure artifact is missing exactly those
+files, and the job log does not carry the drive log either.
+
+**That is the guard working, not a broken upload.** `scan-logs-for-secrets.sh`
+(CLAUDE.md Security Rules 6 and 15) returns rc 1 on a leak, and the gate around
+it — `scan_logs_or_contain` in `run-single-avd-scenario.sh`,
+`scan_log_or_contain` in `run-ios-sim-scenario.sh`, `bgp_scan_or_contain` in
+`run-ios-bg-publish.sh`, `scan_dir_or_contain` in the four directory-scanning
+runners (`run-integration-tests.sh`, `run-relay-customization.sh`,
+`run-flake-stress.sh`, `run-m7-background-catchup.sh` — these also leave a
+`LEAK.marker` naming only the pattern label, so an `if: always()` upload of the
+emptied directory still carries the verdict), and the `logs=(…)` block in the
+workflows' scan steps — **deletes every file it scanned before exiting non-zero**. The
+`if: failure()` upload that the red run triggers then finds nothing to publish
+(`if-no-files-found: ignore`), and the Android runner echoes the drive log into
+the job log only *after* the gate has passed. Artifacts and job logs on this
+repository are public for 14 days; a guard that failed the lane and then
+published the line it failed on would not be a guard.
+
+rc 3 is a different verdict: the log was absent or empty (the lane died before
+writing it), the files are kept, the step still fails, and the message says
+`UNUSABLE`, not `LEAK`. The scanner's header states the taxonomy.
+
+**What to do:** the LEAK line names the file, the pattern label and the line
+number — never the content. Reproduce locally against your own emulator or
+simulator (the same runner script, the same scenario) and read the flagged line
+on your machine; then fix the log site (Rule 15 forbids the value, whatever the
+level). Do not re-run: the patterns are deterministic and both retry gates
+classify a leak as genuine.
+
+The iOS lanes no longer upload `/tmp/sim.logarchive`. The archive is a
+full-device binary capture the scanner cannot read, so the diagnostics step
+exports Haven's own lines to `sim-unified.log`, the first 64 MiB of the whole
+device to `sim-unified-full.log` (chronological, so the earliest bytes; the rest
+is discarded with the archive), deletes the archive, and runs both exports —
+with the transcript and the relay logs — through the same delete-on-leak gate
+before the upload step can see them.
 
 ## What these lanes do NOT cover
 

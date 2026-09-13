@@ -599,18 +599,18 @@ class GeolocatorLocationService implements LocationService {
   ///
   /// The age window is 168 s; without this, every path that learns access
   /// ended would still hand out the user's last position for the rest of
-  /// that window. [reason] is presence-only diagnostic text — never a
+  /// that window. [note] is presence-only diagnostic text — never a
   /// coordinate, and never surfaced to the user (Security Rule 8).
   ///
   /// The native iOS copy goes first, and unconditionally: it is a separate
   /// full-precision coordinate that this method has already emptied the Dart
   /// side of on an earlier call, so gating it on the Dart cache would leave it
   /// behind exactly when the loss repeats.
-  void _noteAccessLost(String reason) {
+  void _noteAccessLost(String note) {
     unawaited(_iosSource.clearLastBestFix());
     if (_lastStreamPosition == null) return;
     _lastStreamPosition = null;
-    debugPrint('[Location] access lost ($reason) — cached fix dropped');
+    debugPrint('[Location] access lost ($note) — cached fix dropped');
   }
 
   /// Confirms the user still has location access, and reports whether the

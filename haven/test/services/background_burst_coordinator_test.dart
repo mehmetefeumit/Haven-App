@@ -10,9 +10,9 @@ library;
 
 import 'dart:async';
 import 'dart:math';
+import 'dart:typed_data';
 
 import 'package:fake_async/fake_async.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/constants/location.dart'
     show kLocationPublishMaxInterval;
@@ -25,6 +25,7 @@ import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/publish_stagger.dart';
 import 'package:haven/src/services/subscription_service.dart';
 
+import '../helpers/log_capture.dart';
 import '../mocks/mock_circle_service.dart';
 
 // ---------------------------------------------------------------------------
@@ -1553,12 +1554,7 @@ void main() {
     });
 
     test('an over-budget burst is reported', () async {
-      final logs = <String>[];
-      final original = debugPrint;
-      debugPrint = (message, {wrapWidth}) {
-        if (message != null) logs.add(message);
-      };
-      addTearDown(() => debugPrint = original);
+      final logs = LogCapture.install();
 
       var clock = DateTime(2026, 9, 7, 12);
       final env = build(now: () => clock)
@@ -1568,7 +1564,10 @@ void main() {
 
       await tick(env, _circle('a', 1));
 
-      expect(logs.where((l) => l.contains('over budget')), hasLength(1));
+      expect(
+        logs.lines.where((l) => l != null && l.contains('over budget')),
+        hasLength(1),
+      );
     });
 
     test('a burst is NOT reported for time its maintenance fold spent',
@@ -1580,12 +1579,7 @@ void main() {
       // it — or through the teardown after it — makes the report fire on a
       // burst that did nothing wrong, and a report that cries wolf is one
       // nobody reads when the real thing happens.
-      final logs = <String>[];
-      final original = debugPrint;
-      debugPrint = (message, {wrapWidth}) {
-        if (message != null) logs.add(message);
-      };
-      addTearDown(() => debugPrint = original);
+      final logs = LogCapture.install();
 
       var clock = DateTime(2026, 9, 7, 12);
       final env = build(now: () => clock)
@@ -1596,7 +1590,10 @@ void main() {
       await tick(env, _circle('a', 1));
 
       expect(env.maintenance.keyPackageAt, hasLength(1), reason: 'it folded');
-      expect(logs.where((l) => l.contains('over budget')), isEmpty);
+      expect(
+        logs.lines.where((l) => l != null && l.contains('over budget')),
+        isEmpty,
+      );
     });
   });
 
@@ -1896,12 +1893,7 @@ void main() {
       // a caller that has not wired them gets the behaviour it had. A default
       // that failed the other way would turn a missing line in `MapShell` into
       // a burst that never closes its sockets.
-      final printed = <String>[];
-      final original = debugPrint;
-      debugPrint = (message, {wrapWidth}) {
-        if (message != null) printed.add(message);
-      };
-      addTearDown(() => debugPrint = original);
+      final printed = LogCapture.install();
 
       final log = <String>[];
       final engine = _RecordingEngine(log);
@@ -1932,7 +1924,9 @@ void main() {
         'shutdown',
       ]);
       expect(
-        printed.where((l) => l.contains('draining commit-critical')),
+        printed.lines.where(
+          (l) => l != null && l.contains('draining commit-critical'),
+        ),
         isEmpty,
         reason: 'with nothing wired there is nothing in flight to wait for, '
             'and a default that waited anyway would put every unwired burst '

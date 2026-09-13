@@ -19,6 +19,7 @@ import 'package:haven/src/services/geolocator_location_service.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/pending_leave_service.dart';
 import 'package:haven/src/services/pending_mls_wipe_service.dart';
+import 'package:haven/src/utils/log_alias.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// Read-only provider for the current identity.
@@ -254,6 +255,10 @@ class IdentityNotifier extends AsyncNotifier<Identity?> {
     try {
       await ref.read(locationSharingServiceProvider).wipeAll();
     } on Object catch (e, stack) {
+      // A Dart StackTrace is compiled-in source frame/method/file locations
+      // only — never a runtime value — so it cannot carry a secret, group id
+      // or any other identifier.
+      // log-scan-ok: StackTrace carries no runtime values (Rule 15)
       debugPrint(
         '[SECURITY][IdentityNotifier] CRITICAL: wipeAll failed during '
         'identity deletion — persisted last-known rows may survive the '
@@ -337,9 +342,11 @@ class IdentityNotifier extends AsyncNotifier<Identity?> {
       // marker so it is trivial to grep in a bug report. We log only the error
       // TYPE + the Dart stack (frame/method/file names) — never `e` itself or
       // `e.toString()`, which could carry an FFI detail string — so no secret
-      // or MLS group ID leaks here even though debugPrint still emits in
-      // release builds. The M10.1 pending-wipe marker is now set, so the next
-      // launch will retry.
+      // or MLS group ID leaks here even in a DEBUG build or an E2E capture,
+      // where (unlike release, which `main.dart`'s `kReleaseMode` silencer
+      // makes a no-op) `debugPrint` genuinely does emit. The M10.1
+      // pending-wipe marker is now set, so the next launch will retry.
+      // log-scan-ok: StackTrace carries no runtime values (Rule 15)
       debugPrint(
         '[SECURITY][IdentityNotifier] CRITICAL: M10 MLS wipe FAILED — a '
         'decryptable circles.db/haven_mdk.db may survive the delete; '
@@ -438,6 +445,14 @@ class IdentityNotifier extends AsyncNotifier<Identity?> {
     // own already-scrubbed secret buffer and fails closed via the null-secret
     // guard in `MaintenanceService` once the identity is gone.)
     await service.deleteIdentity();
+    // Rule 15: no per-process log handle minted this session may still
+    // resolve after logout. Re-mints the salt (so a fresh call for the same
+    // value hashes differently) and drops the memo (so a stale pre-rotation
+    // handle cannot keep answering for it). Best-effort/non-throwing; see
+    // `rotateLogAliasSaltNow`'s own doc comment for why nothing depends on it
+    // succeeding.
+    rotateLogAliasSaltNow();
+    clearLogAliasMemo();
     state = const AsyncData(null);
     // Invalidate ONLY the read-only identity provider so watchers see the
     // logout. circleServiceProvider is intentionally left as the wiped,

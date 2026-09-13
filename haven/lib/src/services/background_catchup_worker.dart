@@ -74,7 +74,7 @@ library;
 // flutter_secure_storage, flutter_foreground_task, etc. are accessible.
 import 'dart:convert' show base64Decode;
 import 'dart:io' show Platform;
-import 'dart:ui' show DartPluginRegistrant;
+import 'dart:ui' show DartPluginRegistrant, PlatformDispatcher;
 
 import 'package:flutter/foundation.dart' show kReleaseMode;
 import 'package:flutter/widgets.dart';
@@ -89,6 +89,7 @@ import 'package:haven/src/services/background_location_manager.dart';
 import 'package:haven/src/services/catchup_service.dart';
 import 'package:haven/src/services/nostr_relay_service.dart';
 import 'package:haven/src/services/pending_mls_wipe_service.dart';
+import 'package:haven/src/utils/log_alias.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:workmanager/workmanager.dart';
 
@@ -327,19 +328,12 @@ Future<bool> runBackgroundCatchupTask({
     return true;
   } on Object catch (e) {
     // Signal WorkManager to apply back-off / retry at next window.
-    // runtimeType only — never the error itself (Security Rule 8).
+    // runtimeType only — never the error itself. `redact_hex_sequences`
+    // only collapses long hex runs; an npub, a relay URL or a display name
+    // in the error text would pass through untouched (Security Rule 8/15),
+    // so no debug-only detail line prints `e` either — this isolate's own
+    // release silencer would not save a debug build or an E2E capture.
     debugPrint('[CatchupWorker] sweep failed: ${e.runtimeType}');
-    // DEBUG-ONLY diagnostic: the assert body is stripped from release builds
-    // (and this isolate also replicates main()'s release debugPrint silencer),
-    // so this never reaches a production log. It surfaces the reason so a
-    // cold-worker BOOTSTRAP failure is debuggable — e.g. the e2e-background-catchup
-    // CI lane, where a reused worker process double-inits RustLib. FFI Result
-    // errors are hex-redacted on the Rust side, and a PanicException carries a
-    // Rust panic location (bug info), not key material.
-    assert(() {
-      debugPrint('[CatchupWorker] sweep failed detail: $e');
-      return true;
-    }(), 'debug-only cold-worker failure diagnostic');
     return false;
   }
 }
@@ -358,7 +352,12 @@ Future<bool> runBackgroundCatchupTask({
 ///      Replicated first so no later line can leak to logcat in release.
 ///   1. `WidgetsFlutterBinding.ensureInitialized()` — must precede the
 ///      registrant; without it `DartPluginRegistrant.ensureInitialized()`
-///      panics on some engines.
+///      panics on some engines. Also backs `PlatformDispatcher.instance` and
+///      may install its own binding-owned `FlutterError.onError`, so it must
+///      precede step 1.5 too, or the binding could clobber ours.
+///   1.5. `FlutterError.onError` / `PlatformDispatcher.instance.onError` —
+///      also per-isolate, also replicated (Security Rule 8/15): Flutter's
+///      defaults print an uncaught exception's raw `toString()` + stack.
 ///   2. `DartPluginRegistrant.ensureInitialized()` — registers all plugins
 ///      (including `shared_preferences`) so platform channels are reachable.
 ///      This MUST precede any platform-channel call. Doing it inside
@@ -381,8 +380,21 @@ void callbackDispatcher() {
   if (kReleaseMode) {
     debugPrint = (String? message, {int? wrapWidth}) {};
   }
-  // (1) Binding first — always.
+  // (1) Binding first — always. Must precede the handler assignments below
+  // too: it backs `PlatformDispatcher.instance` and may install its own
+  // binding-owned `FlutterError.onError` on the way up, which would clobber
+  // ours if we assigned first.
   WidgetsFlutterBinding.ensureInitialized();
+  // This isolate never runs `main()`, so its `FlutterError.onError` /
+  // `PlatformDispatcher.instance.onError` redaction is replicated here too —
+  // Flutter's defaults print an exception's raw `toString()` + stack.
+  FlutterError.onError = (details) => debugPrint(
+    '[FlutterError] ${details.exception.runtimeType} in ${details.library}',
+  );
+  PlatformDispatcher.instance.onError = (error, stack) {
+    debugPrint('[UncaughtAsync] ${error.runtimeType}');
+    return true;
+  };
   // (2) Plugin registrant second — before ANY platform-channel call.
   DartPluginRegistrant.ensureInitialized();
 
@@ -597,11 +609,17 @@ Future<void> _runCatchupViaWorkerBootstrap() async {
     // observed heuristic still holds (an applied Location event is a subset
     // of eventsApplied). `deferred=` is new, informational-only output that
     // CI does not parse.
+    // relayErrors is bucketed, not dropped: `run-m7-background-catchup.sh`'s
+    // `parse_counter` only ever branches on zero vs non-zero
+    // (`relayErrors==0` / `!=0`), and `magnitudeBucket` preserves that
+    // boundary — 0→"0", 1→"1", 2-4→"2-4", 5+→"5+" all parse with a
+    // non-zero leading digit when non-zero.
     debugPrint(
       '$kCatchupWorkerSweepCompletePrefix circles=${result.circlesSwept} '
       'locations=${result.eventsApplied} deferred=${result.eventsDeferred} '
       'cursors=${result.cursorsAdvanced} '
-      'deadline=${result.deadlineHit} relayErrors=${result.relayErrors}',
+      'deadline=${result.deadlineHit} '
+      'relayErrors=${magnitudeBucket(result.relayErrors)}',
     );
   } finally {
     try {

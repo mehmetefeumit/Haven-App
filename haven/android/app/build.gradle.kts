@@ -28,6 +28,13 @@ android {
         jvmTarget = JavaVersion.VERSION_17.toString()
     }
 
+    // `BuildConfig.DEBUG` gates every native log call out of release builds
+    // (scripts/ci/check_native_log_allowlist.sh); AGP 8 no longer generates
+    // the class unless asked.
+    buildFeatures {
+        buildConfig = true
+    }
+
     defaultConfig {
         // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
         applicationId = "com.oblivioustech.haven"

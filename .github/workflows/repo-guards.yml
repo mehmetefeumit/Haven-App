@@ -366,6 +366,33 @@
 #     keyring-core logs the credential's `Debug` at DEBUG, and filtering it on
 #     Android alone left the Apple unified log unfiltered.
 #
+#   No identifier logging             scripts/ci/check_no_identifier_logging.sh
+#     Security Rule 15 at the SOURCE. The key guard answers "is this key
+#     material?"; this one answers "could this value tell one user, circle or
+#     device apart from another?" — pubkeys, group and event ids, relay URLs
+#     (default pool included), names, coordinates, absolute epochs, exact
+#     counts, absolute instants, error objects rendered whole, every
+#     truncation/encoding shape, and any `{:?}` without a named reviewed
+#     Debug. Alias handles, buckets and relative offsets pass.
+#
+#   Debug/Display impls are proven    scripts/ci/check_debug_impls_covered.sh
+#     Every hand-written `Debug`/`Display` impl in both Rust crates is named
+#     by a redaction assertion, a `*_debug_redacts_*` test in its own file, or
+#     a justified allowlist row. A redacting impl nobody tests is the one that
+#     starts rendering the field it was written to hide.
+#
+#   Release log silencer first        scripts/ci/check_release_log_silencer.sh
+#     `main()` and every `@pragma('vm:entry-point')` isolate entry install the
+#     `kReleaseMode` debugPrint silencer before any other statement. The
+#     background isolates never run `main()`, so its silencer cannot reach
+#     them.
+#
+#   Native log calls are allowlisted  scripts/ci/check_native_log_allowlist.sh
+#     Every Kotlin/Swift log call — and every caller of a wrapper around one —
+#     is on a justified allowlist, interpolates only a type name or enum code,
+#     and on iOS sits inside `#if DEBUG`. The Rust and Dart guards cannot see
+#     `android.util.Log` or `NSLog`.
+#
 #   Secret fields are zeroized        scripts/ci/check_secret_fields_zeroized.sh
 #     Security Rule 7 as a scan rather than a list. The compile-time proof in
 #     `zeroization_security.rs` is the strongest possible statement about the
@@ -1138,6 +1165,54 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_no_key_logging.sh --self-test
 
+      # Security Rule 15 at the source — the question the key guard does not
+      # ask. A `log-scan-ok:` marker needs a reason and never blankets a file.
+      - name: No identifier reaches a log call
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_no_identifier_logging.sh
+
+      # Table-driven: one known-bad fixture per vocabulary word in each
+      # language and one per forbidden shape, the known-good shapes that decide
+      # whether the guard survives the tree (an alias, a bucket, a relative
+      # offset, a boolean, a delta, `runtimeType`, `.code`), the marker rules,
+      # and the unknown-macro trap — count-pinned, so a lost fixture is red.
+      - name: Identifier-logging guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_no_identifier_logging.sh --self-test
+
+      # The `{:?}` half of Rule 15: a placeholder may only render a Debug that
+      # a test has been seen proving redacted.
+      - name: Debug/Display impls carry a redaction proof
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_debug_impls_covered.sh
+
+      # Fixtures pin every impl shape the enumerator must see (generic,
+      # lifetime, `where` on the next line, bare `Debug` after a `use`), each
+      # proof kind, the trait-specificity of the macros, a stale allowlist
+      # row, and a `debug_redacts` that lives only in a comment.
+      - name: Debug-impl coverage guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_debug_impls_covered.sh --self-test
+
+      # A release build must not log from ANY isolate; the background entry
+      # points never run main(), so each installs its own silencer first.
+      - name: Release log silencer precedes every entry point
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_release_log_silencer.sh
+
+      - name: Release log silencer guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_release_log_silencer.sh --self-test
+
+      # The two languages the Rust and Dart scanners cannot read.
+      - name: Native log calls are allowlisted
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_native_log_allowlist.sh
+
+      - name: Native log allowlist guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_native_log_allowlist.sh --self-test
+
       # Security Rule 7 over every struct, not the two on a hand-kept list.
       - name: Secret-shaped fields are zeroized
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
@@ -1324,6 +1399,28 @@ jobs:
       - name: E2E harness self-test (connect-flake predicate)
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash tooling/e2e/ci/run-single-avd-scenario.sh --self-test
+
+      # Four more orchestrators own a secret-leak gate of their own. Each
+      # fixture pins the containment that matters: on a leak (rc 1) exactly
+      # the scanned `*.log` files are removed and a labels-only marker is
+      # left, and rc 3 (nothing scannable) and rc 0 touch nothing — so a leak
+      # can never be uploaded `if: failure()` and a clean run never loses its
+      # evidence.
+      - name: E2E harness self-test (integration-lane leak gate)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/run-integration-tests.sh --self-test
+
+      - name: E2E harness self-test (relay-customization leak gate)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/run-relay-customization.sh --self-test
+
+      - name: E2E harness self-test (flake-stress leak gate)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/run-flake-stress.sh --self-test
+
+      - name: E2E harness self-test (background-catchup leak gate)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/run-m7-background-catchup.sh --self-test
 
       - name: E2E harness self-test (secret-leak scanner)
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}

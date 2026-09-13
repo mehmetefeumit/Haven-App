@@ -45,7 +45,7 @@ pub(crate) mod storage_relay_prefs;
 pub mod types;
 
 pub use contamination::ContaminationSource;
-pub use error::{CircleError, Result};
+pub use error::{CircleError, RelayInputRejection, Result};
 pub use leave::LeavePlan;
 pub use manager::{
     AddMembersResult, CircleCreationResult, CircleManager, CommitToPublish, DecryptedIngest,

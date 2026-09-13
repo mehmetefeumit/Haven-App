@@ -42,6 +42,7 @@
 use std::collections::HashMap;
 use std::sync::{Mutex, PoisonError};
 
+use crate::log_alias::bucket;
 use crate::relay::cursor::cursor_ms_for_window;
 
 /// One circle's anchor for the current subscription generation.
@@ -127,7 +128,7 @@ impl std::fmt::Debug for CursorAnchors {
             .unwrap_or_else(PoisonError::into_inner)
             .len();
         f.debug_struct("CursorAnchors")
-            .field("circles", &len)
+            .field("circles", &bucket(len))
             .finish()
     }
 }
@@ -530,12 +531,19 @@ mod inbox_tests {
         assert_eq!(anchor.consume_eose(NOW), None);
     }
 
+    /// The inbox generation's open INSTANT is what the anchor holds; only
+    /// whether one is open renders (Rule 15).
     #[test]
-    fn the_debug_impl_is_presence_only() {
+    fn inbox_anchor_debug_redacts_the_open_instant() {
         let anchor = InboxAnchor::default();
         assert!(format!("{anchor:?}").contains("generation_open: false"));
         anchor.open(OPENED);
-        assert!(format!("{anchor:?}").contains("generation_open: true"));
+        let rendered = format!("{anchor:?}");
+        assert!(rendered.contains("generation_open: true"));
+        assert!(
+            !rendered.contains(&OPENED.to_string()),
+            "the anchor's absolute open time must not render: {rendered}"
+        );
     }
 }
 
@@ -777,16 +785,25 @@ mod tests {
         );
     }
 
+    /// Rules 4 + 15: the table is keyed by `nostr_group_id` hex, and how many
+    /// circles a device follows is itself linkable, so the count is bucketed.
     #[test]
-    fn the_debug_impl_leaks_no_group_id() {
-        // Security Rule 4: the anchor table is keyed by `nostr_group_id` hex.
+    fn cursor_anchors_debug_redacts_the_group_id_and_buckets_the_count() {
         let anchors = CursorAnchors::default();
-        anchors.open_generation("deadbeef", OPENED);
+        anchors.open_generation("deadbeefdeadbeefdeadbeefdeadbeef", OPENED);
+        assert!(format!("{anchors:?}").contains("circles: \"1\""));
+        for hex in ["aa00", "bb00", "cc00", "dd00", "ee00"] {
+            anchors.open_generation(hex, OPENED);
+        }
         let rendered = format!("{anchors:?}");
         assert!(
-            !rendered.contains("deadbeef"),
-            "the anchor table must render presence-only: {rendered}"
+            rendered.contains("circles: \"5+\""),
+            "six followed circles must render as the 5+ bucket: {rendered}"
         );
-        assert!(rendered.contains("circles: 1"));
+        crate::assert_debug_redacted!(
+            anchors,
+            "CursorAnchors",
+            &["deadbeefdeadbeefdeadbeefdeadbeef"]
+        );
     }
 }

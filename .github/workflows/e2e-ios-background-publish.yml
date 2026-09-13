@@ -333,10 +333,13 @@ jobs:
     #     the host-native relay                                      <= 15m
     #   boot step cap                                                   15m
     #   drive step cap                                       135m / poll 129m
-    #   diagnostics + artifact upload, UNCAPPED: a `log collect` and a
-    #     multi-GB .logarchive. Deliberately left uncapped — a step cap
-    #     that killed a diagnostic would turn a green run red, which is
-    #     the failure this whole ladder exists to avoid              <= 10m
+    #   diagnostics + artifact upload, UNCAPPED: a `log collect` of a
+    #     multi-GB .logarchive, then (since 2026-09-12) two `log show`
+    #     passes over it and the secret scan of the exports — unmeasured
+    #     yet: re-measure. Deliberately left uncapped — a step cap that
+    #     killed a diagnostic would turn a green run red, which is the
+    #     failure this whole ladder exists to avoid; and a job-cap death
+    #     skips the upload, so nothing unscanned can be published  <= 10m
     #                                                       = 175m / poll 169m
     # This was 155 while the same header sized setup at 10-15m, so by its own
     # numbers the worst case was 160-165m and the cap could fire first. The
@@ -379,6 +382,7 @@ jobs:
 
     steps:
       - name: Checkout
+        id: checkout
         uses: actions/checkout@v6
 
       - name: Setup Rust
@@ -529,11 +533,44 @@ jobs:
             bash tooling/e2e/ci/run-ios-bg-publish.sh
             ${{ steps.sim.outputs.udid }}
 
+      # The unified-log archive is a full-device capture (binary tracev3,
+      # multi-GB) that the scanner cannot read, so it never leaves the runner:
+      # two `log show` exports replace it — Haven's own lines (the Rust
+      # `frb_user` oslog subsystem and the Runner process), uncapped, and the
+      # whole device under SIM_LOG_FULL_CAP_BYTES. `log show` emits in
+      # chronological order, so the cap keeps the EARLIEST bytes; the residual
+      # past it is discarded with the archive — evidence lost, nothing
+      # published. Every log the upload step names is scanned by the next
+      # step, before that step can see it.
       - name: Collect simulator diagnostics
         if: always()
+        env:
+          SIM_LOG_FULL_CAP_BYTES: "67108864"
         run: |
           xcrun simctl spawn booted log collect --output /tmp/sim.logarchive 2>/dev/null || true
+          log show --archive /tmp/sim.logarchive --style syslog --info --debug \
+            --predicate 'subsystem == "frb_user" OR process == "Runner"' \
+            > /tmp/sim-unified.log 2>/dev/null || true
+          log show --archive /tmp/sim.logarchive --style syslog 2>/dev/null \
+            | head -c "${SIM_LOG_FULL_CAP_BYTES}" > /tmp/sim-unified-full.log || true
+          rm -rf /tmp/sim.logarchive
           cp /tmp/haven-local-relay.log /tmp/relay.log 2>/dev/null || true
+
+      # Scan-before-upload, as its OWN step: every `.log` the upload step names
+      # goes through the scanner here on every outcome short of a cancellation,
+      # so a leak (rc 1) deletes the scanned files and fails the lane even on an
+      # otherwise green run, and an unscannable log (rc 3) fails it and leaves
+      # them as they are. The standard guard condition (not `always()`) is what
+      # lets docs/privacy/privacy_invariants.json cite this step as the runtime
+      # scanner's enforcing run.
+      - name: Scan captured logs for secrets before upload
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: |
+          logs=(/tmp/sim-unified.log /tmp/sim-unified-full.log /tmp/bg-publish-ios.log /tmp/flutter-ios-test.log /tmp/relay.log)
+          rc=0
+          bash tooling/e2e/ci/scan-logs-for-secrets.sh "${logs[@]}" || rc=$?
+          if [ "${rc}" -eq 1 ]; then rm -f -- "${logs[@]}"; fi
+          exit "${rc}"
 
       - name: Upload failure artifacts
         if: failure()
@@ -546,7 +583,8 @@ jobs:
             /tmp/bg-publish-ios.log
             /tmp/flutter-ios-test.log
             /tmp/relay.log
-            /tmp/sim.logarchive
+            /tmp/sim-unified.log
+            /tmp/sim-unified-full.log
           retention-days: 14
           if-no-files-found: ignore
 

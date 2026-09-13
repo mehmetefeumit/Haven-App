@@ -59,6 +59,8 @@ use rand::rngs::OsRng;
 use rand::Rng;
 use tokio::sync::Notify;
 
+use crate::log_alias::bucket;
+
 use super::config::{BACKOFF_JITTER_FRACTION_BP, BACKOFF_MAX_SECS, BACKOFF_MIN_SECS};
 
 /// What a relay's `CLOSED` reason means for how soon the REQ may be re-issued.
@@ -269,7 +271,7 @@ impl std::fmt::Debug for RepairQueue {
             .filter(|e| e.due_at.is_some())
             .count();
         f.debug_struct("RepairQueue")
-            .field("pending", &pending)
+            .field("pending", &bucket(pending))
             .finish_non_exhaustive()
     }
 }
@@ -570,22 +572,37 @@ mod tests {
     }
 
     #[test]
-    fn repair_key_and_queue_debug_are_presence_only() {
-        let k = key("wss://secret-relay.example", "s_group_0_SECRETSUB");
+    fn repair_key_and_repair_queue_debug_redacts_relay_and_sub_id() {
+        let k: RepairKey = key("wss://secret-relay.example", "s_group_0_SECRETSUB");
         let dbg = format!("{k:?}");
-        assert!(!dbg.contains("secret-relay"), "leaked relay url: {dbg}");
-        assert!(!dbg.contains("SECRETSUB"), "leaked sub id: {dbg}");
         assert!(!dbg.contains("wss://"), "leaked relay scheme: {dbg}");
+        crate::assert_debug_redacted!(
+            k,
+            "RepairKey",
+            &["secret-relay.example", "s_group_0_SECRETSUB"]
+        );
 
+        // How many REQs are awaiting repair is a relay-set magnitude, so the
+        // queue reports a bucket rather than a count (Rule 15).
         let q = RepairQueue::default();
         q.note_closed(&k, ClosedKind::Dropped);
+        assert!(format!("{q:?}").contains("pending: \"1\""));
+        for n in 0..5 {
+            q.note_closed(
+                &key("wss://b.example", &format!("s{n}")),
+                ClosedKind::Dropped,
+            );
+        }
         let dbg = format!("{q:?}");
         assert!(
-            dbg.contains("pending: 1"),
-            "the count must be reported: {dbg}"
+            dbg.contains("pending: \"5+\""),
+            "six pending repairs must render as the 5+ bucket: {dbg}"
         );
-        assert!(!dbg.contains("secret-relay"), "leaked relay url: {dbg}");
-        assert!(!dbg.contains("SECRETSUB"), "leaked sub id: {dbg}");
+        crate::assert_debug_redacted!(
+            q,
+            "RepairQueue",
+            &["secret-relay.example", "s_group_0_SECRETSUB"]
+        );
     }
 
     #[tokio::test]

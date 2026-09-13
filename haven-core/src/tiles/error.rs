@@ -134,13 +134,25 @@ mod tests {
     }
 
     #[test]
-    fn display_and_debug_never_leak_wrapped_payload() {
+    fn tile_cache_error_debug_redacts_and_display_redacts_the_payload() {
         // A coordinate-shaped payload smuggled into a Storage/Io error must not
         // survive to either Display or Debug output.
         let coord = "z15/16384/10000";
         let storage = TileCacheError::Storage(coord.to_string());
         let io = TileCacheError::Io(coord.to_string());
         for err in [storage, io] {
+            crate::assert_debug_redacted!(
+                &err,
+                "TileCacheError",
+                marker = "<redacted>",
+                &[coord, "16384"]
+            );
+            crate::assert_display_redacted!(
+                &err,
+                "TileCacheError",
+                marker = "tile cache",
+                &[coord, "16384"]
+            );
             let display = err.to_string();
             let debug = format!("{err:?}");
             assert!(

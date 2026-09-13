@@ -1,12 +1,14 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:fake_async/fake_async.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/live_sync_resubscriber.dart';
 import 'package:haven/src/services/subscription_service.dart';
+
+import '../helpers/log_capture.dart';
 
 // ---------------------------------------------------------------------------
 // Test doubles + helpers
@@ -887,12 +889,7 @@ void main() {
     test(
       'a delta then full-restart failure never leaks the raw error to logs',
       () {
-        final logs = <String>[];
-        final original = debugPrint;
-        debugPrint = (message, {wrapWidth}) {
-          if (message != null) logs.add(message);
-        };
-        addTearDown(() => debugPrint = original);
+        final logs = LogCapture.install();
 
         FakeAsync().run((async) {
           final engine = _RecordingEngine(
@@ -909,12 +906,11 @@ void main() {
           resub.dispose();
         });
 
-        final joined = logs.join('\n');
-        expect(joined, contains('delta failed'));
-        expect(joined, contains('full restart failed'));
+        logs.assertContains('delta failed');
+        logs.assertContains('full restart failed');
         // Both thrown errors embed a fake group hex; only the runtimeType is
         // ever logged (Security Rule 8).
-        expect(joined, isNot(contains('abababab')));
+        logs.assertNoNeedles(['abababab']);
       },
     );
 
@@ -1010,12 +1006,7 @@ void main() {
       // Models `engineFactory` REFUSING (start throws) — e.g. a restart
       // racing a logout after the M10 wipe. The resubscriber must swallow it
       // (the next change retries) and log only the runtimeType.
-      final logs = <String>[];
-      final original = debugPrint;
-      debugPrint = (message, {wrapWidth}) {
-        if (message != null) logs.add(message);
-      };
-      addTearDown(() => debugPrint = original);
+      final logs = LogCapture.install();
 
       FakeAsync().run((async) {
         final engine = _RecordingEngine(
@@ -1030,9 +1021,8 @@ void main() {
         resub.dispose();
       });
 
-      final joined = logs.join('\n');
-      expect(joined, contains('full restart failed'));
-      expect(joined, isNot(contains('abababab')));
+      logs.assertContains('full restart failed');
+      logs.assertNoNeedles(['abababab']);
     });
   });
 

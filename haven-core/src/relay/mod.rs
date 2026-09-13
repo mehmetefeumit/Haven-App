@@ -52,7 +52,7 @@ pub use cursor::{
     INBOX_RESUBSCRIBE_LOOKBACK_SECS, STREAM_GROUP_445, STREAM_INBOX_1059,
 };
 pub use discovery::{discovery_relays, set_discovery_relays_for_test, PRODUCTION_DISCOVERY_RELAYS};
-pub use error::{RelayError, RelayResult};
+pub use error::{InvalidUrlReason, RelayError, RelayResult};
 pub use manager::{allow_ws_loopback_for_test, ws_loopback_allowed_for_test, RelayManager};
 pub use publishers::{
     build_nip09_deletion, build_nip65_relay_list_event, build_relay_list_event,
@@ -63,3 +63,15 @@ pub use types::{
     PublishResult, RelayConnectionStatus, RelayEventCheck, RelayFetchOutcome, RelayStatus,
 };
 pub use url_norm::{canonicalize, normalize_relay_url};
+
+use crate::log_alias::{self, LogAliasClass, LogHandle};
+
+/// The log handle for a circle whose id is in hand as `hex(nostr_group_id)`.
+///
+/// The subscribe and receive planes carry the id as hex, while
+/// [`log_alias::circle`] takes the 32 bytes; `log_alias` normalises both to the
+/// same canonical form, so a line here and a line elsewhere name one circle by
+/// one handle (Security Rule 15).
+pub(crate) fn circle_handle(group_id_hex: &str) -> LogHandle {
+    log_alias::alias(LogAliasClass::Circle, group_id_hex.as_bytes())
+}

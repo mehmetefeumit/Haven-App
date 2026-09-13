@@ -64,6 +64,99 @@
 
 set -euo pipefail
 
+# scan_dir_or_contain <dir> — the secret-leak gate (Security Rules 6 and 15)
+# over the evidence directory the workflow uploads `if: always()`. A leak
+# (rc 1) REMOVES every *.log the scan walked and leaves a LEAK.marker naming
+# only the pattern label(s), so the upload publishes the verdict and not the
+# line; rc 3 (nothing scannable) keeps the directory as it is. Reads
+# SECRET_SCAN at call time so --self-test can hand it a fake scanner.
+scan_dir_or_contain() {
+  local dir="$1" rc=0 err
+  err="$(mktemp)"
+  bash "${SECRET_SCAN}" "${dir}" 2>"${err}" || rc=$?
+  cat "${err}" >&2
+  if (( rc == 1 )); then
+    find "${dir}" -type f -name '*.log' -exec rm -f -- {} +
+    {
+      echo "secret-leak scan: LEAK — every *.log under this directory was removed before upload (scan-logs-for-secrets.sh rc 1)"
+      sed -n 's/^LEAK: .* \[\(.*\)\] at line(s):.*$/pattern: \1/p' "${err}" | sort -u
+    } > "${dir}/LEAK.marker"
+    echo "ERROR: secret-leak guard tripped on ${dir}; removed its *.log files and" \
+         "left ${dir}/LEAK.marker (pattern labels only)." >&2
+  fi
+  rm -f "${err}"
+  return "${rc}"
+}
+
+# --self-test — hermetic: no device, no docker, no relay. Proves the gate
+# CONTAINS, driven with a FAKE scanner: rc 1 removes every *.log under the
+# directory (and nothing else) and leaves a LEAK.marker naming the pattern
+# label only; rc 3 and rc 0 leave the directory untouched; the verdict comes
+# back unchanged.
+run_self_test() {
+  local tmp fail=0 dir fake want rc SECRET_SCAN
+  tmp="$(mktemp -d)"
+  # shellcheck disable=SC2064
+  trap "rm -rf '${tmp}'" RETURN
+  fake="${tmp}/fake-scan.sh"
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'if [[ "${FAKE_SCAN_RC}" == 1 ]]; then echo "LEAK: $1/iter-3.logcat.log [bech32 nsec (private key)] at line(s): 7" >&2; fi' \
+    'exit "${FAKE_SCAN_RC}"' > "${fake}"
+  SECRET_SCAN="${fake}"
+  dir="${tmp}/logs"
+  for want in 1 3 0; do
+    rm -rf "${dir}"
+    mkdir -p "${dir}/nested"
+    printf 'a\n' > "${dir}/iter-3.logcat.log"
+    printf 'b\n' > "${dir}/nested/drive.log"
+    printf 'c\n' > "${dir}/notes.txt"
+    export FAKE_SCAN_RC="${want}"
+    rc=0
+    scan_dir_or_contain "${dir}" 2>/dev/null || rc=$?
+    if (( rc != want )); then
+      echo "SELF-TEST FAIL: the gate returned ${rc} for a scanner rc of ${want}" >&2
+      fail=1
+    fi
+    if (( want == 1 )); then
+      if [[ -e "${dir}/iter-3.logcat.log" || -e "${dir}/nested/drive.log" ]]; then
+        echo "SELF-TEST FAIL: a leak (rc 1) left a scanned *.log on disk for the" \
+             "if: always() upload to publish" >&2
+        fail=1
+      fi
+      if [[ ! -e "${dir}/notes.txt" ]]; then
+        echo "SELF-TEST FAIL: rc 1 removed a file the scan never walked" >&2
+        fail=1
+      fi
+      if [[ ! -f "${dir}/LEAK.marker" ]]; then
+        echo "SELF-TEST FAIL: rc 1 left no LEAK.marker, so the upload carries no verdict" >&2
+        fail=1
+      elif ! grep -qF 'pattern: bech32 nsec (private key)' "${dir}/LEAK.marker"; then
+        echo "SELF-TEST FAIL: LEAK.marker does not name the pattern label" >&2
+        fail=1
+      elif grep -qE 'iter-3|at line' "${dir}/LEAK.marker"; then
+        echo "SELF-TEST FAIL: LEAK.marker carries more than the label (a file or line)" >&2
+        fail=1
+      fi
+    elif [[ ! -e "${dir}/iter-3.logcat.log" || ! -e "${dir}/nested/drive.log" \
+            || -e "${dir}/LEAK.marker" ]]; then
+      echo "SELF-TEST FAIL: scanner rc ${want} touched a directory it had no leak to contain" >&2
+      fail=1
+    fi
+  done
+  unset FAKE_SCAN_RC
+  if (( fail )); then
+    echo "run-flake-stress.sh: SELF-TEST FAILED" >&2
+    return 1
+  fi
+  echo "run-flake-stress.sh: self-test passed (the secret-leak gate removes exactly the *.log files it scanned on a leak, leaves a labels-only LEAK.marker, and touches nothing on rc 3 or rc 0)."
+  return 0
+}
+
+if [[ "${1:-}" == "--self-test" ]]; then
+  run_self_test
+  exit $?
+fi
+
 if [[ $# -lt 1 ]]; then
   echo "Usage: $0 <iterations> [<target.dart>]" >&2
   exit 2
@@ -180,7 +273,7 @@ if (( ${#FAILED_ITERS[@]} > 0 )); then
   # -------------------------------------------------------------------------
   echo "== Secret-leak scan over ${LOG_DIR} (Security Rule 6) =="
   scan_rc=0
-  bash "${SECRET_SCAN}" "${LOG_DIR}" || scan_rc=$?
+  scan_dir_or_contain "${LOG_DIR}" || scan_rc=$?
   if (( scan_rc != 0 )); then
     echo "ERROR: secret-leak guard tripped on ${LOG_DIR} (rc=${scan_rc}) — see the" \
          "LEAK / UNUSABLE line(s) above. rc=1 means key material reached the" \

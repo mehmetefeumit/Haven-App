@@ -57,12 +57,13 @@
 /// platform interactions.
 library;
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/services/background_catchup_worker.dart';
 import 'package:haven/src/services/background_location_manager.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+import '../helpers/log_capture.dart';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -142,16 +143,6 @@ Future<bool> _run(_InjectedTask t, {bool? catchupEnabled}) =>
             catchupEnabled: catchupEnabled,
           );
 
-/// Captures `debugPrint` output for the current test, restoring the original
-/// in a tear-down. Returns the live log list.
-List<String?> _captureDebugPrint() {
-  final log = <String?>[];
-  final original = debugPrint;
-  debugPrint = (String? message, {int? wrapWidth}) => log.add(message);
-  addTearDown(() => debugPrint = original);
-  return log;
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -166,7 +157,7 @@ void main() {
     test(
       'returns true with ZERO gate calls when catchupEnabled is false',
       () async {
-        final log = _captureDebugPrint();
+        final log = LogCapture.install();
         final t = _makeTask();
 
         final result = await _run(t, catchupEnabled: false);
@@ -187,7 +178,7 @@ void main() {
               'consent read, before any prefs/platform-channel/FFI activity',
         );
         expect(
-          log,
+          log.lines,
           contains(kCatchupWorkerFlagDisabledMarker),
           reason: 'Gate-0 exit must emit its presence-only logcat marker',
         );
@@ -224,7 +215,7 @@ void main() {
     test(
       'returns true and does NOT call runCatchup when sharing is disabled',
       () async {
-        final log = _captureDebugPrint();
+        final log = LogCapture.install();
         final t = _makeTask(sharingEnabled: false);
 
         final result = await _run(t);
@@ -244,7 +235,7 @@ void main() {
               'wipe/FGS/foreground checks or runCatchup',
         );
         expect(
-          log,
+          log.lines,
           contains(kCatchupWorkerConsentDisabledMarker),
           reason:
               'Gate-1 exit must emit the exact marker Phase C2 of the '
@@ -280,7 +271,7 @@ void main() {
       'marker set → returns true; FGS/foreground checks and runCatchup '
       'never called',
       () async {
-        final log = _captureDebugPrint();
+        final log = LogCapture.install();
         final t = _makeTask(wipePending: true);
 
         final result = await _run(t);
@@ -301,7 +292,7 @@ void main() {
               'foreground state, and must never reach the sweep',
         );
         expect(
-          log,
+          log.lines,
           contains(kCatchupWorkerPendingWipeMarker),
           reason:
               'Gate-2 exit must emit the exact marker Phase C1 of the '
@@ -351,7 +342,7 @@ void main() {
     test(
       'returns true and does NOT call runCatchup when FGS is running',
       () async {
-        final log = _captureDebugPrint();
+        final log = LogCapture.install();
         final t = _makeTask(fgsRunning: true);
 
         final result = await _run(t);
@@ -370,7 +361,7 @@ void main() {
               'Must pass the security gates, then exit at the FGS check '
               'without probing foreground state or running the sweep',
         );
-        expect(log, contains(kCatchupWorkerFgsAliveMarker));
+        expect(log.lines, contains(kCatchupWorkerFgsAliveMarker));
       },
     );
   });
@@ -382,7 +373,7 @@ void main() {
     test(
       'returns true and does NOT call runCatchup when the UI is active',
       () async {
-        final log = _captureDebugPrint();
+        final log = LogCapture.install();
         final t = _makeTask(foregroundActive: true);
 
         final result = await _run(t);
@@ -399,7 +390,7 @@ void main() {
           ['sharingCheck', 'wipeCheck', 'fgsCheck', 'foregroundCheck'],
           reason: 'All four gates run, then the sweep is skipped',
         );
-        expect(log, contains(kCatchupWorkerForegroundActiveMarker));
+        expect(log.lines, contains(kCatchupWorkerForegroundActiveMarker));
       },
     );
 
@@ -475,6 +466,19 @@ void main() {
       );
       expect(t.calls.contains('catchup'), isTrue);
     });
+
+    test(
+      'logs only the failure type, never the raw error text (Rule 8/15)',
+      () async {
+        final log = LogCapture.install();
+        final t = _makeTask(catchupThrows: true);
+
+        await _run(t);
+
+        log.assertContains('StateError');
+        log.assertNoNeedles(['FFI error']);
+      },
+    );
   });
 
   // ---------------------------------------------------------------------------

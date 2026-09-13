@@ -11,8 +11,10 @@
 library;
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/pending_mls_wipe_service.dart';
+import 'package:haven/src/utils/log_alias.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../mocks/mock_circle_service.dart';
@@ -270,6 +272,88 @@ void main() {
           reason:
               '(c) marker must survive a crash (no clearPending call) and '
               'be visible on the next launch');
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // The Rust `wipe_all_mls_state` FFI call re-mints the log-alias salt
+  // UNCONDITIONALLY (success AND failure), so retryWipeIfPending must drop the
+  // Dart-side memo unconditionally too, or a handle computed before the launch
+  // retry would keep answering identically after it, defeating the rotation.
+  // ---------------------------------------------------------------------------
+
+  group('retryWipeIfPending clears the log-alias memo', () {
+    late String Function({
+      required LogAliasClassFfi class_,
+      required String value,
+    })
+    originalFfiCall;
+
+    setUp(() {
+      originalFfiCall = logAliasFfiCall;
+      clearLogAliasMemo();
+    });
+
+    tearDown(() {
+      logAliasFfiCall = originalFfiCall;
+      clearLogAliasMemo();
+    });
+
+    test('on a successful wipe, a memoized handle is recomputed afterwards',
+        () async {
+      var calls = 0;
+      logAliasFfiCall = ({required class_, required value}) {
+        calls++;
+        return '${class_.name}#fake$calls';
+      };
+
+      // Prime the memo.
+      logAliasHandle(LogAliasClass.circle, 'deadbeef');
+      expect(calls, 1);
+      logAliasHandle(LogAliasClass.circle, 'deadbeef');
+      expect(calls, 1, reason: 'memo hit before the wipe');
+
+      final (:service, prefs: _) = await makeService(
+        prefsValues: {kPendingMlsWipeKey: true},
+        circleService: MockCircleService(),
+      );
+      await service.retryWipeIfPending();
+
+      logAliasHandle(LogAliasClass.circle, 'deadbeef');
+      expect(
+        calls,
+        2,
+        reason: 'a successful launch-retry wipe must drop the memo, so the '
+            'same value is recomputed against the (now-rotated) salt rather '
+            'than answering with the pre-wipe handle',
+      );
+    });
+
+    test('on a failed wipe, a memoized handle is STILL recomputed afterwards',
+        () async {
+      var calls = 0;
+      logAliasFfiCall = ({required class_, required value}) {
+        calls++;
+        return '${class_.name}#fake$calls';
+      };
+
+      logAliasHandle(LogAliasClass.circle, 'deadbeef');
+      expect(calls, 1);
+
+      final (:service, prefs: _) = await makeService(
+        prefsValues: {kPendingMlsWipeKey: true},
+        circleService: _ThrowingWipeMockCircleService(),
+      );
+      await service.retryWipeIfPending();
+
+      logAliasHandle(LogAliasClass.circle, 'deadbeef');
+      expect(
+        calls,
+        2,
+        reason: 'the Rust side rotates the salt even when the wipe throws, '
+            'so a failed retry must ALSO drop the Dart memo — leaving it '
+            'would silently keep answering with the pre-rotation handle',
+      );
     });
   });
 }

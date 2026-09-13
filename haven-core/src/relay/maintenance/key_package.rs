@@ -93,6 +93,7 @@ use base64::Engine as _;
 use cgka_traits::engine::KeyPackage;
 
 use super::kp_lifetime::TrackedKpLifetime;
+use crate::log_alias::{self, bucket, EventIdHex};
 use crate::nostr::mls::SessionManager;
 use crate::relay::publishers::{build_unpublish_event, PublisherError, PublisherResult};
 
@@ -600,11 +601,16 @@ pub struct KpMaintenanceEvents {
 
 impl std::fmt::Debug for KpMaintenanceEvents {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Aliased event id, bucketed relay magnitude: the published id and the
+        // size of the own-relay set are both linkable metadata (Rule 15).
         f.debug_struct("KpMaintenanceEvents")
-            .field("event_id", &self.event.id.to_hex())
+            .field(
+                "event",
+                &log_alias::event(EventIdHex(&self.event.id.to_hex())),
+            )
             .field("key_package", &"<redacted>")
             .field("d_tag", &"<redacted>")
-            .field("relay_count", &self.relays.len())
+            .field("relays", &bucket(self.relays.len()))
             .finish()
     }
 }
@@ -1758,17 +1764,24 @@ mod tests {
     }
 
     #[test]
-    fn kp_maintenance_events_debug_is_presence_only() {
+    fn kp_maintenance_events_debug_redacts_slot_event_id_and_relays() {
         let (keys, kp) = kp_bytes_from_session();
         let own = vec!["wss://secret-own-relay.example.com".to_string()];
         let stable = "deadbeefdeadbeefdeadbeefdeadbeef";
-        let events =
+        let events: KpMaintenanceEvents =
             build_kp_maintenance_events_reusing(&keys, &kp, &own, stable, None).expect("build");
         let dbg = format!("{events:?}");
-        assert!(!dbg.contains("secret-own-relay"), "leaked relay url: {dbg}");
-        assert!(!dbg.contains(stable), "leaked d tag: {dbg}");
-        assert!(dbg.contains("relay_count"));
+        let event_id = events.event.id.to_hex();
+        // The published event id is aliased and the own-relay magnitude is
+        // bucketed (Rule 15); the slot and the package bytes never render.
+        assert!(dbg.contains("event#"), "expected an alias handle: {dbg}");
+        assert!(dbg.contains("relays: \"1\""), "expected a bucket: {dbg}");
         assert!(dbg.contains("<redacted>"));
+        crate::assert_debug_redacted!(
+            events,
+            "KpMaintenanceEvents",
+            &["secret-own-relay.example.com", stable, &event_id]
+        );
     }
 
     // ── Retraction builders ──────────────────────────────────────────────────

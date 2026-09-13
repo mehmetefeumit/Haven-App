@@ -24,6 +24,12 @@ url = "2"
 log = "0.4"
 
 [dev-dependencies]
+# Same path dependency as above, with the `test-utils` marker feature so the
+# `assert_debug_redacted!` / `assert_display_redacted!` macros (gated
+# `cfg(any(test, feature = "test-utils"))` in `haven-core/src/util.rs`) are
+# visible to this crate's in-file redaction tests. DEV-ONLY on purpose: a
+# shipped build must not carry haven-core's test seams.
+haven-core = { path = "../../haven-core", features = ["test-utils"] }
 # In-process Nostr relay for hermetic real-FFI maintenance-orchestration tests
 # (drives the actual `RelayManagerFfi::maintain_key_package` glue over a real
 # socket — probe → decide → republish → 443-GC → record — not a hand-written

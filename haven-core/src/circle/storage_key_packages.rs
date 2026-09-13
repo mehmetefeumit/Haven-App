@@ -41,6 +41,7 @@ use rusqlite::{params, OptionalExtension};
 
 use super::error::{CircleError, Result};
 use super::storage::CircleStorage;
+use crate::log_alias::{self, EventIdHex, KeyPackageSlot};
 
 /// The Marmot `KeyPackage` event kind (NIP-33 addressable, single kind).
 pub const KEY_PACKAGE_KIND: u16 = 30443;
@@ -62,8 +63,9 @@ pub const KP_SLOT_RETIREMENT_DONE_KEY: &str = "kp_slot_retirement_done_v1";
 
 /// One row of the `published_key_packages` table: the current published KP.
 ///
-/// The `Debug` impl is hand-written to redact `key_package` — the MLS wire
-/// bytes must never reach a log line (Security Rule 6, defence in depth).
+/// The `Debug` impl is hand-written: the MLS wire bytes must never reach a log
+/// line (Security Rule 6), and the event id and the `d` slot are identifiers, so
+/// they render as [`log_alias`] handles (Security Rule 15).
 #[derive(Clone, PartialEq, Eq)]
 pub struct PublishedKeyPackageRow {
     /// Lowercase-hex Nostr event id of the published kind-30443 event.
@@ -80,11 +82,13 @@ pub struct PublishedKeyPackageRow {
 impl std::fmt::Debug for PublishedKeyPackageRow {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PublishedKeyPackageRow")
-            .field("event_id", &self.event_id)
-            .field("d_tag", &self.d_tag)
+            .field("event_id", &log_alias::event(EventIdHex(&self.event_id)))
+            .field(
+                "d_tag",
+                &log_alias::key_package(KeyPackageSlot(&self.d_tag)),
+            )
             .field("key_package", &"<redacted>")
-            .field("created_at", &self.created_at)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -458,16 +462,26 @@ mod tests {
     }
 
     #[test]
-    fn debug_redacts_key_package_bytes() {
-        let r = row("id", "d", &[0xde, 0xad, 0xbe, 0xef], 1);
+    fn published_key_package_row_debug_redacts_bytes_and_identifiers() {
+        let event_id = "7c1f0a9b8d2e3f405162738495a6b7c8d9e0f1a2b3c4d5e6f708192a3b4c5d6e";
+        let r: PublishedKeyPackageRow = row(
+            event_id,
+            "haven-kp-slot-0",
+            &[0xde, 0xad, 0xbe, 0xef],
+            1_757_000_000,
+        );
+        crate::assert_debug_redacted!(
+            &r,
+            "PublishedKeyPackageRow",
+            &[event_id, "haven-kp-slot-0", "deadbeef", "1757000000"]
+        );
         let dbg = format!("{r:?}");
         assert!(
             dbg.contains("<redacted>"),
             "kp bytes must be redacted: {dbg}"
         );
-        assert!(!dbg.contains("adbeef"), "raw kp bytes leaked: {dbg}");
-        // Public identifiers are fine to surface.
-        assert!(dbg.contains("event_id"));
-        assert!(dbg.contains('d'));
+        // Correlatable across log lines, resolvable by nobody.
+        assert!(dbg.contains("event#"), "{dbg}");
+        assert!(dbg.contains("key_package#"), "{dbg}");
     }
 }

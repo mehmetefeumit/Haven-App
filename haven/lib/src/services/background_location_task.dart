@@ -75,6 +75,7 @@ import 'package:haven/src/services/pending_mls_wipe_service.dart';
 import 'package:haven/src/services/per_circle_due_tracker.dart';
 import 'package:haven/src/services/publish_stagger.dart';
 import 'package:haven/src/services/publish_wake_lock.dart';
+import 'package:haven/src/utils/log_alias.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// Top-level callback required by [FlutterForegroundTask].
@@ -97,6 +98,16 @@ void backgroundCallback() {
   if (kReleaseMode) {
     debugPrint = (String? message, {int? wrapWidth}) {};
   }
+  // This isolate never runs `main()`, so its `FlutterError.onError` /
+  // `PlatformDispatcher.instance.onError` redaction is replicated here too —
+  // Flutter's defaults print an exception's raw `toString()` + stack.
+  FlutterError.onError = (details) => debugPrint(
+    '[FlutterError] ${details.exception.runtimeType} in ${details.library}',
+  );
+  PlatformDispatcher.instance.onError = (error, stack) {
+    debugPrint('[UncaughtAsync] ${error.runtimeType}');
+    return true;
+  };
   FlutterForegroundTask.setTaskHandler(BackgroundLocationTaskHandler());
 }
 
@@ -512,6 +523,7 @@ class BackgroundLocationTaskHandler extends TaskHandler {
       //    across the foreground→background handoff to one background cycle,
       //    keeping the kind-445 TTL no-gap invariant intact.
 
+      // log-scan-ok: presence-only ("loaded"/"none"), never the pubkey value
       debugPrint(
         '[BackgroundTask] Initialized '
         '(identity=${_pubkeyHex != null ? "loaded" : "none"}, '
@@ -1887,9 +1899,9 @@ class BackgroundLocationTaskHandler extends TaskHandler {
           if (deferred != null) {
             debugPrint(
               '[BackgroundTask] send deferred by the MLS engine — '
-              'gating=${deferred.unresolvedInputs}, '
+              'gating=${magnitudeBucket(deferred.unresolvedInputs)}, '
               'repaired=${deferred.repaired}, '
-              'stagedCommits=${deferred.commits.length}',
+              'stagedCommits=${magnitudeBucket(deferred.commits.length)}',
             );
             await _resolveDeferredCommits(circle, deferred);
             await publishDeferredProposals(
@@ -2121,9 +2133,11 @@ class BackgroundLocationTaskHandler extends TaskHandler {
       // reschedule here would also re-arm the circles the budget deferred and
       // the ones whose publish failed, which must both stay overdue.
       debugPrint(
-        '[BackgroundTask] Published to $publishCount/${dueKeys.length} due '
-        'circle(s) (${accepted.length} eligible), fetched '
-        '$fetchCount/${accepted.length} circle(s).',
+        '[BackgroundTask] Published to ${magnitudeBucket(publishCount)}/'
+        '${magnitudeBucket(dueKeys.length)} due circle(s) '
+        '(${magnitudeBucket(accepted.length)} eligible), fetched '
+        '${magnitudeBucket(fetchCount)}/${magnitudeBucket(accepted.length)} '
+        'circle(s).',
       );
     } on Object catch (e) {
       debugPrint('[BackgroundTask] Publish cycle FAILED: ${e.runtimeType}');

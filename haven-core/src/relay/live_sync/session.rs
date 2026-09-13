@@ -26,6 +26,7 @@ use tokio::task::JoinHandle;
 use zeroize::Zeroizing;
 
 use crate::circle::CircleManager;
+use crate::relay::circle_handle;
 use crate::relay::cursor::{since_for_stream, SubscribePhase, STREAM_INBOX_1059};
 
 use super::config::{
@@ -1137,20 +1138,20 @@ impl LiveSyncCore {
         phase: SubscribePhase,
         inbox_phase: SubscribePhase,
     ) -> LiveSyncResult<Vec<RepairKey>> {
-        // Diagnostic (M11 e2e triage): log the exact circle set this
-        // (re)subscribe anchors onto, so the drive log shows whether a
-        // newly-created mid-session circle actually reached the engine's REQ.
-        // Pseudonymous `nostr_group_id` prefixes only (Protocol Rule 4) — never
-        // the real MLS group id, never key material.
+        // Diagnostic (M11 e2e triage): HOW MANY circles this (re)subscribe anchors
+        // onto, bucketed. It used to join one alias handle per circle, which made
+        // the line's cardinality this account's exact circle count — a magnitude
+        // Rule 15 forbids even at debug level, and one the handles cannot
+        // anonymise because the number of them IS the disclosure. The bucket
+        // keeps the signal the triage wanted ("did the fresh circle reach the
+        // REQ at all"); WHICH circle each later per-circle line concerns is still
+        // named by a handle there.
+        let circle_count: usize = group_subs.iter().map(|g| g.group_ids_hex.len()).sum();
+        // log-scan-ok: the only {:?} here are SubscribePhase, a fieldless enum whose Debug is a variant name
         log::debug!(
-            "[live_sync::subscribe] register_and_subscribe phase={phase:?} inbox_phase={inbox_phase:?}: {} bucket(s), circles=[{}]",
-            group_subs.len(),
-            group_subs
-                .iter()
-                .flat_map(|g| g.group_ids_hex.iter())
-                .map(|h| h.get(..8).unwrap_or(h.as_str()))
-                .collect::<Vec<_>>()
-                .join(",")
+            "[live_sync::subscribe] register_and_subscribe phase={phase:?} \
+             inbox_phase={inbox_phase:?}: circles={}",
+            crate::log_alias::bucket(circle_count)
         );
         let ctx = self.ctx();
         // The endpoints this (re-)subscribe actually OPENED — accepted by a
@@ -1307,9 +1308,12 @@ impl LiveSyncCore {
             // joining; append rather than overwrite so neither set is lost.
             tasks.extend(pending);
         }
+        // Bucketed: an exact task count is one per subscribed plane/relay, so it
+        // sizes this account's relay set (Security Rule 15).
         log::warn!(
-            "[live_sync] stop: supervisor join timed out with {outstanding} task(s) \
-             outstanding; the manager Arc may still be held"
+            "[live_sync] stop: supervisor join timed out with {} task(s) \
+             outstanding; the manager Arc may still be held",
+            crate::log_alias::bucket(outstanding)
         );
         StopOutcome::TimedOut
     }
@@ -1880,22 +1884,20 @@ impl LiveSyncCore {
     /// `Terminated` store, which reads as correctly terminated here and still
     /// re-connects a retry interval later.
     async fn terminate_all_relays(&self) {
-        let mut unterminated = 0usize;
         for _ in 0..RELAY_TERMINATE_ROUNDS {
             self.client.disconnect().await;
             // Let a woken connection task write whatever status it is going to
             // write before this round judges convergence. A yield, never a
             // sleep: convergence is decided by the status read, not by time.
             tokio::task::yield_now().await;
-            unterminated = self.unterminated_relay_count().await;
-            if unterminated == 0 {
+            if self.unterminated_relay_count().await == 0 {
                 return;
             }
         }
         log::warn!(
-            "[live_sync] radio off: {unterminated} relay(s) still hold a connection task \
-             after {RELAY_TERMINATE_ROUNDS} termination rounds; the radio-off watch will \
-             cut any socket they re-open"
+            "[live_sync] radio off: some relay(s) still hold a connection task after \
+             every termination round; the radio-off watch will cut any socket they \
+             re-open"
         );
     }
 
@@ -2172,9 +2174,8 @@ impl LiveSyncCore {
         }
         if !leftover.is_empty() {
             log::warn!(
-                "[live_sync] pause: swept {} subscription(s) a partial unsubscribe_all left \
-                 registered",
-                leftover.len()
+                "[live_sync] pause: swept the subscription(s) a partial unsubscribe_all \
+                 left registered"
             );
         }
 
@@ -2357,8 +2358,8 @@ impl LiveSyncCore {
                 });
             }
             log::debug!(
-                "[live_sync::subscribe] subscribe_circle staged (paused) group={}…",
-                hex.get(..8).unwrap_or(hex.as_str())
+                "[live_sync::subscribe] subscribe_circle staged (paused) {}",
+                circle_handle(&hex)
             );
             return Ok(());
         }
@@ -2417,8 +2418,8 @@ impl LiveSyncCore {
         }
 
         log::debug!(
-            "[live_sync::subscribe] subscribe_circle added group={}…",
-            hex.get(..8).unwrap_or(hex.as_str())
+            "[live_sync::subscribe] subscribe_circle added {}",
+            circle_handle(&hex)
         );
         Ok(())
     }
@@ -2484,8 +2485,8 @@ impl LiveSyncCore {
                 }
             }
             log::debug!(
-                "[live_sync::subscribe] unsubscribe_circle dropped (paused) group={}…",
-                group_id_hex.get(..8).unwrap_or(group_id_hex)
+                "[live_sync::subscribe] unsubscribe_circle dropped (paused) {}",
+                circle_handle(group_id_hex)
             );
             return Ok(());
         }
@@ -2543,8 +2544,8 @@ impl LiveSyncCore {
         }
 
         log::debug!(
-            "[live_sync::subscribe] unsubscribe_circle dropped group={}…",
-            group_id_hex.get(..8).unwrap_or(group_id_hex)
+            "[live_sync::subscribe] unsubscribe_circle dropped {}",
+            circle_handle(group_id_hex)
         );
         Ok(())
     }
@@ -2756,10 +2757,7 @@ impl LiveSyncCore {
         for key in &due {
             plane.reissue(key).await;
         }
-        log::info!(
-            "[live_sync::health] re-anchored {} silent subscription(s)",
-            due.len()
-        );
+        log::info!("[live_sync::health] re-anchored the silent subscription(s)");
     }
 
     /// Runs one subscription-health maintenance tick (M8-4).

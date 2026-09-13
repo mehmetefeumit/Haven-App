@@ -78,6 +78,7 @@ jobs:
 
     steps:
       - name: Checkout
+        id: checkout
         uses: actions/checkout@v6
 
       # Reclaim runner disk BEFORE the Gradle/Rust build — the multi-GB
@@ -267,8 +268,12 @@ jobs:
         run: |
           docker logs strfry > /tmp/strfry.log 2>&1 || true
 
+      # `if: always()` and `.log`, not `.txt`: the upload below runs on every
+      # outcome, so the scan step between them must too, and it refuses an
+      # absent file; the scanner's directory walk only ever picks up `*.log`,
+      # so a `.txt` here would be the one uploaded path the guard cannot see.
       - name: Capture host + emulator diagnostics
-        if: failure()
+        if: always()
         run: |
           {
             echo "=== df -h ==="
@@ -285,7 +290,25 @@ jobs:
             echo
             echo "=== top (1 sample) ==="
             top -bn1 | head -40 || true
-          } > /tmp/diag.txt 2>&1
+          } > /tmp/diag.log 2>&1
+
+      # /tmp/integration-logs/ is scanned by run-integration-tests.sh (and each
+      # target's runner deletes its own logs on a leak); these are the uploaded
+      # logs it never sees. Scan-before-upload, as its OWN step on every outcome
+      # short of a cancellation: a leak (rc 1) deletes them and fails the lane
+      # even on an otherwise green run, so the upload finds nothing to publish;
+      # an unscannable log (rc 3) fails it and leaves the files as they are. The
+      # standard guard condition (not `always()`) is what lets
+      # docs/privacy/privacy_invariants.json cite this step as the runtime
+      # scanner's enforcing run.
+      - name: Scan captured logs for secrets before upload
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: |
+          logs=(/tmp/strfry.log /tmp/diag.log)
+          rc=0
+          bash tooling/e2e/ci/scan-logs-for-secrets.sh "${logs[@]}" || rc=$?
+          if [ "${rc}" -eq 1 ]; then rm -f -- "${logs[@]}"; fi
+          exit "${rc}"
 
       # Upload per-target logs (run-integration-tests.sh copies each
       # target's logcat + drive log under /tmp/integration-logs/ so one
@@ -299,7 +322,7 @@ jobs:
           path: |
             /tmp/integration-logs/
             /tmp/strfry.log
-            /tmp/diag.txt
+            /tmp/diag.log
           retention-days: 14
           if-no-files-found: ignore
 

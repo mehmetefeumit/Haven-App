@@ -1076,6 +1076,11 @@ mod tests {
             height: AVATAR_TIER_EDGE_PX,
         };
 
+        crate::assert_debug_redacted!(
+            &processed,
+            "ProcessedAvatar",
+            &[&hex::encode(processed.content_hash), "abcdef01"]
+        );
         let rendered = format!("{processed:?}");
 
         // Byte buffers must not render in ANY of the shapes `Debug` produces
@@ -1180,6 +1185,11 @@ mod tests {
     #[test]
     fn staged_picture_debug_redacts_bytes_and_hash() {
         let staged = StagedPicture::from_sanitized_cache(vec![0xAB, 0xCD], vec![0x12, 0x34]);
+        crate::assert_debug_redacted!(
+            &staged,
+            "StagedPicture",
+            &[&hex::encode(staged.sha256()), "abcd"]
+        );
         let rendered = format!("{staged:?}");
         assert!(
             !rendered.contains("171") && !rendered.contains("205"),

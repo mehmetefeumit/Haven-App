@@ -100,19 +100,19 @@ pub struct LocationMessage {
 
 impl fmt::Debug for LocationMessage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The two instants go too: a capture moment and a freshness deadline
+        // place the sender in a timeline even with the position withheld.
         f.debug_struct("LocationMessage")
             .field("latitude", &"<redacted>")
             .field("longitude", &"<redacted>")
             .field("geohash", &"<redacted>")
-            .field("timestamp", &self.timestamp)
-            .field("expires_at", &self.expires_at)
             .field("display_name", &"<redacted>")
             .field("device_id", &"<redacted>")
             .field("raw_accuracy", &"<redacted>")
             .field("altitude", &"<redacted>")
             .field("speed", &"<redacted>")
             .field("heading", &"<redacted>")
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -290,9 +290,21 @@ mod tests {
         // keep coordinates/geohash/identity out of any `{:?}` rendering (logs,
         // panic messages, error chains, anyhow/eyre reports).
         let mut location = LocationMessage::new(37.774_929_5, -122.419_415_5);
-        location.display_name = Some("Alice".to_string());
+        location.display_name = Some("Alice Bramble".to_string());
         location.device_id = Some("secret-device-id".to_string());
 
+        crate::assert_debug_redacted!(
+            &location,
+            "LocationMessage",
+            &[
+                "37.7749",
+                "122.4194",
+                &location.geohash,
+                "Alice Bramble",
+                "secret-device-id",
+                &location.timestamp.timestamp().to_string(),
+            ]
+        );
         let debug = format!("{location:?}");
 
         assert!(
@@ -308,7 +320,7 @@ mod tests {
             "Debug output leaked geohash: {debug}"
         );
         assert!(
-            !debug.contains("Alice"),
+            !debug.contains("Alice Bramble"),
             "Debug output leaked display_name: {debug}"
         );
         assert!(
@@ -319,6 +331,11 @@ mod tests {
         assert!(
             debug.contains("<redacted>"),
             "Debug output should contain redaction markers: {debug}"
+        );
+        // An absolute capture instant is a timeline position (Rule 15).
+        assert!(
+            !debug.contains(&location.timestamp.timestamp().to_string()),
+            "Debug output leaked the capture instant: {debug}"
         );
     }
 

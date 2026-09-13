@@ -148,15 +148,21 @@ mod mls_group_context_tests {
     }
 
     #[test]
-    fn context_debug_output_redacts_mls_id() {
-        let (c, dir) = ctx("ctx_debug", "my-group", &[1, 2, 3]);
+    fn context_debug_output_redacts_both_group_ids() {
+        let group_hex = "a".repeat(64);
+        let (c, dir) = ctx("ctx_debug", &group_hex, &[1, 2, 3]);
         let debug_output = format!("{c:?}");
         assert!(debug_output.contains("MlsGroupContext"));
-        assert!(debug_output.contains("my-group"));
         assert!(debug_output.contains("<redacted>"));
         assert!(
             !debug_output.contains("010203"),
             "MLS group id must not appear"
+        );
+        // Security Rule 15: the `nostr_group_id` is the `#h` every relay serving
+        // this circle sees, so it renders as a per-process alias handle.
+        assert!(
+            debug_output.contains("circle#") && !debug_output.contains(&group_hex),
+            "the nostr_group_id must render as an alias handle: {debug_output}"
         );
         cleanup_dir(&dir);
     }
@@ -322,8 +328,12 @@ mod location_message_result_tests {
         );
         assert!(!debug_str.contains("latitude"), "content must be redacted");
         assert!(debug_str.contains("<redacted>"));
-        // The epoch is a non-secret sort key and is shown.
-        assert!(debug_str.contains('4'));
+        // Security Rule 15: an absolute epoch tells one circle's history apart
+        // from another's, so it is redacted with the rest.
+        assert!(
+            !debug_str.contains('4'),
+            "the epoch must not render: {debug_str}"
+        );
     }
 
     #[test]

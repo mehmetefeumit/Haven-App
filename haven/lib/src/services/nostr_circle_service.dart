@@ -47,6 +47,7 @@ import 'package:haven/src/services/pending_leave_service.dart';
 import 'package:haven/src/services/publish_stagger.dart'
     show kMaxCirclesPerAccount;
 import 'package:haven/src/services/relay_service.dart';
+import 'package:haven/src/utils/log_alias.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// Function type for keyring store initialization.
@@ -974,7 +975,7 @@ class NostrCircleService implements CircleService {
         debugPrint('[Leave] aborted: circle relays unavailable');
         throw const CircleServiceException('Failed to leave circle');
       }
-      debugPrint('[Leave] using ${relays.length} relay(s)');
+      debugPrint('[Leave] using ${magnitudeBucket(relays.length)} relay(s)');
 
       if (plan.kind == LeavePlanKindFfi.adminHandoff) {
         final successor = plan.successorHex;
@@ -997,7 +998,7 @@ class NostrCircleService implements CircleService {
           commitEventJson: promote.commitEventJson,
           pending: promote.pending,
           relays: relays,
-          label: 'admin handoff',
+          opKind: 'admin handoff',
         )) {
           debugPrint('[Leave] aborted: admin handoff publish failed');
           throw const CircleServiceException('Failed to leave circle');
@@ -1014,7 +1015,7 @@ class NostrCircleService implements CircleService {
           commitEventJson: demote.commitEventJson,
           pending: demote.pending,
           relays: relays,
-          label: 'self-demote',
+          opKind: 'self-demote',
         )) {
           debugPrint('[Leave] aborted: self-demote publish failed');
           throw const CircleServiceException('Failed to leave circle');
@@ -1035,7 +1036,7 @@ class NostrCircleService implements CircleService {
       if (!await _publishEvolutionEvent(
         leaveEventJson,
         relays,
-        label: 'leave',
+        opKind: 'leave',
         maxAttempts: _leaveMaxPublishAttempts,
       )) {
         debugPrint('[Leave] aborted: leave proposal publish failed');
@@ -1213,7 +1214,7 @@ class NostrCircleService implements CircleService {
       await _publishEvolutionEvent(
         leaveEventJson,
         relays,
-        label: 'leave re-issue',
+        opKind: 'leave re-issue',
         maxAttempts: _leaveMaxPublishAttempts,
       );
     } on Object catch (e) {
@@ -1248,7 +1249,7 @@ class NostrCircleService implements CircleService {
         commitEventJson: result.commitEventJson,
         pending: result.pending,
         relays: relays,
-        label: 'remove member',
+        opKind: 'remove member',
       )) {
         throw const CircleServiceException('Failed to remove member');
       }
@@ -1323,7 +1324,7 @@ class NostrCircleService implements CircleService {
       final published = await _publishEvolutionEvent(
         staged.commitEventJson,
         relays,
-        label: 'add member',
+        opKind: 'add member',
       );
 
       if (!published) {
@@ -1406,7 +1407,7 @@ class NostrCircleService implements CircleService {
       final published = await _publishEvolutionEvent(
         result.commitEventJson,
         publishRelays,
-        label: 'update circle relays',
+        opKind: 'update circle relays',
       );
 
       try {
@@ -1431,7 +1432,7 @@ class NostrCircleService implements CircleService {
       } on Object catch (e) {
         debugPrint(
           'update circle relays: pending-commit '
-          '${published ? "finalizeRelayUpdate" : "rollback"} '
+          '${published ? 'confirm' : 'rollback'} '
           'failed: ${e.runtimeType}',
         );
         throw const CircleServiceException('Failed to update circle relays');
@@ -1537,7 +1538,7 @@ class NostrCircleService implements CircleService {
       commitEventJson: rotated.commitEventJson,
       pending: rotated.pending,
       relays: relays,
-      label: 'epoch repair',
+      opKind: 'epoch repair',
     );
     if (!published) {
       throw const CircleServiceException('Failed to repair the circle');
@@ -1561,14 +1562,14 @@ class NostrCircleService implements CircleService {
         commitEventJson: commit.commitEventJson,
         pending: commit.pending,
         relays: relays,
-        label: 'epoch repair deferred commit',
+        opKind: 'epoch repair deferred commit',
       );
     }
     for (final proposalJson in deferred.proposals) {
       await _publishEvolutionEvent(
         proposalJson,
         relays,
-        label: 'epoch repair deferred proposal',
+        opKind: 'epoch repair deferred proposal',
       );
     }
   }
@@ -1582,12 +1583,12 @@ class NostrCircleService implements CircleService {
     required String commitEventJson,
     required PendingStateRefFfi pending,
     required List<String> relays,
-    required String label,
+    required String opKind,
   }) async {
     final published = await _publishEvolutionEvent(
       commitEventJson,
       relays,
-      label: label,
+      opKind: opKind,
     );
     try {
       if (published) {
@@ -1597,7 +1598,7 @@ class NostrCircleService implements CircleService {
       }
     } on Object catch (e) {
       debugPrint(
-        '$label: pending-commit ${published ? "confirm" : "rollback"} '
+        "$opKind: pending-commit ${published ? 'confirm' : 'rollback'} "
         'failed: ${e.runtimeType}',
       );
       return false;
@@ -1637,14 +1638,14 @@ class NostrCircleService implements CircleService {
   Future<bool> _publishEvolutionEvent(
     String eventJson,
     List<String> relays, {
-    required String label,
+    required String opKind,
     int maxAttempts = _defaultMaxPublishAttempts,
   }) async {
     for (var attempt = 0; attempt < maxAttempts; attempt++) {
       if (attempt > 0) {
         final delaySecs = 1 << attempt; // 2s, 4s, 8s, ...
         debugPrint(
-          '$label event: retrying in ${delaySecs}s '
+          '$opKind event: retrying in ${delaySecs}s '
           '(attempt ${attempt + 1}/$maxAttempts)',
         );
         await Future<void>.delayed(Duration(seconds: delaySecs));
@@ -1657,24 +1658,24 @@ class NostrCircleService implements CircleService {
         );
         if (publishResult.acceptedBy.isNotEmpty) {
           debugPrint(
-            '$label event published: '
-            '${publishResult.acceptedBy.length} accepted, '
-            '${publishResult.failed.length} failed',
+            '$opKind event published: '
+            '${magnitudeBucket(publishResult.acceptedBy.length)} accepted, '
+            '${magnitudeBucket(publishResult.failed.length)} failed',
           );
           return true;
         }
         debugPrint(
-          '$label event rejected by all relays '
+          '$opKind event rejected by all relays '
           '(attempt ${attempt + 1}/$maxAttempts)',
         );
       } on Object catch (e) {
         debugPrint(
-          '$label event: attempt ${attempt + 1} failed: ${e.runtimeType}',
+          '$opKind event: attempt ${attempt + 1} failed: ${e.runtimeType}',
         );
       }
     }
 
-    debugPrint('$label event: all $maxAttempts attempts failed');
+    debugPrint('$opKind event: all $maxAttempts attempts failed');
     return false;
   }
 

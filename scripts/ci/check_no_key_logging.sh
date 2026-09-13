@@ -57,17 +57,20 @@
 #      haven-core/src or haven/rust_builder/src interpolates a secret-shaped
 #      expression.
 #   2. Dart: no `debugPrint(`/`print(` in haven/lib does.
-#   3. The `keyring_core` → Off log filter is installed for EVERY logger
-#      backend `init_app` installs, on every platform. keyring-core logs
-#      `created entry {:?}` / `get secret from entry {:?}` at DEBUG and the
-#      credential `Debug` is the STORE's to define, so this is a dependency
-#      whose disclosure Haven cannot fix at the call site — only by dropping
-#      its target. Filtering it on Android alone (which is what the tree did)
-#      keys a confidentiality property to one target while FRB installs an
-#      unfiltered `oslog` backend on the other shipped one. The install ORDER is
-#      checked with it: both backends are first-call-wins, so a filtered one
-#      installed after `setup_default_user_utils()` loses to FRB's unfiltered
-#      pair and silently no-ops.
+#   3. EVERY logger backend `init_app` installs, on every platform, is an
+#      ALLOWLIST of Haven's own targets (`haven_core`, `rust_lib_haven`) with
+#      `keyring_core` named Off and everything else Off. keyring-core logs
+#      `created entry {:?}` at DEBUG with the STORE's credential `Debug`;
+#      `tungstenite` logs the `Host:` header and `nostr-relay-pool` logs relay
+#      URLs — through the same `log` facade Haven uses. A denylist names the
+#      dependencies somebody has already caught; an allowlist makes the next
+#      one silent by default. The allowlist is the `HavenTargetFilter`
+#      wrapper (oslog matches a category EXACTLY, so it cannot express one
+#      itself), so the wrapper's predicate and its re-check in `log()` are
+#      pinned too: the `log!` macros never call `enabled()`. The install
+#      ORDER is checked with it: both backends are first-call-wins, so a
+#      wrapped one installed after `setup_default_user_utils()` loses to
+#      FRB's unfiltered pair and silently no-ops.
 #
 # Each check carries an anti-vacuity floor: an extractor that has stopped
 # matching would otherwise report "0 interpolations, none secret" forever.
@@ -90,6 +93,9 @@ readonly MIN_RUST_SITES=70
 readonly MIN_DART_SITES=380
 # `init_app` installs one backend per shipped platform family (Android, Apple).
 readonly MIN_LOG_BACKENDS=2
+# Self-test equality pin: 16 Rust + 7 Dart scanner fixtures, 2 floor probes and
+# 16 check-3 fixtures. A fixture lost without this line moving is a red run.
+readonly DECLARED_CASES=41
 
 log()  { printf '\033[1;34m[%s]\033[0m %s\n' "${SCRIPT_NAME}" "$*"; }
 fail() { printf '\033[1;31m[%s] FAIL:\033[0m %s\n' "${SCRIPT_NAME}" "$*" >&2; }
@@ -110,8 +116,10 @@ BEGIN {
   # which PUBLIC has already excluded.
   KEYLIKE = "^([a-z0-9_]*_)?keys?(_[a-z0-9_]*)?$"
   MARKER  = "log-scan-ok:[ \t]*[^ \t]"
+  # `tracing` is not a backend this tree installs, so a `tracing::` macro is a
+  # log line the runtime filter never sees; it is scanned like `log::`.
   if (lang == "rust")
-    CALL = "(log::(trace|debug|info|warn|error)|println|eprintln|print|eprint|dbg)![ \t]*\\("
+    CALL = "(log::(trace|debug|info|warn|error)|tracing::(trace|debug|info|warn|error|event)|println|eprintln|print|eprint|dbg)![ \t]*\\("
   else
     CALL = "(^|[^A-Za-z0-9_.])(debugPrint|print)[ \t]*\\("
 }
@@ -221,6 +229,9 @@ function emit(   bad) {
 FNR == 1 { INMAC = 0; INQ = 0; ESC = 0; prev_supp = 0 }
 {
   split_line($0)
+  # `#[instrument]` renders EVERY argument's Debug at span entry, key-shaped or
+  # not, and the signature is not something this lexer reads: always a hit.
+  if (CODE ~ /#\[(tracing::)?instrument/) { sites++; printf "%s:%d: #[instrument] records every argument | %s\n", FILENAME, FNR, $0 }
   supp_here = (COMMENT ~ MARKER)
   rest = CODE
   while (1) {
@@ -269,11 +280,18 @@ scan() {
 }
 
 # ---------------------------------------------------------------------------
-# Check 3: every logger backend installed by `init_app` drops `keyring_core`.
+# Check 3: every logger backend `init_app` installs is the HavenTargetFilter
+# allowlist — keyring_core named Off, Haven's targets on, everything else Off.
 # ---------------------------------------------------------------------------
+# The two crates whose records may reach a log: haven-core's lib target and the
+# rust_builder package. `main` cross-checks them against the Cargo manifests so
+# a crate rename cannot leave a stale name allowlisted.
+readonly HAVEN_CORE_TARGET='haven_core'
+readonly HAVEN_FFI_TARGET='rust_lib_haven'
+
 check_keyring_filter() { # <api.rs path>
   local api="$1" body stmts rc=0 backends=0 targets=''
-  local idx=0 frb_idx=-1 last_backend_idx=-1
+  local idx=0 frb_idx=-1 last_backend_idx=-1 t
 
   body="$(awk '/^pub fn init_app\(\) \{/ { f = 1 } f { print } f && /^\}/ { exit }' "${api}")"
   if [[ -z "${body}" ]]; then
@@ -292,7 +310,7 @@ check_keyring_filter() { # <api.rs path>
       continue
     fi
     [[ "${stmt}" == *[Ll]ogger* ]] || continue
-    if ! grep -qE '(android_logger::init_once|oslog::OsLogger::new|log::set_boxed_logger|log::set_logger)' <<<"${stmt}"; then
+    if ! grep -qE '(android_logger::(init_once|AndroidLogger::new)|oslog::OsLogger::new|log::set_boxed_logger|log::set_logger)' <<<"${stmt}"; then
       fail "init_app installs a logger backend this guard does not recognise:"
       printf '    %s\n' "${stmt}" >&2
       echo "  Teach the guard about it — an unknown backend is an unfiltered one." >&2
@@ -301,10 +319,44 @@ check_keyring_filter() { # <api.rs path>
     fi
     backends=$(( backends + 1 ))
     last_backend_idx="${idx}"
-    if ! grep -qF 'keyring_core' <<<"${stmt}"; then
-      fail "a logger backend is installed without the keyring_core filter:"
+    # (a) keyring_core, by name, Off — the dependency that logged key bytes
+    # stays visible at the install site even though the allowlist drops it.
+    if ! grep -qE '"keyring_core",[[:space:]]*log::LevelFilter::Off' <<<"${stmt}"; then
+      fail "a logger backend does not name keyring_core Off:"
       printf '    %s\n' "${stmt}" >&2
-      echo "  keyring-core logs the credential's Debug at DEBUG; its target must be dropped." >&2
+      echo "  keyring-core logs the credential's Debug at DEBUG; its target must be dropped by name." >&2
+      rc=1
+    fi
+    # (b) the allowlist. A denylist is a list of dependencies already caught.
+    if ! grep -qF 'HavenTargetFilter(' <<<"${stmt}"; then
+      fail "a logger backend is installed OUTSIDE the HavenTargetFilter allowlist:"
+      printf '    %s\n' "${stmt}" >&2
+      echo "  tungstenite and nostr-relay-pool log relay hosts through the same facade; wrap it." >&2
+      rc=1
+    fi
+    # (c) the backend's OWN default: Off, with Haven's targets re-enabled (an
+    # env_filter denies a target twice that way). oslog cannot have one:
+    # its level_filter() is log::set_max_level — a global, not a default.
+    if [[ "${stmt}" == *FilterBuilder::new\(\)* ]]; then
+      if (( $(grep -o 'filter_level(' <<<"${stmt}" | wc -l) != 1 )) \
+         || ! grep -qE 'filter_level\([[:space:]]*log::LevelFilter::Off[[:space:]]*\)' <<<"${stmt}"; then
+        fail "an env_filter backend's default level is not Off:"
+        printf '    %s\n' "${stmt}" >&2
+        echo "  filter_level(log::LevelFilter::Off) exactly once, then re-enable Haven's targets." >&2
+        rc=1
+      fi
+      for t in HAVEN_CORE_LOG_TARGET HAVEN_FFI_LOG_TARGET; do
+        if ! grep -qE "filter_module\([[:space:]]*${t},[[:space:]]*log::LevelFilter::(Trace|Debug|Info|Warn|Error)" <<<"${stmt}"; then
+          fail "an env_filter backend does not re-enable ${t}:"
+          printf '    %s\n' "${stmt}" >&2
+          rc=1
+        fi
+      done
+    fi
+    if [[ "${stmt}" == *OsLogger::new* ]] && grep -qF '.level_filter(' <<<"${stmt}"; then
+      fail "the oslog backend calls level_filter():"
+      printf '    %s\n' "${stmt}" >&2
+      echo "  That is log::set_max_level — a GLOBAL that overrides the build-profile cap. The wrapper is the default." >&2
       rc=1
     fi
     while [[ "${stmt}" =~ target_os[[:space:]]*=[[:space:]]*\"([a-z]+)\" ]]; do
@@ -315,8 +367,8 @@ check_keyring_filter() { # <api.rs path>
 
   # The ORDER is the whole fix: both backends are first-call-wins, so ours only
   # preempts FRB's unfiltered pair while it is installed first. Every check
-  # above still passes with the two blocks swapped, and keyring-core's DEBUG
-  # records — raw SQLCipher DB-key bytes — would be back in the log.
+  # above still passes with the two blocks swapped, and every dependency's
+  # records would be back in the log.
   if (( frb_idx < 0 )); then
     fail "init_app no longer calls setup_default_user_utils()."
     echo "  That call is what our backends must preempt; without it in init_app," >&2
@@ -325,26 +377,71 @@ check_keyring_filter() { # <api.rs path>
   elif (( last_backend_idx > frb_idx )); then
     fail "a logger backend is installed AFTER setup_default_user_utils()."
     echo "  Both backends are first-call-wins, so FRB's UNFILTERED pair wins and the" >&2
-    echo "  filtered one no-ops: install ours BEFORE the FRB call, never after." >&2
+    echo "  wrapped one no-ops: install ours BEFORE the FRB call, never after." >&2
     rc=1
   fi
 
   if (( backends < MIN_LOG_BACKENDS )); then
     fail "init_app installs ${backends} logger backend(s), expected >= ${MIN_LOG_BACKENDS}."
     echo "  FRB installs an unfiltered backend on Android AND on iOS/macOS; ours must" >&2
-    echo "  preempt every one of them, or the filter is keyed to a single target." >&2
+    echo "  preempt every one of them, or the allowlist is keyed to a single target." >&2
     rc=1
   fi
   local plat
   for plat in android ios; do
     if [[ " ${targets} " != *" ${plat} "* ]]; then
-      fail "no filtered logger backend is installed for target_os=\"${plat}\"."
+      fail "no allowlisted logger backend is installed for target_os=\"${plat}\"."
       echo "  Security Rule 6 is not a per-platform property." >&2
       rc=1
     fi
   done
 
-  (( rc == 0 )) && log "OK: ${backends} logger backend(s), each dropping the keyring_core target, all installed before setup_default_user_utils()."
+  # (d) the wrapper itself: the predicate names both crates on a `::` boundary,
+  # and BOTH methods consult it on the record's own target.
+  check_target_filter "${api}" || rc=1
+
+  (( rc == 0 )) && log "OK: ${backends} logger backend(s), each behind the HavenTargetFilter allowlist (${HAVEN_CORE_TARGET} + ${HAVEN_FFI_TARGET} on, keyring_core named Off, everything else Off), all installed before setup_default_user_utils()."
+  return "${rc}"
+}
+
+check_target_filter() { # <api.rs path>
+  local api="$1" rc=0 code pred impl method name arg
+  code="$(sed 's|//.*||' "${api}")"
+  if ! grep -qE "const HAVEN_CORE_LOG_TARGET: &str = \"${HAVEN_CORE_TARGET}\";" <<<"${code}"; then
+    fail "HAVEN_CORE_LOG_TARGET is not \"${HAVEN_CORE_TARGET}\" (haven-core's lib target) — a wrong name allowlists nothing of ours and a wider one allowlists a stranger."
+    rc=1
+  fi
+  if ! grep -qE "const HAVEN_FFI_LOG_TARGET: &str = \"${HAVEN_FFI_TARGET}\";" <<<"${code}"; then
+    fail "HAVEN_FFI_LOG_TARGET is not \"${HAVEN_FFI_TARGET}\" (the rust_builder package name)."
+    rc=1
+  fi
+  pred="$(awk '/^fn log_target_allowed\(/ { f = 1 } f { print } f && /^\}/ { exit }' <<<"${code}")"
+  if [[ -z "${pred}" ]]; then
+    fail "fn log_target_allowed() not found — the allowlist predicate is what the wrapper enforces."
+    rc=1
+  else
+    for name in HAVEN_CORE_LOG_TARGET HAVEN_FFI_LOG_TARGET '"::"'; do
+      if ! grep -qF -- "${name}" <<<"${pred}"; then
+        fail "log_target_allowed() does not mention ${name}: the allowlist must name both crates and match on a \`::\` boundary (haven_core_extra is not haven_core)."
+        rc=1
+      fi
+    done
+  fi
+  impl="$(awk '/^impl<[^>]*>[ \t]*log::Log[ \t]+for[ \t]+HavenTargetFilter/ { f = 1 } f { print } f && /^\}/ { exit }' <<<"${code}")"
+  if [[ -z "${impl}" ]]; then
+    fail "no \`impl log::Log for HavenTargetFilter\` found."
+    rc=1
+    return "${rc}"
+  fi
+  for method in 'enabled metadata' 'log record'; do
+    name="${method% *}"; arg="${method#* }"
+    method="$(awk -v n="${name}" '$0 ~ ("^[ \t]*fn " n "\\(") { f = 1 } f { print } f && /^    \}/ { exit }' <<<"${impl}")"
+    if ! grep -qE "log_target_allowed\(${arg}\.target\(\)\)" <<<"${method}"; then
+      fail "HavenTargetFilter::${name}() does not gate on log_target_allowed(${arg}.target())."
+      echo "  The log! macros never call enabled(); a log() that trusts it still emits a denied target." >&2
+      rc=1
+    fi
+  done
   return "${rc}"
 }
 
@@ -360,9 +457,6 @@ check_keyring_filter() { # <api.rs path>
 # this tree that earlier drafts of this scanner flagged.
 # ---------------------------------------------------------------------------
 self_test() {
-  # `checked` is COUNTED, never asserted: a hardcoded banner drifts the moment a
-  # fixture is added, and a stated count that is already wrong cannot catch the
-  # deletion it exists to catch.
   local tmp fails=0 checked=0
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
@@ -472,6 +566,17 @@ fn f() {
     log::debug!("signer {:?}", signing_key);
 }
 '
+  # A renamed logging crate must not fall outside the vocabulary: `tracing::`
+  # macros and `#[instrument]` are scanned (the latter is always a hit).
+  _case "tracing::warn! of a secret FAILS" rust 1 rs \
+'fn f() {
+    tracing::warn!("derived {db_key:?}");
+}
+'
+  _case "#[instrument] FAILS" rust 1 rs \
+'#[instrument(skip(storage))]
+fn f(db_key: &[u8; 32], storage: &S) {}
+'
   # A commented-out call is not a call.
   _case "a log call inside a comment is not scanned" rust 0 rs \
 'fn f() {
@@ -541,7 +646,7 @@ fn f() {
   # what the floor in `scan` turns into a red. Without this the guard would
   # report "no secrets" over a tree it could no longer parse.
   checked=$(( checked + 1 ))
-  printf 'fn f() { tracing::info!("ok"); }\n' > "${tmp}/none.rs"
+  printf 'fn f() { otel::info!("ok"); }\n' > "${tmp}/none.rs"
   out="$(awk -v lang=rust "${SCAN_AWK}" "${tmp}/none.rs")"
   if [[ "$(sed -n 's/^#sites //p' <<<"${out}")" == "0" ]]; then
     printf '  \033[1;32mPASS\033[0m an unrecognised macro collapses the count (floor reds)\n'
@@ -550,7 +655,7 @@ fn f() {
     fails=1
   fi
 
-  log "self-test: keyring_core filter (check 3)"
+  log "self-test: logger allowlist (check 3)"
 
   _kc_case() { # _kc_case <label> <expect-rc> <content>
     local label="$1" want="$2" content="$3" got=0
@@ -565,110 +670,162 @@ fn f() {
     fi
   }
 
-  _kc_case "both platforms filtered passes" 0 \
+  # The compliant parts, composed per fixture so each mutation is ONE change.
+  local wrapper android ios frb
+  wrapper="$(cat <<'RS'
+const HAVEN_CORE_LOG_TARGET: &str = "haven_core";
+const HAVEN_FFI_LOG_TARGET: &str = "rust_lib_haven";
+fn log_target_allowed(target: &str) -> bool {
+    [HAVEN_CORE_LOG_TARGET, HAVEN_FFI_LOG_TARGET]
+        .iter()
+        .any(|own| target == *own || target.strip_prefix(own).is_some_and(|rest| rest.starts_with("::")))
+}
+struct HavenTargetFilter<L>(L);
+impl<L: log::Log> log::Log for HavenTargetFilter<L> {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        log_target_allowed(metadata.target()) && self.0.enabled(metadata)
+    }
+    fn log(&self, record: &log::Record<'_>) {
+        if log_target_allowed(record.target()) {
+            self.0.log(record);
+        }
+    }
+    fn flush(&self) {
+        self.0.flush();
+    }
+}
+RS
+)"
+  android="$(cat <<'RS'
+    #[cfg(target_os = "android")]
+    let _ = log::set_boxed_logger(Box::new(HavenTargetFilter(
+        android_logger::AndroidLogger::new(
+            android_logger::Config::default()
+                .with_max_level(log::LevelFilter::Trace)
+                .with_filter(
+                    android_logger::FilterBuilder::new()
+                        .filter_level(log::LevelFilter::Off)
+                        .filter_module(HAVEN_CORE_LOG_TARGET, log::LevelFilter::Trace)
+                        .filter_module(HAVEN_FFI_LOG_TARGET, log::LevelFilter::Trace)
+                        .filter_module("keyring_core", log::LevelFilter::Off)
+                        .build(),
+                ),
+        ),
+    )));
+RS
+)"
+  ios="$(cat <<'RS'
+    #[cfg(any(target_os = "ios", target_os = "macos"))]
+    let _ = log::set_boxed_logger(Box::new(HavenTargetFilter(
+        oslog::OsLogger::new("frb_user")
+            .category_level_filter("keyring_core", log::LevelFilter::Off),
+    )));
+RS
+)"
+  frb='    flutter_rust_bridge::setup_default_user_utils();'
+  _init() { printf 'pub fn init_app() {\n%s\n}\n%s\n' "$1" "$2"; } # <body> <rest-of-file>
+
+  _kc_case "both backends behind the allowlist, defaults Off, passes" 0 \
+    "$(_init "${android}
+${ios}
+${frb}" "${wrapper}")"
+  # THE regression this check now exists for: the shape the tree shipped in —
+  # keyring_core dropped by name, every other dependency's records let through.
+  _kc_case "a denylist-only shape (keyring_core Off, default Trace, no wrapper) FAILS" 1 \
 'pub fn init_app() {
     #[cfg(target_os = "android")]
     android_logger::init_once(
         android_logger::Config::default()
+            .with_max_level(log::LevelFilter::Trace)
             .with_filter(
                 android_logger::FilterBuilder::new()
+                    .filter_level(log::LevelFilter::Trace)
                     .filter_module("keyring_core", log::LevelFilter::Off)
                     .build(),
             ),
     );
     #[cfg(any(target_os = "ios", target_os = "macos"))]
     let _ = oslog::OsLogger::new("frb_user")
+        .level_filter(log::LevelFilter::Trace)
         .category_level_filter("keyring_core", log::LevelFilter::Off)
         .init();
     flutter_rust_bridge::setup_default_user_utils();
 }
 '
-  # THE regression this check exists for: the state the tree shipped in.
+  _kc_case "an env_filter default level that is not Off FAILS" 1 \
+    "$(_init "${android/filter_level(log::LevelFilter::Off)/filter_level(log::LevelFilter::Trace)}
+${ios}
+${frb}" "${wrapper}")"
+  _kc_case "one backend installed outside the allowlist wrapper FAILS" 1 \
+    "$(_init "${android}
+    #[cfg(any(target_os = \"ios\", target_os = \"macos\"))]
+    let _ = oslog::OsLogger::new(\"frb_user\")
+        .category_level_filter(\"keyring_core\", log::LevelFilter::Off)
+        .init();
+${frb}" "${wrapper}")"
+  _kc_case "a Haven target missing from the env_filter allowlist FAILS" 1 \
+    "$(_init "${android/.filter_module(HAVEN_FFI_LOG_TARGET, log::LevelFilter::Trace)/}
+${ios}
+${frb}" "${wrapper}")"
+  _kc_case "keyring_core named but not Off FAILS" 1 \
+    "$(_init "${android/\"keyring_core\", log::LevelFilter::Off/\"keyring_core\", log::LevelFilter::Debug}
+${ios}
+${frb}" "${wrapper}")"
+  _kc_case "a backend installed WITHOUT the keyring_core filter FAILS" 1 \
+    "$(_init "${android}
+    #[cfg(any(target_os = \"ios\", target_os = \"macos\"))]
+    let _ = log::set_boxed_logger(Box::new(HavenTargetFilter(oslog::OsLogger::new(\"frb_user\"))));
+${frb}" "${wrapper}")"
+  # oslog's level_filter is log::set_max_level: a global, so Off silences Haven
+  # and Trace re-opens release builds. Neither is a backend default.
+  _kc_case "oslog level_filter() (a global) FAILS" 1 \
+    "$(_init "${android}
+    #[cfg(any(target_os = \"ios\", target_os = \"macos\"))]
+    let _ = log::set_boxed_logger(Box::new(HavenTargetFilter(
+        oslog::OsLogger::new(\"frb_user\")
+            .level_filter(log::LevelFilter::Off)
+            .category_level_filter(\"keyring_core\", log::LevelFilter::Off),
+    )));
+${frb}" "${wrapper}")"
+  # The log! macros never call enabled(): a wrapper that gates only there
+  # still forwards every denied record.
+  _kc_case "a wrapper whose log() trusts enabled() FAILS" 1 \
+    "$(_init "${android}
+${ios}
+${frb}" "${wrapper/if log_target_allowed(record.target()) \{
+            self.0.log(record);
+        \}/self.0.log(record);}")"
+  _kc_case "a predicate without the :: boundary FAILS" 1 \
+    "$(_init "${android}
+${ios}
+${frb}" "${wrapper/.any(|own| target == *own || target.strip_prefix(own).is_some_and(|rest| rest.starts_with(\"::\")))/.any(|own| target.starts_with(own))}")"
+  _kc_case "a target constant that is not the crate name FAILS" 1 \
+    "$(_init "${android}
+${ios}
+${frb}" "${wrapper/\"rust_lib_haven\"/\"rust_lib\"}")"
   _kc_case "Android-only filtering FAILS" 1 \
-'pub fn init_app() {
-    #[cfg(target_os = "android")]
-    android_logger::init_once(
-        android_logger::Config::default()
-            .with_filter(
-                android_logger::FilterBuilder::new()
-                    .filter_module("keyring_core", log::LevelFilter::Off)
-                    .build(),
-            ),
-    );
-    flutter_rust_bridge::setup_default_user_utils();
-}
-'
-  _kc_case "a backend installed WITHOUT the filter FAILS" 1 \
-'pub fn init_app() {
-    #[cfg(target_os = "android")]
-    android_logger::init_once(android_logger::Config::default());
-    #[cfg(any(target_os = "ios", target_os = "macos"))]
-    let _ = oslog::OsLogger::new("frb_user")
-        .category_level_filter("keyring_core", log::LevelFilter::Off)
-        .init();
-}
-'
+    "$(_init "${android}
+${frb}" "${wrapper}")"
   # An unrecognised backend crate must red rather than slip past: the guard
   # cannot vouch for a filter it does not know how to read.
   _kc_case "an unrecognised logger backend FAILS" 1 \
-'pub fn init_app() {
-    #[cfg(target_os = "android")]
-    android_logger::init_once(
-        android_logger::Config::default()
-            .with_filter(
-                android_logger::FilterBuilder::new()
-                    .filter_module("keyring_core", log::LevelFilter::Off)
-                    .build(),
-            ),
-    );
-    #[cfg(any(target_os = "ios", target_os = "macos"))]
-    let _ = oslog::OsLogger::new("frb_user")
-        .category_level_filter("keyring_core", log::LevelFilter::Off)
-        .init();
-    #[cfg(target_os = "linux")]
+    "$(_init "${android}
+${ios}
+    #[cfg(target_os = \"linux\")]
     let _ = simple_logger::SimpleLogger::new().init();
-}
-'
-  # The mutation every other fixture here passes: both platforms, both filters,
-  # and the whole fix undone by moving three lines.
+${frb}" "${wrapper}")"
+  # The mutation every other fixture here passes: both platforms, both
+  # allowlists, and the whole fix undone by moving one line.
   _kc_case "a backend installed AFTER the FRB call FAILS" 1 \
-'pub fn init_app() {
-    flutter_rust_bridge::setup_default_user_utils();
-    #[cfg(target_os = "android")]
-    android_logger::init_once(
-        android_logger::Config::default()
-            .with_filter(
-                android_logger::FilterBuilder::new()
-                    .filter_module("keyring_core", log::LevelFilter::Off)
-                    .build(),
-            ),
-    );
-    #[cfg(any(target_os = "ios", target_os = "macos"))]
-    let _ = oslog::OsLogger::new("frb_user")
-        .category_level_filter("keyring_core", log::LevelFilter::Off)
-        .init();
-}
-'
+    "$(_init "${frb}
+${android}
+${ios}" "${wrapper}")"
   # Moving the FRB call out of init_app puts the ordering out of this guard's
   # sight, which is a red, not a pass.
   _kc_case "no FRB call to preempt FAILS" 1 \
-'pub fn init_app() {
-    #[cfg(target_os = "android")]
-    android_logger::init_once(
-        android_logger::Config::default()
-            .with_filter(
-                android_logger::FilterBuilder::new()
-                    .filter_module("keyring_core", log::LevelFilter::Off)
-                    .build(),
-            ),
-    );
-    #[cfg(any(target_os = "ios", target_os = "macos"))]
-    let _ = oslog::OsLogger::new("frb_user")
-        .category_level_filter("keyring_core", log::LevelFilter::Off)
-        .init();
-    log::set_max_level(log::LevelFilter::Warn);
-}
-'
+    "$(_init "${android}
+${ios}
+    log::set_max_level(log::LevelFilter::Warn);" "${wrapper}")"
   # The anchor is the one thing a rename silently removes.
   _kc_case "a missing init_app is BROKEN, not clean" 2 \
 'pub fn other() {
@@ -680,7 +837,11 @@ fn f() {
     fail "self-test failed — this guard cannot be trusted until it is fixed"
     exit 2
   fi
-  log "OK: self-test passed (${checked} fixtures)."
+  if (( checked != DECLARED_CASES )); then
+    fail "self-test ran ${checked} cases but declares ${DECLARED_CASES} — re-pin DECLARED_CASES with the fixture change that moved it"
+    exit 2
+  fi
+  log "OK: self-test passed (${checked} fixtures, as declared)."
 }
 
 # ---------------------------------------------------------------------------
@@ -699,6 +860,10 @@ main() {
   [[ -d "${ffi}"  ]] || misconfig "${ffi} not found"
   [[ -d "${dart}" ]] || misconfig "${dart} not found"
   [[ -f "${api}"  ]] || misconfig "${api} not found"
+  grep -q '^name = "haven-core"$' "${REPO_ROOT}/haven-core/Cargo.toml" \
+    || misconfig "haven-core's package name changed — re-pin HAVEN_CORE_TARGET (its lib target) in this guard"
+  grep -q "^name = \"${HAVEN_FFI_TARGET}\"$" "${REPO_ROOT}/haven/rust_builder/Cargo.toml" \
+    || misconfig "rust_builder's package name changed — re-pin HAVEN_FFI_TARGET in this guard"
 
   local status=0 rc
   local -a rust_files dart_files

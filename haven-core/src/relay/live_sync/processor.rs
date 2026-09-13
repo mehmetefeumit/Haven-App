@@ -63,6 +63,7 @@ use tokio::sync::Notify;
 use tokio::time::Instant;
 
 use crate::circle::{CircleManager, DirectoryReconcile};
+use crate::log_alias::bucket;
 use crate::nostr::mls::types::{
     GroupId, IngestOutcome, LocationMessageResult, PublishWork, ScreenedIngest,
 };
@@ -158,7 +159,9 @@ impl std::fmt::Debug for DeliveryLog {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .len();
-        f.debug_struct("DeliveryLog").field("reqs", &len).finish()
+        f.debug_struct("DeliveryLog")
+            .field("reqs", &bucket(len))
+            .finish()
     }
 }
 
@@ -249,7 +252,9 @@ impl std::fmt::Debug for EoseCoverage {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .len();
-        f.debug_struct("EoseCoverage").field("reqs", &len).finish()
+        f.debug_struct("EoseCoverage")
+            .field("reqs", &bucket(len))
+            .finish()
     }
 }
 
@@ -955,8 +960,8 @@ impl EngineProcessor {
                 .await;
                 if deferred > 0 {
                     log::info!(
-                        "background burst deferred {deferred} removal commit(s) to the \
-                         foreground (OD4-c)"
+                        "background burst deferred removal commit(s) to the foreground \
+                         (OD4-c)"
                     );
                 }
             }
@@ -999,7 +1004,7 @@ impl EngineProcessor {
             .redeem_removal_deferrals(publisher.as_ref())
             .await;
         if confirmed > 0 {
-            log::info!("foreground published {confirmed} deferred removal commit(s) (OD4-c)");
+            log::info!("foreground published the deferred removal commit(s) (OD4-c)");
         }
     }
 
@@ -1445,6 +1450,36 @@ mod tests {
             relay_url: RelayUrl::parse(relay).expect("a fixture relay url parses"),
             sub_id: sub.clone(),
         }
+    }
+
+    /// Both per-REQ tables are keyed by `(relay, subscription)`, and how many
+    /// REQs a device holds is its relay-set size; so both render a BUCKET and
+    /// neither renders a key (Rule 15).
+    #[test]
+    fn delivery_log_and_eose_coverage_debug_redacts_relay_and_sub_id() {
+        let sub = SubscriptionId::new("s_group_0_SECRETSUB");
+        let k = key("wss://secret-relay.example", &sub);
+
+        let log = DeliveryLog::default();
+        log.open(&k, 1_700_000_000);
+        assert!(format!("{log:?}").contains("reqs: \"1\""));
+        crate::assert_debug_redacted!(
+            log,
+            "DeliveryLog",
+            &["secret-relay.example", "s_group_0_SECRETSUB", "1700000000"]
+        );
+
+        let coverage = EoseCoverage::default();
+        coverage.expect(
+            &sub,
+            &[RelayUrl::parse("wss://secret-relay.example").expect("url")],
+        );
+        assert!(format!("{coverage:?}").contains("reqs: \"1\""));
+        crate::assert_debug_redacted!(
+            coverage,
+            "EoseCoverage",
+            &["secret-relay.example", "s_group_0_SECRETSUB"]
+        );
     }
 
     #[test]

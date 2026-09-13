@@ -100,8 +100,10 @@ jobs:
     #     attempts, each restarting the relay and the recorder;
     #     derived there)                                         65 / 95
     #   Run iOS background-mirror scenario on the simulator      45
-    #   everything no step cap bounds (setup, diagnostics, the
-    #     post-job tail), measured to the job's COMPLETION time:
+    #   everything no step cap bounds (setup, diagnostics — since
+    #     2026-09-12 also two `log show` passes over the archive and
+    #     the secret scan, unmeasured yet: re-measure — the post-job
+    #     tail), measured to the job's COMPLETION time:
     #     at most 5.4 min over 210 runs of both paths (ci.yml and
     #     e2e-live-sync.yml, 2026-06-24..09-10). Worst is flag-on
     #     run 29548776682, whose Setup Flutter failed and which
@@ -130,6 +132,7 @@ jobs:
 
     steps:
       - name: Checkout
+        id: checkout
         uses: actions/checkout@v6
 
       - name: Setup Rust
@@ -664,10 +667,27 @@ jobs:
           fi
           echo "The wire oracles read the journal and found it clean."
 
+      # The unified-log archive is a full-device capture (binary tracev3,
+      # multi-GB) that the scanner cannot read, so it never leaves the runner:
+      # two `log show` exports replace it — Haven's own lines (the Rust
+      # `frb_user` oslog subsystem and the Runner process), uncapped, and the
+      # whole device under SIM_LOG_FULL_CAP_BYTES. `log show` emits in
+      # chronological order, so the cap keeps the EARLIEST bytes; the residual
+      # past it is discarded with the archive — evidence lost, nothing
+      # published. The exports, the transcript and the relay log are scanned
+      # by the next step, before the upload step can see them.
       - name: Collect simulator diagnostics
         if: always()
+        env:
+          SIM_LOG_FULL_CAP_BYTES: "67108864"
         run: |
           xcrun simctl spawn booted log collect --output /tmp/sim.logarchive 2>/dev/null || true
+          log show --archive /tmp/sim.logarchive --style syslog --info --debug \
+            --predicate 'subsystem == "frb_user" OR process == "Runner"' \
+            > /tmp/sim-unified.log 2>/dev/null || true
+          log show --archive /tmp/sim.logarchive --style syslog 2>/dev/null \
+            | head -c "${SIM_LOG_FULL_CAP_BYTES}" > /tmp/sim-unified-full.log || true
+          rm -rf /tmp/sim.logarchive
           cp /tmp/haven-local-relay.log /tmp/relay.log 2>/dev/null || true
           cp /tmp/haven-wire-proxy.log /tmp/wire-proxy.log 2>/dev/null || true
           # A REDACTED transcript, never the raw journal: the .ndjson is a
@@ -680,6 +700,25 @@ jobs:
           # the oracle step above, which has already had its say.
           bash tooling/e2e/ci/summarize-wire-journal.sh \
             /tmp/haven-wire-journal.ndjson /tmp/wire-summary.log || true
+
+      # Scan-before-upload, as its OWN step: every `.log` the upload step names
+      # goes through the scanner here on every outcome short of a cancellation,
+      # so a leak (rc 1) deletes the scanned files and fails the lane even on an
+      # otherwise green run, and an unscannable log (rc 3) fails it and leaves
+      # them as they are. The standard guard condition (not `always()`) is what
+      # lets docs/privacy/privacy_invariants.json cite this step as the runtime
+      # scanner's enforcing run.
+      # The wire summary is scanned by its producer, and the proxy's own log
+      # carries lengths, counts and fixed labels only
+      # (check_wire_proxy_test_only.sh, invariant 3).
+      - name: Scan captured logs for secrets before upload
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: |
+          logs=(/tmp/sim-unified.log /tmp/sim-unified-full.log /tmp/flutter-ios-test.log /tmp/relay.log)
+          rc=0
+          bash tooling/e2e/ci/scan-logs-for-secrets.sh "${logs[@]}" || rc=$?
+          if [ "${rc}" -eq 1 ]; then rm -f -- "${logs[@]}"; fi
+          exit "${rc}"
 
       - name: Upload failure artifacts
         if: failure()
@@ -697,7 +736,8 @@ jobs:
           path: |
             /tmp/flutter-ios-test.log
             /tmp/relay.log
-            /tmp/sim.logarchive
+            /tmp/sim-unified.log
+            /tmp/sim-unified-full.log
             /tmp/wire-proxy.log
             /tmp/wire-summary.log
           retention-days: 14

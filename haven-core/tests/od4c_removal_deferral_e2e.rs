@@ -47,6 +47,9 @@ use haven_core::relay::maintenance::build_kp_maintenance_events;
 use nostr::{Event, Keys};
 use tempfile::TempDir;
 
+mod helpers;
+use helpers::{assert_no_needles, capture_haven_log};
+
 /// A recording fake relay plane: records every publish and reports a fixed
 /// OK-ack verdict, so the ordering is deterministic with no network.
 struct FakePublisher {
@@ -1422,92 +1425,18 @@ async fn the_deferred_send_plane_owes_its_eviction_before_it_crosses_the_ffi() {
 /// rather than to when the test happens to run.
 const LEAVE_AT_UNIX_SECS: i64 = 1_800_000_000;
 
-/// Records every `haven_core` log line this process emits, for the assertions
-/// below that a residual is REPORTED and not merely survived.
-///
-/// Process-wide rather than thread-local: these tests run on multi-thread
-/// runtimes, where the future under test may resume on a different worker than
-/// the one that started it.
-struct WarnCapture;
-
-/// Every `haven_core` line this binary has emitted since the logger went in.
-/// Append-only: a capturing test remembers where its own window began, so two
-/// running side by side each see a superset of their own lines and neither can
-/// empty the other's buffer.
-static CAPTURED: Mutex<Vec<String>> = Mutex::new(Vec::new());
-
-/// Poison-tolerant lock: a test that panics while the capture is armed must not
-/// turn every later capture into a second panic that hides the first.
-fn lock<T>(mutex: &'static Mutex<T>) -> std::sync::MutexGuard<'static, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
-impl log::Log for WarnCapture {
-    fn enabled(&self, _metadata: &log::Metadata<'_>) -> bool {
-        true
-    }
-
-    fn log(&self, record: &log::Record<'_>) {
-        // Haven's own lines only: what this app promises about its diagnostics is
-        // what THIS crate writes.
-        if record.target().starts_with("haven_core") {
-            lock(&CAPTURED).push(record.args().to_string());
-        }
-    }
-
-    fn flush(&self) {}
-}
-
-/// Runs `body` and returns the `haven_core` log lines emitted during it — a
-/// superset of `body`'s own if another test logs alongside it, which is why the
-/// assertions below look for a line rather than count them.
-async fn capture_haven_log(body: impl std::future::Future<Output = ()>) -> Vec<String> {
-    static INSTALL: std::sync::Once = std::sync::Once::new();
-    /// Whether OUR logger won the process-wide slot. `log` permits exactly one
-    /// per process and reports the loser only through an `Err` that a `let _ =`
-    /// throws away, so a second installer would leave this capture seeing
-    /// NOTHING and every assertion below vacuously green. Record the verdict and
-    /// fail on it instead.
-    static OWNS_LOGGER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-    INSTALL.call_once(|| {
-        OWNS_LOGGER.store(
-            log::set_boxed_logger(Box::new(WarnCapture)).is_ok(),
-            std::sync::atomic::Ordering::SeqCst,
-        );
-        log::set_max_level(log::LevelFilter::Trace);
-    });
-    assert!(
-        OWNS_LOGGER.load(std::sync::atomic::Ordering::SeqCst),
-        "another logger already owns this process, so this capture sees nothing \
-         at all. `log` permits exactly one; whoever installed the other one has \
-         to route through WarnCapture instead."
-    );
-    // The window starts at the current end of the buffer, so the lines returned
-    // are the ones `body` emitted.
-    let from = lock(&CAPTURED).len();
-    body.await;
-    lock(&CAPTURED)[from..].to_vec()
-}
-
-/// Neither warning may name the group it is about.
-///
-/// They fire at the one moment a group identifier is in hand, and Security Rule
-/// 4/6/8 keeps the `nostr_group_id`, the real MLS group id and every key out of
-/// the log. A "more helpful" interpolation is the regression to expect here, so
-/// the SHAPE is asserted (no identifier-length hex run) rather than the wording.
-fn assert_names_no_identifier(line: &str) {
-    let longest_hex_run = line
-        .split(|c: char| !c.is_ascii_hexdigit())
-        .map(str::len)
-        .max()
-        .unwrap_or_default();
-    assert!(
-        longest_hex_run < 16,
-        "a diagnostic must not name the group it is about: {line}"
-    );
+/// The identifiers in hand at the moment either warning fires. Neither may name
+/// the group, the leaver or the circle it is about (Security Rule 15): these
+/// lines are the ONE place a group identifier is already in scope, so a "more
+/// helpful" interpolation is exactly the regression to expect.
+fn eviction_needles(fx: &Fixture) -> Vec<String> {
+    vec![
+        hex::encode(fx.nostr_group_id),
+        hex::encode(fx.mls_group_id.as_slice()),
+        fx.bob_keys.public_key().to_hex(),
+        fx.alice_keys.public_key().to_hex(),
+        "OD4-c Circle".to_owned(),
+    ]
 }
 
 /// The publishing planes SAY SO when the obligation cannot be recorded — and
@@ -1549,14 +1478,18 @@ async fn a_publish_with_no_recordable_obligation_says_so_and_can_still_drop_it()
 
     let warning = lines
         .iter()
-        .find(|line| line.contains("no recorded obligation"))
+        .find(|line| line.message.contains("no recorded obligation"))
         .expect(
             "a plane that opens a publish-before-apply window with nothing \
              recording the debt must say so: the durable row is what turns this \
              wedge from silent into reportable, and this is the case where there \
              is none",
         );
-    assert_names_no_identifier(warning);
+    let needles = eviction_needles(&fx);
+    assert_no_needles(
+        std::slice::from_ref(warning),
+        &needles.iter().map(String::as_str).collect::<Vec<_>>(),
+    );
     assert!(
         fx.alice.owed_removal_commits().is_empty(),
         "premise: the obligation really could not be recorded"
@@ -1612,13 +1545,17 @@ async fn a_park_that_cannot_be_recorded_says_so_and_leaves_the_commit_staged() {
 
     let warning = lines
         .iter()
-        .find(|line| line.contains("left staged"))
+        .find(|line| line.message.contains("left staged"))
         .expect(
             "a commit left staged with no obligation behind it is the silent \
              wedge OD4-c exists to end, so the one plane that can produce it \
              must report it",
         );
-    assert_names_no_identifier(warning);
+    let needles = eviction_needles(&fx);
+    assert_no_needles(
+        std::slice::from_ref(warning),
+        &needles.iter().map(String::as_str).collect::<Vec<_>>(),
+    );
     assert!(
         fx.alice.owed_removal_commits().is_empty(),
         "premise: the park really could not be recorded"

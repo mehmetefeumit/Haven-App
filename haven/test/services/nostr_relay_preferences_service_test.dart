@@ -14,7 +14,8 @@
 ///     exception whose message is safe to show a user (Security Rule 8 — the
 ///     raw FFI error text, which could carry hex-encoded MLS state, MUST
 ///     NEVER reach the thrown exception's message);
-///   * `_mapStorageError`'s validation-substring matching turns specific Rust
+///   * `_mapStorageError`'s matching on Rust's five fixed, payload-free
+///     validation sentences (Phase L0, Security Rule 15) turns specific Rust
 ///     validation failures into specific, actionable [RelayValidationError]s;
 ///   * FFI response objects are mapped field-for-field into their Dart-side
 ///     counterparts, including the `suppressed` (privacy-toggle-off) case,
@@ -360,35 +361,43 @@ void main() {
       expect(manager.lastRelayType, RelayTypeFfi.nip65);
     });
 
+    // These raw strings are the exact, payload-free sentences
+    // `CircleError::InvalidRelayInput`'s `Display` renders since Phase L0
+    // (Security Rule 15) — see `haven-core/src/circle/storage_relay_prefs.rs`.
+    // Pinning the REAL Rust sentences here (rather than hand-invented
+    // fixtures) is the promise under test: a wording drift on the Rust side
+    // that this test does not also catch is a `_mapStorageError` arm that
+    // silently goes dead in production, same as the regression this test
+    // guards against.
     for (final case_ in [
       (
-        raw: 'Use wss:// for this relay',
+        raw: 'Relay URL must not be empty',
+        expected: 'Enter a relay address like wss://relay.example.com.',
+      ),
+      (
+        raw: 'Use wss:// for security',
         expected: 'Use wss:// so traffic to this relay is encrypted.',
       ),
       (
-        raw: 'USE WSS:// FOR THIS RELAY',
+        raw: 'USE WSS:// FOR SECURITY',
         expected: 'Use wss:// so traffic to this relay is encrypted.',
       ),
       (
-        raw: 'relay url must not contain credentials',
+        raw: 'Relay URL must not contain credentials',
         expected: 'Relay URL must not contain credentials.',
       ),
       (
-        raw: 'invalid relay url: not-a-url',
+        raw: 'Invalid relay URL',
         expected: 'Enter a relay address like wss://relay.example.com.',
       ),
       (
-        raw: 'relay url must not be empty',
-        expected: 'Enter a relay address like wss://relay.example.com.',
-      ),
-      (
-        raw: 'you need at least one relay',
+        raw: 'At least one relay is required per category',
         expected: 'You need at least one relay so others can reach you.',
       ),
     ]) {
       test(
-        'maps the validation failure "${case_.raw}" to a RelayValidationError '
-        'with a fixed, presentable message',
+        'maps the real Rust validation sentence "${case_.raw}" to a '
+        'RelayValidationError with a fixed, presentable message',
         () async {
           final manager = _FakeCircleManager()
             ..addUserRelayThrows = Exception(case_.raw);
@@ -443,11 +452,12 @@ void main() {
     });
 
     test(
-      'maps a "last relay" validation failure to a RelayValidationError',
+      'maps the real Rust "last relay" sentence to a RelayValidationError '
+      "(removeRelay shares addRelay's _mapStorageError mapping)",
       () async {
         final manager = _FakeCircleManager()
           ..removeUserRelayThrows = Exception(
-            'removal would leave at least one relay required',
+            'At least one relay is required per category',
           );
         final service = NostrRelayPreferencesService(manager: manager);
         await expectLater(
@@ -458,6 +468,48 @@ void main() {
               'message',
               'You need at least one relay so others can reach you.',
             ),
+          ),
+        );
+      },
+    );
+
+    test(
+      'maps the real Rust "invalid relay URL" sentence to a '
+      'RelayValidationError on removeRelay too',
+      () async {
+        final manager = _FakeCircleManager()
+          ..removeUserRelayThrows = Exception('Invalid relay URL');
+        final service = NostrRelayPreferencesService(manager: manager);
+        await expectLater(
+          service.removeRelay(RelayCategory.inbox, 'not-a-url'),
+          throwsA(
+            isA<RelayValidationError>().having(
+              (e) => e.message,
+              'message',
+              'Enter a relay address like wss://relay.example.com.',
+            ),
+          ),
+        );
+      },
+    );
+
+    test(
+      'an unrecognized manager failure on removeRelay maps to a generic '
+      'RelayPreferencesException, never the raw text',
+      () async {
+        final manager = _FakeCircleManager()
+          ..removeUserRelayThrows = Exception(_sensitiveRawError);
+        final service = NostrRelayPreferencesService(manager: manager);
+        await expectLater(
+          service.removeRelay(RelayCategory.inbox, 'wss://ok.example'),
+          throwsA(
+            isA<RelayPreferencesException>()
+                .having((e) => e.message, 'message', 'Relay update failed.')
+                .having(
+                  (e) => e.toString(),
+                  'toString()',
+                  isNot(contains('deadbeef')),
+                ),
           ),
         );
       },

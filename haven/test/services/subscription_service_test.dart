@@ -1,9 +1,11 @@
-import 'package:flutter/foundation.dart';
+import 'dart:typed_data';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/subscription_service.dart';
 
+import '../helpers/log_capture.dart';
 import '../mocks/mock_circle_service.dart';
 
 /// A captured set of router side effects, for assertions.
@@ -54,37 +56,15 @@ const String _peerPubkey = 'npub1donotlogthispeer';
 /// Everything the injected failure's `toString()` reveals.
 const String _leakyDetail = 'group $_mlsGroupHex member $_peerPubkey';
 
-/// Captures everything [debugPrint] emits for the duration of one test.
-List<String?> _captureDebugPrint() {
-  final logged = <String?>[];
-  final previous = debugPrint;
-  debugPrint = (message, {int? wrapWidth}) => logged.add(message);
-  addTearDown(() => debugPrint = previous);
-  return logged;
-}
-
 /// Rules 4 and 8: a fail-safe log line may name the failure's TYPE (and the
 /// pseudonymous `nostr_group_id`), never the MLS group id, a member pubkey or
 /// the raw error text. The positive assertion is what stops the negatives from
 /// passing vacuously — and a fail-safe branch that records nothing at all is
 /// itself the traceless silence the wedge banner exists to end.
-void _expectRedactedLog(List<String?> logged) {
-  final printed = logged.whereType<String>().join('\n');
-  expect(
-    printed,
-    contains('$_LeakyFailure'),
-    reason: 'the failure is recorded for a developer, by type',
-  );
-  expect(
-    printed,
-    isNot(contains(_mlsGroupHex)),
-    reason: 'Rule 4: the real MLS group id never leaves the device',
-  );
-  expect(
-    printed,
-    isNot(contains(_peerPubkey)),
-    reason: 'Rule 8: no raw error text, so no pubkey it happens to carry',
-  );
+void _expectRedactedLog(LogCapture logged) {
+  logged
+    ..assertContains('$_LeakyFailure')
+    ..assertNoNeedles([_mlsGroupHex, _peerPubkey]);
 }
 
 void main() {
@@ -436,7 +416,7 @@ void main() {
 
     test('a failing marker READ neither blocks nor counts the verdict',
         () async {
-      final logged = _captureDebugPrint();
+      final logged = LogCapture.install();
       final broken = _FailingBlockedReadCircleService();
       circles = [
         _circle(nostrGroupId: const [1, 2, 3], mlsGroupId: _mlsGroupId),
@@ -509,7 +489,7 @@ void main() {
     });
 
     test('a failing wedge REFRESH still leaves the circle blocked', () async {
-      final logged = _captureDebugPrint();
+      final logged = LogCapture.install();
       circles = [
         _circle(nostrGroupId: const [1, 2, 3], mlsGroupId: _mlsGroupId),
       ];

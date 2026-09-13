@@ -482,6 +482,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  LogAliasClassFfi dco_decode_log_alias_class_ffi(dynamic raw);
+
+  @protected
   MemberKeyPackageFfi dco_decode_member_key_package_ffi(dynamic raw);
 
   @protected
@@ -1149,6 +1152,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   LocationMessageResultKindFfi sse_decode_location_message_result_kind_ffi(
     SseDeserializer deserializer,
   );
+
+  @protected
+  LogAliasClassFfi sse_decode_log_alias_class_ffi(SseDeserializer deserializer);
 
   @protected
   MemberKeyPackageFfi sse_decode_member_key_package_ffi(
@@ -1973,6 +1979,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_location_message_result_kind_ffi(
     LocationMessageResultKindFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_log_alias_class_ffi(
+    LogAliasClassFfi self,
     SseSerializer serializer,
   );
 

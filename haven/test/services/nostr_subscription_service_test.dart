@@ -1,11 +1,12 @@
 import 'dart:async';
+import 'dart:typed_data';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/nostr_subscription_service.dart';
 import 'package:haven/src/services/subscription_service.dart';
 
+import '../helpers/log_capture.dart';
 import '../mocks/mock_circle_service.dart';
 
 /// A fake [LiveSyncFfi] engine. Only the methods the service drives are
@@ -604,6 +605,27 @@ void main() {
       );
     });
 
+    test(
+      'a start failure never logs the raw error text, even in debug builds '
+      '(Rule 8/15)',
+      () async {
+        final logged = LogCapture.install();
+        final engine = _FakeEngine(failStart: true);
+        final service = NostrSubscriptionService(
+          router: _SpyRouter(),
+          engineFactory: () async => engine,
+        );
+
+        await expectLater(
+          service.start(groups: const [], inboxRelays: const []),
+          throwsA(isA<SubscriptionServiceException>()),
+        );
+
+        logged.assertContains('Exception');
+        logged.assertNoNeedles(['deadbeefcafef00ddeadbeefcafef00d']);
+      },
+    );
+
     test('repeated failures do not accumulate live handles', () async {
       // The self-heal retries on a timer, so a persistent failure would
       // otherwise add one guard holder per attempt.
@@ -1079,12 +1101,7 @@ void main() {
       // the settle would skip the pause, so the burst's standing REQs and its
       // sockets would stay open for the whole gap to the next burst — the
       // always-on background socket, restored by an error path.
-      final logs = <String>[];
-      final original = debugPrint;
-      debugPrint = (message, {wrapWidth}) {
-        if (message != null) logs.add(message);
-      };
-      addTearDown(() => debugPrint = original);
+      final logs = LogCapture.install();
 
       final (service, engine) = await started(_FakeEngine(failSettle: true));
 
@@ -1095,7 +1112,7 @@ void main() {
         1,
         reason: 'anti-vacuity: it was called, and it threw',
       );
-      final joined = logs.join('\n');
+      final joined = logs.joined;
       expect(joined, contains('settle failed'));
       expect(
         joined,
@@ -1246,19 +1263,14 @@ void main() {
 
     test('isPaused reads false with no engine, and logs a failed FFI read',
         () async {
-      final logs = <String>[];
-      final original = debugPrint;
-      debugPrint = (message, {wrapWidth}) {
-        if (message != null) logs.add(message);
-      };
-      addTearDown(() => debugPrint = original);
+      final logs = LogCapture.install();
 
       final service = NostrSubscriptionService(
         router: _SpyRouter(),
         engineFactory: () async => _FakeEngine(),
       );
       expect(service.isPaused, isFalse, reason: 'no engine yet');
-      expect(logs, isEmpty, reason: 'no engine is not a failure');
+      expect(logs.lines, isEmpty, reason: 'no engine is not a failure');
 
       final live = NostrSubscriptionService(
         router: _SpyRouter(),
@@ -1275,7 +1287,7 @@ void main() {
       );
       // `false` is also what a genuinely un-paused engine answers, so a read
       // that failed has to be visible somewhere or it is silent.
-      final joined = logs.join('\n');
+      final joined = logs.joined;
       expect(joined, contains('isPaused read failed'));
       expect(
         joined,
