@@ -297,18 +297,22 @@ covered = [
 
 [ledger.coordinate]
 covered = [
-  "lat/decimal-round3", "lat/decimal-round4", "lat/decimal-round5", "lat/decimal-round6",
-  "lat/decimal-round7", "lat/decimal-trunc3", "lat/decimal-trunc4", "lat/decimal-trunc5",
+  "lat/decimal-round4", "lat/decimal-round5", "lat/decimal-round6",
+  "lat/decimal-round7", "lat/decimal-trunc4", "lat/decimal-trunc5",
   "lat/decimal-trunc6", "lat/decimal-trunc7", "lat/trimmed", "lat/scientific",
   "lat/scientific-dart", "lat/comma-decimal", "lat/unsigned", "lat/sign-plus",
-  "lon/decimal-round3", "lon/decimal-round4", "lon/decimal-round5", "lon/decimal-round6",
-  "lon/decimal-round7", "lon/decimal-trunc3", "lon/decimal-trunc4", "lon/decimal-trunc5",
+  "lon/decimal-round4", "lon/decimal-round5", "lon/decimal-round6",
+  "lon/decimal-round7", "lon/decimal-trunc4", "lon/decimal-trunc5",
   "lon/decimal-trunc6", "lon/decimal-trunc7", "lon/trimmed", "lon/scientific",
   "lon/scientific-dart", "lon/comma-decimal", "lon/unsigned", "lon/sign-plus",
   "pair-latlon/sep-comma", "pair-latlon/sep-comma-space", "pair-latlon/sep-space",
   "pair-lonlat/sep-comma", "pair-lonlat/sep-comma-space", "pair-lonlat/sep-space"
 ]
 [ledger.coordinate.not_gaps]
+"lat/decimal-round3" = "a 3-decimal single axis is a 6-char decimal that collides with durations and percentages; the PAIR labels keep 3 decimals"
+"lat/decimal-trunc3" = "a 3-decimal single axis is a 6-char decimal that collides with durations and percentages; the PAIR labels keep 3 decimals"
+"lon/decimal-round3" = "a 3-decimal single axis is a 6-char decimal that collides with durations and percentages; the PAIR labels keep 3 decimals"
+"lon/decimal-trunc3" = "a 3-decimal single axis is a 6-char decimal that collides with durations and percentages; the PAIR labels keep 3 decimals"
 "coord/dms" = "a degrees/minutes/seconds rendering is not derived: the symbol set, spacing and hemisphere suffix vary so widely between formatters that one derived string would assert almost nothing"
 "coord/plus-code" = "Open Location Code, MGRS, UTM, H3 and S2 are alternative geocoding SYSTEMS rather than encodings of these numbers, and no code path in this tree produces one"
 "coord/base58" = "base58 is not derived: nothing in this tree renders a coordinate in it"

@@ -36,6 +36,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/rust/api.dart';
+import 'package:haven/src/utils/log_alias.dart';
 import 'package:integration_test/integration_test.dart';
 
 import '_lib/scenario_harness.dart';
@@ -152,14 +153,14 @@ void main() {
           // Expected on a fresh hermetic relay — no events to match.
         }
 
-        // Redact pubkeys to the first 8 chars — consistent with the
-        // 8-char redaction used across the rest of the E2E suite
-        // (diagnostics.dart, e2e_combined.dart _redactPk).
-        String redact(String hex) =>
-            hex.length <= 8 ? hex : '${hex.substring(0, 8)}…';
+        // Handles and a bucket only: a relay URL or a pubkey prefix in the
+        // drive log is a Rule-15 leak the runtime scanner reds the lane on.
+        final aliceHandle =
+            logAliasHandle(LogAliasClass.peer, aliceA.pubkeyHex);
+        final bobHandle = logAliasHandle(LogAliasClass.peer, bob.pubkeyHex);
         debugPrint(
-          '[smoke_test] OK: relays=$relays alice=${redact(aliceA.pubkeyHex)} '
-          'bob=${redact(bob.pubkeyHex)}',
+          '[smoke_test] OK: relays=${magnitudeBucket(relays.length)} '
+          'alice=$aliceHandle bob=$bobHandle',
         );
       },
       timeout: ScenarioHarness.defaultTimeout,

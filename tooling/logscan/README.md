@@ -179,9 +179,16 @@ Label vocabulary, by class kind:
   `upper`, `casefold`, `search-fold`, `percent-component`, `percent-form`,
   `json-escaped`, `latin1-from-char-codes`, each also with **one** `base64`
   layer, plus the `utf8-drop1..4` prefix ladder.
-* **coordinate**: `{lat,lon}/decimal-round3..7`, `/decimal-trunc3..7`,
+* **coordinate**: `{lat,lon}/decimal-round4..7`, `/decimal-trunc4..7`,
   `/trimmed`, `/scientific`, `/scientific-dart`, `/comma-decimal`, `/unsigned`,
-  `/sign-plus`, and `pair-{latlon,lonlat}/sep-{comma,comma-space,space}`.
+  `/sign-plus`, and `pair-{latlon,lonlat}/sep-{comma,comma-space,space}`. The
+  single-axis ladders start at FOUR decimals: `{lat,lon}/decimal-round3` and
+  `/decimal-trunc3` are in `not_gaps`, because a 3-decimal axis is a
+  six-character decimal that a millisecond duration or a percentage carries by
+  chance (CI run 34766632019 matched one in a relay log). The PAIR labels keep
+  three decimals — two axes and a separator are unambiguous — and so does
+  `wire_canaries.dart`'s own ledger, because a wire frame has no duration or
+  percentage column for a lone axis to collide with. A log does.
 * **geohash**: `full`, `prefix6..8`. `prefix4`/`prefix5` are in `not_gaps`: they
   are below the global term floor for EVERY value, so they are not produced at
   all rather than produced and dropped (a drop would have satisfied a `covered`
@@ -212,9 +219,9 @@ Three notes on the encoders:
   precedes the value in the encoded stream and whatever padding follows. The
   `-padded` labels therefore collapse into aliases.
 
-`utf8/base58`, `utf8/base32`, deeper compositions, `coord/dms` and
-`coord/plus-code` are declared out of scope in `policy.toml`'s `not_gaps`, each
-with the sentence why.
+`utf8/base58`, `utf8/base32`, deeper compositions, `coord/dms`,
+`coord/plus-code` and the 3-decimal single axes are declared out of scope in
+`policy.toml`'s `not_gaps`, each with the sentence why.
 
 ## Structural rules
 
@@ -225,10 +232,17 @@ and separated from the cell by one to eight non-alphanumeric characters, which
 covers `geohash=u4pruyd`, `gh: u4pruyd`, `"geohash" : "u4pruyd"` and the
 escaped-JSON form while keeping the rule out of a plant token) · `S7` any `wss?://` URL (the
 default pool included — owner-directed) · `S8` `secret|nsec|seed|key` within 24
-characters of a blob · `S9` 32-element decimal array · `S10`
+characters of a blob that looks ENCODED (two digits, base64 punctuation or S4's
+entropy floor) and that no letter runs into, so `KeyPackageMaintenanceFailed`
+and `KeyCipherImplementationRSA18` are identifiers rather than key material ·
+`S9` 32-element decimal array · `S10`
 `display_name=|petname=|circle_name=|name=` followed by non-placeholder text ·
 `S11` a bare Unix second in the current epoch window on a
-`publish|sent|received|since` line · `S12` a dotted-quad or IPv6 literal.
+`publish|sent|received|since` line · `S12` a dotted-quad, or an IPv6 literal
+delimited by non-word characters on both sides and carrying a digit — the
+delimiters and the digit are what keep the rule off `haven_core::relay::manager`
+and `Option::Some`, which the first CI run of this scanner read as addresses
+hundreds of times per transcript.
 
 They run on **Haven-owned lines only** (tag/process scoping) and never on a
 `relay` sink. On a `logcat` sink they see the message body (the host's own
@@ -280,7 +294,9 @@ citation means the same thing under `cargo test` and under
   `the_token_shape_makes_every_rule_unreachable` is the argument — evaluated on
   the token, on the token followed by a geohash-shaped word, and on the line a
   harness actually writes — and S6 is the rule that already had to require a
-  separator for it.
+  separator for it. Finally run it over `fixtures/furniture.*.log`: a rule that
+  reddens real furniture reddens a real lane, and rc 1 deletes the lane's
+  evidence.
 
 ## Performance
 
@@ -305,3 +321,18 @@ reassembly sinks and three allowlists. Every value in them is **synthetic**: nev
 a real key, and never a wire-canary value, so a canary and a needle can never be
 mistaken for each other. The dirty fixtures deliberately contain shapes that also
 trip `scan-logs-for-secrets.sh`; the clean ones contain none.
+
+`furniture.drive.log` and `furniture.logcat.log` are the one exception, and the
+reason is the point: they are **real** lines, verbatim from the uploaded
+transcripts of CI run 34766632019, whose first scan returned rc 1 on nothing but
+false positives. A synthetic clean fixture only says what the author of a rule
+expected a log to look like. These say what a log looks like — tooling preamble,
+vendor chatter, Rust module paths, Dart and Java type names, durations, bucket
+tokens, alias handles — and every line was reviewed against Rule 15 before it
+was pinned (no hex run of eight or more, no key material, no URL, host or
+address, no coordinate, no name, no wall-clock instant, nothing the harness
+printed about the run). The logcat corpus carries only Haven-OWNED tags, because
+a vendor-tagged line is skipped by tag scoping and would prove nothing. They are
+asserted twice: case N of `--self-test` (with the sealed manifest, so needles
+count too) and `real_furniture_trips_no_structural_rule` under `cargo test`.
+A rule tightening that would redden a real lane is red here first.

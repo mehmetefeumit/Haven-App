@@ -2953,7 +2953,7 @@
         },
         {
           "file": "tooling/logscan/src/plants.rs",
-          "name": "the_highest_seq_wins_and_the_rest_are_superseded"
+          "name": "the_last_declaration_wins_and_the_rest_are_superseded"
         },
         {
           "file": "tooling/logscan/src/plants.rs",

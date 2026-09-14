@@ -86,7 +86,12 @@ const RULES: &[Rule] = &[
     },
     Rule {
         id: "S8",
-        patterns: &[r"(?i)(?:secret|nsec|seed|key)[^\n]{0,24}?[A-Za-z0-9+/]{24,}={0,2}"],
+        // The blob is captured so `is_real_hit` can ask whether it looks
+        // ENCODED: `KeyPackageMaintenanceFailed` and
+        // `KeyCipherImplementationRSA18` are a long alphanumeric run next to
+        // the word `key` too, and a rule that reddens on a Rust enum variant is
+        // a rule that gets deleted.
+        patterns: &[r"(?i)(?:secret|nsec|seed|key)[^\n]{0,24}?([A-Za-z0-9+/]{24,}={0,2})"],
     },
     Rule {
         id: "S9",
@@ -109,9 +114,14 @@ const RULES: &[Rule] = &[
     },
     Rule {
         id: "S12",
+        // The IPv6 literal must be delimited by NON-WORD characters on both
+        // sides and (in `is_real_hit`) carry a digit. A Rust module path is the
+        // shape this rule is otherwise indistinguishable from: every `::` in
+        // `haven_core::relay::manager` has a letter on each side, and
+        // `Option::Some` has one on both.
         patterns: &[
             r"(?:^|[^0-9.])((?:\d{1,3}\.){3}\d{1,3})(?:[^0-9.]|$)",
-            r"(?i)(?:^|[^0-9a-f:])((?:[0-9a-f]{1,4}:){7}[0-9a-f]{1,4}|::(?:[0-9a-f]{1,4}:){0,6}[0-9a-f]{1,4}|(?:[0-9a-f]{1,4}:){1,7}:)(?:[^0-9a-f:]|$)",
+            r"(?i)(?:^|[^A-Za-z0-9_:])((?:[0-9a-f]{1,4}:){7}[0-9a-f]{1,4}|(?:[0-9a-f]{1,4}:){1,7}:(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){0,6})?|::(?:[0-9a-f]{1,4}:){0,6}[0-9a-f]{1,4})(?:[^A-Za-z0-9_:]|$)",
         ],
     },
 ];
@@ -271,7 +281,7 @@ impl RuleSet {
             let regex = &self.regexes[index];
             for capture in regex.captures_iter(line) {
                 let whole = capture.get(0).map_or("", |m| m.as_str());
-                if !self.is_real_hit(id, &capture, whole) {
+                if !self.is_real_hit(id, &capture, whole, line) {
                     continue;
                 }
                 if self.is_allowlisted(id, line, sink_path, tag) {
@@ -288,7 +298,13 @@ impl RuleSet {
     }
 
     /// The post-filters: the part of a rule a regex cannot express.
-    fn is_real_hit(&self, id: &str, capture: &regex::Captures<'_>, whole: &str) -> bool {
+    fn is_real_hit(
+        &self,
+        id: &str,
+        capture: &regex::Captures<'_>,
+        whole: &str,
+        line: &str,
+    ) -> bool {
         match id {
             "S4" => {
                 let blob = longest_base64_run(whole);
@@ -300,6 +316,10 @@ impl RuleSet {
                 .get(1)
                 .is_some_and(|m| m.as_str().chars().any(char::is_alphabetic)),
             "S7" => !self.is_exempt_endpoint(whole),
+            "S8" => capture.get(1).is_some_and(|blob| {
+                !runs_into_a_word(line, blob.start())
+                    && looks_encoded(blob.as_str(), self.entropy_bits)
+            }),
             "S10" => capture.get(1).is_some_and(|m| !is_placeholder(m.as_str())),
             "S11" => capture.get(1).is_some_and(|m| {
                 m.as_str()
@@ -311,6 +331,12 @@ impl RuleSet {
                 if literal.contains('.')
                     && !literal.split('.').all(|octet| octet.parse::<u8>().is_ok())
                 {
+                    return false;
+                }
+                // No digit, no address: `[abc::def]` is a path, a type or a
+                // label, and every IPv6 spelling a log carries (`::1`,
+                // `fe80::…`, `2001:db8::…`, `fd00::…`) has one.
+                if !literal.bytes().any(|b| b.is_ascii_digit()) {
                     return false;
                 }
                 !self.is_exempt_endpoint(literal)
@@ -458,6 +484,30 @@ fn is_placeholder(text: &str) -> bool {
         || trimmed
             .split_once('#')
             .is_some_and(|(_, suffix)| suffix.len() == 6 && suffix.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
+/// Whether the character immediately before `at` is an ASCII letter, i.e. the
+/// blob is the tail of a longer word (`Key` + `CipherImplementationRSA18`)
+/// rather than a value the line presents on its own.
+fn runs_into_a_word(line: &str, at: usize) -> bool {
+    line[..at]
+        .chars()
+        .next_back()
+        .is_some_and(|c| c.is_ascii_alphabetic())
+}
+
+/// Whether a keyword-adjacent run looks ENCODED rather than like an identifier.
+///
+/// Three independent signs, because no single one covers the renderings that
+/// matter: two digits (hex and base64 of random bytes almost always carry
+/// several, a CamelCase name rarely carries two), base64 punctuation, or S4's
+/// entropy floor. `KeyPackageMaintenanceFailed` satisfies none of them; 32 hex
+/// characters satisfy the first while sitting just BELOW the entropy floor,
+/// which is why the floor alone is not the test.
+fn looks_encoded(blob: &str, entropy_bits: f64) -> bool {
+    blob.bytes().filter(u8::is_ascii_digit).count() >= 2
+        || blob.bytes().any(|b| matches!(b, b'+' | b'/' | b'='))
+        || shannon_bits(blob) > entropy_bits
 }
 
 /// The longest run of base64 characters in `text`.
@@ -690,6 +740,58 @@ mod tests {
         }
     }
 
+    /// S12 across the IPv6 spellings a log carries, and the Rust furniture it
+    /// must not read as one.
+    ///
+    /// The negatives are verbatim from the captures of CI run 34766632019,
+    /// where the pre-delimiter rule matched `re::r` inside
+    /// `haven_core::relay::manager` on hundreds of lines per transcript.
+    #[test]
+    fn s12_reads_an_ipv6_literal_and_not_a_rust_path() {
+        for dirty in [
+            "haven: peer at fe80::1 left",
+            "haven: peer at 2001:db8::1 left",
+            "haven: peer at ::1 left",
+            "haven: refused [2001:db8:85a3::8a2e:370:7334]:7788",
+            "haven: peer at 2001:db8:85a3:0:0:8a2e:370:7334 left",
+        ] {
+            assert!(hits(dirty).contains(&"S12"), "must fire on {dirty:?}");
+        }
+        for clean in [
+            "haven_core::relay::manager: dialing",
+            "haven: state is Option::Some",
+            "haven: std::io::Error while reading",
+            "haven: at 15:47:32.240 the window closed",
+            // A path whose every component is hex-shaped: delimited, but with
+            // no digit anywhere, so it is a name and not an address.
+            "haven: [abc::def] resolved",
+        ] {
+            assert!(!hits(clean).contains(&"S12"), "must not fire on {clean:?}");
+        }
+    }
+
+    /// S8 needs a blob that looks ENCODED, not a CamelCase identifier the word
+    /// `key` happens to run into.
+    ///
+    /// Both negatives are verbatim from CI run 34766632019; the positives keep
+    /// the three renderings a leaked secret actually takes.
+    #[test]
+    fn s8_reads_an_encoded_blob_and_not_a_camel_case_identifier() {
+        for dirty in [
+            "haven: exporter secret 7mK4pQz9XbR2vT8yLwN3cJ5hD6gF0aSe",
+            "haven: nsec bytes 3mK/9xQ+aZv2tRlPqW8nEuY1hCdG7bFs=",
+            "haven: key=0a1b2c3d4e5f60718293a4b5c6d7e8f9",
+        ] {
+            assert!(hits(dirty).contains(&"S8"), "must fire on {dirty:?}");
+        }
+        for clean in [
+            "[KeyPackage] maintain tick: KeyPackageMaintenanceFailed(noRelaysConfigured, awaitUserAction, relayErrors: 0, initKeyPurged: false)",
+            "Detected non-biometric migration: FROM=com.it_nomads.fluttersecurestorage.ciphers.KeyCipherImplementationRSA18@727ec4, TO=AES_GCM_NoPadding",
+        ] {
+            assert!(!hits(clean).contains(&"S8"), "must not fire on {clean:?}");
+        }
+    }
+
     #[test]
     fn s1_and_s2_do_not_double_report_one_run() {
         let line = "haven: 0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9";
@@ -698,7 +800,11 @@ mod tests {
 
     #[test]
     fn an_exempt_endpoint_is_skipped_by_s7_and_s12_and_nothing_else_is() {
-        let exempt = vec!["ws://10.0.2.2:7777".to_owned(), "10.0.2.2".to_owned()];
+        let exempt = vec![
+            "ws://10.0.2.2:7777".to_owned(),
+            "10.0.2.2".to_owned(),
+            "::1".to_owned(),
+        ];
         let engine = RuleSet::new(4.2, 1_800_000_000, &exempt, Vec::new()).expect("rules");
         let hits = |line: &str| -> Vec<&'static str> {
             engine
@@ -714,6 +820,10 @@ mod tests {
         assert!(hits("haven: relay ws://10.0.2.3:7777 connected").contains(&"S7"));
         assert!(hits("haven: relay ws://10.0.2.2:7777/secret connected").contains(&"S7"));
         assert!(hits("haven: host 192.168.1.22 reachable").contains(&"S12"));
+        // An IPv6 exemption is the exact spelling too: the loopback the lane
+        // declared is forgiven and the address one hop away is not.
+        assert!(hits("haven: proxy at ::1 accepted").is_empty());
+        assert!(hits("haven: proxy at ::2 accepted").contains(&"S12"));
     }
 
     #[test]

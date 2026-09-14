@@ -34,12 +34,14 @@ use crate::{RC_CLEAN, RC_GUARD, RC_LEAK, RC_META, RC_UNUSABLE};
 
 /// Number of cases [`run`] must execute. A case that stops running is a case that
 /// stops proving anything, and silence is how that goes unnoticed.
-const DECLARED_CASES: usize = 13;
+const DECLARED_CASES: usize = 14;
 
 const DECL: &str = include_str!("../fixtures/selftest.needles.decl");
 const CLEAN_DRIVE: &str = include_str!("../fixtures/clean.drive.log");
 const CLEAN_LOGCAT: &str = include_str!("../fixtures/clean.logcat.log");
 const DIRTY_LOGCAT: &str = include_str!("../fixtures/dirty.logcat.log");
+const FURNITURE_DRIVE: &str = include_str!("../fixtures/furniture.drive.log");
+const FURNITURE_LOGCAT: &str = include_str!("../fixtures/furniture.logcat.log");
 const REASSEMBLY: &str = include_str!("../fixtures/reassembly.logcat.log");
 const ALLOW_EXPIRED: &str = include_str!("../fixtures/allowlist.expired.json");
 const ALLOW_DANGLING: &str = include_str!("../fixtures/allowlist.dangling.json");
@@ -47,10 +49,10 @@ const ALLOW_LIVE: &str = include_str!("../fixtures/allowlist.live.json");
 const PLANT_TRIPPING: &str = include_str!("../fixtures/plant.tripping.needles.decl");
 
 /// Searchable terms the fixture declaration expands to.
-const SEALED_TERMS: usize = 142;
-/// Labels that produced no term: 62 aliases, 30 policy gaps, 3 renderings the
+const SEALED_TERMS: usize = 139;
+/// Labels that produced no term: 61 aliases, 30 policy gaps, 3 renderings the
 /// declared values cannot carry.
-const SEALED_DROPPED: usize = 95;
+const SEALED_DROPPED: usize = 94;
 /// Of those, the ones that lose recall (everything but an alias): the 28
 /// withheld `nsec` renderings, the two hinted bech32 forms, and the three the
 /// fixture values are too short for.
@@ -60,6 +62,10 @@ const DIRTY_RULE_LINES: usize = 12;
 /// Lines of `dirty.logcat.log` that must each stay clean: the vendor line (tag
 /// scoping) and the alias-only Haven line.
 const DIRTY_CLEAN_LINES: usize = 2;
+/// Lines of the real-furniture negative controls, pinned so a fixture that lost
+/// lines cannot report the same clean verdict over less evidence.
+const FURNITURE_DRIVE_LINES: u64 = 98;
+const FURNITURE_LOGCAT_LINES: u64 = 87;
 /// Structural rules, all of which the dirty fixture must exercise.
 const RULE_COUNT: usize = 12;
 /// Bytes the CLI's throughput probe generates.
@@ -119,6 +125,7 @@ pub(crate) fn run_with(
             "M single streaming pass",
             case_throughput(&rig, out, probe_bytes, mutation),
         ),
+        ("N real furniture is clean", case_furniture(&rig, mutation)),
     ] {
         executed += 1;
         match result {
@@ -894,6 +901,61 @@ fn case_throughput(
     require(
         outcome.findings.is_empty(),
         "the throughput probe is also a clean-at-scale control and must produce no finding",
+    )
+}
+
+/// Real furniture from a real run, every line of it a negative control.
+///
+/// The synthetic clean fixtures say what the author of a rule expected a log to
+/// look like; these two say what a log ACTUALLY looks like. Run 34766632019
+/// returned rc 1 on nothing but false positives — a Rust module path read as an
+/// IPv6 literal, an enum variant read as a key blob — and each of those shapes
+/// is in here now, so the next rule that would redden a real lane reddens this
+/// case first, before a lane deletes its own evidence.
+fn case_furniture(rig: &Rig, mutation: Option<&'static str>) -> Case {
+    let manifest = rig.manifest()?;
+    let rules = rules_for(&manifest, Vec::new(), mutation)?;
+    let drive = rig.write("furniture.drive.log", FURNITURE_DRIVE)?;
+    let logcat = rig.write("furniture.logcat.log", FURNITURE_LOGCAT)?;
+    let outcome = scan(
+        &manifest,
+        &[sink("logcat", &[&logcat]), sink("drive", &[&drive])],
+        &rules,
+    );
+    let where_ = |kind: FindingKind| -> Vec<String> {
+        outcome
+            .findings
+            .iter()
+            .filter(|f| f.kind == kind)
+            .map(|f| {
+                format!(
+                    "{}:{}",
+                    f.rule
+                        .clone()
+                        .or_else(|| f.encoding.clone())
+                        .unwrap_or_default(),
+                    f.line
+                )
+            })
+            .collect()
+    };
+    require(
+        outcome.findings.is_empty(),
+        &format!(
+            "real furniture produced {} finding(s): rules {:?}, needles {:?}",
+            outcome.findings.len(),
+            where_(FindingKind::Rule),
+            where_(FindingKind::Needle)
+        ),
+    )?;
+    require(
+        outcome.lines.get("drive") == Some(&FURNITURE_DRIVE_LINES)
+            && outcome.lines.get("logcat") == Some(&FURNITURE_LOGCAT_LINES),
+        &format!(
+            "the furniture corpus is {:?}/{:?} line(s), not the pinned {FURNITURE_DRIVE_LINES}/{FURNITURE_LOGCAT_LINES}",
+            outcome.lines.get("drive"),
+            outcome.lines.get("logcat")
+        ),
     )
 }
 

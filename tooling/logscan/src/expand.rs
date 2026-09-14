@@ -175,13 +175,18 @@ pub const TEXT_FORMS: &[&str] = &[
 pub const NAME_DROPS: usize = 4;
 
 /// The per-axis coordinate labels, in expansion order.
+///
+/// The ladders start at FOUR decimals: a single axis at three decimals is a
+/// six-character decimal number (`47.209`), which collides with a millisecond
+/// duration, a percentage and a logcat stamp — CI run 34766632019 matched one
+/// in a relay log. `policy.toml`'s `[ledger.coordinate].not_gaps` names the two
+/// labels per axis that removes, and the PAIR labels keep three decimals
+/// because a pair is unambiguous.
 const AXIS_LABELS: &[&str] = &[
-    "decimal-round3",
     "decimal-round4",
     "decimal-round5",
     "decimal-round6",
     "decimal-round7",
-    "decimal-trunc3",
     "decimal-trunc4",
     "decimal-trunc5",
     "decimal-trunc6",
@@ -757,12 +762,10 @@ fn axis_encoding(label: &str, declared: &str, parsed: f64) -> Option<String> {
     let negative = declared.starts_with('-');
     let unsigned = declared.trim_start_matches(['-', '+']);
     match label {
-        "decimal-round3" => Some(format!("{parsed:.3}")),
         "decimal-round4" => Some(format!("{parsed:.4}")),
         "decimal-round5" => Some(format!("{parsed:.5}")),
         "decimal-round6" => Some(format!("{parsed:.6}")),
         "decimal-round7" => Some(format!("{parsed:.7}")),
-        "decimal-trunc3" => truncate_decimals(declared, 3),
         "decimal-trunc4" => truncate_decimals(declared, 4),
         "decimal-trunc5" => truncate_decimals(declared, 5),
         "decimal-trunc6" => truncate_decimals(declared, 6),
@@ -1235,13 +1238,14 @@ mod tests {
             "coordinate",
             COORD,
             &[
+                // `lat/decimal-round3` and `lat/decimal-trunc3` are absent, not
+                // dropped: a 3-decimal single axis collides with a duration, so
+                // the ledger declares the four labels out of scope.
                 ("lat/comma-decimal", term("-33,865143")),
-                ("lat/decimal-round3", term("-33.865")),
                 ("lat/decimal-round4", term("-33.8651")),
                 ("lat/decimal-round5", term("-33.86514")),
                 ("lat/decimal-round6", term("-33.865143")),
                 ("lat/decimal-round7", term("-33.8651430")),
-                ("lat/decimal-trunc3", ALIAS),
                 ("lat/decimal-trunc4", ALIAS),
                 ("lat/decimal-trunc5", ALIAS),
                 ("lat/decimal-trunc6", ALIAS),
@@ -1252,12 +1256,10 @@ mod tests {
                 ("lat/trimmed", ALIAS),
                 ("lat/unsigned", term("33.865143")),
                 ("lon/comma-decimal", term("151,209901")),
-                ("lon/decimal-round3", term("151.210")),
                 ("lon/decimal-round4", term("151.2099")),
                 ("lon/decimal-round5", term("151.20990")),
                 ("lon/decimal-round6", term("151.209901")),
                 ("lon/decimal-round7", term("151.2099010")),
-                ("lon/decimal-trunc3", term("151.209")),
                 ("lon/decimal-trunc4", ALIAS),
                 ("lon/decimal-trunc5", ALIAS),
                 ("lon/decimal-trunc6", ALIAS),
@@ -1345,6 +1347,44 @@ mod tests {
         assert_eq!(
             got.get("percent-form/base64"),
             Some(&term("S2FpJTI3cytDaXJj"))
+        );
+    }
+
+    /// The single-axis ladders start at four decimals, and say so in the ledger.
+    ///
+    /// A 3-decimal axis is six characters — `47.209` matched a millisecond
+    /// duration in a relay log on CI run 34766632019 — so the two labels per
+    /// axis are not produced at all rather than produced and later forgiven by
+    /// an allowlist, which would forgive the real coordinate too.
+    #[test]
+    fn the_axis_ladders_start_at_four_decimals() {
+        let policy = Policy::load().expect("policy");
+        let spec = policy.class("coordinate").expect("class");
+        let labels = labels_for(&policy, spec);
+        for below in [
+            "lat/decimal-round3",
+            "lat/decimal-trunc3",
+            "lon/decimal-round3",
+            "lon/decimal-trunc3",
+        ] {
+            assert!(
+                !labels.contains(&below.to_owned()),
+                "`{below}` must not be produced"
+            );
+            assert!(
+                policy.ledger["coordinate"]
+                    .not_gaps
+                    .get(below)
+                    .is_some_and(|reason| reason.contains("collides with durations")),
+                "`{below}` must be declared out of scope, with the reason"
+            );
+        }
+        // The pair renderings are untouched: two axes and a separator cannot be
+        // a duration, so a 3-decimal pair stays searchable.
+        let (got, _) = outcomes("coordinate", "47.209,-122.331");
+        assert_eq!(
+            got.get("pair-latlon/sep-comma"),
+            Some(&term("47.209,-122.331"))
         );
     }
 

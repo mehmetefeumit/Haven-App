@@ -1442,6 +1442,44 @@ mod tests {
         assert!(outcome.problems.is_empty(), "{:?}", outcome.problems);
     }
 
+    /// Real furniture from CI run 34766632019, rule-scanned in both framings.
+    ///
+    /// The self-test's case N scans the same two files with a sealed manifest;
+    /// this is the `cargo test`-visible half, and it names the rule and the line
+    /// so a tightening that would redden a real lane is diagnosed at the shape
+    /// rather than at the file.
+    #[test]
+    fn real_furniture_trips_no_structural_rule() {
+        let dir = Dir::new("furniture");
+        let manifest = manifest(&[]);
+        for (class, name, body) in [
+            (
+                "drive",
+                "furniture.drive.log",
+                include_str!("../fixtures/furniture.drive.log"),
+            ),
+            (
+                "logcat",
+                "furniture.logcat.log",
+                include_str!("../fixtures/furniture.logcat.log"),
+            ),
+        ] {
+            let path = dir.write(name, body);
+            let outcome = run(&manifest, class, &[path]);
+            let hits: Vec<String> = outcome
+                .findings
+                .iter()
+                .map(|f| format!("{}:{}", f.rule.clone().unwrap_or_default(), f.line))
+                .collect();
+            assert!(hits.is_empty(), "{class} furniture is not clean: {hits:?}");
+            assert_eq!(
+                outcome.lines.get(class),
+                Some(&u64::try_from(body.lines().count()).expect("line count")),
+                "{class} furniture lost lines"
+            );
+        }
+    }
+
     /// `--plants-in` must name a file the scan is actually reading.
     #[test]
     fn plants_in_must_name_a_scanned_file() {

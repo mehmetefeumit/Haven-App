@@ -1,0 +1,87 @@
+# Negative control: REAL furniture, verbatim from the uploaded logcats of CI run
+# 34766632019 (the FGS-publish, background-catchup and integration lanes),
+# reviewed line by line against Rule 15 exactly as `furniture.drive.log` was.
+# Every entry carries a Haven-OWNED tag on purpose: a vendor-tagged line is
+# skipped by tag scoping, so it would prove nothing about the rules. The host's
+# own `MM-DD HH:MM:SS.mmm` stamp is the documented residual and is not part of
+# the message body the rules see.
+09-13 16:12:53.388  4384  4469 I flutter : [IMPORTANT:flutter/shell/platform/android/android_context_gl_impeller.cc(104)] Using the Impeller rendering backend (OpenGLES).
+09-13 16:13:00.607  4384  4384 I flutter : 00:00 +0: B1: hold a live foreground MLS session across a REAL pause and prove the FGS publishes with it
+09-13 16:13:04.956  4384  4384 I flutter : [LocationFetch] No circle selected
+09-13 16:13:07.007  4384  4384 I flutter : [LocationPublish] Provider executing...
+09-13 16:13:07.044  4384  4384 I flutter : [LocationPublish] Identity loaded
+09-13 16:13:07.911  4384  4600 I haven_core::circle::storage: profile migration: dropped legacy in-group avatar tables
+09-13 16:13:07.981  4384  4384 I flutter : [LiveSyncResubscriber] engine stopped — self-heal restart
+09-13 16:13:08.002  4384  4602 D rust_lib_haven::api: [maintain_key_package] no KeyPackage relays configured; skipping
+09-13 16:13:08.002  4384  4603 D rust_lib_haven::api: [retract_legacy] no KeyPackage relays configured; deferring
+09-13 16:13:08.299  4384  4384 I flutter : [KeyPackage] relay-list tick: inbox=suppressed, nip65=suppressed
+09-13 16:13:09.712  4384  4384 I flutter : [BackgroundManager] Service started
+09-13 16:13:09.756  4384  4603 D haven_core::relay::live_sync::supervisor: [live_sync::worker] EOSE anchored inbox cursor
+09-13 16:13:09.785  4384  4384 I flutter : [BackgroundTask] onStart (starter=TaskStarter.developer)
+09-13 16:13:10.146  4384  4601 W haven_core::nostr::mls::storage: HAVEN_E_SESSION_BUSY: a live MLS session already holds this database
+09-13 16:13:10.149  4384  4384 I flutter : [BackgroundTask] circle manager open failed: String
+09-13 16:13:10.165  4384  4384 I flutter : [BackgroundTask] Initialized (identity=loaded, locationSharing=false)
+09-13 16:13:11.121  4384  4603 D haven_core::relay::manager: [RelayManager] add_relay relay#7df424: newly_added=false
+09-13 16:13:11.121  4384  4603 D haven_core::relay::manager: [RelayManager] connected to relay#7df424
+09-13 16:13:11.270  4384  4384 I flutter : [LocationPublish] GPS fix acquired
+09-13 16:13:11.287  4384  4384 I flutter : [LocationPublish] No accepted circles to publish to
+09-13 16:13:11.304  4384  4603 D haven_core::relay::manager: [RelayManager] add_relay relay#7df424: newly_added=true
+09-13 16:13:11.728  4384  4603 D haven_core::circle::manager: [CircleManager] process_gift_wrapped_invitation: wrapper=event#75323a kind=1059
+09-13 16:13:11.908  4384  4603 D haven_core::relay::live_sync::session: [live_sync] stop: shutdown flagged; awaiting lifecycle lock
+09-13 16:13:11.908  4384  4603 D haven_core::relay::live_sync::session: [live_sync] stop: lifecycle lock acquired
+09-13 16:13:11.909  4384  4603 D haven_core::relay::live_sync::session: [live_sync] stop_inner: entered
+09-13 16:13:11.910  4384  4603 D haven_core::relay::live_sync::session: [live_sync] stop_inner: unsubscribe_all returned
+09-13 16:13:11.912  4384  4603 D haven_core::relay::live_sync::session: [live_sync] stop_inner: client shutdown returned
+09-13 16:13:11.914  4384  4603 D haven_core::relay::live_sync::session: [live_sync] stop_inner: router cleared; emitting SessionStopped
+09-13 16:13:11.930  4384  4384 I flutter : [Subscription] stream event kind=FfiRelayEventKind.status
+09-13 16:13:11.938  4384  4384 I flutter : [MapShell] live-sync stop=stopped
+09-13 16:13:11.949  4384  4384 I flutter : [MapShell] handoff: released=true
+09-13 16:13:11.957  4384  4384 I flutter : [LocationService] in-memory caches cleared on pause
+09-13 16:13:11.979  4384  4384 I flutter : [BackgroundTask] cycle trigger=paused-signal
+09-13 16:13:12.432  4384  4384 I flutter : [LiveSyncResubscriber] engine not running — full restart instead of delta
+09-13 16:13:12.438  4384  4384 I flutter : [Subscription] start failed: CircleServiceException
+09-13 16:13:12.441  4384  4384 I flutter : [LiveSyncResubscriber] full restart failed: SubscriptionServiceException
+09-13 16:13:12.745  4384  4384 I flutter : [BackgroundTask] session acquired
+09-13 16:13:12.817  4384  4384 I flutter : [BackgroundTask] registration armed (113s)
+09-13 16:13:12.918  4384  4603 D rust_lib_haven::api: [FFI encrypt] event#1d4c3d → kind:445 ready
+09-13 16:13:12.951  4384  4384 I flutter : [LocationService] No cached last-known rows for circle
+09-13 16:13:12.975  4384  4603 D rust_lib_haven::api: [FFI decrypt] event#1d4c3d ingested (any_result=false, any_auto_commit=false)
+09-13 16:13:12.981  4384  4384 I flutter : [LocationService] evt=event#1d4c3d → empty
+09-13 16:15:08.091  4384  4384 I flutter : [BackgroundTask] cycle trigger=delivery
+09-13 16:16:33.095  4384  4384 I flutter : [Location] access lost (position stream error: LocationServiceDisabledException) — cached fix dropped
+09-13 16:16:33.096  4384  4384 I flutter : [BackgroundTask] fix stream error: LocationServiceDisabledException
+09-13 16:16:46.178  4384  4384 I flutter : [BackgroundTask] cycle trigger=watchdog
+09-13 16:18:00.193  4384  4384 I flutter : [BackgroundTask] cold fix: asking the platform
+09-13 16:18:30.215  4384  4384 I flutter : [BackgroundTask] cold fix: in hand
+09-13 16:22:43.167  4384  4384 I flutter : 09:42 +1: (tearDownAll)
+09-13 16:22:43.168  4384  4384 I flutter : [BackgroundManager] Service already running
+09-13 16:22:43.184  4384  4384 I flutter : 09:42 +2: All tests passed!
+09-13 16:22:43.206  4384  4384 I flutter : [BackgroundTask] onDestroy (isTimeout=false)
+09-13 16:22:43.212  4384  4384 I flutter : [BackgroundManager] Service stopped
+09-13 16:14:12.622  4390  4390 I flutter : 00:00 +0: M7 setup: arm the WorkManager catch-up worker (real keyring, seeded peer)
+09-13 16:14:30.765  4641  4641 I flutter : [CatchupWorker] RustLib.init note: StateError
+09-13 16:14:31.597  4641  4723 I haven_core::circle::manager: contamination ledger: backfilled 5+ relay(s) at startup
+09-13 16:14:31.614  4641  4641 I flutter : [CatchupWorker] bootstrap ok
+09-13 16:16:57.970  5614  5614 I flutter : 00:00 +0: (setUpAll)
+09-13 16:16:58.090  5614  5614 I flutter : 00:00 +1: AppRouter routing gate shows OnboardingShell (not MapShell) when onboarding is not completed
+09-13 16:17:00.482  5614  5614 I flutter : 00:02 +2: AppRouter routing gate shows MapShell (not OnboardingShell) when onboarding is completed
+09-13 16:17:01.650  5614  5614 I flutter : [LocationPublish] Disclosure not accepted yet — skipping
+09-13 16:18:35.017  7219  7219 I flutter : 00:00 +1: Admin-leave gate (FFI) MDK rejects proposeLeave from a still-admin caller with a structured self-demote error (regression target for the upstream ghost-admin fix)
+09-13 16:18:08.390  6920  6920 I flutter : 00:00 +1: NostrCircleService.removeMember (fail-closed contract) throws CircleServiceException and does not fall back to DEFAULT_RELAYS when the circle has no relays available
+09-13 16:18:09.690  6920  6920 I flutter : Circle relays unavailable — aborting remove
+09-13 16:18:09.738  6920  6920 I flutter : 00:01 +2: NostrCircleService.removeMember (real removal + forward secrecy) member count drops by one and removed member cannot decrypt a post-removal message (forward secrecy)
+09-13 16:18:11.180  6920  6978 D rust_lib_haven::api: [FFI decrypt] event#f58f9a ingested (any_result=true)
+09-13 16:18:11.510  6920  6978 D rust_lib_haven::api: [FFI decrypt] event#f0356e ingested (any_result=false)
+09-13 16:18:11.526  6920  6920 I flutter : 00:03 +3: the member list drives a real removal an admin taps Remove and the member leaves the MLS roster
+09-13 16:16:28.853  4637  4637 I flutter : 00:00 +1: Phase 0 E2E infrastructure in-memory keyring + relay override + deterministic identities work
+09-13 16:17:44.230  6624  6624 I flutter : 00:00 +1: Location encryption pipeline (FFI boundary) kind 445 event JSON contains no plaintext coordinates and uses ephemeral pubkey
+09-13 16:17:48.162  6624  6624 I flutter : 00:04 +3: Engine-delivered location content (FFI parse) empty content is refused, not parsed into a zeroed location
+09-13 16:17:48.192  6624  6624 I flutter : 00:04 +4: Engine-delivered location content (FFI parse) the production parse maps refusals to a silent null
+09-13 16:17:48.220  6624  6624 I flutter : [ServiceProvider] parseEngineLocation skipped: String
+09-13 16:17:48.245  6624  6624 I flutter : 00:04 +5: Engine-delivered location content (FFI parse) the router drops a foreign-kind event and keeps the real one
+09-13 16:17:48.295  6624  6624 I flutter : [Subscription] stream event kind=FfiRelayEventKind.location group=circle#1d31b3
+09-13 16:17:48.314  6624  6624 I flutter : [Subscription] location INGESTED — group=circle#1d31b3
+09-13 16:17:24.205  6319  6319 I flutter : 00:00 +1: Keyring store initialization keyring store initializes successfully
+09-13 16:17:24.584  6319  6319 I flutter : 00:00 +2: Keyring store initialization keyring store initialization is idempotent
+09-13 16:18:55.604  7517  7517 I flutter : 00:00 +1: Rule 14 under forced contention a second open fails closed while the first handle lives
+09-13 16:18:56.946  7517  7517 I flutter : 00:01 +2: Rule 14 under forced contention releasing the handle frees the database

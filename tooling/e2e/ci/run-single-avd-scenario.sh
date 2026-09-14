@@ -331,10 +331,13 @@ worst_rc() {
 # The flag-on arm fails CLOSED at every joint — an absent binary, a sidecar
 # the drive never wrote, a seal that refuses — and still runs the wrapper
 # after a failed seal, so the floor's containment never waits on the scanner.
-# The seal declares the lane's own loopback endpoints as exempt from the URL
-# and IP rules (the app-facing relay URL, the proxy's two listen spellings,
-# and the proxy's upstream when the workflow exported it) and the relay URL
-# itself as a needle; the `--expect` floors are what e2e_combined.dart
+# The seal exempts the lane's own loopback endpoints from the URL and IP
+# rules (the app-facing relay URL, the proxy's two listen spellings, and the
+# proxy's upstream when the workflow exported it) and never DECLARES them: a
+# declared value must appear nowhere, but the lane's relay is infrastructure
+# the harness itself names, not a value the run minted — declared as well, it
+# flagged every Haven-owned line naming its host (run 34766632019). The
+# `--expect` floors are what e2e_combined.dart
 # declares — three roles, the three role fakes plus the canary coordinate,
 # one circle name, one petname, at least one circle, and the three
 # deterministic event carriers. Reads HAVEN_LOGSCAN_BIN at call time so
@@ -365,8 +368,7 @@ log_privacy_gate() {
     local -a seal_args=()
     local decl
     for decl in "${decls[@]}"; do seal_args+=(--decl "${decl}"); done
-    seal_args+=(--host-decl "relay_url=${RELAY_URL}"
-                --exempt-endpoint "${RELAY_URL}"
+    seal_args+=(--exempt-endpoint "${RELAY_URL}"
                 --exempt-endpoint ws://127.0.0.1:7788
                 --exempt-endpoint ws://10.0.2.2:7788)
     [[ -z "${WIRE_UPSTREAM:-}" ]] || seal_args+=(--exempt-endpoint "${WIRE_UPSTREAM}")
@@ -821,9 +823,16 @@ wlan0	0002000A	00000000	0000	0	0	0	00FFFFFF	0	0	0" 10.0.2.2; then
     rm -f "${seal_argv}" "${scan_argv}"
   }
   # gate_case <label> <want-rc> <deleted|kept> <seal-rc> <scan-rc> [needle-dir]
+  #
+  # Every call pins the whole environment the gate reads. The guards job
+  # inherits GITHUB_RUN_ID/GITHUB_RUN_ATTEMPT from Actions and a lane exports
+  # WIRE_UPSTREAM and HAVEN_LOGSCAN, so a fixture that let them through passed
+  # on a laptop and failed in CI (run 34766632019: `--run-id 34766632019-1`
+  # against a `local-local` expectation). Empty is how the gate reads "unset".
   gate_case() {
     local label="$1" want="$2" fate="$3" dir="${6:-${needles}}" rc=0 f
-    HAVEN_LOGSCAN=true HAVEN_LOGSCAN_BIN="${fake_bin}" FAKE_SEAL_RC="$4" FAKE_SCAN_RC="$5" \
+    GITHUB_RUN_ID= GITHUB_RUN_ATTEMPT= WIRE_UPSTREAM= \
+      HAVEN_LOGSCAN=true HAVEN_LOGSCAN_BIN="${fake_bin}" FAKE_SEAL_RC="$4" FAKE_SCAN_RC="$5" \
       log_privacy_gate "${dir}" "${logcat}" "${drive_final}" "${drive_full}" \
       > "${tmp}/gate-out" 2>&1 || rc=$?
     if (( rc != want )); then
@@ -864,7 +873,8 @@ wlan0	0002000A	00000000	0000	0	0	0	00FFFFFF	0	0	0" 10.0.2.2; then
   # An absent binary is rc 2 from the seal AND from the wrapper — never a skip.
   reset_gate_logs
   rc=0
-  HAVEN_LOGSCAN=true HAVEN_LOGSCAN_BIN="${tmp}/no-such-binary" \
+  GITHUB_RUN_ID= GITHUB_RUN_ATTEMPT= WIRE_UPSTREAM= \
+    HAVEN_LOGSCAN=true HAVEN_LOGSCAN_BIN="${tmp}/no-such-binary" \
     log_privacy_gate "${needles}" "${logcat}" "${drive_final}" "${drive_full}" \
     > "${tmp}/gate-out" 2>&1 || rc=$?
   if (( rc != 2 )) || [[ ! -e "${logcat}" || ! -e "${drive_full}" ]]; then
@@ -872,16 +882,17 @@ wlan0	0002000A	00000000	0000	0	0	0	00FFFFFF	0	0	0" 10.0.2.2; then
          "got rc ${rc}" >&2
     fail=1
   fi
-  # The seal's argv: the run id, every sidecar, the relay URL both as a needle
-  # and as an exempt endpoint, both proxy listen spellings, the scenario's
-  # declaration floors, the logcat line floor, and the manifest path under the
-  # sidecar directory — and the upstream only when the workflow exported it.
+  # The seal's argv: the run id (`local-local` off a workflow), every sidecar,
+  # the relay URL as an exempt endpoint ONLY — never as a needle, see the
+  # gate's comment — both proxy listen spellings, the scenario's declaration
+  # floors, and the manifest path under the sidecar directory; the upstream
+  # only when the workflow exported it.
   reset_gate_logs
   : > "${needles}/second.needles.decl"
   gate_case "seal argv" 0 kept 0 0
   local -a got_seal=() want_seal=(seal --run-id local-local
     --decl "${needles}/default.needles.decl" --decl "${needles}/second.needles.decl"
-    --host-decl "relay_url=${RELAY_URL}" --exempt-endpoint "${RELAY_URL}"
+    --exempt-endpoint "${RELAY_URL}"
     --exempt-endpoint ws://127.0.0.1:7788 --exempt-endpoint ws://10.0.2.2:7788
     --expect pubkey=3 --expect coordinate=4 --expect circle_name=1
     --expect petname=1 --expect nostr_group_id=1 --expect mls_group_id=1
@@ -919,12 +930,13 @@ wlan0	0002000A	00000000	0000	0	0	0	00FFFFFF	0	0	0" 10.0.2.2; then
     echo "SELF-TEST FAIL (9c scan argv): got '${got_scan[*]}', expected '${want_scan[*]}'" >&2
     fail=1
   fi
-  # The flag-off arm never touches the scanner: with HAVEN_LOGSCAN unset the
+  # The flag-off arm never touches the scanner: with HAVEN_LOGSCAN unset —
+  # pinned empty, so a lane's exported `true` cannot pick the other arm — the
   # gate is exactly the (9a) floor gate over the logcat and the full drive log.
   reset_gate_logs
   rc=0
   export FAKE_SCAN_RC=1
-  HAVEN_LOGSCAN_BIN="${fake_bin}" \
+  HAVEN_LOGSCAN= HAVEN_LOGSCAN_BIN="${fake_bin}" \
     log_privacy_gate "${needles}" "${logcat}" "${drive_final}" "${drive_full}" \
     > "${tmp}/gate-out" 2>&1 || rc=$?
   unset FAKE_SCAN_RC
@@ -940,7 +952,7 @@ wlan0	0002000A	00000000	0000	0	0	0	00FFFFFF	0	0	0" 10.0.2.2; then
     echo "run-single-avd-scenario: SELF-TEST FAILED" >&2
     return 1
   fi
-  echo "run-single-avd-scenario: self-test passed (connect flake caught; clean pass, real post-connect failure, and non-connect failure all correctly NOT retried; app-failure check scoped to the final attempt; the network gate admits a guest whose on-link routes cover the relay, still rejects one with no route to it, and is satisfied by neither loopback, a foreign subnet, a downed interface, nor adb noise; the Wi-Fi read-back accepts only a literal 0, never 'null' or adb noise; a connect-flake retry restores the app through install_app and re-grants; the secret-leak gate removes what it flags and nothing else; the log-privacy gate seals from the sidecar directory and then runs scan-logs.sh over the logcat and both drive logs, folds the seal's and the wrapper's verdicts, contains on a leak even under a failed seal, fails closed on an absent binary or sidecar, is the floor alone when HAVEN_LOGSCAN is unset, and the drive log is echoed only after it. Phase 2's install barrier is app-install-lib.sh's, and its own --self-test pins it)."
+  echo "run-single-avd-scenario: self-test passed (connect flake caught; clean pass, real post-connect failure, and non-connect failure all correctly NOT retried; app-failure check scoped to the final attempt; the network gate admits a guest whose on-link routes cover the relay, still rejects one with no route to it, and is satisfied by neither loopback, a foreign subnet, a downed interface, nor adb noise; the Wi-Fi read-back accepts only a literal 0, never 'null' or adb noise; a connect-flake retry restores the app through install_app and re-grants; the secret-leak gate removes what it flags and nothing else; the log-privacy gate seals from the sidecar directory under a pinned environment, exempting the lane's own endpoints without declaring them, and then runs scan-logs.sh over the logcat and both drive logs, folds the seal's and the wrapper's verdicts, contains on a leak even under a failed seal, fails closed on an absent binary or sidecar, is the floor alone when HAVEN_LOGSCAN is unset, and the drive log is echoed only after it. Phase 2's install barrier is app-install-lib.sh's, and its own --self-test pins it)."
   return 0
 }
 

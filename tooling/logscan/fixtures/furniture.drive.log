@@ -1,0 +1,98 @@
+# Negative control: REAL furniture, verbatim from the uploaded drive transcripts
+# of CI run 34766632019 (the FGS-publish, background-catchup and integration
+# lanes), which is the run whose scan returned rc 1 on nothing but false
+# positives. Selected line by line and reviewed against Rule 15: no hex run of
+# eight or more, no bech32 or hex key material, no URL, host or address, no
+# coordinate, no person or circle name, no wall-clock instant, and nothing the
+# harness printed about the run (sentinels, connection ids, exact counts). What
+# is left is furniture — tooling preamble, vendor chatter, Rust module paths,
+# Dart and Java type names, durations, bucket tokens and alias handles — so a
+# rule tightening that would redden a real lane goes red HERE first.
+Installing ../../../../../../tmp/integration-apks/b1_fgs_live_foreground_test.apk...         4.2s
+D/FlutterGeolocator( 4384): Attaching Geolocator to activity
+W/vioustech.haven( 4384): Accessing hidden method Landroid/view/accessibility/AccessibilityNodeInfo;->getSourceNodeId()J (unsupported,test-api, reflection, allowed)
+W/vioustech.haven( 4384): Accessing hidden field Landroid/view/accessibility/AccessibilityNodeInfo;->mChildNodeIds:Landroid/util/LongArray; (unsupported, reflection, allowed)
+D/AccessibilityBridge( 4384): Setting not found: accessibility_display_inversion_enabled, using default: 0
+D/FlutterRenderer( 4384): Width is zero. 0,0
+W/OpenGLRenderer( 4384): Unknown dataspace 0
+I/Choreographer( 4384): Skipped 257 frames!  The application may be doing too much work on its main thread.
+W/OpenGLRenderer( 4384): Failed to initialize 101010-2 format, error = EGL_SUCCESS
+D/FlutterJNI( 4384): Sending viewport metrics to the engine.
+I/Gralloc4( 4384): mapper 4.x is not supported
+D/FlutterGeolocator( 4384): Creating service.
+D/FlutterGeolocator( 4384): Geolocator foreground service connected
+D/FlutterGeolocator( 4384): Flutter engine connected. Connected engine count 1
+VMServiceFlutterDriver: Isolate is paused at start.
+VMServiceFlutterDriver: Connected to Flutter application.
+D/ProfileInstaller( 4384): Installing profile for com.oblivioustech.haven
+D/FlutterSecureStorage( 4384): No data found in EncryptedSharedPreferences.
+E/FlutterSecureStorage( 4384): Key mismatch detected during cipher initialization: Algorithm changed detected
+E/FlutterSecureStorage( 4384): Stored key cannot be decrypted with current algorithm.
+I/FlutterSecureStorage( 4384): migrateOnAlgorithmChange is enabled. Attempting data migration...
+I/FlutterSecureStorage( 4384): Detected non-biometric migration: FROM=com.it_nomads.fluttersecurestorage.ciphers.KeyCipherImplementationRSA18@727ec4, TO=AES_GCM_NoPadding
+I/FlutterSecureStorage( 4384): Starting non-biometric migration (no authentication required)...
+D/FlutterSecureStorage( 4384): Step 1/6: Initializing saved cipher...
+I/FlutterSecureStorage( 4384): Step 6/6: No data to migrate, continuing...
+I/flutter ( 4384): [LocationFetch] No circle selected
+E/FlutterGeolocator( 4384): Geolocator position updates started
+W/WindowOnBackDispatcher( 4384): OnBackInvokedCallback is not enabled for the application.
+E/FlutterGeolocator( 4384): Geolocator position updates stopped
+E/FlutterGeolocator( 4384): There is still another flutter engine connected, not stopping location service
+I/flutter ( 4384): [LocationPublish] Provider executing...
+I/haven_core::circle::storage( 4384): profile migration: dropped legacy in-group avatar tables
+I/flutter ( 4384): [LiveSyncResubscriber] engine stopped — self-heal restart
+D/rust_lib_haven::api( 4384): [maintain_key_package] no KeyPackage relays configured; skipping
+D/rust_lib_haven::api( 4384): [retract_legacy] no KeyPackage relays configured; deferring
+D/EGL_emulation( 4384): app_time_stats: avg=2252.42ms min=414.35ms max=4697.36ms count=3
+I/flutter ( 4384): [KeyPackage] relay-list tick: inbox=suppressed, nip65=suppressed
+D/WM-PackageManagerHelper( 4384): androidx.work.impl.background.systemalarm.RescheduleReceiver enabled
+I/flutter ( 4384): [IMPORTANT:flutter/shell/platform/android/android_context_gl_impeller.cc(104)] Using the Impeller rendering backend (OpenGLES).
+I/flutter ( 4384): [BackgroundManager] Service started
+D/haven_core::relay::live_sync::supervisor( 4384): [live_sync::worker] EOSE anchored inbox cursor
+I/flutter ( 4384): [BackgroundTask] onStart (starter=TaskStarter.developer)
+W/haven_core::nostr::mls::storage( 4384): HAVEN_E_SESSION_BUSY: a live MLS session already holds this database
+I/flutter ( 4384): [BackgroundTask] circle manager open failed: String
+I/flutter ( 4384): [BackgroundTask] Initialized (identity=loaded, locationSharing=false)
+D/haven_core::relay::manager( 4384): [RelayManager] add_relay relay#7df424: newly_added=false
+D/haven_core::relay::manager( 4384): [RelayManager] connected to relay#7df424
+I/flutter ( 4384): [LocationPublish] GPS fix acquired
+I/flutter ( 4384): [LocationPublish] No accepted circles to publish to
+D/haven_core::circle::manager( 4384): [CircleManager] process_gift_wrapped_invitation: wrapper=event#75323a kind=1059
+D/haven_core::relay::live_sync::session( 4384): [live_sync] stop: shutdown flagged; awaiting lifecycle lock
+D/haven_core::relay::live_sync::session( 4384): [live_sync] stop_inner: entered
+D/haven_core::relay::live_sync::session( 4384): [live_sync] stop_inner: router cleared; emitting SessionStopped
+I/flutter ( 4384): [Subscription] stream event kind=FfiRelayEventKind.status
+I/flutter ( 4384): [MapShell] live-sync stop=stopped
+I/flutter ( 4384): [MapShell] handoff: released=true
+I/flutter ( 4384): [LocationService] in-memory caches cleared on pause
+I/flutter ( 4384): [BackgroundTask] cycle trigger=paused-signal
+I/flutter ( 4384): [LiveSyncResubscriber] engine not running — full restart instead of delta
+I/flutter ( 4384): [Subscription] start failed: CircleServiceException
+I/flutter ( 4384): [BackgroundTask] session acquired
+I/flutter ( 4384): [BackgroundTask] registration armed (113s)
+D/rust_lib_haven::api( 4384): [FFI encrypt] event#1d4c3d → kind:445 ready
+I/flutter ( 4384): [LocationService] No cached last-known rows for circle
+D/rust_lib_haven::api( 4384): [FFI decrypt] event#1d4c3d ingested (any_result=false, any_auto_commit=false)
+I/flutter ( 4384): [LocationService] evt=event#1d4c3d → empty
+I/flutter ( 4384): [Location] access lost (position stream error: LocationServiceDisabledException) — cached fix dropped
+I/flutter ( 4384): [BackgroundTask] fix stream error: LocationServiceDisabledException
+I/flutter ( 4384): [BackgroundTask] cold fix: asking the platform
+I/flutter ( 4384): [BackgroundManager] Service already running
+I/flutter ( 4384): 09:42 +2: All tests passed!
+All tests passed.
+I/flutter ( 4384): [BackgroundTask] onDestroy (isTimeout=false)
+Leaving the application running.
+Installing ../../../../../../tmp/scenario.apk...                 1,772ms
+I/flutter ( 5614): 00:00 +0: (setUpAll)
+I/flutter ( 5614): 00:00 +1: AppRouter routing gate shows OnboardingShell (not MapShell) when onboarding is not completed
+I/flutter ( 5614): [LocationPublish] Disclosure not accepted yet — skipping
+I/flutter ( 7219): 00:00 +1: Admin-leave gate (FFI) MDK rejects proposeLeave from a still-admin caller with a structured self-demote error (regression target for the upstream ghost-admin fix)
+I/flutter ( 6920): Circle relays unavailable — aborting remove
+D/rust_lib_haven::api( 6920): [FFI decrypt] event#f58f9a ingested (any_result=true)
+D/rust_lib_haven::api( 6920): [FFI decrypt] event#f0356e ingested (any_result=false)
+I/flutter ( 6624): 00:00 +1: Location encryption pipeline (FFI boundary) kind 445 event JSON contains no plaintext coordinates and uses ephemeral pubkey
+I/flutter ( 6624): [ServiceProvider] parseEngineLocation skipped: String
+I/flutter ( 6624): [Subscription] stream event kind=FfiRelayEventKind.location group=circle#1d31b3
+I/flutter ( 6624): [Subscription] location INGESTED — group=circle#1d31b3
+I/flutter ( 7517): 00:00 +1: Rule 14 under forced contention a second open fails closed while the first handle lives
+I/haven_core::circle::manager( 7517): contamination ledger: backfilled 5+ relay(s) at startup
