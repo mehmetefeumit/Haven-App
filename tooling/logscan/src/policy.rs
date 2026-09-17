@@ -32,6 +32,24 @@ pub enum EntryFormat {
     Plain,
 }
 
+/// Whether the STRUCTURAL rules read cargo's own status lines in a sink class.
+///
+/// Never about needles: a declared value on a cargo status line is a hit in
+/// every sink, because the needle pass reads every byte of every line.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CargoStatus {
+    /// The rules read them like any other line — every sink but the one that
+    /// holds a cargo transcript.
+    #[default]
+    Scanned,
+    /// The rules skip the lines matching cargo's status shape
+    /// (`crate::rules::RuleSet::is_cargo_status`): cargo prints the public
+    /// pinned git revision of every git dependency and the name of every crate
+    /// before a single test runs, and neither is a Haven identifier.
+    Exempt,
+}
+
 /// The shape of a declared value, which decides which encodings exist for it.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -89,6 +107,11 @@ pub struct SinkSpec {
     /// Whether consecutive entries sharing pid/tid/tag are re-joined before
     /// needle matching (`android_logger` chunks a record at ~4000 B).
     pub reassemble: bool,
+    /// Whether the structural rules read cargo's own status lines here.
+    /// `exempt` for `rust-test` alone, which is the only class that holds a
+    /// cargo transcript; every other sink defaults to reading them.
+    #[serde(default)]
+    pub cargo_status: CargoStatus,
     /// Default line floor; `seal --floor <sink>=<n>` overrides it.
     pub min_lines: u64,
     /// How lines are framed.
@@ -304,7 +327,7 @@ impl Policy {
 
 #[cfg(test)]
 mod tests {
-    use super::{ClassKind, Policy};
+    use super::{CargoStatus, ClassKind, Policy};
 
     #[test]
     fn the_shipped_policy_loads_and_validates() {
@@ -453,6 +476,31 @@ mod tests {
             policy.sinks["ios"].required_shape_plants,
             vec!["rust".to_owned(), "swift".to_owned()]
         );
+    }
+
+    /// Which sinks skip cargo's status lines, pinned in both directions.
+    ///
+    /// A cargo transcript is the only capture in the fleet that carries them, so
+    /// the exemption must not spread: on a `drive` or `logcat` sink a line
+    /// shaped like `Compiling x v1.2.3 (…<hex>…)` is app output, and the rules
+    /// are right to read it.
+    #[test]
+    fn only_the_cargo_transcript_sink_skips_cargo_status_lines() {
+        let policy = Policy::load().expect("policy");
+        for (sink, expected) in [
+            ("rust-test", CargoStatus::Exempt),
+            ("logcat", CargoStatus::Scanned),
+            ("drive", CargoStatus::Scanned),
+            ("ios", CargoStatus::Scanned),
+            ("proxy", CargoStatus::Scanned),
+            ("diag", CargoStatus::Scanned),
+            ("relay", CargoStatus::Scanned),
+        ] {
+            assert_eq!(policy.sinks[sink].cargo_status, expected, "`{sink}`");
+        }
+        // And the exemption never stands in for the rules being off: the sink
+        // that skips cargo's lines still runs S1–S12 over every other one.
+        assert!(policy.sinks["rust-test"].structural_rules);
     }
 
     #[test]

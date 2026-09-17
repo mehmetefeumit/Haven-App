@@ -8,6 +8,8 @@
 //!
 //! # What is scanned where
 //!
+//! * **terminal escapes** — removed from every byte of every sink before any
+//!   matching, needles and rules alike ([`strip_escapes`]).
 //! * **needles** — every line of every file, because a declared value in a
 //!   vendor line is still a disclosure in an uploaded artifact. Class scoping
 //!   (`relay` holds pubkeys legitimately) and the sink's term floor do the
@@ -24,6 +26,7 @@
 //!   dump matchable across a split — and a hit is reported only when it SPANS a
 //!   join, since anything else was already found on its own line.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -34,7 +37,7 @@ use regex::Regex;
 use crate::expand::Term;
 use crate::manifest::Manifest;
 use crate::plants::{self, PlantSlot};
-use crate::policy::{EntryFormat, SinkSpec};
+use crate::policy::{CargoStatus, EntryFormat, SinkSpec};
 use crate::rules::RuleSet;
 use crate::{worse, RC_CLEAN, RC_GUARD, RC_LEAK, RC_META, RC_UNUSABLE};
 
@@ -48,6 +51,9 @@ const LINE_CAP: usize = 1 << 20;
 
 /// How much reassembled text is held before it is matched and cleared.
 const REASSEMBLY_CAP: usize = 256 * 1024;
+
+/// `ESC`, which opens every sequence [`strip_escapes`] removes.
+const ESC: u8 = 0x1b;
 
 /// One `--sink <class>=<path>[,<path>…]`.
 #[derive(Clone, Debug)]
@@ -713,6 +719,104 @@ fn match_window(
     state.carry = window[split..].to_vec();
 }
 
+/// Where the escape stripper is between chunks, so a sequence split across a
+/// 1 MiB read is still removed whole.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum Escape {
+    #[default]
+    Idle,
+    /// `ESC` seen; the next byte says which kind of sequence this is.
+    Opened,
+    /// Inside `ESC [ … <final>`, whose final byte is `0x40..=0x7E` (SGR colour
+    /// is `ESC [ … m`).
+    Csi,
+    /// Inside an OSC's INTRODUCER: the numeric selector and its `;` parameters
+    /// (`8;;` for a hyperlink), which are dropped.
+    OscParams,
+    /// Inside an OSC's PAYLOAD, which is kept — a hyperlink's target is a URL,
+    /// and a URL is something the rules and the needle search must see.
+    Osc,
+    /// Inside an OSC, having just seen the `ESC` of a possible terminator.
+    OscEsc,
+}
+
+/// Removes terminal escape sequences from a chunk before ANY matching.
+///
+/// CI sets `CARGO_TERM_COLOR=always`, so every `cargo` transcript carries SGR
+/// colour and OSC-8 hyperlinks, and a `flutter` one can too. Stripping them is a
+/// RECALL improvement rather than cosmetics: a colour code lands exactly where a
+/// tool highlights a value, so an escape INSIDE a hex run splits the run into
+/// two shorter ones — which hides the needle from the automaton and the shape
+/// from the rules, silently and in the encoding a terminal chose. One pass here
+/// means needles, plants and rules all read the same plain text.
+///
+/// What is removed is the FRAMING, never the content: a CSI sequence carries no
+/// text, but an OSC does — an OSC-8 hyperlink's payload is a URL, which S7 and
+/// the needle search must see — so only the introducer (`ESC ]`, the numeric
+/// selector and its `;` parameters) and the terminator come off. The residual,
+/// stated in the README: a payload whose first bytes are digits or `;` loses
+/// them to the parameter run, which no OSC this tree emits produces (a URI
+/// scheme starts with a letter).
+///
+/// The state is carried across chunks so a sequence split by a 1 MiB read is
+/// still removed whole; a newline always ends a sequence, terminated or not,
+/// because a stripper that swallowed one would merge two records and shift every
+/// line number after it.
+fn strip_escapes<'a>(state: &mut Escape, fresh: &'a [u8]) -> Cow<'a, [u8]> {
+    if *state == Escape::Idle && !fresh.contains(&ESC) {
+        return Cow::Borrowed(fresh);
+    }
+    let mut out = Vec::with_capacity(fresh.len());
+    for &byte in fresh {
+        if byte == b'\n' {
+            *state = Escape::Idle;
+            out.push(byte);
+            continue;
+        }
+        match *state {
+            Escape::Idle if byte == ESC => *state = Escape::Opened,
+            Escape::Idle => out.push(byte),
+            Escape::Opened => {
+                *state = match byte {
+                    b'[' => Escape::Csi,
+                    b']' => Escape::OscParams,
+                    // A two-byte escape (`ESC c`, the `ESC \` string
+                    // terminator): the dispatcher byte is the whole of it.
+                    _ => Escape::Idle,
+                };
+            }
+            Escape::Csi => {
+                if (0x40..=0x7e).contains(&byte) {
+                    *state = Escape::Idle;
+                }
+            }
+            Escape::OscParams => match byte {
+                0x07 => *state = Escape::Idle,
+                ESC => *state = Escape::OscEsc,
+                b'0'..=b'9' | b';' => {}
+                _ => {
+                    *state = Escape::Osc;
+                    out.push(byte);
+                }
+            },
+            Escape::Osc => match byte {
+                0x07 => *state = Escape::Idle,
+                ESC => *state = Escape::OscEsc,
+                _ => out.push(byte),
+            },
+            Escape::OscEsc => {
+                if byte == b'\\' {
+                    *state = Escape::Idle;
+                } else {
+                    *state = Escape::Osc;
+                    out.push(byte);
+                }
+            }
+        }
+    }
+    Cow::Owned(out)
+}
+
 /// One streaming pass over one file.
 fn scan_file(
     path: &Path,
@@ -732,6 +836,7 @@ fn scan_file(
         overlap: needles.max_len.saturating_sub(1),
     };
     let mut partial: Vec<u8> = Vec::new();
+    let mut escapes = Escape::default();
     let mut line_no: u64 = 1;
     let mut needle_lines: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
     let mut reassembly = Reassembly::default();
@@ -752,8 +857,11 @@ fn scan_file(
         if read == 0 {
             break;
         }
+        // Counted before stripping: `bytes_read == file size` is the
+        // single-pass property, and a colour code is a byte the pass read.
         report.bytes += u64::try_from(read).unwrap_or(u64::MAX);
-        let fresh = &chunk[..read];
+        let plain = strip_escapes(&mut escapes, &chunk[..read]);
+        let fresh = plain.as_ref();
 
         needle_lines.clear();
         match_window(
@@ -840,6 +948,16 @@ fn handle_line(
                 .rules
                 .evaluate(segment, ctx.sink_path, framed.tag.as_deref())
             {
+                // A `Compiling <crate> v<semver>` line carries the public pinned
+                // git revision of a dependency (S2) and a crate name (S6), and
+                // nothing else of ours. Those two rules only, on that shape
+                // only, in a class that says so: every other rule still fires
+                // here, and the needle pass above read every byte of the line.
+                if ctx.spec.cargo_status == CargoStatus::Exempt
+                    && ctx.rules.is_cargo_furniture(hit.rule, segment)
+                {
+                    continue;
+                }
                 let entry = report
                     .rules
                     .entry((hit.rule, line_no, framed.tag.clone()))
@@ -1831,6 +1949,210 @@ mod tests {
                 Some(&u64::try_from(body.lines().count()).expect("line count")),
                 "{class} furniture lost lines"
             );
+        }
+    }
+
+    /// A colour code inside a hex run must not hide the needle it splits.
+    ///
+    /// This is the recall half of the escape stripper: `ESC[0m` in the middle of
+    /// a 64-hex value leaves two runs the automaton has no term for, and both
+    /// are below S1's floor, so the value would be invisible to needles AND
+    /// rules. The control is the same value with no escape in it.
+    #[test]
+    fn an_escape_inside_a_hex_run_does_not_hide_the_needle() {
+        let dir = Dir::new("ansi");
+        let manifest = manifest(&[("pubkey", PUBKEY)]);
+        let (head, tail) = PUBKEY.split_at(31);
+        let path = dir.write(
+            "coloured.drive.log",
+            &format!("[fixture] plain {PUBKEY}\n[fixture] coloured {head}\u{1b}[0m{tail}\n"),
+        );
+        let lines: Vec<u64> = run(&manifest, "drive", &[path])
+            .findings
+            .iter()
+            .filter(|f| f.encoding.as_deref() == Some("hex-lower"))
+            .map(|f| f.line)
+            .collect();
+        assert_eq!(
+            lines,
+            vec![1, 2],
+            "the split value must be found on its own line, like the plain one"
+        );
+    }
+
+    /// The stripper removes the framing cargo actually emits, and nothing else.
+    ///
+    /// Both inputs are verbatim from a `CARGO_TERM_COLOR=always` run: an SGR
+    /// pair around the verb, and the OSC-8 hyperlink cargo wraps the profile
+    /// name in. The assertion is equality with the uncoloured line, because
+    /// "some escapes removed" is what silently leaves one inside a value.
+    #[test]
+    fn a_coloured_cargo_line_strips_to_the_plain_one() {
+        let strip = |text: &str| -> String {
+            let mut state = super::Escape::default();
+            String::from_utf8(super::strip_escapes(&mut state, text.as_bytes()).into_owned())
+                .expect("stripping keeps valid utf-8")
+        };
+        assert_eq!(
+            strip("\u{1b}[1m\u{1b}[92m   Compiling\u{1b}[0m geo-types v0.7.19\n"),
+            "   Compiling geo-types v0.7.19\n"
+        );
+        // The hyperlink's TARGET survives: an OSC payload is content, and a URL
+        // is exactly what S7 and the needle search exist to see. Only the
+        // introducer (`ESC ] 8 ; ;`) and the terminator come off.
+        assert_eq!(
+            strip(
+                "\u{1b}[1m\u{1b}[92m    Finished\u{1b}[0m \u{1b}]8;;https://doc.rust-lang.org/cargo/reference/profiles.html#default-profiles\u{1b}\\`dev` profile [unoptimized + debuginfo]\u{1b}]8;;\u{1b}\\ target(s) in 22.61s\n"
+            ),
+            "    Finished https://doc.rust-lang.org/cargo/reference/profiles.html#default-profiles`dev` profile [unoptimized + debuginfo] target(s) in 22.61s\n"
+        );
+        // …and a hyperlink whose target IS an identifier is caught, which is the
+        // whole reason the payload is kept.
+        let mut engine_state = super::Escape::default();
+        let linked = super::strip_escapes(
+            &mut engine_state,
+            "dialing \u{1b}]8;;wss://relay.example.com\u{1b}\\the relay\u{1b}]8;;\u{1b}\\\n"
+                .as_bytes(),
+        )
+        .into_owned();
+        let linked = String::from_utf8(linked).expect("utf-8");
+        assert!(
+            rules()
+                .evaluate(linked.trim_end(), "/tmp/fixture.log", None)
+                .iter()
+                .any(|hit| hit.rule == "S7"),
+            "a URL inside a terminal hyperlink is still a URL: {linked:?}"
+        );
+        // A sequence split by a chunk boundary is still removed whole, and an
+        // unterminated one ends at the newline rather than eating the record
+        // after it.
+        let mut state = super::Escape::default();
+        let first = super::strip_escapes(&mut state, b"id \x1b[").into_owned();
+        let second = super::strip_escapes(&mut state, b"0mcafe\n").into_owned();
+        assert_eq!([first, second].concat(), b"id cafe\n");
+        assert_eq!(
+            strip("truncated \u{1b}[1\nnext line\n"),
+            "truncated \nnext line\n"
+        );
+    }
+
+    /// Cargo's status lines are furniture on a `rust-test` sink, and only there.
+    ///
+    /// The same line in a drive transcript is app output, so the rules keep
+    /// reading it; the same line carrying a DECLARED value is a needle hit in
+    /// both. That pair is what makes the exemption an exemption rather than a
+    /// blind spot.
+    #[test]
+    fn a_cargo_status_line_is_structural_furniture_only_on_a_cargo_transcript() {
+        let dir = Dir::new("cargofurniture");
+        let manifest = manifest(&[("pubkey", PUBKEY)]);
+        // A synthetic revision, deliberately NOT a prefix of the declared
+        // pubkey: this arm is about the structural rules, and a needle hit
+        // would make either verdict unreadable.
+        let body = "   Compiling cgka-traits v0.9.4 (https://github.com/marmot-protocol/mdk?rev=7d4e1c9b3a2f85607d4e1c9b3a2f85607d4e1c9b#7d4e1c9b)\n".to_owned();
+
+        let cargo = dir.write("cargo.rust-test.log", &body);
+        assert!(
+            run(&manifest, "rust-test", &[cargo]).findings.is_empty(),
+            "a pinned dependency revision is not a Haven identifier"
+        );
+
+        let drive = dir.write("cargo.drive.log", &body);
+        let rules: Vec<String> = run(&manifest, "drive", &[drive])
+            .findings
+            .iter()
+            .filter_map(|f| f.rule.clone())
+            .collect();
+        assert_eq!(
+            rules,
+            vec!["S2".to_owned()],
+            "the exemption belongs to the cargo transcript sink, not to the shape"
+        );
+
+        let declared = dir.write(
+            "declared.rust-test.log",
+            &format!("   Compiling evil v0.1.0 (git+https://example.invalid/e?rev={PUBKEY})\n"),
+        );
+        let outcome = run(&manifest, "rust-test", &[declared]);
+        assert!(
+            outcome
+                .findings
+                .iter()
+                .any(|f| f.kind == FindingKind::Needle),
+            "a declared value cannot hide behind a cargo verb: {:?}",
+            outcome.findings
+        );
+        assert!(
+            outcome
+                .findings
+                .iter()
+                .any(|f| f.rule.as_deref() == Some("S1")),
+            "only S2 and S6 are furniture here: a 64-hex run on a cargo line is still S1: {:?}",
+            outcome.findings
+        );
+    }
+
+    /// The evasions a wider exemption allowed, each now a rule hit again.
+    ///
+    /// `--rules-only` is the whole net on a unit-test transcript: there is no
+    /// manifest, so a shape the rules skip is a shape nothing sees. Every line
+    /// here passed for cargo furniture while the exemption reached past the
+    /// crate-version shape — an unbounded tail is a slot, and a slot is where a
+    /// value goes. The `Running unittests` control is the fixture header's own
+    /// claim ("sixteen hex is a build hash, and no rule may read it as an id"),
+    /// which only means something while that line is NOT exempt.
+    #[test]
+    fn a_cargo_verb_does_not_exempt_the_rest_of_the_line() {
+        let dir = Dir::new("cargoevasion");
+        let manifest = manifest(&[]);
+        for (name, line, want) in [
+            (
+                "doctests",
+                "   Doc-tests 0a1b2c3d4e5f60718293a4b5c6d7e8f9",
+                Some("S2"),
+            ),
+            (
+                "cratename",
+                "   Compiling 0a1b2c3d4e5f60718293a4b5c6d7e8f9 v1.2.3",
+                Some("S2"),
+            ),
+            (
+                "runningtarget",
+                "     Running x (target/40.7128,-74.0060)",
+                Some("S5"),
+            ),
+            (
+                "updatingurl",
+                "    Updating git repository `wss://relay.example.com`",
+                Some("S7"),
+            ),
+            (
+                "ipv6source",
+                "   Compiling evil v1.2.3 (2001:db8::1)",
+                Some("S12"),
+            ),
+            (
+                "buildhash",
+                "     Running unittests src/lib.rs (target/debug/deps/haven_core-78272f4b45ab4866)",
+                None,
+            ),
+        ] {
+            let path = dir.write(&format!("{name}.rust-test.log"), &format!("{line}\n"));
+            let rules: Vec<String> = run(&manifest, "rust-test", &[path])
+                .findings
+                .iter()
+                .filter_map(|f| f.rule.clone())
+                .collect();
+            match want {
+                Some(rule) => assert!(
+                    rules.iter().any(|fired| fired == rule),
+                    "{rule} must still fire on {line:?}; fired {rules:?}"
+                ),
+                None => assert!(
+                    rules.is_empty(),
+                    "a cargo build hash is sixteen hex and no rule may read it as an id: {rules:?}"
+                ),
+            }
         }
     }
 

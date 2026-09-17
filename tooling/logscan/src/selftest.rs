@@ -34,7 +34,7 @@ use crate::{RC_CLEAN, RC_GUARD, RC_LEAK, RC_META, RC_UNUSABLE};
 
 /// Number of cases [`run`] must execute. A case that stops running is a case that
 /// stops proving anything, and silence is how that goes unnoticed.
-const DECLARED_CASES: usize = 16;
+const DECLARED_CASES: usize = 17;
 
 const DECL: &str = include_str!("../fixtures/selftest.needles.decl");
 const CLEAN_DRIVE: &str = include_str!("../fixtures/clean.drive.log");
@@ -72,8 +72,8 @@ const FURNITURE_LOGCAT_LINES: u64 = 87;
 /// The unit-test transcripts' corpora, scanned as the `--rules-only` lanes scan
 /// them: a `cargo test` log and a `flutter test` log, the second carrying the
 /// reporter's carriage returns.
-const FURNITURE_RUST_TEST_LINES: u64 = 101;
-const FURNITURE_FLUTTER_LINES: u64 = 83;
+const FURNITURE_RUST_TEST_LINES: u64 = 141;
+const FURNITURE_FLUTTER_LINES: u64 = 117;
 /// Lines of `format.ios.log` whose OWNED variant must reach the rules: five of
 /// the columnar rendering, three of the `--style syslog` one the lanes capture.
 const IOS_OWNED_RULE_LINES: [u64; 8] = [15, 16, 17, 18, 23, 25, 26, 27];
@@ -146,6 +146,10 @@ pub(crate) fn run_with(
             case_rules_only(&rig),
         ),
         ("P ios column framing", case_ios_framing(&rig, mutation)),
+        (
+            "Q cargo's crate-build line is furniture for S2 and S6 only",
+            case_cargo_furniture(&rig, mutation),
+        ),
     ] {
         executed += 1;
         match result {
@@ -1159,6 +1163,100 @@ fn case_ios_framing(rig: &Rig, mutation: Option<&'static str>) -> Case {
     )
 }
 
+/// Cargo's crate-build line: furniture for S2 and S6, and for nothing else.
+///
+/// Both `cargo test` jobs of CI run 35244067610 went rc 1 over nothing but
+/// cargo's coloured output — the public pinned MDK revision every git
+/// dependency prints, and a crate name that reads as a cell next to a `geo`
+/// keyword. The corpus carries those lines verbatim now (escape bytes
+/// included), so the clean arm is the exemption's proof. Three mutations keep
+/// it from being a hole: a DECLARED value on a cargo-shaped line is still a
+/// needle, a rule outside the pair still fires on that same line, and a line
+/// that merely opens with a cargo verb is still rule-scanned in full.
+fn case_cargo_furniture(rig: &Rig, mutation: Option<&'static str>) -> Case {
+    let manifest = rig.manifest()?;
+    let rules = rules_for(&manifest, Vec::new(), mutation)?;
+    let corpus = rig.write("cargo.rust-test.log", FURNITURE_RUST_TEST)?;
+    let outcome = scan(&manifest, &[sink("rust-test", &[&corpus])], &rules);
+    require(
+        outcome.rc() == RC_CLEAN,
+        &format!(
+            "the coloured cargo corpus reads as rc {}: {:?}",
+            outcome.rc(),
+            outcome
+                .findings
+                .iter()
+                .map(|f| format!("{:?}:{}", f.rule, f.line))
+                .collect::<Vec<_>>()
+        ),
+    )?;
+
+    let pubkey = manifest
+        .terms
+        .iter()
+        .find(|t| t.class == "pubkey" && t.encoding == "hex-lower")
+        .ok_or_else(|| "the fixture declares a pubkey".to_owned())?;
+    let planted = format!(
+        "{FURNITURE_RUST_TEST}   Compiling evil v0.1.0 (git+https://example.invalid/evil?rev={})\n",
+        pubkey.text
+    );
+    let path = rig.write("cargo-needle.rust-test.log", &planted)?;
+    let outcome = scan(&manifest, &[sink("rust-test", &[&path])], &rules);
+    require(
+        outcome.rc() == RC_LEAK,
+        &format!(
+            "a declared value inside a cargo status line reads as rc {}",
+            outcome.rc()
+        ),
+    )?;
+    require(
+        outcome
+            .findings
+            .iter()
+            .any(|f| f.kind == FindingKind::Needle),
+        "the exemption is structural-only: a declared value on that line is still a needle",
+    )?;
+    require(
+        outcome
+            .findings
+            .iter()
+            .any(|f| f.rule.as_deref() == Some("S1")),
+        "only S2 and S6 are cargo furniture: a 64-hex run on a cargo-shaped line is still S1",
+    )?;
+
+    for (name, line, rule) in [
+        (
+            "cargo-stdout",
+            "Compiling nostr_group_id=9f2c7b1e4d6a08359f2c7b1e4d6a0835",
+            "S2",
+        ),
+        (
+            "cargo-doctests",
+            "   Doc-tests 9f2c7b1e4d6a08359f2c7b1e4d6a0835",
+            "S2",
+        ),
+        (
+            "cargo-running",
+            "     Running x (target/40.7128,-74.0060)",
+            "S5",
+        ),
+    ] {
+        let body = format!("{FURNITURE_RUST_TEST}{line}\n");
+        let path = rig.write(&format!("{name}.rust-test.log"), &body)?;
+        let outcome = scan(&manifest, &[sink("rust-test", &[&path])], &rules);
+        require(
+            outcome
+                .findings
+                .iter()
+                .any(|f| f.rule.as_deref() == Some(rule)),
+            &format!(
+                "a cargo VERB is not a cargo status line: {rule} must still fire on the {name} shape"
+            ),
+        )?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{run_with, SMALL_PROBE_BYTES};
@@ -1183,7 +1281,10 @@ mod tests {
     /// make impossible.
     #[test]
     fn disabling_one_rule_turns_the_self_test_red() {
-        for rule in ["S1", "S5", "S10", "S12"] {
+        // S2 and S6 are in the list because they are the two the cargo
+        // exemption skips on one shape: a suppression that went unnoticed there
+        // is exactly the hole the narrowed shape exists to close.
+        for rule in ["S1", "S2", "S5", "S6", "S10", "S12"] {
             let mut out = Vec::new();
             let mut err = Vec::new();
             let result = run_with(&mut out, &mut err, SMALL_PROBE_BYTES, Some(rule));

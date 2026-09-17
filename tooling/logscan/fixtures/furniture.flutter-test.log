@@ -7,7 +7,7 @@
 # because the sanitiser masks those digests and a masked line is not verbatim.
 #
 # This is NOT the same shape as `furniture.drive.log`, which is a `flutter
-# drive` transcript. Two shapes live only here:
+# drive` transcript. Three shapes live only here:
 #   * the compact reporter rewrites its status line with a CARRIAGE RETURN and
 #     no newline when it writes to a pipe, so several of the physical lines
 #     below carry more than one update. That is what `rule_segments` splits on,
@@ -17,7 +17,13 @@
 #     (`kBackgroundSessionReclaimAtMsKey`), and the reporter prints the
 #     repository path with it (`.../haven/test/providers/identity_provider_test`)
 #     - a long run of base64 characters joined by `/`. Both reddened S4 before
-#     `is_base64_payload` required digits or padding.
+#     `is_base64_payload` required two separate digit RUNS or `=` padding;
+#   * the github reporter's block at the end of the file: one line per test,
+#     with the repository path and the whole description, several of whose
+#     names carry a vocabulary number (a `Base64` or a `Sha256`) inside a
+#     30-to-44-letter camel-case run. That is ONE digit run, which is what
+#     separates a name from a payload; counting digits instead reddened the
+#     Flutter coverage lane of CI run 35244067610 on three of them.
 Resolving dependencies...
 Downloading packages...
   _fe_analyzer_shared 93.0.0 (108.0.0 available)
@@ -81,3 +87,31 @@ Downloading packages...
 [LocationPublish] Encrypting (1 relays)
 [LocationService] Encrypting location via MLS...
 [LocationPublish] Published — accepted=1, rejected=0, failed=0
+#
+# The block below is the GITHUB reporter's shape, verbatim from the `flutter
+# test` transcript of CI run 35244067610. CI runs the suite with
+# `--reporter github`, which prints one line per test carrying the repository
+# path and the whole description, where the compact reporter above rewrites a
+# single status line; the corpus needs both, because the two shapes trip
+# different rules. Three of these names went rc 1 on the Flutter coverage
+# lane: a vocabulary number inside a 33-to-44-letter camel-case run cleared
+# S4's entropy floor while its digit test asked only for two digits, and a
+# name's number is ONE run where a payload scatters them.
+✅ /home/runner/work/Haven-App/Haven-App/haven/test/e2e/wire_canaries_test.dart: realistic leak shapes coordinateRoundedToFiveDecimalsIsCaught
+✅ /home/runner/work/Haven-App/Haven-App/haven/test/e2e/wire_canaries_test.dart: realistic leak shapes coordinateAsFixedPointIntegerIsCaught
+✅ /home/runner/work/Haven-App/Haven-App/haven/test/e2e/wire_canaries_test.dart: realistic leak shapes structHexedIntoATagIsCaught
+✅ /home/runner/work/Haven-App/Haven-App/haven/test/e2e/wire_canaries_test.dart: realistic leak shapes circleNameBase64dIntoAnUnalignedBlobIsCaught
+✅ /home/runner/work/Haven-App/Haven-App/haven/test/e2e/wire_canaries_test.dart: realistic leak shapes petnameInsideAReqFilterIsCaught
+✅ /home/runner/work/Haven-App/Haven-App/haven/test/e2e/wire_canaries_test.dart: realistic leak shapes percentEncodedCanaryInAUrlIsCaught
+✅ /home/runner/work/Haven-App/Haven-App/haven/test/e2e/wire_canaries_test.dart: realistic leak shapes unicodeEscapedCanaryInALineThatIsNotJsonIsCaught
+✅ /home/runner/work/Haven-App/Haven-App/haven/test/e2e/wire_canaries_test.dart: realistic leak shapes escapedCanaryInAnUnparseableFramePreviewIsCaughtDecoded
+✅ /home/runner/work/Haven-App/Haven-App/haven/test/e2e/wire_canaries_test.dart: realistic leak shapes caseFoldedCanaryIsCaught
+✅ /home/runner/work/Haven-App/Haven-App/haven/test/e2e/wire_canaries_test.dart: realistic leak shapes coarseGeohashTagIsCaught
+✅ /home/runner/work/Haven-App/Haven-App/haven/test/e2e/wire_canaries_test.dart: realistic leak shapes coarseDecimalCoordinateIsCaught
+✅ /home/runner/work/Haven-App/Haven-App/haven/test/e2e/wire_canaries_test.dart: realistic leak shapes kilometreScaleDecimalCoordinateIsCaught
+✅ /home/runner/work/Haven-App/Haven-App/haven/test/e2e/wire_canaries_test.dart: realistic leak shapes singlePrecisionCoordinatePairIsCaught
+✅ /home/runner/work/Haven-App/Haven-App/haven/test/e2e/wire_canaries_test.dart: realistic leak shapes geoJsonOrderedSinglePrecisionPairIsCaught
+✅ /home/runner/work/Haven-App/Haven-App/haven/test/e2e/test_relay_transport_test.dart: a delivered frame that goes unanswered still fails on time the sentinel fails at its budget and is not retried
+✅ /home/runner/work/Haven-App/Haven-App/haven/test/e2e/wire_canaries_test.dart: realistic leak shapes base64OfAPercentEncodedNameIsCaught
+✅ /home/runner/work/Haven-App/Haven-App/haven/test/e2e/wire_canaries_test.dart: realistic leak shapes base64OfAHexDumpedPetnameIsCaught
+✅ /home/runner/work/Haven-App/Haven-App/haven/test/e2e/wire_canaries_test.dart: realistic leak shapes uiTruncatedDisplayNameIsCaught

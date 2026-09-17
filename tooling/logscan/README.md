@@ -336,7 +336,21 @@ Three notes on the encoders:
 
 ## Sink framing
 
-A sink class says how its lines are shaped, and the shape decides where the
+Terminal escape sequences come off first, on every sink, before anything
+matches: SGR colour (`ESC [ … m`) and OSC-8 hyperlinks (`ESC ] 8 ; ; … ESC \`),
+in one pass as the bytes enter the scanner, so needles, plants and rules all
+read the same plain text. That is a **recall** property rather than a cosmetic
+one — CI sets `CARGO_TERM_COLOR=always`, a colour code lands exactly where a
+tool highlights a value, and an escape inside a hex run splits it into two
+shorter runs that no term and no rule matches. What comes off is the FRAMING,
+never the content: an OSC-8 hyperlink's payload is a URL, so only the introducer
+(`ESC ] 8 ; ;`) and the terminator are dropped and the target is scanned like any
+other URL. A newline always ends a sequence, terminated or not, so a stripped
+capture keeps every line number it had — with one exception, in the direction
+that cannot hide anything: a FINAL unterminated line made only of escape bytes
+strips to nothing and is not counted, which can only make a line floor stricter.
+
+A sink class then says how its lines are shaped, and the shape decides where the
 Haven-owned part of a line starts — which is what the structural rules are
 allowed to read.
 
@@ -392,7 +406,8 @@ pass.
 ## Structural rules
 
 `S1` 64-hex run · `S2` 32–63-hex run · `S3` bech32 of any HRP · `S4` base64 ≥ 32
-characters above a Shannon floor **and carrying two digits or `=` padding** ·
+characters above a Shannon floor **and carrying two separate digit RUNS or `=`
+padding** ·
 `S5` decimal coordinate pair · `S6`
 geohash-shaped token adjacent to `geohash|geo|gh` (the keyword must be delimited
 and separated from the cell by one to eight non-alphanumeric characters, which
@@ -413,29 +428,90 @@ delimiters and the digit are what keep the rule off `haven_core::relay::manager`
 and `Option::Some`, which the first CI run of this scanner read as addresses
 hundreds of times per transcript.
 
-Two of those qualifiers narrow what the rules catch, so they are written down as
-**declared residuals** — the same discipline the ledger's `not_gaps` follow: a
+Four things narrow what the rules catch — two rule qualifiers, one sink-class
+exemption and one property of the escape stripper — so all four are written down
+as **declared residuals**, the same discipline the ledger's `not_gaps` follow: a
 boundary stated in one sentence beats a boundary discovered by an adversarial
 reader later.
 
 | residual | what is no longer caught | what carries it instead |
 |---|---|---|
-| **S4** | a base64 run of 32 or more characters with no `=` padding and fewer than two digits (roughly one random 44-character blob in two hundred) | S1/S2 for the hex spellings, S8 when a key word is within 24 characters, the needle search for every value the run declared, and `scan-logs-for-secrets.sh`'s keyword-anchored patterns |
+| **S4** | a base64 run of 32 or more characters with no `=` padding whose digits are absent or all in ONE contiguous run (roughly one random 44-character blob in a hundred and sixty) | S1/S2 for the hex spellings, S8 when a key word is within 24 characters, the needle search for every value the run declared, and `scan-logs-for-secrets.sh`'s keyword-anchored patterns |
 | **S6** | a geohash cell immediately followed by `_`, `(` or `::` | the needle search for a declared coordinate's `geohash` renderings; an undeclared cell in that position is a code path in every capture this tree has produced |
+| **cargo's crate-build line** (`rust-test` only) | **S2 and S6 only**, and only on a `Compiling\|Checking\|Downloaded <name> v<semver> [(<source>)]` line: a 32–63-hex run or a geohash-shaped token in the crate-name or source-URL slot. Every other rule still fires on that line, and cargo's other status lines are not exempt at all | the needle search, which reads those lines byte for byte like any other; S1 for a 64-hex run; and the shape itself, which has to be produced deliberately |
+| **escaped value** | a value the app printed immediately after a LITERAL `ESC [` it emitted itself: the CSI consumer eats the parameter bytes (digits, `;`, `:`, `<=>?`) up to the first `@`–`~`, so the head of such a value is removed before matching | `tooling/e2e/ci/scan-logs-for-secrets.sh`, which runs FIRST and over raw bytes; and the fact that nothing in this tree emits a bare `ESC [` — the app's own log backends do not colour |
 
-Both qualifiers were paid for by a real transcript, and both are in
-`furniture.rust-test.log` / `furniture.flutter-test.log` now. S4's entropy floor
+The first three were each paid for by a real transcript and are in
+`furniture.rust-test.log` / `furniture.flutter-test.log` now; the fourth is a
+property of the stripper rather than a line anyone has captured, and its control
+is the unit test that plants an escape inside a hex run. S4's entropy floor
 cannot separate `kBackgroundSessionReclaimAtMsKey` (4.33 bits) from a 32-byte
 base64 blob (4.5–5.0), and base64 punctuation cannot either, because
 `App/haven/test/providers/identity` is a path made of `/`; what a base64 payload
-of random bytes has and an identifier does not is DIGITS — 10 of the 64
-characters, so fewer than two of them in 32 encoded characters happens in roughly
-one run out of thirty, and in a 44-character key roughly one out of two hundred.
-That recall is carried by S1/S2, by S8, by the
-needle search and by `scan-logs-for-secrets.sh`. S6's code-path test is what
+of random bytes has and an identifier does not is SCATTERED digits — 10 of the 64
+characters, landing in several separate runs, where an identifier carries a
+vocabulary number as one (`Base64`, `Sha256`, `Nip44`). Counting digits rather
+than runs is what reddened the Flutter coverage lane of CI run 35244067610 on
+three test NAMES, `circleNameBase64dIntoAnUnalignedBlobIsCaught` among them, and
+the tightening is nearly free: fewer than two digit runs in a random 44-character
+blob happens about once in a hundred and sixty (against once in a hundred and
+ninety for fewer than two digits), and in a 32-character one about once in
+twenty-eight (against once in thirty-three).
+
+What carries that recall is worth stating precisely, because on a rules-only lane
+some of it is not there: S1/S2 catch the value only where it is ALSO spelled in
+hex, S8 only where a key word is within 24 characters, the needle search only in
+a lane that sealed a manifest (a unit-test transcript seals none), and
+`scan-logs-for-secrets.sh`'s patterns need a keyword AND `=` padding. So on a
+`cargo test` or `flutter test` transcript an unpadded, keyword-free blob whose
+digits are absent or contiguous is a **bare residual** — nothing else is looking.
+Two things bound it: a 32-byte secret in standard base64 always ends in `=`, so
+the class that matters most is unaffected; and the weakest case, an unpadded
+24-byte value encoded in exactly 32 characters, is the ~1-in-28 tail above.
+
+S8 deliberately still
+counts digits rather than runs: it fires only within 24 characters of a key word
+and only on a blob no letter runs into, and its entropy clause already admits a
+long identifier on its own, so narrowing its digit test would cost recall in the
+one net that has a keyword anchor and buy nothing. S6's code-path test is what
 keeps `location::geohash::tests::nan_latitude_returns_empty` — a delimited
 keyword, `::` as the separator, and five geohash-alphabet letters — from
 reddening every `cargo test` transcript this tree produces.
+
+The cargo residual is the only exemption that belongs to a SINK CLASS rather than
+to a rule, and it is deliberately the narrowest thing that closes the failure it
+was written for. Before a single test runs, cargo prints the public pinned git
+revision of every git dependency (a 40-hex run, which S2 reads as a truncated id)
+and the name of every crate it touches (one of which S6 reads as a cell next to a
+`geo` keyword), so both `cargo test` jobs of CI run 35244067610 went rc 1 over
+nothing but the toolchain's own output. Neither is a Haven identifier — they are
+public facts about this tree's dependency list, printed by cargo rather than by
+the app — so `policy.toml`'s `rust-test` sink sets `cargo_status = "exempt"`.
+
+Two bounds make that an exemption rather than a blind spot, and both are
+mechanical:
+
+* **one shape.** Only `Compiling|Checking|Downloaded <name> v<major>.<minor>.<patch>`,
+  optionally followed by a parenthesised source that must open with a scheme or a
+  path separator. The crate slot is a crate NAME, the version is a bare semver
+  triple, and the source is not free text. Cargo's other status lines —
+  `Finished`, `Running`, `Doc-tests`, `Updating`, `Downloading` — are **not**
+  exempt: they trip no rule as cargo prints them (asserted, not assumed), and
+  each has an unbounded tail, which is a slot a value can be printed into.
+  `Doc-tests <32 hex>`, `Running x (target/<coordinate pair>)` and
+  `Updating git repository \`wss://…\`` were all furniture under a wider shape;
+  each is a regression test now.
+* **two rules.** Only S2 and S6 are skipped, because those are the two shapes
+  cargo's own output carries. S1, S3, S4, S5, S7, S8, S9, S10, S11 and S12 all
+  still fire on that line, so a 64-hex run, a URL, a coordinate or an address
+  inside a cargo-shaped line is reported exactly as it would be anywhere else.
+
+Needle matching is untouched on those lines as on every other, so a declared value
+cannot hide behind a cargo verb. What remains is the residual in the table above,
+stated plainly: a print of the whole crate-build shape, on the `rust-test` sink,
+with a 32–63-hex run or a geohash-shaped token in the crate-name or source slot,
+is not reported by S2 or S6. A hex run beginning with a letter does fit the name
+slot. Case Q of `--self-test` holds the clean arm and all four mutations.
 
 They run on **Haven-owned lines only** (tag/process scoping) and never on a
 `relay` sink. On a `logcat` sink they see the message body (the host's own
@@ -460,10 +536,11 @@ declared value across the split. The seven patterns of
 `tooling/e2e/ci/scan-logs-for-secrets.sh` are **not** duplicated here; that
 script stays the toolchain-free key-material floor and the wrapper runs both.
 
-Only S7 and S12 have an exemption, and only for the endpoints the run declares
-with `seal --exempt-endpoint` (the lane's own loopback relay and proxy, in host,
-`host:port` and URL spellings — never a path under them). Everything else needs
-an `allowlist.json` entry.
+Only S7 and S12 have a RULE exemption, and only for the endpoints the run
+declares with `seal --exempt-endpoint` (the lane's own loopback relay and proxy,
+in host, `host:port` and URL spellings — never a path under them). The cargo
+crate-build line above is the only SINK-CLASS one: one shape, two rules, one sink
+class, and a declared residual. Everything else needs an `allowlist.json` entry.
 
 ## Allowlist
 
@@ -538,7 +615,14 @@ vendor chatter, Rust module paths, Dart and Java type names, durations, bucket
 tokens, alias handles — and every line was reviewed against Rule 15 before it
 was pinned (no hex run of eight or more, no key material, no URL, host or
 address, no coordinate, no name, no wall-clock instant, nothing the harness
-printed about the run). The logcat corpus carries only Haven-OWNED tags, because
+printed about the run). The cargo block of `furniture.rust-test.log` is the one
+deliberate exception on two of those counts, and both are public toolchain
+facts rather than identifiers: the 40-hex pinned MDK revision, which
+`haven-core/Cargo.lock` carries in the clear, and the `github.com` /
+`doc.rust-lang.org` URLs cargo itself prints. Neither tells one user, circle or
+device from another, and a corpus that omitted them could not prove the lines
+that reddened a real lane are furniture. The logcat corpus carries only
+Haven-OWNED tags, because
 a vendor-tagged line is skipped by tag scoping and would prove nothing. They are
 asserted twice: case N of `--self-test` (with the sealed manifest, so needles
 count too) and `real_furniture_trips_no_structural_rule` under `cargo test`.
@@ -546,12 +630,19 @@ A rule tightening that would redden a real lane is red here first.
 
 `furniture.rust-test.log` and `furniture.flutter-test.log` are the same thing for
 the two UNIT-test transcripts, mined from sanitised local transcripts of this tree's
-own `cargo test` and `flutter test` runs, reviewed line by line — the files
-themselves are the record — and they carry the three
+own `cargo test` and `flutter test` runs and from the two red jobs of CI run
+35244067610, reviewed line by line — the files
+themselves are the record — and they carry the five
 shapes those transcripts trip that a device log never does: the module path
 `location::geohash::tests::…` (S6), a camel-case Dart test description and a
-repository path over the Shannon floor (S4), and the compact reporter's
-carriage-return-joined status line (S8). Each file's header says what was
+repository path over the Shannon floor (S4), the compact reporter's
+carriage-return-joined status line (S8), the github reporter's one-line-per-test
+shape whose names carry a vocabulary number (S4 again, digit runs), and cargo's
+own coloured status block — ESCAPE BYTES INCLUDED, which is what makes the
+corpus prove the stripper as well as the exemption (S2 on every pinned git
+revision, S6 on one crate name; the `Finished`, `Running` and `Doc-tests` lines
+in the same block are NOT exempt and are clean on their own, which is what makes
+them controls rather than passengers). Each file's header says what was
 selected and what was deliberately left out — the `#[ignore]` reason that names a
 local Blossom server by loopback URL is NOT in the cargo corpus, because it is a
 real address that S12 is right to see and the lanes exempt it explicitly instead;

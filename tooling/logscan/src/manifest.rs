@@ -108,13 +108,19 @@ pub struct Manifest {
     pub expect: BTreeMap<String, usize>,
     /// Sink classes each needle class is NOT searched in.
     pub scoped_out: BTreeMap<String, Vec<String>>,
-    /// The sink specs, copied from the policy at seal time.
+    /// The sink specs, written at seal time for the record and RE-READ from the
+    /// compiled-in policy on every [`read_manifest`].
     ///
-    /// Copied rather than re-read: `scan` must apply the policy the seal
-    /// applied, or a policy edit between the two halves of one run would change
-    /// the meaning of the verdict without anything saying so.
+    /// Written, because a manifest should say what the run was scanned under.
+    /// Re-read, because a sink spec decides where the structural rules run,
+    /// which classes are searched and which rules a shape may skip: honouring
+    /// the file's copy would put the instrument's own rules under the caller's
+    /// control, which is the one thing `policy.toml` is compiled in to prevent.
+    /// Seal and scan run the same binary, so the two agree by construction; when
+    /// they do not, the policy this binary was BUILT with is the honest answer.
     pub sinks: BTreeMap<String, SinkSpec>,
-    /// S4's entropy floor, copied from the policy.
+    /// S4's entropy floor. Written at seal time, re-read from the policy for the
+    /// same reason as `sinks`: a floor of 9.0 in a manifest would silence S4.
     pub base64_entropy_bits: f64,
     /// Endpoint spellings S7 and S12 skip (the lane's own loopback relay and
     /// proxy). Nothing else is ever exempt from those two rules.
@@ -495,7 +501,7 @@ pub fn write_manifest(path: &Path, manifest: &Manifest) -> Result<(), String> {
 pub fn read_manifest(path: &Path) -> Result<Manifest, String> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| format!("cannot read the manifest: {:?}", e.kind()))?;
-    let manifest: Manifest = serde_json::from_str(&text)
+    let mut manifest: Manifest = serde_json::from_str(&text)
         .map_err(|_| "the manifest does not match the manifest schema".to_owned())?;
     if manifest.schema != SCHEMA {
         return Err(format!(
@@ -503,6 +509,24 @@ pub fn read_manifest(path: &Path) -> Result<Manifest, String> {
             manifest.schema
         ));
     }
+    // The POLICY halves of the manifest are re-read from the compiled-in policy
+    // rather than honoured from the file. A manifest arrives on `--manifest
+    // <path>`, i.e. from the caller, and a sink spec decides where the
+    // structural rules run, which classes are searched and — since the cargo
+    // exemption — which rules a shape may skip. Honouring the file's copy would
+    // make the instrument's own rules caller-controlled through a second door,
+    // the one `scripts/ci/check_wire_proxy_test_only.sh:180-191` records being
+    // opened twice. What the file stays authoritative for is what the RUN
+    // minted or chose: terms, values, plants, roles, line floors and the
+    // endpoints it sealed.
+    let policy = Policy::load()?;
+    manifest.sinks.clone_from(&policy.sinks);
+    manifest.scoped_out = policy
+        .classes
+        .iter()
+        .map(|(name, spec)| (name.clone(), spec.scoped_out.clone()))
+        .collect();
+    manifest.base64_entropy_bits = policy.base64_entropy_bits;
     Ok(manifest)
 }
 
@@ -590,6 +614,49 @@ mod tests {
         assert!(again.contains("already sealed"), "{again}");
         let read = read_manifest(&path.0).expect("round trip");
         assert_eq!(read.run_id, "test");
+    }
+
+    /// A manifest cannot relax the policy, only record it.
+    ///
+    /// The sink specs decide where the rules run and which of them a cargo-shaped
+    /// line may skip, so a manifest that claimed `logcat` exempts cargo status
+    /// lines — or that S4's entropy floor is unreachable — would be a caller
+    /// turning the instrument down through its input file. Both are overwritten
+    /// on read, while everything the RUN chose (its floors, its endpoints)
+    /// survives.
+    #[test]
+    fn the_policy_halves_of_a_manifest_are_re_read_and_never_honoured() {
+        let path = SealedPath::new("policyauthority");
+        let policy = Policy::load().expect("policy");
+        let mut tampered = manifest();
+        tampered.sinks = policy.sinks.clone();
+        for spec in tampered.sinks.values_mut() {
+            spec.cargo_status = crate::policy::CargoStatus::Exempt;
+            spec.structural_rules = false;
+        }
+        tampered.base64_entropy_bits = 9.0;
+        tampered
+            .scoped_out
+            .insert("mls_group_id".to_owned(), vec!["logcat".to_owned()]);
+        tampered.floors.insert("logcat".to_owned(), 7);
+        tampered.exempt_endpoints = vec!["ws://10.0.2.2:7777".to_owned()];
+        write_manifest(&path.0, &tampered).expect("seal");
+
+        let read = read_manifest(&path.0).expect("round trip");
+        assert_eq!(
+            read.sinks["logcat"].cargo_status,
+            crate::policy::CargoStatus::Scanned,
+            "only `rust-test` exempts cargo status lines, and only the policy says so"
+        );
+        assert!(read.sinks["logcat"].structural_rules);
+        assert!((read.base64_entropy_bits - policy.base64_entropy_bits).abs() < f64::EPSILON);
+        assert!(
+            !read.scoped_out["mls_group_id"].contains(&"logcat".to_owned()),
+            "the real MLS group id is scoped out of nothing"
+        );
+        // …and the run's own choices are untouched.
+        assert_eq!(read.floor("logcat"), 7);
+        assert_eq!(read.exempt_endpoints, vec!["ws://10.0.2.2:7777".to_owned()]);
     }
 
     #[test]

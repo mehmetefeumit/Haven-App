@@ -746,9 +746,20 @@ the iOS lanes, the runner's own choice elsewhere):
   a test (a relay stub announcing itself, an assertion message naming the
   endpoint) is an S7 hit that reds the job and deletes the transcript. The
   fix is the print — a `logAliasHandle(LogAliasClass.relay, …)` or no URL at
-  all — never a second exemption. Containment is detection only: the
-  transcript already streamed into the job log. `--rules-only` is forbidden
-  outside those two workflows.
+  all — never a second exemption. One shape the TOOLCHAIN adds on its own is
+  narrowly exempt: on a `rust-test` sink, **S2 and S6 only** are skipped on a
+  `Compiling|Checking|Downloaded <crate> v<semver> [(<source>)]` line
+  (`policy.toml`'s `cargo_status = "exempt"`), because a cold coloured run
+  prints the public pinned git revision of every git dependency and the name of
+  every crate before a test starts. Everything else about that line is still
+  scanned — S1, S5, S7, S12 and the rest all fire on it, and the needle search
+  reads every byte — and cargo's other status lines (`Finished`, `Running`,
+  `Doc-tests`, `Updating`, `Downloading`) are not exempt at all. So a hit on a
+  cargo-shaped line is a real print, not furniture; the one thing the exemption
+  hides is a 32–63-hex run or a geohash-shaped token in the crate-name or
+  source slot of that exact shape, which is the residual `tooling/logscan/README.md`
+  declares. Containment is detection only: the transcript already streamed into
+  the job log. `--rules-only` is forbidden outside those two workflows.
 
 The wrapper folds the two verdicts as `1 > 2 > 3 > 4 > 0`; its last line names
 both scanners' codes, the sink count and the manifest's basename (or

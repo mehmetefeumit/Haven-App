@@ -79,11 +79,21 @@ plant = { kind = "plant" }
 # dead iOS capture is still caught. It is `false` for the sinks that carry no app output at all
 # (`rust-test`, `proxy`, `diag`, `relay`). The day a capture proves the Dart
 # token reaches `log show`, this flips to `true` and stays there.
+# `cargo_status` is `"exempt"` for `rust-test` alone: before a single test
+# runs, cargo prints the public pinned git revision of every git dependency (40
+# hex, which S2 reads as a truncated id) and the name of every crate
+# (`geo-types`, which S6 reads as a cell next to a `geo` keyword). Neither is a
+# Haven identifier, and both are in EVERY transcript of this repo. The exemption
+# is as narrow as those two facts: ONLY the `Compiling|Checking|Downloaded
+# <crate> v<semver> [(<source>)]` shape in `src/rules.rs`, and ONLY rules S2 and
+# S6 on it. Every other rule still runs on that line, cargo's other status lines
+# are not exempt at all (they trip nothing as cargo prints them), and the needle
+# search reads all of them: a declared value cannot hide behind a cargo verb.
 [sinks]
 logcat = { term_floor = 8, declared_plants_expected = true, structural_rules = true, reassemble = true, min_lines = 2000, entry_format = "logcat", required_shape_plants = ["rust", "kotlin"], owned_tags = ["flutter", "haven_core", "rust_lib_haven", "RustStdoutStderr", "frb_user", "HavenApplication", "MainActivity", "PublishWakeLock", "com.oblivioustech.haven"] }
 ios = { term_floor = 8, declared_plants_expected = false, structural_rules = true, reassemble = false, min_lines = 2000, entry_format = "ios", required_shape_plants = ["rust", "swift"], owned_processes = ["Runner", "frb_user", "HavenSLC", "HavenBGTask", "haven_core"] }
 drive = { term_floor = 6, declared_plants_expected = true, structural_rules = true, reassemble = false, min_lines = 100, entry_format = "plain" }
-rust-test = { term_floor = 6, declared_plants_expected = false, structural_rules = true, reassemble = false, min_lines = 20, entry_format = "plain" }
+rust-test = { term_floor = 6, declared_plants_expected = false, structural_rules = true, reassemble = false, min_lines = 20, entry_format = "plain", cargo_status = "exempt" }
 proxy = { term_floor = 6, declared_plants_expected = false, structural_rules = true, reassemble = false, min_lines = 5, entry_format = "plain" }
 diag = { term_floor = 6, declared_plants_expected = false, structural_rules = true, reassemble = false, min_lines = 1, entry_format = "plain" }
 # A relay log legitimately holds pubkeys, event ids and `#h` tags: structural

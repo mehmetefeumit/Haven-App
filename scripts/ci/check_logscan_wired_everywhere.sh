@@ -57,7 +57,13 @@
 #       coverage.yml — with a floor on how many such captures exist.
 #   (g) RULES-ONLY IS FOR TRANSCRIPTS. `--rules-only` (no manifest: the rules
 #       ran, nothing declared was searched) appears in rust-check.yml and
-#       coverage.yml only, and in no lane runner.
+#       coverage.yml only, and in no lane runner. The `rust-test` SINK CLASS is
+#       confined the same way, to rust-check.yml alone, because that class is
+#       the one that exempts cargo's crate-build line from S2 and S6
+#       (`cargo_status = "exempt"` in tooling/logscan/policy.toml). Typing any
+#       other capture as `rust-test` would carry the exemption to a log cargo
+#       never wrote — and a device log CAN hold a line of that shape, since the
+#       app is free to print anything.
 #   (h) A RECORDING LANE DECLARES, ACCOUNTS AND DISCARDS. Every job that
 #       starts the wire proxy declares `HAVEN_LOGSCAN_PROFILE: proxy` at job
 #       level (the runners infer `proxy` from the recorder's exports when it
@@ -145,6 +151,11 @@ readonly GATE_SOURCE_RE='^[[:space:]]*(source|[.])[[:space:]].*logscan-gate[.]sh
 readonly RULES_ONLY_RE='--rules-only|logscan_gate[[:space:]]+rules([[:space:]]|$)'
 readonly XTRACE_RE='(^|[[:space:];&|(])(set[[:space:]]+(-[a-zA-Z]*x[a-zA-Z]*|[+]x|-o[[:space:]]+xtrace)|bash[[:space:]]+-x)([[:space:]]|$)'
 readonly RULES_ONLY_WORKFLOWS=('rust-check.yml' 'coverage.yml')
+# The `rust-test` sink class carries the cargo-status exemption, so it belongs to
+# the workflow that scans cargo transcripts and nowhere else. coverage.yml's
+# `flutter test` logs are `drive`, which has no exemption of any kind.
+readonly RUST_TEST_SINK_RE='--sink[[:space:]]+rust-test='
+readonly RUST_TEST_SINK_WORKFLOWS=('rust-check.yml')
 
 # Measured 2026-09-16: 18 e2e jobs + rust-check's four + coverage's flutter
 # job = 23 capturing jobs; the floor is 80 % of that. Six tee'd transcripts —
@@ -628,6 +639,29 @@ check_tree() { # check_tree <workflow-dir> <harness-dir> <min-jobs> <min-tees>
     fi
   done
 
+  # (g) the `rust-test` SINK CLASS, confined the same way and for a sharper
+  # reason: it is the class that skips S2 and S6 on cargo's crate-build line.
+  for f in "${wf}"/*.yml "${wf}"/*.yaml; do
+    [[ -f "${f}" ]] || continue
+    base="${f##*/}"
+    ok=0
+    for w in "${RUST_TEST_SINK_WORKFLOWS[@]}"; do [[ "${base}" == "${w}" ]] && ok=1; done
+    (( ok )) && continue
+    hits="$(grep -E -- "${RUST_TEST_SINK_RE}" "${f}" | grep -vcE '^[[:space:]]*#' || true)"
+    if (( hits > 0 )); then
+      violation "${base}: a --sink rust-test= appears outside ${RUST_TEST_SINK_WORKFLOWS[*]}. That class exempts cargo's crate-build line from S2 and S6 (tooling/logscan/policy.toml), which is only true of a capture cargo wrote; type a test transcript that is not cargo's as \`drive\`."
+    fi
+  done
+  for f in "${harness}"/*.sh; do
+    [[ -f "${f}" ]] || continue
+    base="${f##*/}"
+    [[ "${base}" == 'scan-logs.sh' ]] && continue
+    hits="$(grep -E -- "${RUST_TEST_SINK_RE}" "${f}" | grep -vcE '^[[:space:]]*#' || true)"
+    if (( hits > 0 )); then
+      violation "tooling/e2e/ci/${base}: a --sink rust-test= appears in a lane runner. A lane captures device and drive logs, never a cargo transcript, and that class carries the cargo-status exemption."
+    fi
+  done
+
   local before
   jobs="$(awk -F'\t' '{ print $1 "\t" $2 }' <<<"${records}" | awk '!seen[$0]++')"
   while IFS=$'\t' read -r base job; do
@@ -895,7 +929,7 @@ YAML
 }
 
 self_test() {
-  local -r SELF_TEST_CASES=55
+  local -r SELF_TEST_CASES=57
   local tmp cases=0 failures=0
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
@@ -1039,6 +1073,13 @@ self_test() {
   _expect "(g) --rules-only in rust-check.yml passes (base)" "${b}" 0
   d="${tmp}/g2"; rm -rf "${d}"; cp -r "${b}" "${d}"; write_runner "${d}/harness" 'run-good.sh' rules
   _expect "(g) the rules profile in a lane runner fails" "${d}" 1 "uses --rules-only (or the rules profile)"
+  # The `rust-test` sink class carries the cargo exemption, so it is confined to
+  # the workflow that scans cargo transcripts. The base names it in
+  # rust-check.yml, which is the passing half of this pair.
+  d="${tmp}/g3"; mut "${b}" "${d}" 'wf/e2e-android.yml' 's|--sink diag=/tmp/diag.log|--sink rust-test=/tmp/diag.log|'
+  _expect "(g) a rust-test sink in a lane fails" "${d}" 1 "outside rust-check.yml"
+  d="${tmp}/g4"; rm -rf "${d}"; cp -r "${b}" "${d}"; sed -i 's|--sink drive=/tmp/flutter-drive.log|--sink rust-test=/tmp/flutter-drive.log|' "${d}/harness/run-good.sh"
+  _expect "(g) a rust-test sink in a lane runner fails" "${d}" 1 "appears in a lane runner"
 
   # (h)
   d="${tmp}/h1"; mut "${b}" "${d}" 'wf/e2e-android.yml' '/check-proxy-sidecar-summary.sh/d; /Proxy declaration channel stayed healthy/d'

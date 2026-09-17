@@ -3,15 +3,20 @@
 # `--rules-only`. The transcript itself is not checked in anywhere; these lines
 # ARE the record. Selected line by line and
 # reviewed against Rule 15 exactly as `furniture.drive.log` was: no key
-# material, no pubkey, no URL, host or address, no coordinate, no name, no
-# wall-clock instant, nothing about a run.
+# material, no pubkey, no host or address, no coordinate, no name, no
+# wall-clock instant, nothing about a run. The cargo block at the end of the
+# file is the one exception to "no URL", and its own header says which two
+# public toolchain URLs it carries and why they are not identifiers.
 #
 # Two selections are deliberate and neither is an oversight:
 #   * the `Running unittests … (target/debug/deps/<crate>-<16 hex>)` line IS
 #     here. Sixteen hex characters is a cargo build hash — a compiler artifact,
 #     not an identifier — and no rule may read it as one: S2 starts at 32. Every
 #     cargo lane emits it, so a tightening that reddened it would delete a real
-#     transcript.
+#     transcript. That claim is load-bearing only while the line is NOT exempt,
+#     which is why the cargo exemption covers the crate-build shape alone and
+#     `a_cargo_verb_does_not_exempt_the_rest_of_the_line` asserts this exact
+#     line produces no hit on a `rust-test` sink.
 #   * the `#[ignore]` reason that names a local Blossom server by loopback URL
 #     is NOT here. It carries a real address, so S12 is RIGHT to see it; the
 #     unit-test lanes exempt the loopback with `--exempt-endpoint`, and that is
@@ -99,3 +104,38 @@ test src/relay/live_sync/health.rs - relay::live_sync::health::health_needs_targ
 
 test result: ok. 40 passed; 0 failed; 13 ignored; 0 measured; 0 filtered out; finished in 5.84s
 
+#
+# The block below is verbatim from the `cargo test` transcripts of CI run
+# 35244067610 (haven-core and rust_builder, both red), ESCAPE BYTES INCLUDED:
+# CI sets CARGO_TERM_COLOR=always, so every cargo status line carries SGR
+# colour, and the `Finished` line carries an OSC-8 hyperlink when the terminal
+# advertises one — that single line is from a local run, which is where the
+# hyperlink shows. The block pins two things at once: that the escapes are
+# removed before anything matches (a colour code inside a hex run would split
+# the run and hide it), and that what is left is cargo furniture rather than
+# Haven output. Both shapes that reddened those two jobs are here: the 40-hex
+# PUBLIC pinned MDK revision that every git dependency prints (a dependency
+# pin is not a user, a circle or a device), and one hyphenated crate name
+# whose halves read as a keyword next to a cell. Neither may be spelled out in
+# the prose above, because a comment line is scanned exactly like a log line.
+#
+# Two public toolchain URLs come with the block and are the file's only ones:
+# the MDK repository each git dependency is fetched from, and the cargo
+# profile reference the `Finished` line hyperlinks. Both are printed by the
+# toolchain, neither is a relay, a host of ours or anything that tells one
+# user, circle or device from another; the hyperlink's target survives
+# stripping deliberately, so a URL in an OSC payload is still scanned.
+# Only the `Compiling` lines here are exempt, and only from S2 and S6: the
+# `Finished`, `Running` and `Doc-tests` lines below are rule-scanned in full
+# and clean on their own, which is what makes them negative controls.
+[1m[92m   Compiling[0m cgka-traits v0.9.4 (https://github.com/marmot-protocol/mdk?rev=e391adc133a9b60e420da7a0446f014a180ac8d2#e391adc1)
+[1m[92m   Compiling[0m fs-private v0.9.4 (https://github.com/marmot-protocol/mdk?rev=e391adc133a9b60e420da7a0446f014a180ac8d2#e391adc1)
+[1m[92m   Compiling[0m marmot-forensics v0.9.4 (https://github.com/marmot-protocol/mdk?rev=e391adc133a9b60e420da7a0446f014a180ac8d2#e391adc1)
+[1m[92m   Compiling[0m cgka-engine v0.9.4 (https://github.com/marmot-protocol/mdk?rev=e391adc133a9b60e420da7a0446f014a180ac8d2#e391adc1)
+[1m[92m   Compiling[0m storage-sqlite v0.9.4 (https://github.com/marmot-protocol/mdk?rev=e391adc133a9b60e420da7a0446f014a180ac8d2#e391adc1)
+[1m[92m   Compiling[0m geo-types v0.7.19
+[1m[92m   Compiling[0m cgka-session v0.9.4 (https://github.com/marmot-protocol/mdk?rev=e391adc133a9b60e420da7a0446f014a180ac8d2#e391adc1)
+[1m[92m   Compiling[0m transport-nostr-peeler v0.9.4 (https://github.com/marmot-protocol/mdk?rev=e391adc133a9b60e420da7a0446f014a180ac8d2#e391adc1)
+[1m[92m    Finished[0m ]8;;https://doc.rust-lang.org/cargo/reference/profiles.html#default-profiles\`dev` profile [unoptimized + debuginfo]]8;;\ target(s) in 22.61s
+[1m[92m     Running[0m unittests src/lib.rs (target/debug/deps/haven_core-78272f4b45ab4866)
+[1m[92m   Doc-tests[0m haven_core

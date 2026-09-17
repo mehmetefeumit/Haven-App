@@ -126,6 +126,59 @@ const RULES: &[Rule] = &[
     },
 ];
 
+/// The ONE cargo status line that trips a structural rule: a crate being built,
+/// with its version and, for a git or path dependency, its source.
+///
+/// Cargo prints the public pinned git REVISION of every git dependency and the
+/// NAME of every crate it touches before a single test runs, so a cold run
+/// carries a 40-hex run per MDK crate (S2) and `geo-types` (S6 — a `geo`
+/// keyword next to five base32 letters). Neither is a Haven identifier: both
+/// are public facts about this tree's dependency list, printed by the toolchain
+/// rather than by the app. `rust-test` therefore skips [`CARGO_STATUS_RULES`] on
+/// lines of this shape (`cargo_status = "exempt"` in `policy.toml`, which is
+/// where the per-sink answer lives).
+///
+/// Cargo's OTHER status lines — `Finished`, `Running`, `Doc-tests`, `Updating`,
+/// `Downloading` — are deliberately NOT here. They trip no rule as cargo prints
+/// them (`the_cargo_lines_that_need_no_exemption_are_clean_on_their_own` is the
+/// proof), so exempting them would buy nothing and cost everything: each of
+/// those tails is unbounded, which is a slot an app print can land a value in.
+/// `Doc-tests <32 hex>`, `Running x (target/<coordinate pair>)` and an
+/// `Updating git repository` line naming a `wss://` URL all used to pass for
+/// furniture.
+///
+/// Every field is bounded for the same reason. The crate name is a cargo crate
+/// name (`[A-Za-z][A-Za-z0-9_-]*`, which no `<key>=<value>` print can occupy),
+/// the version is a bare semver triple, and the source must open with a scheme
+/// or a path separator, so `(2001:db8::1)` is not a source.
+///
+/// What is left inside is the residual, and the README states it in one
+/// sentence rather than pretending it away: a 32–63-hex run or a
+/// geohash-shaped token in the crate-name or source-URL slot of a
+/// `Compiling|Checking|Downloaded <name> v<semver>` line, on the `rust-test`
+/// sink only. A hex run that begins with a LETTER does fit the name slot; what
+/// bounds the residual is that S2 and S6 are the only rules skipped, that the
+/// needle search still reads the line, and that the whole shape has to be
+/// produced deliberately.
+///
+/// Both verbs and shapes are verbatim from the `cargo test`, `cargo clippy` and
+/// `cargo build` transcripts of CI run 35244067610 (the run this exemption was
+/// paid for) and from `fixtures/furniture.rust-test.log`; none is guessed from
+/// cargo's source.
+const CARGO_STATUS: &str = concat!(
+    r"^\s*(?:Compiling|Checking|Downloaded) ",
+    r"[A-Za-z][A-Za-z0-9_-]* v\d+\.\d+\.\d+",
+    r"(?: \((?:[a-z+]+)?(?:/|https://)[^)\s]*\))?$",
+);
+
+/// The rules a cargo status line is furniture FOR, and no others.
+///
+/// S2 is the pinned git revision and S6 the crate name — the two shapes cargo's
+/// own output actually carries. Every other rule still runs on the line, so a
+/// coordinate, a URL, an IP or a 64-hex run inside a cargo-shaped line is
+/// reported exactly as it would be anywhere else.
+const CARGO_STATUS_RULES: &[&str] = &["S2", "S6"];
+
 /// Placeholders S10 must not fire on: the redactions and alias handles the tree
 /// prints deliberately.
 const PLACEHOLDERS: &[&str] = &[
@@ -199,6 +252,7 @@ pub struct RuleSet {
     /// Rule id per regex index; a rule may own several shapes (S12 does).
     ids: Vec<&'static str>,
     set: RegexSet,
+    cargo_status: Regex,
     entropy_bits: f64,
     epoch_window: (u64, u64),
     exempt: BTreeSet<String>,
@@ -248,6 +302,8 @@ impl RuleSet {
             regexes,
             ids,
             set,
+            cargo_status: Regex::new(CARGO_STATUS)
+                .map_err(|e| format!("the cargo status shape does not compile: {e}"))?,
             entropy_bits,
             // Floor: 2020-01-01. Ceiling: a year out, so a fixture's fixed
             // timestamp stays inside the window forever while a future stamp
@@ -266,6 +322,23 @@ impl RuleSet {
         let mut ids: Vec<&'static str> = RULES.iter().map(|r| r.id).collect();
         ids.dedup();
         ids
+    }
+
+    /// Whether `line` is one of cargo's own status lines ([`CARGO_STATUS`]).
+    #[must_use]
+    pub fn is_cargo_status(&self, line: &str) -> bool {
+        self.cargo_status.is_match(line)
+    }
+
+    /// Whether this HIT is cargo furniture: the right rule ([`CARGO_STATUS_RULES`])
+    /// on a line of the right shape, in a sink class that says so.
+    ///
+    /// Both halves are required. A rule outside the pair still fires on a
+    /// cargo-shaped line, and the pair still fires on every other line, so the
+    /// exemption is one shape's two rules rather than a sink-wide licence.
+    #[must_use]
+    pub fn is_cargo_furniture(&self, rule: &str, line: &str) -> bool {
+        CARGO_STATUS_RULES.contains(&rule) && self.is_cargo_status(line)
     }
 
     /// Evaluates one Haven-owned line.
@@ -533,18 +606,42 @@ fn is_code_path(line: &str, whole: regex::Match<'_>, cell: regex::Match<'_>) -> 
 /// either — `App/haven/test/providers/identity` is a path made of `/`.
 ///
 /// What a base64 payload of random bytes has, and a camel-case identifier does
-/// not, is DIGITS: 10 of the 64 characters are digits, so fewer than two of them
-/// in 32 encoded characters happens in roughly one run out of thirty, and in 44
-/// (a 32-byte key) in roughly one out of two hundred. Trailing `=` padding is
+/// not, is SCATTERED digits: 10 of the 64 characters are digits, so a random
+/// blob carries several of them in separate places, while an identifier carries
+/// a vocabulary number as ONE run — `Base64`, `Sha256`, `Utf8`, `Nip44`,
+/// `Kind445`. Counting digits rather than digit RUNS is why
+/// `circleNameBase64dIntoAnUnalignedBlobIsCaught` reddened the Flutter coverage
+/// lane of CI run 35244067610: the two digits of `64` are one run, and a
+/// 44-letter camel-case name clears the entropy floor. Trailing `=` padding is
 /// the other definitive tell. Both are checked alongside the entropy floor,
 /// never instead of it.
 ///
-/// The recall this costs — a digit-free base64 blob — is carried by S1/S2 (hex),
-/// S8 (a blob next to a key word), the needle search for every value the run
-/// declared, and `scan-logs-for-secrets.sh`'s keyword-anchored patterns.
+/// Two runs rather than two digits costs almost nothing: a random 44-character
+/// base64 blob (a 32-byte key) has fewer than two digit runs about once in 160,
+/// against once in 190 for fewer than two digits, and a 32-character one about
+/// once in 28 against once in 33.
+///
+/// The recall this costs — a base64 blob whose digits are absent or contiguous —
+/// is carried by S1/S2 (hex), S8 (a blob next to a key word), the needle search
+/// for every value the run declared, and `scan-logs-for-secrets.sh`'s
+/// keyword-anchored patterns.
 fn is_base64_payload(blob: &str, padded: bool, entropy_bits: f64) -> bool {
-    let digits = blob.bytes().filter(u8::is_ascii_digit).count();
-    (digits >= 2 || padded) && shannon_bits(blob) > entropy_bits
+    (digit_runs(blob) >= 2 || padded) && shannon_bits(blob) > entropy_bits
+}
+
+/// Maximal runs of consecutive ASCII digits in `text`.
+fn digit_runs(text: &str) -> usize {
+    let mut runs = 0;
+    let mut in_run = false;
+    for byte in text.bytes() {
+        if byte.is_ascii_digit() {
+            runs += usize::from(!in_run);
+            in_run = true;
+        } else {
+            in_run = false;
+        }
+    }
+    runs
 }
 
 /// Whether a keyword-adjacent run looks ENCODED rather than like an identifier.
@@ -555,6 +652,14 @@ fn is_base64_payload(blob: &str, padded: bool, entropy_bits: f64) -> bool {
 /// entropy floor. `KeyPackageMaintenanceFailed` satisfies none of them; 32 hex
 /// characters satisfy the first while sitting just BELOW the entropy floor,
 /// which is why the floor alone is not the test.
+///
+/// Deliberately still DIGITS here, where [`is_base64_payload`] counts digit
+/// runs: this rule fires only within 24 characters of `secret|nsec|seed|key`
+/// and only on a blob no word runs into, and its entropy clause already admits
+/// a long camel-case identifier on its own, so the digit count is not what
+/// separates the two — narrowing it would cost recall in the one net that has a
+/// keyword anchor and buy nothing. No `flutter test` or `cargo test` transcript
+/// of CI run 35244067610 carries an S8 hit on an identifier.
 fn looks_encoded(blob: &str, entropy_bits: f64) -> bool {
     blob.bytes().filter(u8::is_ascii_digit).count() >= 2
         || blob.bytes().any(|b| matches!(b, b'+' | b'/' | b'='))
@@ -821,6 +926,138 @@ mod tests {
         ] {
             assert!(!hits(clean).contains(&"S4"), "must not fire on {clean:?}");
         }
+    }
+
+    /// A vocabulary number in a name is ONE digit run; a payload scatters them.
+    ///
+    /// The three clean lines are verbatim from the `flutter test` transcript of
+    /// CI run 35244067610, where the Flutter coverage lane went rc 1 on nothing
+    /// but test names: `64` inside `Base64` satisfied a "two digits" test while
+    /// a 44-letter camel-case name cleared the entropy floor. The dirty side is
+    /// what must survive the tightening — digits in two places, and padding with
+    /// no digit at all.
+    #[test]
+    fn s4_counts_digit_runs_so_a_vocabulary_number_in_a_name_is_not_a_payload() {
+        for clean in [
+            "✅ /home/runner/work/Haven-App/Haven-App/haven/test/e2e/wire_canaries_test.dart: realistic leak shapes circleNameBase64dIntoAnUnalignedBlobIsCaught",
+            "✅ /home/runner/work/Haven-App/Haven-App/haven/test/e2e/wire_canaries_test.dart: realistic leak shapes base64OfAPercentEncodedNameIsCaught",
+            "✅ /home/runner/work/Haven-App/Haven-App/haven/test/e2e/wire_canaries_test.dart: realistic leak shapes base64OfAHexDumpedPetnameIsCaught",
+            "haven: Sha256OfTheCircleNameAsDisplayedInTheSheet",
+        ] {
+            assert!(!hits(clean).contains(&"S4"), "must not fire on {clean:?}");
+        }
+        for dirty in [
+            // Digits in two separate places: a payload, whatever its length.
+            "haven: payload=7mK4pQzXbRvTyLwN3cJhDgFaSeUiOpZxCvBnMq",
+            // No digit anywhere, but `=` padding: still a payload.
+            "haven: payload=qDHwmDddLrxtQXmYUMdiNlUvKZPWaUXjZQFTVzo=",
+        ] {
+            assert!(hits(dirty).contains(&"S4"), "must fire on {dirty:?}");
+        }
+    }
+
+    /// The exempted shape is the crate-build line, and nothing else.
+    ///
+    /// Every accepted line is verbatim from CI run 35244067610's transcripts or
+    /// from `fixtures/furniture.rust-test.log`. The rejected ones are two
+    /// traps: a test's own stdout that opens with a cargo verb, and cargo's
+    /// OTHER status lines, whose tails are unbounded — every one of them passed
+    /// for furniture while the shape reached past the crate version, and each
+    /// was an evasion: `Doc-tests <32 hex>`, `Running x (target/<pair>)`, and
+    /// an `Updating git repository` line naming a `wss://` URL.
+    #[test]
+    fn the_cargo_status_shape_admits_only_the_crate_build_line() {
+        let engine = engine();
+        for furniture in [
+            "   Compiling cgka-traits v0.9.4 (https://github.com/marmot-protocol/mdk?rev=e391adc133a9b60e420da7a0446f014a180ac8d2#e391adc1)",
+            "   Compiling geo-types v0.7.19",
+            "    Checking cgka-engine v0.9.4 (https://github.com/marmot-protocol/mdk?rev=e391adc133a9b60e420da7a0446f014a180ac8d2#e391adc1)",
+            "  Downloaded geo-types v0.7.19",
+            "   Compiling haven-core v0.1.0 (/home/runner/work/Haven-App/Haven-App/haven-core)",
+            "   Compiling evil v0.1.0 (git+https://example.invalid/evil?rev=deadbeef)",
+        ] {
+            assert!(
+                engine.is_cargo_status(furniture),
+                "cargo prints {furniture:?}"
+            );
+        }
+        for stdout in [
+            "Compiling nostr_group_id=5f3a9c2e1b7d408695a4c3e2f1d0b9a8",
+            "test relay::manager::tests::compiling_a_filter_twice_is_idempotent ... ok",
+            "   Compiling evil",
+            "   Compiling evil v1.2",
+            // The crate slot is a crate NAME, so a hex run cannot occupy it, and
+            // the source must open with a scheme or a path separator, so an
+            // address is not a source.
+            "   Compiling 0a1b2c3d4e5f60718293a4b5c6d7e8f9 v1.2.3",
+            "   Compiling evil v1.2.3 (2001:db8::1)",
+            "   Compiling evil v1.2.3 (fix -33.865143,151.209901)",
+        ] {
+            assert!(
+                !engine.is_cargo_status(stdout),
+                "a test's own stdout must not pass for a cargo status line: {stdout:?}"
+            );
+        }
+        // The exemption is structural-only and never reaches the rules' own
+        // verdict: the line still trips S2 when nothing exempts it.
+        assert!(hits("Compiling nostr_group_id=5f3a9c2e1b7d408695a4c3e2f1d0b9a8").contains(&"S2"));
+    }
+
+    /// Cargo's other status lines need no exemption, because they trip no rule.
+    ///
+    /// That is the argument for leaving them out of the shape — an exemption
+    /// that buys nothing still costs an unbounded slot — so it is asserted
+    /// rather than assumed. Each line is verbatim from CI run 35244067610.
+    #[test]
+    fn the_cargo_lines_that_need_no_exemption_are_clean_on_their_own() {
+        for line in [
+            "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 22.61s",
+            "    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 44s",
+            "     Running unittests src/lib.rs (target/debug/deps/haven_core-521ec6d6aa32dd35)",
+            "     Running tests/mls_integration_tests.rs (target/debug/deps/mls_integration_tests-db684c5c6718c987)",
+            "   Doc-tests haven_core",
+            "    Updating crates.io index",
+            "    Updating git repository `https://github.com/marmot-protocol/mdk`",
+            " Downloading crates ...",
+        ] {
+            assert!(
+                hits(line).is_empty(),
+                "{line:?} needs no exemption, but fired {:?}",
+                hits(line)
+            );
+            assert!(
+                !engine().is_cargo_status(line),
+                "…and therefore must not be inside the exemption: {line:?}"
+            );
+        }
+    }
+
+    /// The exemption is two rules on one shape, never the shape itself.
+    #[test]
+    fn only_s2_and_s6_are_cargo_furniture() {
+        let engine = engine();
+        let line = "   Compiling geo-types v0.7.19 (https://example.invalid/x?rev=7d4e1c9b3a2f85607d4e1c9b3a2f85607d4e1c9b)";
+        assert!(engine.is_cargo_furniture("S2", line));
+        assert!(engine.is_cargo_furniture("S6", line));
+        for other in [
+            "S1", "S3", "S4", "S5", "S7", "S8", "S9", "S10", "S11", "S12",
+        ] {
+            assert!(
+                !engine.is_cargo_furniture(other, line),
+                "{other} must still fire on a cargo status line"
+            );
+        }
+        // And neither half stands alone: the pair is not furniture off-shape.
+        assert!(!engine.is_cargo_furniture("S2", "gid=0a1b2c3d4e5f60718293a4b5c6d7e8f90"));
+        // The residual, asserted rather than implied: a hex run that begins with
+        // a LETTER fits the crate-name slot, so a deliberate print of that exact
+        // shape is inside the exemption. The same run one character earlier —
+        // starting with a digit, as a hex id usually does — is not.
+        assert!(
+            engine.is_cargo_furniture("S2", "   Compiling a1b2c3d4e5f60718293a4b5c6d7e8f90 v1.2.3")
+        );
+        assert!(!engine
+            .is_cargo_furniture("S2", "   Compiling 0a1b2c3d4e5f60718293a4b5c6d7e8f9 v1.2.3"));
     }
 
     /// S12 across the IPv6 spellings a log carries, and the Rust furniture it

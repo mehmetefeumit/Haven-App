@@ -38,6 +38,12 @@
 #   P5  LEDGER COMPLETE. Every class in `[classes]` other than the `plant` kind
 #       (matched literally, never expanded) has a `[ledger.<class>]` table, and
 #       every ledger table names a declared class.
+#   P6  CARGO EXEMPTION CONFINED. `cargo_status = "exempt"` appears on exactly
+#       the sinks in CARGO_STATUS_EXEMPT (today: `rust-test`), every other
+#       `[sinks]` entry either omits the key or says `"scanned"`, and the
+#       README explains the knob and names each exempt sink. It is the one
+#       exemption that belongs to a sink class rather than to a rule, so a
+#       second sink acquiring it silently is a widening nothing else reports.
 #
 # Floors on the number of sinks and classes parsed keep a policy the parser
 # has stopped reading from passing as compliant.
@@ -79,6 +85,13 @@ readonly MIN_CLASSES=14
 # Sinks whose structural rules are off, with the reason.
 declare -A STRUCTURAL_RULES_OFF=(
   ['relay']='a relay log legitimately holds pubkeys, event ids and #h tags; the public classes are scoped out and the secret classes, names and coordinates stay searched'
+)
+# Sinks that skip cargo's crate-build line for S2 and S6, with the reason; the
+# README must explain the knob and name each one. A second entry here is a
+# second capture claiming to be a cargo transcript — which is what the scanner's
+# narrowest exemption rests on.
+declare -A CARGO_STATUS_EXEMPT=(
+  ['rust-test']='the only class that holds a cargo transcript; cargo prints the public pinned git revision of every git dependency and every crate name before a test runs'
 )
 # Sinks whose DECLARED Dart plant tokens are not demanded, with the reason;
 # the README's positive-controls bullet must name each one.
@@ -141,6 +154,15 @@ check_policy() { # check_policy <policy> <readme>
     elif [[ "${v}" != "true" ]]; then
       violation "${rel}: sink \`${name}\` has declared_plants_expected = ${v} but is not in DECLARED_PLANTS_OFF. Waiving the positive control is the one way a dead capture reads as clean; list the sink with its reason and name it in the README's positive-controls bullet."
     fi
+    # P6: the cargo exemption, which skips S2 and S6 on cargo's crate-build
+    # line. Absent means scanned, so only an explicit `"exempt"` is a decision.
+    v="$(field_of "${body}" cargo_status)"
+    v="${v//\"/}"
+    if [[ -n "${CARGO_STATUS_EXEMPT[${name}]+x}" ]]; then
+      [[ "${v}" == "exempt" ]] || violation "${rel}: sink \`${name}\` is listed in CARGO_STATUS_EXEMPT (${CARGO_STATUS_EXEMPT[${name}]}) but has cargo_status = ${v:-<absent>}. Re-decide: set it, or delete the entry from the list in the same change."
+    elif [[ -n "${v}" && "${v}" != "scanned" ]]; then
+      violation "${rel}: sink \`${name}\` has cargo_status = ${v}. Only a class that holds a CARGO transcript may skip cargo's crate-build line (S2 and S6 on it); on any other capture that shape is app output. List the sink with its reason here and in the README, or delete the key."
+    fi
   done <<<"${entries}"
   if (( n_sinks < MIN_SINKS )); then
     broken "${rel}: parsed ${n_sinks} sink(s) under [sinks], expected at least ${MIN_SINKS}. The section parser has stopped matching, so every verdict above is vacuous."
@@ -155,6 +177,18 @@ check_policy() { # check_policy <policy> <readme>
   else
     for s in "${!DECLARED_PLANTS_OFF[@]}"; do
       grep -qF -- "\`${s}\`" <<<"${bullet}" || violation "${README_REL}: the declared_plants_expected paragraph does not name \`${s}\`, which the policy waives. Say why, there."
+    done
+  fi
+
+  # …and the same cross-check for the cargo exemption: the knob is explained
+  # where the next reader looks, and every exempt sink is named there.
+  local cargo_doc
+  cargo_doc="$(grep -nF -- 'cargo_status = "exempt"' "${readme}" || true)"
+  if [[ -z "${cargo_doc}" ]]; then
+    violation "${README_REL}: nothing explains \`cargo_status = \"exempt\"\`. It is the only exemption that belongs to a sink class rather than a rule; a knob the README does not explain is a knob the next reader widens blind."
+  else
+    for s in "${!CARGO_STATUS_EXEMPT[@]}"; do
+      grep -qF -- "\`${s}\`" "${readme}" || violation "${README_REL}: the README does not name \`${s}\`, which the policy exempts from S2 and S6 on cargo's crate-build line. Say why, there."
     done
   fi
 
@@ -242,7 +276,7 @@ check_all() { # check_all <policy> <allowlist> <readme> <proof-root>
 # scratch. Every rule has a fixture in both directions; the count is pinned.
 # ---------------------------------------------------------------------------
 self_test() {
-  local -r SELF_TEST_CASES=31
+  local -r SELF_TEST_CASES=36
   local tmp cases=0 failures=0
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
@@ -344,6 +378,17 @@ self_test() {
   _expect "(P5) the orphan table is named" "${d}" 1 "[ledger.petname_gone] names a class"
   _expect "(P5) the plant class needs no ledger (base)" "${b}" 0
 
+  # P6
+  d="${tmp}/p6a"; mut "${d}" policy.toml '/^drive = /s|entry_format = "plain"|entry_format = "plain", cargo_status = "exempt"|'
+  _expect "(P6) the cargo exemption on an unlisted sink fails" "${d}" 1 "sink \`drive\` has cargo_status = exempt"
+  d="${tmp}/p6b"; mut "${d}" policy.toml '/^rust-test = /s|, cargo_status = "exempt"||'
+  _expect "(P6) a listed sink that dropped the key is a stale list entry" "${d}" 1 "listed in CARGO_STATUS_EXEMPT"
+  d="${tmp}/p6c"; mut "${d}" policy.toml '/^logcat = /s|entry_format = "logcat"|entry_format = "logcat", cargo_status = "scanned"|'
+  _expect "(P6) an explicit \"scanned\" passes" "${d}" 0
+  d="${tmp}/p6d"; mut "${d}" README.md 's|`cargo_status = "exempt"`|`cargo-status = exempt`|g'
+  _expect "(P6) a README that never explains the knob fails" "${d}" 1 "nothing explains"
+  _expect "(P6) rust-test exempt passes (base)" "${b}" 0
+
   # floors
   d="${tmp}/v1"; mut "${d}" policy.toml 's|^\[sinks\]|[sinks_renamed]|'
   _expect "floor: a [sinks] section the parser cannot find is BROKEN" "${d}" 2 "parsed 0 sink(s)"
@@ -385,7 +430,7 @@ main() {
     echo "and CLAUDE.md (Log anonymity, Security Rule 15)." >&2
     exit 1
   fi
-  log "OK — no deferral vocabulary, structural rules on except relay, plant expectations pinned and explained, allowlist entries shaped and live, every class ledgered."
+  log "OK — no deferral vocabulary, structural rules on except relay, the cargo exemption on rust-test alone and explained, plant expectations pinned and explained, allowlist entries shaped and live, every class ledgered."
 }
 
 main "$@"

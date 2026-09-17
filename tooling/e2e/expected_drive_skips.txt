@@ -179,4 +179,4 @@ integration_test/relay_resync_convergence_test.dart|Keyring unavailable on this 
 # Shared helper `runLeakProof`, reached from BOTH testWidgets bodies in the
 # file, so one call site covers two tests; `$label` is the category name each
 # passes in.
-integration_test/relay_two_plane_privacy_test.dart|Keyring unavailable on this runner (${e.runtimeType}); skipping $label.
+integration_test/relay_two_plane_privacy_test.dart|Keyring unavailable on this runner (${e.runtimeType}); skipping $scenario.
