@@ -24,7 +24,9 @@ const SCHEMA: u32 = 1;
 pub enum EntryFormat {
     /// `adb logcat -v threadtime`: `MM-DD HH:MM:SS.mmm  pid  tid P tag: message`.
     Logcat,
-    /// `log show` text export: a timestamp, then columns, then `process: message`.
+    /// A `log show` text export, in either rendering: `--style syslog`
+    /// (`<date> <time+tz> <host> <process>[<pid>] <<Type>>: <message>`, which is
+    /// what the lanes capture) or the default columnar one.
     Ios,
     /// Every line is Haven-owned in full (drive transcripts, `cargo test` logs).
     Plain,
@@ -97,6 +99,14 @@ pub struct SinkSpec {
     /// Process names this repo owns, for `log show` exports.
     #[serde(default)]
     pub owned_processes: Vec<String>,
+    /// Whether the DECLARED (Dart) plant tokens must appear in this sink class.
+    ///
+    /// There is no default: a sink class added without an answer would inherit
+    /// one silently, and the two answers differ by whether a whole positive
+    /// control is enforced. `false` says "Dart's `debugPrint` is not known to
+    /// reach this capture", which is the honest state of `ios` until a run
+    /// proves otherwise; the shape plants are unaffected either way.
+    pub declared_plants_expected: bool,
     /// Emitters whose UNDECLARED, shape-matched plant must appear at least once
     /// in this sink class (`rust`, `kotlin`, `swift`). Proof that the emitter's
     /// log backend actually reached the file: a mis-installed Rust backend, a
@@ -234,6 +244,16 @@ impl Policy {
                     ));
                 }
                 _ => {}
+            }
+            // A sink cannot require a control the declaration channel has no way
+            // to mint: without the `plant` class the harness cannot declare a
+            // token, and the requirement would be permanently unsatisfiable. The
+            // shipped policy cannot reach this; `a_sink_cannot_expect_a_plant_the_policy_cannot_declare`
+            // is what keeps a future edit from reaching it silently.
+            if sink.declared_plants_expected && !self.classes.contains_key("plant") {
+                return Err(format!(
+                    "sink `{name}` expects declared plants but the policy declares no `plant` class, so the control could never be satisfied"
+                ));
             }
         }
         for (name, entry) in &self.ledger {
@@ -405,6 +425,68 @@ mod tests {
             .is_some_and(|reason| reason.contains("base58")));
     }
 
+    /// Which sinks the DECLARED Dart plants are demanded in, pinned.
+    ///
+    /// Both values are asserted, because the knob is only worth having if the
+    /// `false` side is reachable — and only safe if the `true` side cannot be
+    /// flipped off quietly to make a red lane green.
+    #[test]
+    fn the_declared_plant_expectation_is_pinned_per_sink() {
+        let policy = Policy::load().expect("policy");
+        for (sink, expected) in [
+            ("logcat", true),
+            ("drive", true),
+            ("ios", false),
+            ("rust-test", false),
+            ("proxy", false),
+            ("diag", false),
+            ("relay", false),
+        ] {
+            assert_eq!(
+                policy.sinks[sink].declared_plants_expected, expected,
+                "`{sink}`"
+            );
+        }
+        // The `false` on `ios` is a claim about a capture, not a licence: the
+        // shape plants that prove the emitters' backends reached it still stand.
+        assert_eq!(
+            policy.sinks["ios"].required_shape_plants,
+            vec!["rust".to_owned(), "swift".to_owned()]
+        );
+    }
+
+    #[test]
+    fn a_sink_that_omits_the_declared_plant_expectation_is_rejected() {
+        let text = r#"
+schema = 1
+base64_entropy_bits = 4.2
+min_term_len = 6
+furniture = []
+[classes]
+[sinks]
+drive = { term_floor = 6, structural_rules = true, reassemble = false, min_lines = 1, entry_format = "plain" }
+[ledger]
+"#;
+        let err = Policy::parse(text).expect_err("the expectation has no default");
+        assert!(err.contains("declared_plants_expected"), "{err}");
+    }
+
+    #[test]
+    fn a_sink_cannot_expect_a_plant_the_policy_cannot_declare() {
+        let text = r#"
+schema = 1
+base64_entropy_bits = 4.2
+min_term_len = 6
+furniture = []
+[classes]
+[sinks]
+drive = { term_floor = 6, declared_plants_expected = true, structural_rules = true, reassemble = false, min_lines = 1, entry_format = "plain" }
+[ledger]
+"#;
+        let err = Policy::parse(text).expect_err("an unsatisfiable control must be rejected");
+        assert!(err.contains("could never be satisfied"), "{err}");
+    }
+
     #[test]
     fn a_label_declared_both_covered_and_a_gap_is_rejected() {
         let text = r#"
@@ -415,7 +497,7 @@ furniture = []
 [classes]
 pubkey = { kind = "bytes" }
 [sinks]
-drive = { term_floor = 6, structural_rules = true, reassemble = false, min_lines = 1, entry_format = "plain" }
+drive = { term_floor = 6, declared_plants_expected = false, structural_rules = true, reassemble = false, min_lines = 1, entry_format = "plain" }
 [ledger.pubkey]
 covered = ["hex-lower"]
 [ledger.pubkey.gaps]
@@ -435,7 +517,7 @@ furniture = []
 [classes]
 pubkey = { kind = "bytes" }
 [sinks]
-drive = { term_floor = 6, structural_rules = true, reassemble = false, min_lines = 1, entry_format = "plain" }
+drive = { term_floor = 6, declared_plants_expected = false, structural_rules = true, reassemble = false, min_lines = 1, entry_format = "plain" }
 [ledger]
 "#;
         let err = Policy::parse(text).expect_err("an unledgered class must be rejected");
@@ -451,7 +533,7 @@ min_term_len = 6
 furniture = []
 [classes]
 [sinks]
-logcat = { term_floor = 8, structural_rules = true, reassemble = true, min_lines = 1, entry_format = "logcat" }
+logcat = { term_floor = 8, declared_plants_expected = false, structural_rules = true, reassemble = true, min_lines = 1, entry_format = "logcat" }
 [ledger]
 "#;
         let err = Policy::parse(text).expect_err("an unscoped logcat sink must be rejected");
@@ -467,7 +549,7 @@ min_term_len = 6
 furniture = []
 [classes]
 [sinks]
-drive = { term_floor = 4, structural_rules = true, reassemble = false, min_lines = 1, entry_format = "plain" }
+drive = { term_floor = 4, declared_plants_expected = false, structural_rules = true, reassemble = false, min_lines = 1, entry_format = "plain" }
 [ledger]
 "#;
         let err = Policy::parse(text).expect_err("a sub-minimum floor must be rejected");

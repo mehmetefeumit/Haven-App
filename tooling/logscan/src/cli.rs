@@ -15,11 +15,12 @@ use crate::manifest::{
     add_host_decl, endpoint_spellings, parse_decl, read_manifest, validate_out_path,
     write_manifest, Declarations, Manifest, SCHEMA,
 };
-use crate::plants::{assert_inert, resolve_slots, DECLARED_EMITTER, PHASES};
+use crate::plants::{assert_inert, resolve_slots, DeclaredPlants, DECLARED_EMITTER, PHASES};
 use crate::policy::Policy;
 use crate::report::{write_ndjson, write_report};
 use crate::rules::{validate_allowlist, AllowEntry, RuleSet, Today};
-use crate::scan::{scan_sinks, SinkArg};
+use crate::scan::{scan_sinks, Problem, ScanMode, SinkArg};
+use crate::seed::x_only_pubkey_hex;
 use crate::selftest;
 use crate::{worse, RC_CLEAN, RC_GUARD, RC_LEAK, RC_META, RC_UNUSABLE};
 
@@ -33,12 +34,16 @@ const USAGE: &str = "\
 haven-logscan — runtime log-privacy scanner
 
   haven-logscan seal  --run-id <id> [--decl <file.needles.decl>]...
-                      [--host-decl <class>=<value>]... [--expect <class>=<min>]...
+                      [--host-decl <class>=<value>]... [--host-seed <64-hex>]...
+                      [--declared-plants dart|none] [--expect <class>=<min>]...
                       [--floor <sink>=<min-lines>]... [--exempt-endpoint <url|host|ip>]...
                       --out /tmp/haven-soak/needles/<run-id>.needles.json
   haven-logscan scan  --manifest <path> [--sink <class>=<path>[,<path>...]]...
                       [--segments <class>=<n>]... [--plants-in <class>=<path>]...
                       [--report <path.ndjson>] [--disclose-values]
+  haven-logscan scan  --rules-only --sink <class>=<path>[,<path>...]...
+                      [--segments <class>=<n>]... [--exempt-endpoint <url|host|ip>]...
+                      [--report <path.ndjson>]
   haven-logscan plant --manifest <path> --sink dart --phase open|close
   haven-logscan --self-test
 
@@ -105,6 +110,12 @@ struct SealArgs {
     run_id: String,
     decls: Vec<PathBuf>,
     host: Vec<(String, String)>,
+    /// The 32-byte secrets whose pubkeys this run derives. Kept as the declared
+    /// hex because the commitment is computed over the SPELLING, like every
+    /// other declaration; it is never printed and never serialised.
+    seeds: Vec<String>,
+    /// Whether this run can hand the app a Dart plant token at all.
+    declared_plants: DeclaredPlants,
     expect: BTreeMap<String, usize>,
     floors: BTreeMap<String, u64>,
     exempt: Vec<String>,
@@ -115,6 +126,8 @@ fn parse_seal_args(args: &[String]) -> Result<SealArgs, String> {
     let mut run_id = None;
     let mut decls: Vec<PathBuf> = Vec::new();
     let mut host: Vec<(String, String)> = Vec::new();
+    let mut seeds: Vec<String> = Vec::new();
+    let mut declared_plants = DeclaredPlants::default();
     let mut expect: BTreeMap<String, usize> = BTreeMap::new();
     let mut floors: BTreeMap<String, u64> = BTreeMap::new();
     let mut exempt: Vec<String> = Vec::new();
@@ -129,6 +142,10 @@ fn parse_seal_args(args: &[String]) -> Result<SealArgs, String> {
             "--host-decl" => {
                 let (class, raw) = pair(&value(args, &mut index, flag)?, flag)?;
                 host.push((class, raw));
+            }
+            "--host-seed" => seeds.push(value(args, &mut index, flag)?),
+            "--declared-plants" => {
+                declared_plants = DeclaredPlants::parse(&value(args, &mut index, flag)?)?;
             }
             "--expect" => {
                 let (class, raw) = pair(&value(args, &mut index, flag)?, flag)?;
@@ -156,6 +173,8 @@ fn parse_seal_args(args: &[String]) -> Result<SealArgs, String> {
         run_id: run_id.ok_or_else(|| format!("seal needs --run-id\n{USAGE}"))?,
         decls,
         host,
+        seeds,
+        declared_plants,
         expect,
         floors,
         exempt,
@@ -195,8 +214,28 @@ fn seal(argv: &[String], out: &mut dyn Write) -> Result<i32, String> {
     for (class, raw) in &sealing.host {
         add_host_decl(&policy, class, raw, &mut ids, &mut declarations)?;
     }
+    for seed in &sealing.seeds {
+        // Two declarations per seed, and the asymmetry is the point: the derived
+        // pubkey is a public value, so every encoding of it is searched; the
+        // seed is a private key by shape, so it is declared secret-class and
+        // only its commitment is searched. Recall on a raw seed is S1/S2/S8's,
+        // exactly as for an `nsec` off the wire.
+        let pubkey = x_only_pubkey_hex(seed)?;
+        add_host_decl(&policy, "pubkey", &pubkey, &mut ids, &mut declarations)?;
+        add_host_decl(&policy, "nsec", seed, &mut ids, &mut declarations)?;
+    }
 
-    let plants = resolve_slots(&declarations.plants)?;
+    let plants = if sealing.declared_plants == DeclaredPlants::None {
+        if !declarations.plants.is_empty() {
+            return Err(
+                "--declared-plants none, but a sidecar declared a Dart plant: the run had a channel after all, and the two claims cannot both be true"
+                    .to_owned(),
+            );
+        }
+        Vec::new()
+    } else {
+        resolve_slots(&declarations.plants)?
+    };
     let inertness = RuleSet::new(
         policy.base64_entropy_bits,
         now_unix(),
@@ -234,14 +273,20 @@ fn seal(argv: &[String], out: &mut dyn Write) -> Result<i32, String> {
     write_manifest(&sealing.output, &manifest)?;
 
     let gaps = manifest.dropped.iter().filter(|d| d.coverage_gap).count();
+    // A run with no declaration channel says so where the plant count would
+    // otherwise read as "zero controls, all passed".
+    let controls = if manifest.declared_plants == DeclaredPlants::None {
+        "declared plants: none (host profile)".to_owned()
+    } else {
+        format!("{} plant(s)", manifest.plants.len())
+    };
     // Counts and classes only. This line lands in a public CI artifact.
     let _ = writeln!(
         out,
-        "haven-logscan: sealed {} value(s), {} term(s), {} dropped ({gaps} coverage gap(s)), {} plant(s), {} ledger claim(s) reconciled",
+        "haven-logscan: sealed {} value(s), {} term(s), {} dropped ({gaps} coverage gap(s)), {controls}, {} ledger claim(s) reconciled",
         manifest.values.len(),
         manifest.terms.len(),
         manifest.dropped.len(),
-        manifest.plants.len(),
         manifest.ledger.len()
     );
     Ok(RC_CLEAN)
@@ -322,6 +367,7 @@ fn build_manifest(
         dropped: expansion.dropped.clone(),
         ledger: sealed_claims(policy, expansion),
         plants,
+        declared_plants: args.declared_plants,
         floors: policy
             .sinks
             .iter()
@@ -348,22 +394,45 @@ fn build_manifest(
 // scan
 // ---------------------------------------------------------------------------
 
-fn scan(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> Result<i32, String> {
-    let mut manifest_path = None;
-    let mut sinks: Vec<SinkArg> = Vec::new();
-    let mut segments: BTreeMap<String, usize> = BTreeMap::new();
-    let mut plants_in: BTreeMap<String, PathBuf> = BTreeMap::new();
-    let mut report = None;
-    let mut disclose = false;
+/// `scan`'s arguments, parsed.
+struct ScanArgs {
+    manifest_path: Option<PathBuf>,
+    sinks: Vec<SinkArg>,
+    segments: BTreeMap<String, usize>,
+    plants_in: BTreeMap<String, PathBuf>,
+    report: Option<PathBuf>,
+    disclose: bool,
+    rules_only: bool,
+    exempt: Vec<String>,
+}
 
+fn parse_scan_args(args: &[String]) -> Result<ScanArgs, String> {
+    let mut parsed = ScanArgs {
+        manifest_path: None,
+        sinks: Vec::new(),
+        segments: BTreeMap::new(),
+        plants_in: BTreeMap::new(),
+        report: None,
+        disclose: false,
+        rules_only: false,
+        exempt: Vec::new(),
+    };
     let mut index = 0;
     while index < args.len() {
         let flag = args[index].as_str();
         match flag {
-            "--manifest" => manifest_path = Some(PathBuf::from(value(args, &mut index, flag)?)),
+            "--manifest" => {
+                parsed.manifest_path = Some(PathBuf::from(value(args, &mut index, flag)?));
+            }
+            "--rules-only" => parsed.rules_only = true,
+            "--exempt-endpoint" => {
+                parsed
+                    .exempt
+                    .extend(endpoint_spellings(&value(args, &mut index, flag)?));
+            }
             "--sink" => {
                 let (class, paths) = pair(&value(args, &mut index, flag)?, flag)?;
-                sinks.push(SinkArg {
+                parsed.sinks.push(SinkArg {
                     class,
                     paths: paths.split(',').map(PathBuf::from).collect(),
                 });
@@ -373,32 +442,75 @@ fn scan(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> Result<i32
                 let count = raw
                     .parse()
                     .map_err(|_| format!("{flag} needs <class>=<count>"))?;
-                segments.insert(class, count);
+                parsed.segments.insert(class, count);
             }
             "--plants-in" => {
                 let (class, path) = pair(&value(args, &mut index, flag)?, flag)?;
-                plants_in.insert(class, PathBuf::from(path));
+                parsed.plants_in.insert(class, PathBuf::from(path));
             }
-            "--report" => report = Some(PathBuf::from(value(args, &mut index, flag)?)),
-            "--disclose-values" => disclose = true,
+            "--report" => parsed.report = Some(PathBuf::from(value(args, &mut index, flag)?)),
+            "--disclose-values" => parsed.disclose = true,
             other => return Err(format!("unknown flag `{other}`\n{USAGE}")),
         }
         index += 1;
     }
-
-    let manifest_path = manifest_path.ok_or_else(|| format!("scan needs --manifest\n{USAGE}"))?;
-    if sinks.is_empty() {
+    if parsed.sinks.is_empty() {
         return Err(format!("scan needs at least one --sink\n{USAGE}"));
     }
-    if !manifest_path.exists() {
-        let _ = writeln!(
-            err,
-            "haven-logscan: no manifest at {} — a scan with no manifest proves only that the structural rules ran",
-            manifest_path.display()
-        );
-        return Ok(RC_META);
+    Ok(parsed)
+}
+
+/// Which question this invocation asked, refusing the combinations that ask two.
+fn scan_mode(parsed: &ScanArgs) -> Result<ScanMode, String> {
+    if !parsed.rules_only {
+        // With a manifest the exemptions are the SEALED ones: a scan that could
+        // add an endpoint after the fact would be a scan that could forgive one
+        // the run never declared.
+        if !parsed.exempt.is_empty() {
+            return Err(format!(
+                "--exempt-endpoint belongs to `seal` when there is a manifest; only --rules-only takes it, because a rules-only scan has no seal to carry it\n{USAGE}"
+            ));
+        }
+        return Ok(ScanMode::Full);
     }
-    let manifest = read_manifest(&manifest_path)?;
+    // Mutually exclusive rather than "the manifest wins": the two answer
+    // different questions, and a caller that asked for both does not know which
+    // answer it is about to act on.
+    if parsed.manifest_path.is_some() {
+        return Err(format!(
+            "--rules-only and --manifest are mutually exclusive: one certifies that the rules ran, the other that a run's declared values are absent\n{USAGE}"
+        ));
+    }
+    if !parsed.plants_in.is_empty() {
+        return Err(
+            "--plants-in reconciles positive controls, which --rules-only does not do; a flag that is silently ignored is a false claim of coverage".to_owned(),
+        );
+    }
+    Ok(ScanMode::RulesOnly)
+}
+
+fn scan(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> Result<i32, String> {
+    let parsed = parse_scan_args(args)?;
+    let mode = scan_mode(&parsed)?;
+    let manifest = if mode == ScanMode::RulesOnly {
+        let mut manifest = Manifest::rules_only(&Policy::load()?);
+        manifest.exempt_endpoints.clone_from(&parsed.exempt);
+        manifest
+    } else {
+        let path = parsed
+            .manifest_path
+            .as_ref()
+            .ok_or_else(|| format!("scan needs --manifest\n{USAGE}"))?;
+        if !path.exists() {
+            let _ = writeln!(
+                err,
+                "haven-logscan: no manifest at {} — a scan with no manifest proves only that the structural rules ran, which is what --rules-only says out loud",
+                path.display()
+            );
+            return Ok(RC_META);
+        }
+        read_manifest(path)?
+    };
 
     let allowlist: Vec<AllowEntry> = serde_json::from_str(ALLOWLIST_JSON)
         .map_err(|e| format!("the compiled-in allowlist does not parse: {e}"))?;
@@ -409,8 +521,9 @@ fn scan(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> Result<i32
         return Ok(RC_GUARD);
     }
 
-    if disclose {
-        let target = report
+    if parsed.disclose {
+        let target = parsed
+            .report
             .as_ref()
             .map_or_else(|| "this terminal".to_owned(), |p| p.display().to_string());
         let _ = writeln!(
@@ -425,8 +538,28 @@ fn scan(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> Result<i32
         &manifest.exempt_endpoints,
         allowlist,
     )?;
-    let outcome = scan_sinks(&manifest, &sinks, &segments, &plants_in, &rules, disclose);
-    if let Some(path) = &report {
+    let mut outcome = scan_sinks(
+        &manifest,
+        &parsed.sinks,
+        &parsed.segments,
+        &parsed.plants_in,
+        &rules,
+        parsed.disclose,
+        mode,
+    );
+    // The vacuity rule again, this time on the manifest this scan was HANDED.
+    // `seal` refuses to write one with no term, but `scan` reads a file: a
+    // truncated write, a hand-edited manifest or a future seal with a narrower
+    // expander would otherwise let a capture read as clean on a search for
+    // nothing. Not applicable to `--rules-only`, which declares that state
+    // deliberately and says so in its summary.
+    if mode == ScanMode::Full && manifest.terms.is_empty() {
+        outcome.problems.push(Problem {
+            rc: RC_META,
+            message: "no searchable term was declared; a manifest that searches for nothing cannot certify a capture as clean".to_owned(),
+        });
+    }
+    if let Some(path) = &parsed.report {
         write_ndjson(&outcome, path)?;
     }
     write_report(&outcome, out, err)
@@ -472,6 +605,12 @@ fn plant(args: &[String], out: &mut dyn Write) -> Result<i32, String> {
         return Err(format!("--phase must be one of {PHASES:?}"));
     }
     let manifest = read_manifest(&manifest_path)?;
+    if manifest.declared_plants == DeclaredPlants::None {
+        return Err(
+            "this run sealed `--declared-plants none`: it has no declaration channel, so there is no token to hand the app and nothing for `plant` to print"
+                .to_owned(),
+        );
+    }
     // The token and nothing else: the harness reads this with `$(…)`.
     Ok(manifest
         .plants
@@ -606,6 +745,12 @@ mod tests {
     /// The needle every output path is checked against.
     const NEEDLE: &str = "0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9";
 
+    /// The harness's alice seed (`test_user.dart:48`) and the x-only pubkey it
+    /// derives to, pinned independently in `seed.rs`.
+    const HOST_SEED: &str = "0101010101010101010101010101010101010101010101010101010101010101";
+    const HOST_SEED_PUBKEY: &str =
+        "1b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f";
+
     fn seal_with_needle(rig: &Rig) -> String {
         let decl = rig.write(
             "alice.needles.decl",
@@ -619,6 +764,10 @@ mod tests {
             "cli-test",
             "--decl",
             decl.to_str().expect("utf8"),
+            // A seed on the command line, so every output path below is walked
+            // with a secret in argv rather than only with a public needle.
+            "--host-seed",
+            HOST_SEED,
             "--floor",
             "drive=1",
             "--out",
@@ -707,6 +856,24 @@ mod tests {
         assert!(
             !transcript.contains(&NEEDLE[..8]),
             "an output path printed an 8-character prefix of the needle, which is still a join key"
+        );
+        // The host seed and the pubkey it derives to are held to the same line,
+        // and the seed additionally to the manifest's: a secret-class value is
+        // committed, never serialised.
+        for secret in [HOST_SEED, HOST_SEED_PUBKEY] {
+            assert!(
+                !transcript.contains(secret) && !transcript.contains(&secret[..8]),
+                "an output path printed a host-seed value or an 8-character prefix of one"
+            );
+        }
+        let manifest = std::fs::read_to_string(&rig.manifest).expect("the sealed manifest");
+        assert!(
+            manifest.contains(HOST_SEED_PUBKEY),
+            "the derived pubkey must be a searchable TERM: that is the whole point of --host-seed"
+        );
+        assert!(
+            !manifest.contains(HOST_SEED),
+            "the seed itself is secret-class: the manifest carries its commitment, never the value"
         );
     }
 
@@ -926,6 +1093,372 @@ mod tests {
         ]);
         assert_eq!(rc, RC_UNUSABLE);
         assert!(err.contains("[empty]"), "{err}");
+    }
+
+    /// Every `--host-seed` declares two values: the public one to search for in
+    /// every encoding, and the secret one to commit to.
+    #[test]
+    fn a_host_seed_declares_a_pubkey_and_a_committed_secret() {
+        let rig = Rig::new("hostseed");
+        let (rc, out, err) = invoke(&[
+            "seal",
+            "--run-id",
+            "seeds",
+            "--host-seed",
+            HOST_SEED,
+            "--host-seed",
+            "0202020202020202020202020202020202020202020202020202020202020202",
+            "--host-seed",
+            "0303030303030303030303030303030303030303030303030303030303030303",
+            "--expect",
+            "pubkey=3",
+            "--out",
+            rig.manifest.to_str().expect("utf8"),
+        ]);
+        assert_eq!(rc, RC_CLEAN, "{out}{err}");
+        let manifest = std::fs::read_to_string(&rig.manifest).expect("manifest");
+        let parsed: serde_json::Value = serde_json::from_str(&manifest).expect("json");
+        let classes: Vec<&str> = parsed["values"]
+            .as_array()
+            .expect("values")
+            .iter()
+            .filter_map(|v| v["class"].as_str())
+            .collect();
+        assert_eq!(classes.iter().filter(|c| **c == "pubkey").count(), 3);
+        assert_eq!(classes.iter().filter(|c| **c == "nsec").count(), 3);
+        for seed in [
+            HOST_SEED,
+            "0202020202020202020202020202020202020202020202020202020202020202",
+            "0303030303030303030303030303030303030303030303030303030303030303",
+        ] {
+            assert!(!manifest.contains(seed), "a seed reached the manifest");
+        }
+        for pubkey in [
+            HOST_SEED_PUBKEY,
+            "4d4b6cd1361032ca9bd2aeb9d900aa4d45d9ead80ac9423374c451a7254d0766",
+            "531fe6068134503d2723133227c867ac8fa6c83c537e9a44c3c5bdbdcb1fe337",
+        ] {
+            assert!(
+                manifest.contains(pubkey),
+                "a derived pubkey is missing from the terms"
+            );
+        }
+    }
+
+    /// `--expect pubkey=N` counts the derived pubkeys, so a runner that dropped
+    /// a seed cannot seal a manifest that looks complete.
+    #[test]
+    fn an_expect_floor_counts_the_derived_pubkeys() {
+        let rig = Rig::new("seedexpect");
+        let (rc, out, _) = invoke(&[
+            "seal",
+            "--run-id",
+            "seeds",
+            "--host-seed",
+            HOST_SEED,
+            "--expect",
+            "pubkey=2",
+            "--out",
+            rig.manifest.to_str().expect("utf8"),
+        ]);
+        assert_eq!(rc, RC_META);
+        assert!(out.contains("declaration floor unmet"), "{out}");
+        assert!(!rig.manifest.exists());
+    }
+
+    #[test]
+    fn a_malformed_host_seed_is_a_broken_invocation() {
+        let rig = Rig::new("badseed");
+        for bad in ["0101", "zz", ""] {
+            let (rc, _, err) = invoke(&[
+                "seal",
+                "--run-id",
+                "seeds",
+                "--host-seed",
+                bad,
+                "--out",
+                rig.manifest.to_str().expect("utf8"),
+            ]);
+            assert_eq!(rc, RC_GUARD, "`{bad}` must be refused");
+            assert!(err.contains("withheld"), "{err}");
+            assert!(!rig.manifest.exists());
+        }
+    }
+
+    /// The host profile: no declaration channel, so no Dart plant is demanded —
+    /// and the shape plants still are.
+    ///
+    /// Without this, every proxy-less lane is rc 3 by construction: the seal
+    /// mints a token nobody can hand the app, and the scan then requires it in
+    /// every class that carries Dart output.
+    #[test]
+    fn a_host_profile_seals_without_a_dart_plant_and_says_so() {
+        const LOGCAT: &str = "09-12 10:00:00.001  1234  1234 D HavenApplication: logscan-plant-kotlin-open-QRSTUVWXYZ\n09-12 10:00:00.112  1234  1301 D haven_core: logscan-plant-rust-open-MNPQRSTUVW\n";
+
+        let host = Rig::new("hostplants");
+        let (rc, out, err) = invoke(&[
+            "seal",
+            "--run-id",
+            "host",
+            "--host-seed",
+            HOST_SEED,
+            "--declared-plants",
+            "none",
+            "--floor",
+            "logcat=1",
+            "--out",
+            host.manifest.to_str().expect("utf8"),
+        ]);
+        assert_eq!(rc, RC_CLEAN, "{out}{err}");
+        assert!(
+            out.contains("declared plants: none (host profile)"),
+            "the seal must say which control it is NOT requiring: {out}"
+        );
+
+        let logcat = host.write("device.logcat.log", LOGCAT);
+        let (rc, out, err) = invoke(&[
+            "scan",
+            "--manifest",
+            host.manifest.to_str().expect("utf8"),
+            "--sink",
+            &format!("logcat={}", logcat.display()),
+        ]);
+        assert_eq!(
+            rc, RC_CLEAN,
+            "a capture with only the shape plants is complete for a host lane: {out}{err}"
+        );
+        assert!(out.contains("declared plants: none"), "{out}");
+
+        let (rc, _, err) = invoke(&[
+            "plant",
+            "--manifest",
+            host.manifest.to_str().expect("utf8"),
+            "--sink",
+            "dart",
+            "--phase",
+            "open",
+        ]);
+        assert_eq!(rc, RC_GUARD);
+        assert!(err.contains("no declaration channel"), "{err}");
+
+        // The default is unchanged: a seal that minted a token still demands it,
+        // so a lane that HAS a channel cannot go green by losing its plant.
+        let proxied = Rig::new("proxiedplants");
+        let (rc, out, err) = invoke(&[
+            "seal",
+            "--run-id",
+            "proxied",
+            "--host-seed",
+            HOST_SEED,
+            "--floor",
+            "logcat=1",
+            "--out",
+            proxied.manifest.to_str().expect("utf8"),
+        ]);
+        assert_eq!(rc, RC_CLEAN, "{out}{err}");
+        let logcat = proxied.write("device.logcat.log", LOGCAT);
+        let (rc, _, err) = invoke(&[
+            "scan",
+            "--manifest",
+            proxied.manifest.to_str().expect("utf8"),
+            "--sink",
+            &format!("logcat={}", logcat.display()),
+        ]);
+        assert_eq!(rc, RC_UNUSABLE, "{err}");
+        assert!(err.contains("positive control missed"), "{err}");
+    }
+
+    /// A sidecar plant and `--declared-plants none` cannot both be true.
+    #[test]
+    fn a_declared_plant_contradicts_the_host_profile() {
+        let rig = Rig::new("contradiction");
+        let decl = rig.write(
+            "alice.needles.decl",
+            "{\"class\":\"plant\",\"value\":\"logscan-plant-dart-open-ABCDEFGHJK\",\"sink\":\"dart\",\"phase\":\"open\"}\n",
+        );
+        let (rc, _, err) = invoke(&[
+            "seal",
+            "--run-id",
+            "contradiction",
+            "--decl",
+            decl.to_str().expect("utf8"),
+            "--host-seed",
+            HOST_SEED,
+            "--declared-plants",
+            "none",
+            "--out",
+            rig.manifest.to_str().expect("utf8"),
+        ]);
+        assert_eq!(rc, RC_GUARD);
+        assert!(err.contains("cannot both be true"), "{err}");
+        assert!(!rig.manifest.exists());
+    }
+
+    #[test]
+    fn an_unknown_declared_plants_argument_is_refused() {
+        let rig = Rig::new("badplants");
+        let (rc, _, err) = invoke(&[
+            "seal",
+            "--run-id",
+            "x",
+            "--declared-plants",
+            "swift",
+            "--out",
+            rig.manifest.to_str().expect("utf8"),
+        ]);
+        assert_eq!(rc, RC_GUARD);
+        assert!(err.contains("--declared-plants takes"), "{err}");
+    }
+
+    /// `scan` re-applies the vacuity rule to the manifest it was HANDED.
+    ///
+    /// `seal` refuses to write a term-less manifest, but `scan` reads a file,
+    /// and a file can be truncated, hand-edited or written by a future seal
+    /// whose expander narrowed. Without this the capture would read rc 0 on a
+    /// search for nothing — the exact verdict the whole instrument exists to
+    /// make impossible.
+    #[test]
+    fn a_manifest_with_no_searchable_term_cannot_certify_a_scan() {
+        let rig = Rig::new("termless");
+        crate::manifest::ensure_needle_dir().expect("needle dir");
+        // Hand-written and schema-valid: the point is a manifest this binary
+        // would never itself produce.
+        std::fs::write(
+            &rig.manifest,
+            r#"{
+              "schema": 1,
+              "run_id": "termless",
+              "roles": [],
+              "values": [],
+              "terms": [],
+              "dropped": [],
+              "ledger": [],
+              "plants": [],
+              "floors": { "drive": 1 },
+              "expect": {},
+              "scoped_out": {},
+              "sinks": {
+                "drive": { "term_floor": 6, "declared_plants_expected": false,
+                           "structural_rules": true, "reassemble": false,
+                           "min_lines": 1, "entry_format": "plain" }
+              },
+              "base64_entropy_bits": 4.2,
+              "exempt_endpoints": []
+            }"#,
+        )
+        .expect("hand-written manifest");
+        let clean = rig.write("t.log", "[fixture] settled in bucket 2-4\n");
+        let (rc, _, err) = invoke(&[
+            "scan",
+            "--manifest",
+            rig.manifest.to_str().expect("utf8"),
+            "--sink",
+            &format!("drive={}", clean.display()),
+        ]);
+        assert_eq!(rc, RC_META, "{err}");
+        assert!(err.contains("searches for nothing"), "{err}");
+    }
+
+    /// A rules-only scan is the honest verdict where nothing is declarable, and
+    /// it says so; it is refused next to a manifest and next to `--plants-in`.
+    #[test]
+    fn a_rules_only_scan_certifies_the_rules_and_refuses_to_claim_more() {
+        let rig = Rig::new("rulesonly");
+        seal_with_needle(&rig);
+        let clean = rig.write("t.log", &"[fixture] settled in bucket 2-4\n".repeat(30));
+        let report = rig.dir.join("report.ndjson");
+        let (rc, out, err) = invoke(&[
+            "scan",
+            "--rules-only",
+            "--sink",
+            &format!("rust-test={}", clean.display()),
+            "--report",
+            report.to_str().expect("utf8"),
+        ]);
+        assert_eq!(rc, RC_CLEAN, "{out}{err}");
+        assert!(out.contains("rules-only"), "{out}");
+        assert!(report.exists(), "--report must still be written");
+
+        // The needle the manifest WOULD have caught is not searched for: that
+        // is exactly what the summary refuses to claim.
+        let with_needle = rig.write(
+            "n.log",
+            &format!(
+                "[fixture] identity {NEEDLE}\n{}",
+                "[fixture] idle\n".repeat(30)
+            ),
+        );
+        let (rc, _, err) = invoke(&[
+            "scan",
+            "--rules-only",
+            "--sink",
+            &format!("relay={}", with_needle.display()),
+        ]);
+        assert_eq!(
+            rc, RC_CLEAN,
+            "a relay sink runs no rules, so a rules-only scan of one proves nothing and says so: {err}"
+        );
+
+        for extra in [
+            vec!["--manifest", rig.manifest.to_str().expect("utf8")],
+            vec!["--plants-in", "rust-test=/tmp/nope.log"],
+        ] {
+            let sink = format!("rust-test={}", clean.display());
+            let mut args: Vec<String> = ["scan", "--rules-only", "--sink", &sink]
+                .iter()
+                .map(|a| (*a).to_owned())
+                .collect();
+            args.extend(extra.iter().map(|a| (*a).to_owned()));
+            let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+            assert_eq!(
+                invoke(&borrowed).0,
+                RC_GUARD,
+                "a flag rules-only cannot honour must be refused, not ignored"
+            );
+        }
+    }
+
+    /// The exemption is the lane's, declared per invocation — and only where
+    /// there is no seal to carry it.
+    #[test]
+    fn a_rules_only_scan_takes_exempt_endpoints_and_nothing_else() {
+        let rig = Rig::new("rulesexempt");
+        seal_with_needle(&rig);
+        // Verbatim shape from `cargo test`: the reason string of an `#[ignore]`.
+        let body = format!(
+            "test profile::blossom::tests::live_round_trip ... ignored, needs a running Blossom server; set HAVEN_E2E_BLOSSOM=http://127.0.0.1:9000\n{}",
+            "[fixture] idle\n".repeat(30)
+        );
+        let log = rig.write("ignore.log", &body);
+        let sink = format!("rust-test={}", log.display());
+        assert_eq!(
+            invoke(&["scan", "--rules-only", "--sink", &sink]).0,
+            RC_LEAK,
+            "an address in a transcript is a hit until the lane declares it exempt"
+        );
+        assert_eq!(
+            invoke(&[
+                "scan",
+                "--rules-only",
+                "--exempt-endpoint",
+                "127.0.0.1",
+                "--sink",
+                &sink,
+            ])
+            .0,
+            RC_CLEAN
+        );
+        let (rc, _, err) = invoke(&[
+            "scan",
+            "--manifest",
+            rig.manifest.to_str().expect("utf8"),
+            "--exempt-endpoint",
+            "127.0.0.1",
+            "--sink",
+            &sink,
+        ]);
+        assert_eq!(rc, RC_GUARD, "{err}");
+        assert!(err.contains("belongs to `seal`"), "{err}");
     }
 
     #[test]

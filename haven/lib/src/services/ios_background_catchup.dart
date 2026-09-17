@@ -183,6 +183,7 @@ void registerIosBackgroundCatchupHandler({
 
   const MethodChannel(_kCatchupChannelName).setMethodCallHandler((call) async {
     if (call.method != 'runCatchup') {
+      // log-scan-ok: call.method is this channel's own fixed method name.
       throw PlatformException(
         code: 'UNIMPLEMENTED',
         message: 'Unknown method: ${call.method}',

@@ -56,6 +56,8 @@ import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/subscription_service.dart';
+import 'package:haven/src/utils/log_alias.dart'
+    show LogAliasClass, logAliasHandle;
 import 'package:integration_test/integration_test.dart';
 
 import 'e2e/_lib/test_user.dart';
@@ -389,8 +391,9 @@ void main() {
             eventJson,
             isNot(contains(forbidden)),
             reason:
-                'Encrypted event content must not contain plaintext '
-                'latitude substring "$forbidden"',
+                'Encrypted event content must not contain a plaintext '
+                'latitude substring — the forbidden value itself is never '
+                'logged, even on failure',
           );
         }
 
@@ -400,8 +403,9 @@ void main() {
             eventJson,
             isNot(contains(forbidden)),
             reason:
-                'Encrypted event content must not contain plaintext '
-                'longitude substring "$forbidden"',
+                'Encrypted event content must not contain a plaintext '
+                'longitude substring — the forbidden value itself is never '
+                'logged, even on failure',
           );
         }
 
@@ -470,7 +474,9 @@ void main() {
           contains('"h","$nostrGroupIdHex"'),
           reason:
               'MIP-00 Rule 4: h-tag value must equal hex(nostrGroupId); '
-              'expected to find ["h","$nostrGroupIdHex"] in event JSON',
+              'expected to find an ["h", …] tag naming '
+              '${logAliasHandle(LogAliasClass.circle, nostrGroupIdHex)} in '
+              'event JSON',
         );
 
         // ---- Assertion 9: expiration tag from the group retention ----
@@ -541,7 +547,8 @@ void main() {
           matches(RegExp(r'^[A-Za-z0-9+/=_\-]{32,}$')),
           reason:
               'content must be base64 / URL-safe base64 with at least '
-              '32 characters; got: "$ciphertext"',
+              '32 characters — the ciphertext itself is never logged, even '
+              'on failure',
         );
 
         // --------------------------------------------------------------
@@ -600,8 +607,9 @@ void main() {
             eventJson2,
             isNot(contains(forbidden)),
             reason:
-                'Second encrypted event must not contain plaintext '
-                'latitude substring "$forbidden"',
+                'Second encrypted event must not contain a plaintext '
+                'latitude substring — the forbidden value itself is never '
+                'logged, even on failure',
           );
         }
         for (final forbidden in _forbiddenLonSubstrings2) {
@@ -609,8 +617,9 @@ void main() {
             eventJson2,
             isNot(contains(forbidden)),
             reason:
-                'Second encrypted event must not contain plaintext '
-                'longitude substring "$forbidden"',
+                'Second encrypted event must not contain a plaintext '
+                'longitude substring — the forbidden value itself is never '
+                'logged, even on failure',
           );
         }
 
@@ -799,7 +808,10 @@ void main() {
           expect(
             encrypted.eventJson,
             isNot(contains(forbidden)),
-            reason: 'Sanity: encrypted event must not contain lat "$forbidden"',
+            reason:
+                'Sanity: encrypted event must not contain a plaintext '
+                'latitude substring — the forbidden value itself is never '
+                'logged, even on failure',
           );
         }
 
@@ -841,10 +853,9 @@ void main() {
           loc!.latitude,
           closeTo(_sentinelLat, _coordTolerance),
           reason:
-              'Decrypted latitude must equal the sentinel $_sentinelLat '
-              'within $_coordTolerance. Got: ${loc.latitude}. '
-              'A mismatch means the Rust serializer truncated precision or '
-              'swapped lat/lon.',
+              'Decrypted latitude must equal the sentinel within tolerance '
+              '(coordinates are never logged). A mismatch means the Rust '
+              'serializer truncated precision or swapped lat/lon.',
         );
 
         // ---- Longitude round-trip ----
@@ -852,10 +863,9 @@ void main() {
           loc.longitude,
           closeTo(_sentinelLon, _coordTolerance),
           reason:
-              'Decrypted longitude must equal the sentinel $_sentinelLon '
-              'within $_coordTolerance. Got: ${loc.longitude}. '
-              'A mismatch means the Rust serializer truncated precision or '
-              'swapped lat/lon.',
+              'Decrypted longitude must equal the sentinel within tolerance '
+              '(coordinates are never logged). A mismatch means the Rust '
+              'serializer truncated precision or swapped lat/lon.',
         );
 
         // ---- Sender pubkey round-trip ----
@@ -976,12 +986,8 @@ void main() {
       expect(anchor.latitude, closeTo(_sentinelLat, _coordTolerance));
 
       var parsed = false;
-      DecryptedLocationFfi? location;
       try {
-        location = await parseEngineLocation(
-          contentJson: '',
-          senderPubkey: senderPubkey,
-        );
+        await parseEngineLocation(contentJson: '', senderPubkey: senderPubkey);
         parsed = true;
       } on Object catch (e) {
         debugPrint(
@@ -994,10 +1000,10 @@ void main() {
         isFalse,
         reason:
             'An empty content is what the Rust receive gate hands Dart for an '
-            'inner event of a kind Haven does not own. Parsing it would yield '
-            'a location whose coordinates nobody sent — '
-            'lat=${location?.latitude} lon=${location?.longitude} — and every '
-            'member of the circle would see that peer pinned there.',
+            'inner event of a kind Haven does not own. Parsing it would '
+            'yield a location whose coordinates nobody sent (never logged) '
+            'and every member of the circle would see that peer pinned '
+            'there.',
       );
     });
 
@@ -1101,5 +1107,6 @@ void main() {
 class _UnusedCircleService implements CircleService {
   @override
   dynamic noSuchMethod(Invocation invocation) =>
+      // log-scan-ok: memberName is the called METHOD's Symbol, not a member.
       throw UnimplementedError('unexpected call: ${invocation.memberName}');
 }

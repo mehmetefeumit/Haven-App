@@ -312,8 +312,8 @@ class NostrIdentityService implements IdentityService {
   @override
   Future<String> sign(Uint8List messageHash) async {
     if (messageHash.length != 32) {
-      throw IdentityServiceException(
-        'Message hash must be exactly 32 bytes, got ${messageHash.length}',
+      throw const IdentityServiceException(
+        'Message hash must be exactly 32 bytes',
       );
     }
 

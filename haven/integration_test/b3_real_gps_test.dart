@@ -124,7 +124,7 @@ import 'package:haven/src/services/fresh_secret.dart' show withFreshSecret;
 import 'package:haven/src/services/geolocator_location_service.dart'
     show GeolocatorLocationService;
 import 'package:haven/src/services/location_service.dart'
-    show LocationPermissionStatus, Position;
+    show LocationPermissionStatus;
 import 'package:haven/src/services/nostr_circle_service.dart'
     show NostrCircleService;
 import 'package:integration_test/integration_test.dart';
@@ -327,22 +327,16 @@ void main() {
       // the first read can legitimately precede the first delivery. Failing
       // HERE attributes the problem to the emulator/GPS half of the chain
       // instead of surfacing it 60 s later as "the peer never saw a location".
-      Position? observed;
       await waitUntilAsync(
         () async {
           try {
             final position = await locationService.getCurrentLocationFresh();
             if ((position.latitude - expectedLat).abs() <= tolerance &&
                 (position.longitude - expectedLon).abs() <= tolerance) {
-              observed = position;
               return true;
             }
-            debugPrint(
-              '[b3] fix seen but off target by '
-              'dLat=${(position.latitude - expectedLat).abs()} '
-              'dLon=${(position.longitude - expectedLon).abs()} '
-              '(tolerance $tolerance) — retrying.',
-            );
+            // Never the coordinates or their delta — Log anonymity pillar.
+            debugPrint('[b3] fix seen but withinTolerance=false — retrying.');
             return false;
           } on Object catch (e) {
             // Rule 8: runtimeType only.
@@ -356,13 +350,10 @@ void main() {
         timeout: _fixWaitTimeout,
         pollInterval: const Duration(seconds: 3),
       );
-      final osFix = observed!;
-      // Delta, never the coordinates — see the library doc's privacy note.
-      debugPrint(
-        '$kRealFixMarker dLat=${(osFix.latitude - expectedLat).abs()} '
-        'dLon=${(osFix.longitude - expectedLon).abs()} '
-        'tolerance=$tolerance',
-      );
+      // `waitUntilAsync` only returns once both axes are within tolerance —
+      // never print the coordinates or their delta (Log anonymity pillar);
+      // `withinTolerance=true` always holds at this point.
+      debugPrint('$kRealFixMarker withinTolerance=true');
 
       // --- Build a genuine 2-member circle to publish into.
       final circleService = container.read(circleServiceProvider);
@@ -409,7 +400,7 @@ void main() {
             circleType: 'location_sharing',
             relays: <String>[defaultStrfryUrl],
             creatorFallbackRelays: <String>[defaultStrfryUrl],
-            label: 'b3',
+            scenario: 'b3',
           ),
         );
       } finally {
@@ -450,7 +441,11 @@ void main() {
       final publishedTo = await container.refresh(
         locationPublisherProvider.future,
       );
-      debugPrint('$kPublishedMarker n=$publishedTo');
+      // `n=<N>` is parsed by run-b3-real-gps.sh's `b3_published_count`
+      // oracle (0 vs >=1, largest-wins across retries) — a magnitude bucket
+      // would break that numeric parse; N is bounded by this scenario's
+      // single 2-member circle (0-2), not an identifying count.
+      debugPrint('$kPublishedMarker n=$publishedTo'); // harness-log-ok: see ^
       expect(
         publishedTo,
         greaterThanOrEqualTo(1),
@@ -519,12 +514,11 @@ void main() {
             'exactly what this lane exists to prevent.',
       );
 
-      // Delta only — never the coordinates (library doc, privacy note).
-      debugPrint(
-        '$kPeerDecryptMarker dLat=${(decrypted.latitude - expectedLat).abs()} '
-        'dLon=${(decrypted.longitude - expectedLon).abs()} '
-        'tolerance=$tolerance',
-      );
+      // Never the coordinates or their delta (Log anonymity pillar). The two
+      // `closeTo` expects above already proved both axes are within
+      // tolerance, so `withinTolerance=true` always holds here.
+      // harness-log-ok: runner-grepped marker constant
+      debugPrint('$kPeerDecryptMarker withinTolerance=true');
 
       // Best-effort teardown. Failures here are not evidence about B3.
       try {

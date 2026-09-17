@@ -136,6 +136,8 @@ import 'package:haven/src/services/nostr_circle_service.dart'
     show NostrCircleService;
 import 'package:haven/src/services/profile_service.dart'
     show ProfileSyncOutcome;
+import 'package:haven/src/utils/log_alias.dart'
+    show LogAliasClass, logAliasHandle, magnitudeBucket;
 import 'package:integration_test/integration_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -212,7 +214,7 @@ const String _aliceEditedName = 'Alice Edited';
 const Duration _outerTestTimeout = Duration(minutes: 10);
 
 /// Deadline on relay-level waits for a kind-1059 gift-wrap / kind-0 to land.
-const Duration _relayWaitDeadline = Duration(seconds: 90);
+const Duration _kind0WaitDeadline = Duration(seconds: 90);
 
 /// Deadline for a single Blossom HTTP round-trip.
 const Duration _blossomHttpTimeout = Duration(seconds: 15);
@@ -290,23 +292,19 @@ class _InertMaintenanceScheduler extends MaintenanceSchedulerNotifier {
 /// Runs [cleanup] but never lets it hang past [_teardownTimeout] or throw out
 /// of a `tearDownAll` block.
 Future<void> _boundedTeardown(
-  String label,
+  String step,
   Future<void> Function() cleanup,
 ) async {
   try {
     await cleanup().timeout(_teardownTimeout);
   } on Object catch (e) {
     debugPrint(
-      '[e2e_profile:tearDownAll] $label did not complete within '
+      '[e2e_profile:tearDownAll] $step did not complete within '
       '${_teardownTimeout.inSeconds}s (or threw): ${e.runtimeType}. '
       'Best-effort cleanup only — never rethrown.',
     );
   }
 }
-
-/// Short prefix-and-ellipsis pubkey form for log lines.
-String _redactPk(String hex) =>
-    hex.length <= 8 ? hex : '${hex.substring(0, 8)}…';
 
 // =============================================================================
 // Profile-plane pool
@@ -351,13 +349,14 @@ List<String> _parseProfileRelayPool(String raw) {
       .where((s) => s.isNotEmpty)
       .toList(growable: false);
 
-  for (final url in urls) {
-    if (!_isLoopbackUrl(url)) {
+  for (var i = 0; i < urls.length; i++) {
+    if (!_isLoopbackUrl(urls[i])) {
       throw StateError(
-        '[e2e_profile] HAVEN_E2E_PROFILE_RELAYS entry "$url" is not a '
-        'loopback / emulator-host URL. The profile plane PUBLISHES a kind-0 '
-        'for Alice to every pool member, so a non-loopback entry would put a '
-        'sentinel-seed public profile on a real relay. Refusing to install.',
+        '[e2e_profile] HAVEN_E2E_PROFILE_RELAYS entry at index $i is not '
+        'a loopback / emulator-host URL. The profile plane PUBLISHES a '
+        'kind-0 for Alice to every pool member, so a non-loopback entry '
+        'would put a sentinel-seed public profile on a real relay. '
+        'Refusing to install.',
       );
     }
   }
@@ -366,10 +365,11 @@ List<String> _parseProfileRelayPool(String raw) {
   if (distinct.length < _profilePoolMin) {
     throw StateError(
       '[e2e_profile] HAVEN_E2E_PROFILE_RELAYS resolved to '
-      '${distinct.length} distinct relay(s) ($urls) but the profile plane '
-      'needs at least $_profilePoolMin. Fewer is a terminal PoolUnderflow: '
-      'resolve_profile_pool fails closed instead of degrading, so kind-0 '
-      'would neither publish nor resolve. Start (and pass) three relays.',
+      '${magnitudeBucket(distinct.length)} distinct relay(s) but the '
+      'profile plane needs at least $_profilePoolMin. Fewer is a '
+      'terminal PoolUnderflow: resolve_profile_pool fails closed '
+      'instead of degrading, so kind-0 would neither publish nor '
+      'resolve. Start (and pass) three relays.',
     );
   }
 
@@ -377,10 +377,11 @@ List<String> _parseProfileRelayPool(String raw) {
   if (distinct.contains(circleRelay)) {
     throw StateError(
       '[e2e_profile] HAVEN_E2E_PROFILE_RELAYS contains the CIRCLE relay '
-      '($defaultStrfryUrl). That relay carries the account Welcome and '
-      'kind-445 traffic, so the contamination ledger excludes it from the '
-      'profile pool — including it shrinks the usable pool and defeats the '
-      'plane-separation proof this lane exists to make.',
+      '(${logAliasHandle(LogAliasClass.relay, defaultStrfryUrl)}). That '
+      'relay carries the account Welcome and kind-445 traffic, so the '
+      'contamination ledger excludes it from the profile pool — including '
+      'it shrinks the usable pool and defeats the plane-separation proof '
+      'this lane exists to make.',
     );
   }
 
@@ -388,9 +389,11 @@ List<String> _parseProfileRelayPool(String raw) {
       _normalizeForCompare(_profileRelayFirst) !=
           _normalizeForCompare(urls.first)) {
     throw StateError(
-      '[e2e_profile] HAVEN_E2E_PROFILE_RELAY ("$_profileRelayFirst") is not '
-      'the first member of HAVEN_E2E_PROFILE_RELAYS ("${urls.first}"). The '
-      'two dart-defines are set independently in e2e-profile.yml; they have '
+      '[e2e_profile] HAVEN_E2E_PROFILE_RELAY '
+      '(${logAliasHandle(LogAliasClass.relay, _profileRelayFirst)}) is not '
+      'the first member of HAVEN_E2E_PROFILE_RELAYS '
+      '(${logAliasHandle(LogAliasClass.relay, urls.first)}). The two '
+      'dart-defines are set independently in e2e-profile.yml; they have '
       'drifted apart.',
     );
   }
@@ -438,16 +441,17 @@ Future<TestRelayEvent> _awaitKind0(
         'authors': <String>[authorHex],
       },
       matcher: matcher,
-      timeout: _relayWaitDeadline,
+      timeout: _kind0WaitDeadline,
     );
   } on Object catch (e) {
     throw StateError(
-      '[e2e_profile] $step: profile relay ${relay.url} never served a '
-      'matching kind-0 for Alice within ${_relayWaitDeadline.inSeconds}s. '
+      '[e2e_profile] $step: profile relay '
+      '${logAliasHandle(LogAliasClass.relay, relay.url)} never served a '
+      'matching kind-0 for Alice within ${_kind0WaitDeadline.inSeconds}s. '
       'Every publish path targets the WHOLE usable pool, so a single lagging '
       'member means either that relay is not running (check '
       'start-profile-relays.sh) or the publish fan-out regressed to a '
-      'subset — never a benign timing artifact: $e',
+      'subset — never a benign timing artifact (${e.runtimeType}).',
     );
   }
 }
@@ -596,10 +600,11 @@ void main() {
     poolStatusAtFirstManager = await bob.user.circleManager.profilePoolStatus();
 
     debugPrint(
-      '[e2e_profile:setUpAll] alice=${_redactPk(aliceHex)} '
-      'bob=${_redactPk(bob.pubkeyHex)} blossom=$_blossomUrl '
-      'circleRelay=$defaultStrfryUrl '
-      'profilePool=${_profileRelayUrls.length} relays',
+      '[e2e_profile:setUpAll] alice=${logAliasHandle(LogAliasClass.peer, aliceHex)} '
+      'bob=${logAliasHandle(LogAliasClass.peer, bob.pubkeyHex)} '
+      'blossom=${logAliasHandle(LogAliasClass.relay, _blossomUrl)} '
+      'circleRelay=${logAliasHandle(LogAliasClass.relay, defaultStrfryUrl)} '
+      'profilePool=${magnitudeBucket(_profileRelayUrls.length)} relays',
     );
   });
 
@@ -613,10 +618,10 @@ void main() {
         TestUser.clearPreSeededIdentity,
       );
     }
-    for (final relay in profilePool) {
+    for (var i = 0; i < profilePool.length; i++) {
       await _boundedTeardown(
-        'profileRelay(${relay.url}).dispose',
-        relay.dispose,
+        'profileRelay[$i].dispose',
+        profilePool[i].dispose,
       );
     }
     if (didInitCtx) {
@@ -640,11 +645,12 @@ void main() {
     expect(
       poolStatusAtFirstManager.configured,
       _profileRelayUrls.length,
-      reason: 'the profile pool should hold exactly the '
-          '${_profileRelayUrls.length} hermetic relays this scenario '
-          'installed. A larger count means the curated PUBLIC pool was seeded '
-          'into the fresh DB before the override took effect — kind-0 REQs '
-          'for test pubkeys would reach real relays.',
+      reason: 'the profile pool should hold exactly '
+          '${magnitudeBucket(_profileRelayUrls.length)} hermetic relays '
+          '(this scenario\'s installed pool size). A larger count means the '
+          'curated PUBLIC pool was seeded into the fresh DB before the '
+          'override took effect — kind-0 REQs for test pubkeys would reach '
+          'real relays.',
     );
     expect(
       poolStatusAtFirstManager.excluded,
@@ -747,7 +753,7 @@ void main() {
         await waitForKeyPackage(
           relay: ctx.relay,
           authorPubkeyHex: bob.pubkeyHex,
-          timeout: _relayWaitDeadline,
+          timeout: _kind0WaitDeadline,
         );
         final relayManager = await RelayManagerFfi.newInstance();
         final bobKp = await relayManager.fetchMemberKeypackage(
@@ -773,7 +779,7 @@ void main() {
           circleType: 'location_sharing',
           relays: <String>[ctx.relay.url],
           creatorFallbackRelays: <String>[ctx.relay.url],
-          label: 'e2e_profile',
+          scenario: 'e2e_profile',
         );
         if (!creation.welcomeEvents.any(
           (e) => e.recipientPubkey.toLowerCase() == bob.pubkeyHex.toLowerCase(),
@@ -782,7 +788,7 @@ void main() {
             '[e2e_profile] createCircle produced no Welcome for Bob.',
           );
         }
-        // Default accept timeout is already 90 s (== _relayWaitDeadline).
+        // Default accept timeout is already 90 s (== _kind0WaitDeadline).
         final bobCircle = await bob.acceptInvitationViaRelay(relay: ctx.relay);
         expect(
           bobCircle.members.length,
@@ -802,9 +808,10 @@ void main() {
           expect(
             aliceKind0OnPool[i],
             isEmpty,
-            reason: 'Profile relay ${profilePool[i].url} must observe ZERO '
-                'kind-0 for a fresh Alice who has not yet set a name or photo '
-                '(so ZERO blob can exist on Blossom).',
+            reason: 'Profile relay '
+                '${logAliasHandle(LogAliasClass.relay, profilePool[i].url)} '
+                'must observe ZERO kind-0 for a fresh Alice who has not yet '
+                'set a name or photo (so ZERO blob can exist on Blossom).',
           );
         }
         expect(
@@ -815,7 +822,8 @@ void main() {
         );
         debugPrint(
           '[e2e_profile] STEP 1 — fresh user verified (no kind-0 yet, on any '
-          'of the ${profilePool.length} pool relays or the circle relay)',
+          'of the ${magnitudeBucket(profilePool.length)} pool relays or the '
+          'circle relay)',
         );
 
         // -------------------------------------------------------------------
@@ -852,8 +860,10 @@ void main() {
             aliceKind0OnPool[i],
             isEmpty,
             reason: 'a LOCAL save (updateOwnProfile/setOwnAvatar) must '
-                'publish NOTHING — ${profilePool[i].url} must still see '
-                'zero kind-0 for Alice until syncOwnProfile runs.',
+                'publish NOTHING — '
+                '${logAliasHandle(LogAliasClass.relay, profilePool[i].url)} '
+                'must still see zero kind-0 for Alice until syncOwnProfile '
+                'runs.',
           );
         }
         // A ROW for Alice is expected here and is not a leak: a fetch that
@@ -1060,7 +1070,8 @@ void main() {
             _contentJson(editedKind0s[i])['picture'],
             originalPictureUrl,
             reason: 'Name-only edit must not clobber the picture URL (merge) '
-                '— violated on ${profilePool[i].url}.',
+                '— violated on '
+                '${logAliasHandle(LogAliasClass.relay, profilePool[i].url)}.',
           );
         }
 
@@ -1208,8 +1219,10 @@ Future<void> _assertBlobAbsent(
     expect(
       response.statusCode,
       isNot(200),
-      reason: 'Blossom GET $uri must NOT serve a blob before syncOwnProfile — '
-          'a LOCAL photo save must upload nothing.',
+      reason: 'Blossom GET '
+          '${logAliasHandle(LogAliasClass.relay, uri.toString())} must NOT '
+          'serve a blob before syncOwnProfile — a LOCAL photo save must '
+          'upload nothing.',
     );
   } finally {
     client.close(force: true);
@@ -1238,7 +1251,9 @@ Future<void> _assertBlobRetrievable(
     expect(
       response.statusCode,
       200,
-      reason: 'Blossom GET $uri must return 200 (blob present).',
+      reason: 'Blossom GET '
+          '${logAliasHandle(LogAliasClass.relay, uri.toString())} must '
+          'return 200 (blob present).',
     );
     var bytes = 0;
     await for (final chunk in response) {

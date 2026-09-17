@@ -1106,6 +1106,7 @@ class _LegacyCircleBannerState extends ConsumerState<_LegacyCircleBanner> {
     try {
       final selfPubkey = ref.read(identityProvider).valueOrNull?.pubkeyHex;
       if (selfPubkey == null) {
+        // log-scan-ok: leaveCircleIdentityUnavailable is fixed l10n copy.
         throw CircleServiceException(l10n.leaveCircleIdentityUnavailable);
       }
       final circleService = ref.read(circleServiceProvider);
@@ -1388,6 +1389,7 @@ class _CircleDetailsSheetState extends ConsumerState<_CircleDetailsSheet> {
     try {
       final selfPubkey = ref.read(identityProvider).valueOrNull?.pubkeyHex;
       if (selfPubkey == null) {
+        // log-scan-ok: leaveCircleIdentityUnavailable is fixed l10n copy.
         throw CircleServiceException(l10n.leaveCircleIdentityUnavailable);
       }
       final circleService = ref.read(circleServiceProvider);

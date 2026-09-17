@@ -68,18 +68,29 @@ plant = { kind = "plant" }
 # `required_shape_plants` name the UNDECLARED plants (there is no native harness
 # channel to declare through), each proving that emitter's log backend reached
 # this capture.
+# `declared_plants_expected` says whether the DART tokens the harness declares
+# must appear here. It is `false` for `ios` because NO CAPTURE HAS SHOWN ONE
+# YET — not because the path cannot exist: the Flutter engine routes
+# `debugPrint` through `vsyslog`, which does reach `log show` as
+# `Runner(Flutter)[pid] … flutter: <msg>`, so the expectation is unproven rather
+# than impossible, and the first iOS capture that carries a token flips this to
+# `true` for good. Demanding an unproven control would make every iOS lane rc 3
+# for a reason that is not a privacy fact. The SHAPE plants still apply, so a
+# dead iOS capture is still caught. It is `false` for the sinks that carry no app output at all
+# (`rust-test`, `proxy`, `diag`, `relay`). The day a capture proves the Dart
+# token reaches `log show`, this flips to `true` and stays there.
 [sinks]
-logcat = { term_floor = 8, structural_rules = true, reassemble = true, min_lines = 2000, entry_format = "logcat", required_shape_plants = ["rust", "kotlin"], owned_tags = ["flutter", "haven_core", "rust_lib_haven", "RustStdoutStderr", "frb_user", "HavenApplication", "MainActivity", "PublishWakeLock", "com.oblivioustech.haven"] }
-ios = { term_floor = 8, structural_rules = true, reassemble = false, min_lines = 2000, entry_format = "ios", required_shape_plants = ["rust", "swift"], owned_processes = ["Runner", "frb_user", "HavenSLC", "HavenBGTask", "haven_core"] }
-drive = { term_floor = 6, structural_rules = true, reassemble = false, min_lines = 100, entry_format = "plain" }
-rust-test = { term_floor = 6, structural_rules = true, reassemble = false, min_lines = 20, entry_format = "plain" }
-proxy = { term_floor = 6, structural_rules = true, reassemble = false, min_lines = 5, entry_format = "plain" }
-diag = { term_floor = 6, structural_rules = true, reassemble = false, min_lines = 1, entry_format = "plain" }
+logcat = { term_floor = 8, declared_plants_expected = true, structural_rules = true, reassemble = true, min_lines = 2000, entry_format = "logcat", required_shape_plants = ["rust", "kotlin"], owned_tags = ["flutter", "haven_core", "rust_lib_haven", "RustStdoutStderr", "frb_user", "HavenApplication", "MainActivity", "PublishWakeLock", "com.oblivioustech.haven"] }
+ios = { term_floor = 8, declared_plants_expected = false, structural_rules = true, reassemble = false, min_lines = 2000, entry_format = "ios", required_shape_plants = ["rust", "swift"], owned_processes = ["Runner", "frb_user", "HavenSLC", "HavenBGTask", "haven_core"] }
+drive = { term_floor = 6, declared_plants_expected = true, structural_rules = true, reassemble = false, min_lines = 100, entry_format = "plain" }
+rust-test = { term_floor = 6, declared_plants_expected = false, structural_rules = true, reassemble = false, min_lines = 20, entry_format = "plain" }
+proxy = { term_floor = 6, declared_plants_expected = false, structural_rules = true, reassemble = false, min_lines = 5, entry_format = "plain" }
+diag = { term_floor = 6, declared_plants_expected = false, structural_rules = true, reassemble = false, min_lines = 1, entry_format = "plain" }
 # A relay log legitimately holds pubkeys, event ids and `#h` tags: structural
 # rules are OFF here and the public classes are scoped out. What is NOT scoped
 # out is the real MLS group id, the secrets, the names and the coordinates —
 # their presence in a relay log would be the violation itself.
-relay = { term_floor = 6, structural_rules = false, reassemble = false, min_lines = 5, entry_format = "plain" }
+relay = { term_floor = 6, declared_plants_expected = false, structural_rules = false, reassemble = false, min_lines = 5, entry_format = "plain" }
 
 # ---------------------------------------------------------------------------
 # The coverage ledger

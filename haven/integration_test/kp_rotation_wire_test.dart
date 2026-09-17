@@ -89,6 +89,7 @@ import 'package:haven/src/rust/api.dart'
         MemberKeyPackageFfi,
         RelayManagerFfi,
         RelayTypeFfi;
+import 'package:haven/src/utils/log_alias.dart' show magnitudeBucket;
 import 'package:integration_test/integration_test.dart';
 
 import 'e2e/_lib/circle_creation.dart' show createCircleConfirmed;
@@ -219,39 +220,39 @@ class _WirePackage {
   /// Throws [StateError] when the payload is not a well-formed addressable
   /// KeyPackage event, because every comparison below would otherwise silently
   /// compare two empty strings and pass.
-  factory _WirePackage.fromEventJson(String eventJson, String label) {
+  factory _WirePackage.fromEventJson(String eventJson, String phase) {
     final Object? decoded = jsonDecode(eventJson);
     if (decoded is! Map<String, dynamic>) {
-      throw StateError('[kpr] $label: KeyPackage event is not a JSON object.');
+      throw StateError('[kpr] $phase: KeyPackage event is not a JSON object.');
     }
     final Object? id = decoded['id'];
     final Object? content = decoded['content'];
     final Object? createdAt = decoded['created_at'];
     if (id is! String || content is! String || createdAt is! int) {
       throw StateError(
-        '[kpr] $label: KeyPackage event is missing id/content/created_at.',
+        '[kpr] $phase: KeyPackage event is missing id/content/created_at.',
       );
     }
     if (content.isEmpty) {
-      throw StateError('[kpr] $label: KeyPackage event carries no material.');
+      throw StateError('[kpr] $phase: KeyPackage event carries no material.');
     }
     return _WirePackage(
       eventId: id,
-      dSlot: _dTagOf(decoded['tags'], label),
+      dSlot: _dTagOf(decoded['tags'], phase),
       material: content,
       createdAt: createdAt,
     );
   }
 
   /// Builds from an event already observed through [TestRelay].
-  factory _WirePackage.fromRelayEvent(TestRelayEvent event, String label) {
+  factory _WirePackage.fromRelayEvent(TestRelayEvent event, String phase) {
     final Object? content = event.raw['content'];
     if (content is! String || content.isEmpty) {
-      throw StateError('[kpr] $label: on-relay KeyPackage carries no content.');
+      throw StateError('[kpr] $phase: on-relay KeyPackage carries no content.');
     }
     final d = event.tag('d');
     if (d == null || d.length < 2 || d[1].isEmpty) {
-      throw StateError('[kpr] $label: on-relay KeyPackage has no `d` tag.');
+      throw StateError('[kpr] $phase: on-relay KeyPackage has no `d` tag.');
     }
     return _WirePackage(
       eventId: event.id,
@@ -261,7 +262,7 @@ class _WirePackage {
     );
   }
 
-  static String _dTagOf(Object? tags, String label) {
+  static String _dTagOf(Object? tags, String phase) {
     if (tags is List) {
       for (final dynamic tag in tags) {
         if (tag is List && tag.length >= 2) {
@@ -272,7 +273,7 @@ class _WirePackage {
       }
     }
     throw StateError(
-      '[kpr] $label: KeyPackage event has no `d` tag. The transport binding '
+      '[kpr] $phase: KeyPackage event has no `d` tag. The transport binding '
       'makes the addressable slot a MUST, so this is a protocol violation, '
       'not a test-harness problem.',
     );
@@ -336,7 +337,7 @@ void main() {
         // read below is the independent, wire-side confirmation.
         // -------------------------------------------------------------------
         alice = await SyntheticUser.bootstrap(
-          label: 'alice',
+          role: 'alice',
           seed: aliceSeed,
           relay: relay,
         );
@@ -362,7 +363,10 @@ void main() {
           baselineOnRelay.first,
           'baseline',
         );
-        debugPrint('$kBaselineMintedMarker onRelay=${baselineOnRelay.length}');
+        debugPrint(
+          // harness-log-ok: parsed by kpr_marker_number
+          '$kBaselineMintedMarker onRelay=${baselineOnRelay.length}',
+        );
 
         // -------------------------------------------------------------------
         // Phase 2 — ask the shell to restore true time, and OBSERVE the jump.
@@ -389,6 +393,7 @@ void main() {
             'would prove nothing.',
           );
         }
+        // harness-log-ok: jumpedSecs= parsed by kpr_marker_number.
         debugPrint('$kClockRestoredMarker jumpedSecs=${jump.inSeconds}');
 
         // -------------------------------------------------------------------
@@ -430,9 +435,13 @@ void main() {
         final elapsedSecs = nowSecs - baseline.createdAt;
         final elapsedPct =
             (elapsedSecs * 100) ~/ kMlsKeyPackageLifetimeSpanSecs;
+        // harness-log-ok: elapsedPct= parsed by kpr_marker_number, gated
+        // against kRotationThresholdPct.
         debugPrint(
           '$kBaselineFetchedMarker elapsedPct=$elapsedPct '
-          'ageDays=${elapsedSecs ~/ 86400} '
+          // ageDays= is not parsed — bucketed.
+          'ageDays=${magnitudeBucket(elapsedSecs ~/ 86400)} '
+          // harness-log-ok: boolean equality of KP slots, no identifier
           'slotStable=${baseline.dSlot == onRelayBaseline.dSlot}',
         );
         expect(
@@ -471,10 +480,11 @@ void main() {
             'silently ages out of being invitable.',
           );
         }
+        // probed= is not parsed by the shell — bucketed.
         debugPrint(
           '$kRotatedMarker action=${rotation.action.name} '
-          'healed=${rotation.relaysHealed} '
-          'probed=${rotation.respondersProbed}',
+          'healed=${rotation.relaysHealed} ' // harness-log-ok: parsed
+          'probed=${magnitudeBucket(rotation.respondersProbed)}',
         );
         expect(
           rotation.relaysHealed,
@@ -521,6 +531,7 @@ void main() {
             'unchanged and the account still ages out.',
           );
         }
+        // harness-log-ok: dCreatedAt= parsed by kpr_marker_number.
         debugPrint(
           '$kSupersededMarker dSame=true idChanged=true '
           'materialChanged=true '
@@ -561,7 +572,7 @@ void main() {
             circleType: 'location_sharing',
             relays: <String>[defaultStrfryUrl],
             creatorFallbackRelays: <String>[defaultStrfryUrl],
-            label: 'kpr',
+            scenario: 'kpr',
           );
         } on Object {
           // The Add itself is the RFC 9420 validation point, so a throw here
@@ -587,6 +598,7 @@ void main() {
 
         final bobCircle = await bob.getCircle(creation.circle.mlsGroupId);
         if (bobCircle == null) {
+          // harness-log-ok: runner-grepped marker constant
           debugPrint(kPeerDecryptDeadMarker);
           throw StateError(
             '[kpr] Bob cannot resolve the circle he just created.',
@@ -607,6 +619,7 @@ void main() {
           timeout: const Duration(seconds: 120),
         );
         if (decrypted == null) {
+          // harness-log-ok: runner-grepped marker constant
           debugPrint(kPeerDecryptDeadMarker);
           throw StateError(
             '[kpr] Alice joined through the rotated KeyPackage but never '
@@ -615,13 +628,15 @@ void main() {
             '"did the Add succeed" check would miss.',
           );
         }
-        // Deltas, never coordinates: the drive log is an uploaded artifact
-        // and the kind-445 that carried these was encrypted at MLS.
-        debugPrint(
-          '$kPeerDecryptMatchMarker '
-          'dLat=${(decrypted.latitude - bobFakeLatitude).abs()} '
-          'dLon=${(decrypted.longitude - bobFakeLongitude).abs()}',
-        );
+        // Never the coordinates or their delta (Log anonymity pillar) — the
+        // drive log is an uploaded artifact and the kind-445 that carried
+        // these was encrypted at MLS.
+        const epsilon = 1e-9;
+        final withinTolerance =
+            (decrypted.latitude - bobFakeLatitude).abs() <= epsilon &&
+            (decrypted.longitude - bobFakeLongitude).abs() <= epsilon;
+        // harness-log-ok: runner-grepped marker constant
+        debugPrint('$kPeerDecryptMatchMarker withinTolerance=$withinTolerance');
 
         // -------------------------------------------------------------------
         // Phase 7 — a heal moves the EVENT timestamp and nothing else.
@@ -657,6 +672,7 @@ void main() {
         }
         debugPrint(
           '$kHealedMarker action=${heal.action.name} '
+          // harness-log-ok: parsed by kpr_marker_number
           'healed=${heal.relaysHealed}',
         );
         expect(
@@ -708,12 +724,14 @@ void main() {
           rotated.dSlot,
           reason: '[kpr] the heal republished into a different `d` slot.',
         );
+        // harness-log-ok: dCreatedAt= parsed by kpr_marker_number.
         debugPrint(
           '$kHealMaterialStableMarker materialSame=true '
           'createdAtAdvanced=true dSame=true '
           'dCreatedAt=${healed.createdAt - rotated.createdAt}',
         );
 
+        // harness-log-ok: runner-grepped marker constant
         debugPrint(kSequenceCompleteMarker);
       } finally {
         // Best-effort teardown. A throw here would replace the real failure
@@ -788,7 +806,9 @@ Future<Duration?> _awaitClockJump({
     if (lastRequest == Duration.zero ||
         sinceStart.elapsed - lastRequest >= const Duration(seconds: 10)) {
       // Offset 0 == "set the device clock to host time", i.e. undo the
-      // backdate the shell applied before the drive.
+      // backdate the shell applied before the drive; seq is fixed at 1 for
+      // this only-ever-repeated request, not user data.
+      // harness-log-ok: see above
       debugPrint('$kReqClockMarker $seq 0');
       lastRequest = sinceStart.elapsed;
     }

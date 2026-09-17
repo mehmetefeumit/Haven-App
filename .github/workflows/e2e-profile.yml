@@ -96,14 +96,14 @@ jobs:
     # The job cap must clear the SUM of the step caps: below it, a run whose
     # every step is still inside its own cap can die here, and a job-cap death
     # skips every `if: failure()` step (e2e-android.yml states the rule). So:
-    # Build E2E test APK 25 + Create AVD snapshot (on an AVD-cache miss) 15 +
-    # the drive step 45 (derived there) + the most the work no step cap bounds
-    # has taken, 12.9 min over 201 runs of this job and of e2e-android.yml's
-    # on both paths (ci.yml and e2e-nightly.yml, 2026-07-29..09-11; 11.1 of it
-    # one Setup Flutter stall in e2e-android.yml's job, run 30792258968), taken
-    # as 13 = 98 -> 100.
+    # Build the runtime log scanner 10 + Build E2E test APK 25 + Create AVD
+    # snapshot (on an AVD-cache miss) 15 + the drive step 45 (derived there) +
+    # the most the work no step cap bounds has taken, 12.9 min over 201 runs of
+    # this job and of e2e-android.yml's on both paths (ci.yml and
+    # e2e-nightly.yml, 2026-07-29..09-11; 11.1 of it one Setup Flutter stall in
+    # e2e-android.yml's job, run 30792258968), taken as 13 = 108 -> 110.
     # job-uncapped-minutes: 12.9 (201 runs with e2e-android.yml's, worst 30792258968)
-    timeout-minutes: 100
+    timeout-minutes: 110
     env:
       HAVEN_E2E_RELAY: ws://10.0.2.2:7777
       # Profile plane. DISJOINT from HAVEN_E2E_RELAY above by construction —
@@ -133,6 +133,15 @@ jobs:
       # production-parity option and is the one that risks turning red.
       HAVEN_LIVE_SYNC: "true"
       FLUTTER_SUPPRESS_ANALYTICS: "true"
+      # The runtime log scanner (tooling/logscan) is wired into this lane. The
+      # runner reads the flag: it seals the run's needle manifest and runs every
+      # captured log through tooling/e2e/ci/scan-logs.sh before echoing or
+      # keeping any of it. No recording proxy runs here, so the needles are the
+      # host-known constants of tooling/e2e/ci/host-needles.sh (the `host`
+      # profile): the fixed role seeds, the role and canary coordinates and the
+      # canary name stems.
+      HAVEN_LOGSCAN: "true"
+      HAVEN_LOGSCAN_PROFILE: host
 
     steps:
       - name: Checkout
@@ -158,10 +167,30 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: haven-core
+          workspaces: |
+            haven-core
+            tooling/logscan
           # Distinct cache key so this lane doesn't race the other Android e2e
           # jobs on the same cache entry.
           key: e2e-profile-android-x64
+
+      # The runtime log scanner, release-built ONCE, before Flutter and the
+      # emulator are resident (same reasoning as the APK build below). Capped
+      # so a cargo stall fails fast; the cap is a term of the job cap's sum
+      # above.
+      - name: Build the runtime log scanner
+        timeout-minutes: 10
+        run: cargo build --release --manifest-path tooling/logscan/Cargo.toml
+
+      # The needle directory is rotated BEFORE any drive: a manifest left by an
+      # earlier run on a reused runner would be reused as this run's (the
+      # host-profile gate reuses the manifest already at its out path).
+      # Owner-only, because what lands there is every identifier the run
+      # declares, verbatim.
+      - name: Rotate the needle directory
+        run: |
+          mkdir -m 0700 -p /tmp/haven-soak/needles
+          rm -f /tmp/haven-soak/needles/*.needles.decl /tmp/haven-soak/needles/*.needles.json /tmp/haven-soak/needles/*.canaries.json
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -415,22 +444,35 @@ jobs:
             top -bn1 | head -40 || true
           } > /tmp/diag.log 2>&1
 
-      # The logcat and the drive log were scanned by the runner (which deletes
-      # them on a leak); these are the uploaded logs it never sees. Scan-before-
-      # upload, as its OWN step on every outcome short of a cancellation: a
-      # leak (rc 1) deletes them and fails the lane even on an otherwise green
-      # run, so the `if: failure()` upload finds nothing to publish; an
-      # unscannable log (rc 3) fails it and leaves the files as they are. The
-      # standard guard condition (not `always()`) is what lets
+      # Where each uploaded log is scanned, and by what. The logcat and both
+      # drive logs go through the runner's log-privacy gate (HAVEN_LOGSCAN
+      # above): tooling/e2e/ci/scan-logs.sh — the key-material floor AND the
+      # identifier scanner, against the manifest sealed from the host needles —
+      # deleting them on a leak, before any drive log is echoed. What is left
+      # is scanned HERE, against the SAME manifest, by the same wrapper: the
+      # relay logs of both planes (`relay` class: structural rules off — a
+      # relay legitimately holds pubkeys and event ids) and, as `diag` sinks
+      # (a one-line floor, no plant requirement, every rule and every needle
+      # on), the host diagnostics and the blossom log: an HTTP blob server,
+      # not a relay, whose log carries the kind-24242 auth events and must
+      # not be typed into the rules-off class. Scan-before-upload, as its OWN step on
+      # every outcome short of a cancellation: a leak (rc 1) deletes every
+      # scanned file and fails the lane even on an otherwise green run, so the
+      # upload finds nothing to publish; an unscannable log (rc 3), a broken
+      # guard (rc 2) or an unmet floor (rc 4) fails it and leaves the files as
+      # they are. The standard guard condition (not `always()`) is what lets
       # docs/privacy/privacy_invariants.json cite this step as the runtime
       # scanner's enforcing run.
       - name: Scan captured logs for secrets before upload
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: |
-          logs=(/tmp/strfry.log /tmp/strfry-profile-*.log /tmp/blossom.log /tmp/diag.log)
+          relays=(/tmp/strfry.log /tmp/strfry-profile-*.log)
           rc=0
-          bash tooling/e2e/ci/scan-logs-for-secrets.sh "${logs[@]}" || rc=$?
-          if [ "${rc}" -eq 1 ]; then rm -f -- "${logs[@]}"; fi
+          bash tooling/e2e/ci/scan-logs.sh \
+            --manifest /tmp/haven-soak/needles/*.needles.json \
+            --sink "relay=$(IFS=,; echo "${relays[*]}")" \
+            --sink diag=/tmp/diag.log,/tmp/blossom.log \
+            --report /tmp/logscan-report-upload.ndjson || rc=$?
           exit "${rc}"
 
       - name: Upload failure artifacts
@@ -448,6 +490,14 @@ jobs:
             /tmp/scenario.apk
           retention-days: 14
           if-no-files-found: ignore
+
+      # The sealed manifest holds the run's identifiers verbatim. It is never
+      # uploaded (check_wire_proxy_test_only.sh) and does not outlive the job
+      # either: removed on EVERY outcome, after every upload step, so a reused
+      # runner never starts the next run holding the last run's needles.
+      - name: Discard needle manifests
+        if: always()
+        run: rm -f /tmp/haven-soak/needles/*.needles.decl /tmp/haven-soak/needles/*.needles.json /tmp/haven-soak/needles/*.canaries.json
 
       # Teardown runs LAST and if: always() so every container + its host data
       # dir is removed on every outcome, after the log-collection step read
@@ -480,13 +530,15 @@ jobs:
     name: e2e_profile_ios
     runs-on: macos-latest # Apple Silicon; arm64 simulator (no Linux Docker).
     # Clears the sum of its step caps, by the rule stated on the Android job:
-    # Boot iOS simulator 15 + the drive step 65 + at most 6.0 min of work no
-    # step cap bounds (the cold relay builds included; since 2026-09-12 the
-    # diagnostics step also runs two `log show` passes over the archive and
-    # the secret scan, unmeasured yet: re-measure) over 52 runs (ci.yml,
-    # 2026-07-29..09-10; run 34488512808), taken as 6 = 86 -> 90.
+    # Build the runtime log scanner 10 + Boot iOS simulator 15 + the drive step
+    # 65 + at most 6.0 min of work no step cap bounds (the cold relay builds
+    # included; since 2026-09-12 the diagnostics step also runs two `log show`
+    # passes over the archive and the secret scan, and since 0c the seal +
+    # identifier scan in the runner and at the scan step, unmeasured yet:
+    # re-measure) over 52 runs (ci.yml, 2026-07-29..09-10; run 34488512808),
+    # taken as 6 = 96 -> 100.
     # job-uncapped-minutes: 6.0 (52 runs, worst 34488512808)
-    timeout-minutes: 90
+    timeout-minutes: 100
     env:
       HAVEN_E2E_RELAY: ws://localhost:7777
       # Profile plane — separate host-native relay processes with separate
@@ -514,6 +566,13 @@ jobs:
       # default can no longer answer the question by accident.
       HAVEN_LIVE_SYNC: "false"
       FLUTTER_SUPPRESS_ANALYTICS: "true"
+      # The runtime log scanner is wired into this lane: run-ios-sim-scenario.sh
+      # reads the flag and, after the drive, seals the run's needle manifest —
+      # the host-knowable needles alone, since no recording proxy is in front
+      # of this relay — and runs the transcript through
+      # tooling/e2e/ci/scan-logs.sh before the retry classification can see it.
+      HAVEN_LOGSCAN: "true"
+      HAVEN_LOGSCAN_PROFILE: host
 
     steps:
       - name: Checkout
@@ -537,7 +596,17 @@ jobs:
             haven-core
             tooling/e2e/local-relay
             tooling/e2e/local-blossom
+            tooling/logscan
           key: e2e-profile-ios-sim
+
+      # The runtime log scanner, release-built ONCE, before Flutter and the
+      # simulator are resident. The runner seals and scans with it after the
+      # drive; the scan step at the bottom runs it over the exports and the
+      # upload-only logs. Capped so a cargo stall fails fast; the cap is a term
+      # of the job cap's sum above.
+      - name: Build the runtime log scanner
+        timeout-minutes: 10
+        run: cargo build --release --manifest-path tooling/logscan/Cargo.toml
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -589,6 +658,16 @@ jobs:
       # 30753193231) burned a second 30-minute attempt on a deterministic
       # `set_profile_relays_for_test already installed` setUpAll throw. See
       # tooling/e2e/ci/ios-flake-lib.sh.
+      # The needle directory the runner seals into, rotated before the drive
+      # and owner-only: a manifest left by an earlier run on a reused runner
+      # would be reused as this run's (the host profile treats a manifest at
+      # its out path as its own), and what lands there is every identifier the
+      # run declares, verbatim.
+      - name: Rotate the needle directory
+        run: |
+          mkdir -m 0700 -p /tmp/haven-soak/needles
+          rm -f /tmp/haven-soak/needles/*.needles.decl /tmp/haven-soak/needles/*.needles.json /tmp/haven-soak/needles/*.canaries.json
+
       - name: Run e2e_profile_sharing on the simulator
         timeout-minutes: 65
         uses: nick-fields/retry@v3
@@ -636,19 +715,38 @@ jobs:
           cp /tmp/haven-local-blossom.log /tmp/blossom.log 2>/dev/null || true
 
       # Scan-before-upload, as its OWN step: every `.log` the upload step names
-      # goes through the scanner here on every outcome short of a cancellation,
-      # so a leak (rc 1) deletes the scanned files and fails the lane even on an
-      # otherwise green run, and an unscannable log (rc 3) fails it and leaves
-      # them as they are. The standard guard condition (not `always()`) is what
-      # lets docs/privacy/privacy_invariants.json cite this step as the runtime
-      # scanner's enforcing run.
+      # goes through tooling/e2e/ci/scan-logs.sh here — the key-material floor
+      # AND the identifier scanner, against the manifest the runner sealed —
+      # on every outcome short of a cancellation, so a leak (rc 1) deletes the
+      # scanned files and fails the lane even on an otherwise green run, and an
+      # unscannable log (rc 3), a broken guard (rc 2) or an unmet floor (rc 4)
+      # fails it and leaves them as they are. The standard guard condition
+      # (not `always()`) is what lets docs/privacy/privacy_invariants.json
+      # cite this step as the runtime scanner's enforcing run. Typed sinks: the
+      # two `log show` exports are `ios`, the transcript is `drive`, the four
+      # relays' own logs are `relay` — a relay's log legitimately holds
+      # pubkeys and event ids, so the policy runs no structural rule over that
+      # class and scopes those needle classes out; the group ids, secrets,
+      # names and coordinates stay searched — and the blossom server's log is
+      # `diag`: an HTTP blob server, not a relay, whose log carries the
+      # kind-24242 auth events, so every rule and every needle runs over it
+      # (a one-line floor, no plant). The pool's logs are collected by glob, so
+      # the sink list is joined here; a member the diagnostics step could not
+      # copy leaves the pattern unexpanded, a missing capture the scanner
+      # reports as unusable.
       - name: Scan captured logs for secrets before upload
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: |
-          logs=(/tmp/sim-unified.log /tmp/sim-unified-full.log /tmp/flutter-ios-test.log /tmp/relay.log /tmp/relay-profile-*.log /tmp/blossom.log)
+          relays=/tmp/relay.log
+          for f in /tmp/relay-profile-*.log; do relays="${relays},${f}"; done
           rc=0
-          bash tooling/e2e/ci/scan-logs-for-secrets.sh "${logs[@]}" || rc=$?
-          if [ "${rc}" -eq 1 ]; then rm -f -- "${logs[@]}"; fi
+          bash tooling/e2e/ci/scan-logs.sh \
+            --manifest /tmp/haven-soak/needles/*.needles.json \
+            --sink ios=/tmp/sim-unified.log,/tmp/sim-unified-full.log \
+            --sink drive=/tmp/flutter-ios-test.log \
+            --sink "relay=${relays}" \
+            --sink diag=/tmp/blossom.log \
+            --report /tmp/logscan-report-upload.ndjson || rc=$?
           exit "${rc}"
 
       - name: Upload failure artifacts
@@ -665,6 +763,14 @@ jobs:
             /tmp/sim-unified-full.log
           retention-days: 14
           if-no-files-found: ignore
+
+      # The sealed manifest holds the run's identifiers verbatim. It is never
+      # uploaded (check_wire_proxy_test_only.sh) and does not outlive the job
+      # either: removed on EVERY outcome, after every upload step, so a reused
+      # runner never starts the next run holding the last run's needles.
+      - name: Discard needle manifests
+        if: always()
+        run: rm -f /tmp/haven-soak/needles/*.needles.decl /tmp/haven-soak/needles/*.needles.json /tmp/haven-soak/needles/*.canaries.json
 
       # Teardown runs LAST and if: always() so every server process is killed on
       # every outcome. All three scripts always exit 0, and each teardown is its

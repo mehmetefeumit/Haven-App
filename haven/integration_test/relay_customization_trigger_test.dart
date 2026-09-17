@@ -63,6 +63,8 @@ import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/nostr_circle_service.dart';
 import 'package:haven/src/services/nostr_relay_service.dart';
+import 'package:haven/src/utils/log_alias.dart'
+    show LogAliasClass, logAliasHandle;
 import 'package:integration_test/integration_test.dart';
 
 import 'e2e/_lib/test_relay.dart';
@@ -314,7 +316,7 @@ void main() {
 
             debugPrint(
               '[RLY-PROV-01] PASS: kind 30443 received on R2 '
-              'id=${ev.id.substring(0, 8)}',
+              'id=${logAliasHandle(LogAliasClass.event, ev.id)}',
             );
           } finally {
             container.dispose();

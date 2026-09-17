@@ -118,6 +118,10 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/drive-log-lib.sh"
 # barrier.
 # shellcheck source=tooling/e2e/ci/app-install-lib.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/app-install-lib.sh"
+# The log-privacy gate (logscan_gate / logscan_gate_dir): one implementation
+# for every runner, sourced BEFORE the --self-test dispatch.
+# shellcheck source=tooling/e2e/ci/logscan-gate.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/logscan-gate.sh"
 
 # ---------------------------------------------------------------------------
 # Config
@@ -127,6 +131,27 @@ readonly DEVICE="emulator-5554"
 readonly RELAY_URL="${HAVEN_E2E_RELAY:-ws://10.0.2.2:7777}"
 readonly DRIVER_FILE="test_driver/integration_test.dart"
 readonly LOG_DIR="/tmp/m7-logs"
+# The gate's findings report (sink:line, class, rule ids — never a value).
+# Outside LOG_DIR, which the workflow uploads whole.
+readonly LOGSCAN_REPORT="/tmp/logscan-report-m7.ndjson"
+readonly NEEDLE_DIR="/tmp/haven-soak/needles"
+
+# echo_log_tail <captured-logcat> [<lines>] — the ONLY way a logcat reaches the
+# job log, which is world-readable: the gate first, over that one file, and the
+# tail only when it passes. A refusing gate says so and withholds the tail; the
+# EXIT trap's gate over LOG_DIR still decides the upload. Never fails the
+# caller: every call site is already on its way to `fail`. Sits above the
+# --self-test dispatch so the self-test drives the real helper.
+echo_log_tail() {
+  local log="$1" lines="${2:-60}" rc=0
+  logscan_gate host "${NEEDLE_DIR}" -- --sink "logcat=${log}" --report "${LOGSCAN_REPORT}" || rc=$?
+  if (( rc != 0 )); then
+    echo "(tail of ${log##*/} withheld: log-privacy gate rc ${rc})" >&2
+    return 0
+  fi
+  tail -n "${lines}" "${log}" >&2 || true
+}
+
 
 # A4: androidx.work 2.10.x schedules into this JobScheduler namespace on
 # API 34+, so every force-run must target it explicitly.
@@ -213,91 +238,107 @@ readonly REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 readonly HAVEN_DIR="${REPO_ROOT}/haven"
 readonly START_STRFRY="${SCRIPT_DIR}/start-strfry.sh"
 readonly STOP_STRFRY="${SCRIPT_DIR}/stop-strfry.sh"
-# scan_dir_or_contain <dir> — the secret-leak gate (Security Rules 6 and 15)
-# over the evidence directory the workflow uploads `if: always()`. A leak
-# (rc 1) REMOVES every *.log the scan walked and leaves a LEAK.marker naming
-# only the pattern label(s), so the upload publishes the verdict and not the
-# line; rc 3 (nothing scannable) keeps the directory as it is. Reads
-# SECRET_SCAN at call time so --self-test can hand it a fake scanner.
-scan_dir_or_contain() {
-  local dir="$1" rc=0 err
-  err="$(mktemp)"
-  bash "${SECRET_SCAN}" "${dir}" 2>"${err}" || rc=$?
-  cat "${err}" >&2
-  if (( rc == 1 )); then
-    find "${dir}" -type f -name '*.log' -exec rm -f -- {} +
-    {
-      echo "secret-leak scan: LEAK — every *.log under this directory was removed before upload (scan-logs-for-secrets.sh rc 1)"
-      sed -n 's/^LEAK: .* \[\(.*\)\] at line(s):.*$/pattern: \1/p' "${err}" | sort -u
-    } > "${dir}/LEAK.marker"
-    echo "ERROR: secret-leak guard tripped on ${dir}; removed its *.log files and" \
-         "left ${dir}/LEAK.marker (pattern labels only)." >&2
-  fi
-  rm -f "${err}"
-  return "${rc}"
-}
-
-# --self-test — hermetic: no device, no docker, no relay. Proves the gate
-# CONTAINS, driven with a FAKE scanner: rc 1 removes every *.log under the
-# directory (and nothing else) and leaves a LEAK.marker naming the pattern
-# label only; rc 3 and rc 0 leave the directory untouched; the verdict comes
-# back unchanged.
+# --self-test — hermetic: no device, no docker, no relay. Two things are under
+# test. (1) CONTAINMENT: through logscan-gate.sh's floor arm with a FAKE
+# scanner, a leak (rc 1) removes every *.log under the evidence directory and
+# nothing else; rc 3 and rc 0 leave it untouched; the verdict comes back
+# unchanged. (2) THE WIRING, read from this file (comments stripped): the gate
+# library is sourced; the EXIT trap gates LOG_DIR through logscan_gate_dir with
+# the report outside it; every echo of a captured log — the drive log's `cat`,
+# every logcat `tail` — goes through echo_log_tail, whose gate line precedes
+# its echo line; and no soft `if [[ -x …` scanner gate exists. The job log is
+# world-readable, so an echo before the gate is a leak the guard could only
+# report after the fact.
 run_self_test() {
-  local tmp fail=0 dir fake want rc SECRET_SCAN
+  local tmp fail=0 dir fake want rc real_run body gate_line echo_line
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
   trap "rm -rf '${tmp}'" RETURN
   fake="${tmp}/fake-scan.sh"
-  printf '%s\n' '#!/usr/bin/env bash' \
-    'if [[ "${FAKE_SCAN_RC}" == 1 ]]; then echo "LEAK: $1/iter-3.logcat.log [bech32 nsec (private key)] at line(s): 7" >&2; fi' \
-    'exit "${FAKE_SCAN_RC}"' > "${fake}"
-  SECRET_SCAN="${fake}"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit "${FAKE_SCAN_RC}"' > "${fake}"
   dir="${tmp}/logs"
   for want in 1 3 0; do
     rm -rf "${dir}"
-    mkdir -p "${dir}/nested"
-    printf 'a\n' > "${dir}/iter-3.logcat.log"
-    printf 'b\n' > "${dir}/nested/drive.log"
-    printf 'c\n' > "${dir}/notes.txt"
-    export FAKE_SCAN_RC="${want}"
+    mkdir -p "${dir}"
+    printf 'a\n' > "${dir}/logcat.a.log"
+    printf 'b\n' > "${dir}/drive.a.log"
+    printf 'c\n' > "${dir}/setup.apk"
     rc=0
-    scan_dir_or_contain "${dir}" 2>/dev/null || rc=$?
+    HAVEN_LOGSCAN= SECRET_SCAN="${fake}" FAKE_SCAN_RC="${want}" \
+      logscan_gate_dir host "${tmp}/needles" "${dir}" "${tmp}/report.ndjson" 2>/dev/null || rc=$?
     if (( rc != want )); then
       echo "SELF-TEST FAIL: the gate returned ${rc} for a scanner rc of ${want}" >&2
       fail=1
     fi
     if (( want == 1 )); then
-      if [[ -e "${dir}/iter-3.logcat.log" || -e "${dir}/nested/drive.log" ]]; then
+      if [[ -e "${dir}/logcat.a.log" || -e "${dir}/drive.a.log" ]]; then
         echo "SELF-TEST FAIL: a leak (rc 1) left a scanned *.log on disk for the" \
              "if: always() upload to publish" >&2
         fail=1
       fi
-      if [[ ! -e "${dir}/notes.txt" ]]; then
+      if [[ ! -e "${dir}/setup.apk" ]]; then
         echo "SELF-TEST FAIL: rc 1 removed a file the scan never walked" >&2
         fail=1
       fi
-      if [[ ! -f "${dir}/LEAK.marker" ]]; then
-        echo "SELF-TEST FAIL: rc 1 left no LEAK.marker, so the upload carries no verdict" >&2
-        fail=1
-      elif ! grep -qF 'pattern: bech32 nsec (private key)' "${dir}/LEAK.marker"; then
-        echo "SELF-TEST FAIL: LEAK.marker does not name the pattern label" >&2
-        fail=1
-      elif grep -qE 'iter-3|at line' "${dir}/LEAK.marker"; then
-        echo "SELF-TEST FAIL: LEAK.marker carries more than the label (a file or line)" >&2
-        fail=1
-      fi
-    elif [[ ! -e "${dir}/iter-3.logcat.log" || ! -e "${dir}/nested/drive.log" \
-            || -e "${dir}/LEAK.marker" ]]; then
+    elif [[ ! -e "${dir}/logcat.a.log" || ! -e "${dir}/drive.a.log" ]]; then
       echo "SELF-TEST FAIL: scanner rc ${want} touched a directory it had no leak to contain" >&2
       fail=1
     fi
   done
-  unset FAKE_SCAN_RC
+  # The echo helper itself: a refusing gate withholds the tail; a clean one
+  # prints it.
+  printf 'line one\nline two\n' > "${tmp}/logcat.x.log"
+  rc=0
+  HAVEN_LOGSCAN= SECRET_SCAN="${fake}" FAKE_SCAN_RC=3 \
+    echo_log_tail "${tmp}/logcat.x.log" > "${tmp}/tail-out" 2>&1 || rc=$?
+  if (( rc != 0 )) || grep -qF 'line two' "${tmp}/tail-out" || ! grep -qF 'withheld' "${tmp}/tail-out"; then
+    echo "SELF-TEST FAIL (echo_log_tail): a refusing gate must withhold the tail and say so (rc ${rc})" >&2
+    fail=1
+  fi
+  rc=0
+  HAVEN_LOGSCAN= SECRET_SCAN="${fake}" FAKE_SCAN_RC=0 \
+    echo_log_tail "${tmp}/logcat.x.log" > "${tmp}/tail-out" 2>&1 || rc=$?
+  if (( rc != 0 )) || ! grep -qF 'line two' "${tmp}/tail-out"; then
+    echo "SELF-TEST FAIL (echo_log_tail): a clean gate must print the tail (rc ${rc})" >&2
+    fail=1
+  fi
+
+  real_run="$(grep -v '^[[:space:]]*#' "${BASH_SOURCE[0]}" | sed '/^run_self_test() {/,/^}/d')"
+  if ! grep -qE '^source .*/logscan-gate\.sh"$' <<<"${real_run}"; then
+    echo "SELF-TEST FAIL (wiring): logscan-gate.sh is no longer sourced" >&2
+    fail=1
+  fi
+  body="$(sed -n '/^cleanup() {/,/^}/p' <<<"${real_run}")"
+  if ! grep -qF 'logscan_gate_dir host "${NEEDLE_DIR}" "${LOG_DIR}" "${LOGSCAN_REPORT}"' <<<"${body}"; then
+    echo "SELF-TEST FAIL (wiring): the EXIT trap no longer gates LOG_DIR through logscan_gate_dir" >&2
+    fail=1
+  fi
+  local fn
+  for fn in echo_log_tail drive_target; do
+    body="$(sed -n "/^${fn}() {/,/^}/p" <<<"${real_run}")"
+    gate_line="$(grep -n 'logscan_gate host "${NEEDLE_DIR}" -- --sink' <<<"${body}" | cut -d: -f1 | head -n 1)"
+    echo_line="$(grep -nE '^[[:space:]]*(cat|tail|head) ' <<<"${body}" | cut -d: -f1 | head -n 1)"
+    if [[ -z "${gate_line}" || -z "${echo_line}" ]] || (( echo_line < gate_line )) \
+       || (( "$(grep -cE '^[[:space:]]*(cat|tail|head) ' <<<"${body}")" != 1 )); then
+      echo "SELF-TEST FAIL (wiring): ${fn} must gate (line ${gate_line:-none}) before its one echo (line ${echo_line:-none})" >&2
+      fail=1
+    fi
+  done
+  # Outside those two, no cat/tail/head of a captured log at a command position.
+  if sed '/^echo_log_tail() {/,/^}/d; /^drive_target() {/,/^}/d' <<<"${real_run}" \
+       | grep -qE '(^|[;&|][[:space:]]*)[[:space:]]*(cat|tail|head|less|more)[[:space:]]+[^|]*(logcat|drivelog|drive\.|logfile|LOG_DIR)'; then
+    echo "SELF-TEST FAIL (wiring): a captured log is echoed outside echo_log_tail/drive_target, i.e. before any gate" >&2
+    fail=1
+  fi
+  if grep -qE 'if[[:space:]]+\[\[[[:space:]]+-x[[:space:]]' <<<"${real_run}"; then
+    echo "SELF-TEST FAIL (wiring): a soft \`if [[ -x …\` scanner gate is in the real run" >&2
+    fail=1
+  fi
   if (( fail )); then
     echo "run-m7-background-catchup.sh: SELF-TEST FAILED" >&2
     return 1
   fi
-  echo "run-m7-background-catchup.sh: self-test passed (the secret-leak gate removes exactly the *.log files it scanned on a leak, leaves a labels-only LEAK.marker, and touches nothing on rc 3 or rc 0)."
+  echo "run-m7-background-catchup.sh: self-test passed (the log-privacy gate removes exactly the *.log files it scanned on a leak and touches nothing on rc 3 or rc 0; echo_log_tail withholds a tail the gate refuses; the gate library is sourced, the EXIT trap gates LOG_DIR with the report outside the upload, every echo of a captured log goes through the gate first, no soft scanner gate)."
   return 0
 }
 
@@ -311,9 +352,10 @@ readonly SECRET_SCAN="${SCRIPT_DIR}/scan-logs-for-secrets.sh"
 LOGCAT_PID=""
 
 # ---------------------------------------------------------------------------
-# Cleanup (EXIT trap): flush logcat, run the mandatory secret scan over EVERY
-# captured log (Security Rule 6 — must run even on a phase failure), snapshot +
-# tear down strfry. Escalates the exit code on a leak; never masks a phase rc.
+# Cleanup (EXIT trap): flush logcat, run the log-privacy gate over EVERY
+# captured log, each typed by its name (Security Rules 6 and 15 — must run even
+# on a phase failure), snapshot + tear down strfry. Escalates the exit code on a
+# leak; never masks a phase rc.
 # ---------------------------------------------------------------------------
 cleanup() {
   local rc=$?
@@ -322,9 +364,9 @@ cleanup() {
     kill "${LOGCAT_PID}" 2>/dev/null || true
   fi
   docker logs strfry > "${LOG_DIR}/strfry.final.log" 2>&1 || true
-  echo "== Secret-leak scan over ${LOG_DIR} (Security Rule 6) =="
-  if ! scan_dir_or_contain "${LOG_DIR}"; then
-    echo "ERROR: secret-leak guard tripped on M7 logs — see the line(s) above." >&2
+  echo "== Log-privacy gate over ${LOG_DIR} (Security Rules 6 and 15) =="
+  if ! logscan_gate_dir host "${NEEDLE_DIR}" "${LOG_DIR}" "${LOGSCAN_REPORT}"; then
+    echo "ERROR: log-privacy gate failed on M7 logs — see the line(s) above." >&2
     rc=1
   fi
   bash "${STOP_STRFRY}" >/dev/null 2>&1 || true
@@ -379,7 +421,7 @@ assert_marker_absent() {
   local logfile="$1" marker="$2" label="$3"
   if grep -aqF -- "${marker}" "${logfile}" 2>/dev/null; then
     echo "---- offending logcat tail ----" >&2
-    tail -40 "${logfile}" >&2 || true
+    echo_log_tail "${logfile}" 40
     fail "${label}: unexpected marker present: ${marker}"
   fi
 }
@@ -697,6 +739,13 @@ drive_target() {
       --use-application-binary "${apk}" \
       --driver "${DRIVER_FILE}" \
       --target "${target}" ) > "${drivelog}" 2>&1 || drc=$?
+  # The gate BEFORE the echo: the drive log is world-readable once echoed, and
+  # a leak (rc 1) removes it, so there is nothing left to echo either way.
+  local grc=0
+  logscan_gate host "${NEEDLE_DIR}" -- --sink "drive=${drivelog}" --report "${LOGSCAN_REPORT}" || grc=$?
+  if (( grc != 0 )); then
+    fail "log-privacy gate failed on the drive log of ${target} (rc ${grc}) — see the line(s) above."
+  fi
   cat "${drivelog}" || true
   if (( drc != 0 )); then
     fail "drive of ${target} failed (rc=${drc}) — cannot arm the worker state."
@@ -825,12 +874,12 @@ phase_a() {
 
   if ! force_run_until_marker "${LOG_DIR}/logcat.a.log" "${MARK_BOOTSTRAP_OK}" \
         "${MARKER_TIMEOUT}" "${LOG_DIR}/drive.a.log" "${ids}"; then
-    tail -60 "${LOG_DIR}/logcat.a.log" >&2 || true
+    echo_log_tail "${LOG_DIR}/logcat.a.log"
     fail "worker never logged '${MARK_BOOTSTRAP_OK}' within ${MARKER_TIMEOUT}s (isolate bootstrap failed)."
   fi
   echo "[phase-a] bootstrap ok observed."
   if ! wait_for_marker "${LOG_DIR}/logcat.a.log" "${MARK_SWEEP_COMPLETE}" "${MARKER_TIMEOUT}"; then
-    tail -60 "${LOG_DIR}/logcat.a.log" >&2 || true
+    echo_log_tail "${LOG_DIR}/logcat.a.log"
     fail "worker never logged '${MARK_SWEEP_COMPLETE}' within ${MARKER_TIMEOUT}s (sweep did not run)."
   fi
 
@@ -868,11 +917,11 @@ phase_a() {
   # delivery regression. The CI dispatcher installs the process-global ws://
   # loopback opt-in that the cold process cannot inherit.
   if grep -aqF -- "${MARK_CI_LOOPBACK_FAILED}" "${LOG_DIR}/logcat.a.log" 2>/dev/null; then
-    tail -60 "${LOG_DIR}/logcat.a.log" >&2 || true
+    echo_log_tail "${LOG_DIR}/logcat.a.log"
     fail "the CI dispatcher could not arm the ws:// loopback opt-in in the cold worker (HARNESS failure, not a delivery regression): ${MARK_CI_LOOPBACK_FAILED}"
   fi
   if ! grep -aqF -- "${MARK_CI_LOOPBACK_ARMED}" "${LOG_DIR}/logcat.a.log" 2>/dev/null; then
-    tail -60 "${LOG_DIR}/logcat.a.log" >&2 || true
+    echo_log_tail "${LOG_DIR}/logcat.a.log"
     fail "the cold worker never logged '${MARK_CI_LOOPBACK_ARMED}' — it ran the PRODUCTION dispatcher, so it could not reach ws://; registerM7CiOneOffCatchup must re-point the WorkManager callback handle at m7CiCallbackDispatcher AFTER registerBackgroundCatchup()."
   fi
   echo "[phase-a] cold worker armed the ws:// loopback opt-in (relay reachable)."
@@ -886,7 +935,7 @@ phase_a() {
 
   if [[ -z "${locations}" ]] || (( locations < 1 )) \
      || [[ -z "${relay_errors}" ]] || (( relay_errors != 0 )); then
-    tail -60 "${LOG_DIR}/logcat.a.log" >&2 || true
+    echo_log_tail "${LOG_DIR}/logcat.a.log"
     fail "BACKGROUND DELIVERY FAILED: the cold worker reached the relay (opt-in armed) but did not apply the seeded peer location — locations=${locations:-<none>} (want >=1) relayErrors=${relay_errors:-<none>} (want 0), seed→sweep ${elapsed}s. A peer kind-445 published before the wake was not received in the background."
   fi
   echo "[phase-a] PASS (deterministic): cold isolate booted, reached the relay, and DECRYPTED the seeded peer location" \
@@ -1010,7 +1059,7 @@ run_negative_phase() {
 
   if ! force_run_until_marker "${LOG_DIR}/logcat.${tag}.log" "${marker}" \
         "${MARKER_TIMEOUT}" "${LOG_DIR}/drive.${tag}.log" "${ids}"; then
-    tail -60 "${LOG_DIR}/logcat.${tag}.log" >&2 || true
+    echo_log_tail "${LOG_DIR}/logcat.${tag}.log"
     fail "phase ${name}: worker never logged the expected no-op marker within ${MARKER_TIMEOUT}s: ${marker}"
   fi
   echo "[phase-${tag}] no-op marker observed: ${marker}"
@@ -1022,7 +1071,7 @@ run_negative_phase() {
   # what the gate decided — an over-determined proof, which is what this phase
   # asserted until 2026-08-03 (docs/CI_HARDENING_BACKLOG.md B2).
   if ! grep -aqF -- "${MARK_CI_LOOPBACK_ARMED}" "${LOG_DIR}/logcat.${tag}.log" 2>/dev/null; then
-    tail -60 "${LOG_DIR}/logcat.${tag}.log" >&2 || true
+    echo_log_tail "${LOG_DIR}/logcat.${tag}.log"
     fail "phase ${name}: cold worker never logged '${MARK_CI_LOOPBACK_ARMED}' — the relay was unreachable by construction, so the strfry-silence proof below would be vacuous."
   fi
   echo "[phase-${tag}] relay was reachable (loopback opt-in armed) — silence below proves the GATE."

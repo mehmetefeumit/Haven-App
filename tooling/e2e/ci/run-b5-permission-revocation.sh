@@ -241,6 +241,20 @@ source "${SCRIPT_DIR}/drive-log-lib.sh"
 # barrier.
 # shellcheck source=tooling/e2e/ci/app-install-lib.sh
 source "${SCRIPT_DIR}/app-install-lib.sh"
+# The log-privacy gate — the key-material floor AND the identifier scanner,
+# one call, one verdict — over the captures after the drive and over the whole
+# evidence directory at exit.
+# shellcheck source=tooling/e2e/ci/logscan-gate.sh
+source "${SCRIPT_DIR}/logscan-gate.sh"
+
+# location_provider_names — the providers `dumpsys location` lists, with their
+# `[mock]` state, and nothing else. The dump's `last location=` line is the
+# position, which no log may carry (Security Rule 15) — a synthetic landmark
+# included, because the scanner declares this lane's point as a needle.
+location_provider_names() {
+  tr -d '\r' | grep -aoE '^[[:space:]]*[a-z_]+ provider( \[mock\])?' \
+    | sed 's/^[[:space:]]*//' | sort -u
+}
 
 # Shared `detect_strfry_bin`. The candidate path list is a property of the
 # pinned relay IMAGE, not of this lane, and B9 probes the same one — sourced
@@ -1801,12 +1815,8 @@ type=LocationServiceException streamAgeMs=52000" \
     "1" "$(grep -ac . "${poll_log}" || true)"
   _eq_case "…and the line records zero, not silence" \
     "1" "$(grep -ac '0 new location event' "${poll_log}" || true)"
-  # Resolved here rather than via ${SECRET_SCAN}: that is declared with the rest
-  # of the config, BELOW the --self-test dispatch, so it does not exist yet.
-  local scanner
-  scanner="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/scan-logs-for-secrets.sh"
-  _case "…so the scanner can read the log a PASSING lane leaves" \
-    0 "$(bash "${scanner}" "${poll_log}" >/dev/null 2>&1; echo $?)"
+  _case "…so the log a PASSING lane leaves is a non-empty sink" \
+    0 "$([[ -s "${poll_log}" ]]; echo $?)"
 
   b5_record_poll "${poll_log}" "$(printf 'aa\nbb\n')"
   _eq_case "a poll that finds events appends a second line" \
@@ -1816,13 +1826,14 @@ type=LocationServiceException streamAgeMs=52000" \
 
   # --- the WHOLE LOG DIR must scan clean on a passing lane ------------------
   #
-  # The fixtures above scan ONE file; `cleanup` scans the DIRECTORY. That gap
-  # is not academic — it is where the first version of this fix reintroduced
-  # the bug it was fixing. Promoting every non-`*.log` file so nothing is
-  # uploaded unscanned also promoted `relay-act2-new.ids` and its `.raw`, which
-  # are written ONLY when a new location event appears (the lane's failure
-  # condition) and are therefore 0 bytes on a GREEN run. Three empty
-  # assertions, scanner rc=3, `rc=1` on a passing lane.
+  # The fixtures above look at ONE file; `cleanup` hands the gate the whole
+  # DIRECTORY, typed by name. That gap is not academic — it is where the first
+  # version of this fix reintroduced the bug it was fixing. Promoting every
+  # non-`*.log` file so nothing is uploaded unscanned also promoted
+  # `relay-act2-new.ids` and its `.raw`, which are written ONLY when a new
+  # location event appears (the lane's failure condition) and are therefore
+  # 0 bytes on a GREEN run. Three empty sinks, scanner rc=3, `rc=1` on a
+  # passing lane.
   local scandir="${tmp}/logdir"
   mkdir -p "${scandir}"
   printf '12:00:00 poll: 0 new location event(s) observed\n' \
@@ -1833,14 +1844,93 @@ type=LocationServiceException streamAgeMs=52000" \
   : > "${scandir}/relay-baseline.ids"          # ditto
   printf 'deadbeef\n' > "${scandir}/relay-scan.tmp"   # has content -> must be scanned
   b5_prepare_logs_for_scan "${scandir}"
-  _case "a PASSING lane's whole log dir still scans clean" \
-    0 "$(bash "${scanner}" "${scandir}" >/dev/null 2>&1; echo $?)"
+  # A fake scanner records the argv the gate builds over the directory: the
+  # promoted relay scratch types as `relay` by its prefix, the drive as
+  # `drive`, and the empty intermediates are gone rather than named.
+  local fake_dir="${tmp}/fake" fake_bin="${tmp}/fake/logscan"
+  mkdir -p "${fake_dir}"
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'case "${1:-}" in scan) printf "%s\n" "$@" > "${FAKE_SCAN_ARGV}" ;; esac' 'exit 0' > "${fake_bin}"
+  chmod +x "${fake_bin}"
+  FAKE_SCAN_ARGV="${fake_dir}/scan-argv" GITHUB_RUN_ID= GITHUB_RUN_ATTEMPT= WIRE_UPSTREAM= RELAY_URL= \
+    HAVEN_LOGSCAN=true HAVEN_LOGSCAN_BIN="${fake_bin}" \
+    logscan_gate_dir host "${fake_dir}/needles" "${scandir}" "${fake_dir}/r.ndjson" >/dev/null 2>&1 || true
+  _eq_case "a PASSING lane's whole log dir gates to non-empty sinks alone" \
+    "$(printf '%s\n' scan --manifest "${fake_dir}/needles/local-local.needles.json" \
+         --sink "drive=${scandir}/drive1.log" \
+         --sink "relay=${scandir}/relay-poll.b5.log,${scandir}/relay-scan.tmp.log" \
+         --report "${fake_dir}/r.ndjson")" \
+    "$(cat "${fake_dir}/scan-argv" 2>/dev/null || true)"
   _eq_case "…with every remaining file scannable (*.log)" \
     "0" "$(find "${scandir}" -type f ! -name '*.log' | grep -ac . || true)"
   _eq_case "…the non-empty intermediate kept, promoted and scanned" \
     "1" "$(find "${scandir}" -name 'relay-scan.tmp.log' | grep -ac . || true)"
   _eq_case "…and the empty ones dropped rather than asserted" \
     "0" "$(find "${scandir}" -name 'relay-act2-new.ids*' | grep -ac . || true)"
+
+
+  # --- location_provider_names ---------------------------------------------
+  # A real `dumpsys location` shape: the provider headers survive, the
+  # position does not — planted, then asserted absent.
+  printf '%s\n' \
+    '  fused provider [mock]:' \
+    '      last location=Location[fused 52.370215,4.895167 hAcc=5.0 et=+10m0s201ms alt=0.0]' \
+    '      enabled=true' \
+    '  gps provider:' \
+    '      last location=Location[gps 52.370215,4.895167 hAcc=5.0 et=+10m0s201ms alt=0.0]' \
+    '  passive provider:' \
+    > "${tmp}/dumpsys-location.txt"
+  _eq_case "provider names and mock state, no position" \
+    "$(printf '%s\n' 'fused provider [mock]' 'gps provider' 'passive provider')" \
+    "$(location_provider_names < "${tmp}/dumpsys-location.txt")"
+  _eq_case "…the planted coordinate is absent from the output" "0" \
+    "$(location_provider_names < "${tmp}/dumpsys-location.txt" | grep -c '52.37' || true)"
+
+  # --- log-privacy gate wiring ---------------------------------------------
+  # Source pins in the shape of run-single-avd-scenario.sh's (9b): the gate
+  # is what stands between a captured log and the job log, so its position is
+  # read from this file's own lines, never trusted. Continuation lines are
+  # joined and comments dropped, so a call that spans lines is one line here;
+  # literals are counted at column 0 (`index == 1`) or inside the function
+  # that holds them, where the real call sits and a fixture's own text does
+  # not.
+  local self="${BASH_SOURCE[0]}" joined gate_at cat_at
+  joined="$(sed -e ':a' -e '/\\$/N; s/\\\n//; ta' "${self}" | grep -vE '^[[:space:]]*#')"
+  local gate_scope
+  gate_scope="$(sed -n '/^report_drive() {/,/^}/p' <<<"${joined}")"
+  gate_at="$(grep -nE '^  logscan_gate host /tmp/haven-soak/needles' <<<"${gate_scope}" \
+    | cut -d: -f1 | head -n 1 || true)"
+  cat_at="$(grep -nE '^[[:space:]]*cat "\$\{(logfile|LOGCAT_FILE)\}"' <<<"${gate_scope}" | cut -d: -f1 | head -n 1 || true)"
+  rc=0
+  [[ -n "${gate_at}" && -n "${cat_at}" ]] && (( gate_at < cat_at )) || rc=1
+  _case "the drive log is echoed only after the log-privacy gate" 0 "${rc}"
+  _eq_case "…and exactly once" "1" "$(grep -cE '^[[:space:]]*cat "\$\{(logfile|LOGCAT_FILE)\}"' <<<"${gate_scope}" || true)"
+  local gate_lit='logscan_gate host /tmp/haven-soak/needles --host-decl "coordinate=${GEO_LAT},${GEO_LON}" --host-decl "coordinate=${GEO_LAT_B},${GEO_LON}" --     --sink "logcat=${LOGCAT_FILE}" --sink "drive=${logfile}"     --report "${LOGSCAN_REPORTS}/gate-${label}.ndjson" || gate_rc=$?'
+  _eq_case "the gate names the logcat, the drive log and the injected point" "1" \
+    "$(awk -v lit="${gate_lit}" \
+         'index($0, lit) == 3 { n++ } END { print n + 0 }' <<<"${gate_scope}")"
+  local trap_body dump_at scan_at exit_at
+  trap_body="$(sed -n '/^cleanup() {/,/^}/p' <<<"${joined}")"
+  dump_at="$(grep -nF 'docker logs "${STRFRY_CONTAINER}" > "${LOG_DIR}/strfry.final.log"' <<<"${trap_body}" | cut -d: -f1 | head -n 1 || true)"
+  scan_at="$(grep -nF 'logscan_gate_dir host /tmp/haven-soak/needles "${LOG_DIR}" "${LOGSCAN_REPORTS}/exit.ndjson" --host-decl "coordinate=${GEO_LAT},${GEO_LON}" --host-decl "coordinate=${GEO_LAT_B},${GEO_LON}"     || scan_rc=$?' <<<"${trap_body}" \
+    | cut -d: -f1 | head -n 1 || true)"
+  exit_at="$(grep -nF 'exit "${rc}"' <<<"${trap_body}" | cut -d: -f1 | head -n 1 || true)"
+  rc=0
+  [[ -n "${dump_at}" && -n "${scan_at}" && -n "${exit_at}" ]] \
+    && (( dump_at < scan_at && scan_at < exit_at )) || rc=1
+  _case "the EXIT trap gates the whole log directory after the relay dump" 0 "${rc}"
+  local floor='scan-logs-for-'
+  floor+='secrets.sh'
+  _eq_case "no soft scanner gate" "0" \
+    "$(grep -cE 'if[[:space:]]+\[\[[[:space:]]+-x[[:space:]]' <<<"${joined}" || true)"
+  _eq_case "no bare key-material floor call" "0" "$(grep -cF "${floor}" <<<"${joined}" || true)"
+  rc=0; declare -f logscan_gate | grep -q 'HAVEN_LOGSCAN' || rc=1
+  _case "the HAVEN_LOGSCAN arm exists in the sourced gate" 0 "${rc}"
+  _eq_case "the injected coordinates are never echoed" "0" \
+    "$(grep -cE '(echo|printf) .*\$\{GEO_L(AT|ON)' <<<"${joined}" || true)"
+  _eq_case "dumpsys location reaches the log only as provider names" \
+    "$(grep -c 'dumpsys location' <<<"${joined}" || true)" \
+    "$(grep -c 'dumpsys location .*| location_provider_names' <<<"${joined}" || true)"
 
   if (( fails != 0 )); then
     echo "run-b5-permission-revocation.sh --self-test: FAILED" >&2
@@ -1949,9 +2039,9 @@ readonly APPOPS_MIN_DENY_SECS="${B5_APPOPS_MIN_DENY_SECS:-168}"
 # well-known public landmark, chosen precisely BECAUSE it is obviously not a
 # real user's position. The kind-445 carrying it is MLS-encrypted on the wire.
 #
-# WARNING before overriding: `fail()` dumps `dumpsys location`, which PRINTS
-# the active position into the step log and the uploaded artifact. Fine for a
-# hardcoded landmark; NOT fine for anything derived from a real device.
+# Both points are declared to the log-privacy gate as needles: synthetic or
+# not, a position in a log is the violation (Security Rule 15), so nothing
+# here prints them.
 readonly GEO_LON="${B5_GEO_LON:-4.895168}"
 readonly GEO_LAT="${B5_GEO_LAT:-52.370216}"
 
@@ -1977,7 +2067,6 @@ readonly REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 readonly HAVEN_DIR="${REPO_ROOT}/haven"
 readonly START_STRFRY="${SCRIPT_DIR}/start-strfry.sh"
 readonly STOP_STRFRY="${SCRIPT_DIR}/stop-strfry.sh"
-readonly SECRET_SCAN="${SCRIPT_DIR}/scan-logs-for-secrets.sh"
 
 LOGCAT_PID=""
 GEO_PID=""
@@ -1997,6 +2086,14 @@ readonly APPOPS_NEW_IDS="${LOG_DIR}/relay-appops-new.ids"
 readonly APPOPS_DENIED_DUMP="${LOG_DIR}/appops.denied.b5.log"
 readonly APPOPS_RESTORED_DUMP="${LOG_DIR}/appops.restored.b5.log"
 readonly RELAY_POLL_LOG="${LOG_DIR}/relay-poll.b5.log"
+
+# The post-drive gate's verdict, folded into the EXIT trap's: a leak the gate
+# contained has deleted its sinks, so the trap's rescan alone would read clean.
+LOGSCAN_GATE_RC=0
+# The scanner's findings reports (sink:line, class, rule — never a value) live
+# BESIDE the uploaded directory, not in it: the workflow uploads LOG_DIR whole.
+readonly LOGSCAN_REPORTS="/tmp/b5-logscan"
+mkdir -p "${LOGSCAN_REPORTS}"
 
 # ---------------------------------------------------------------------------
 # Cleanup (EXIT trap): stop the background helpers, RESTORE the permission
@@ -2062,18 +2159,18 @@ cleanup() {
   # --self-test dispatch so the "a passing lane must still scan clean" property
   # is pinned by a fixture rather than only by this call site.
   b5_prepare_logs_for_scan "${LOG_DIR}"
-  echo "== Secret-leak scan over ${LOG_DIR} (Security Rule 6) =="
-  bash "${SECRET_SCAN}" "${LOG_DIR}" || scan_rc=$?
-  if (( scan_rc == 1 )); then
-    find "${LOG_DIR}" -type f -name '*.log' -delete 2>/dev/null || true
+  echo "== Log-privacy scan over ${LOG_DIR} (Security Rules 6 and 15) =="
+  logscan_gate_dir host /tmp/haven-soak/needles "${LOG_DIR}" "${LOGSCAN_REPORTS}/exit.ndjson" --host-decl "coordinate=${GEO_LAT},${GEO_LON}" --host-decl "coordinate=${GEO_LAT_B},${GEO_LON}" \
+    || scan_rc=$?
+  if (( scan_rc == 1 || LOGSCAN_GATE_RC == 1 )); then
     {
-      echo "Logs withheld: the secret-leak guard tripped (Security Rule 6)."
+      echo "Logs withheld: the log-privacy gate tripped (Security Rules 6 and 15)."
       echo "See the LEAK line(s) in the step log for file/label/line numbers."
     } > "${LOG_DIR}/LEAK_DETECTED.txt"
-    echo "ERROR: secret-leak guard tripped on B5 logs — logs deleted," \
+    echo "ERROR: log-privacy gate tripped on B5 logs — logs deleted," \
          "not uploaded." >&2
     rc=1
-  elif (( scan_rc != 0 )); then
+  elif (( scan_rc != 0 || LOGSCAN_GATE_RC != 0 )); then
     # An unscannable log is only NEWS on a lane that otherwise succeeded. When
     # the lane has already failed, the abort is why the capture is short or
     # missing, and reporting it as a second, differently-worded ERROR buries the
@@ -2087,18 +2184,18 @@ cleanup() {
     # with a less specific one. A leak (rc=1) escalates in both branches above
     # regardless — that path is untouched.
     if (( rc == 0 )); then
-      echo "ERROR: secret-leak guard could not scan the B5 logs" \
-           "(rc=${scan_rc}) — see the UNUSABLE line(s) above. The lane" \
-           "otherwise PASSED, so this is a real capture failure: an expected" \
-           "log was never written and the privacy scan therefore proved" \
-           "nothing. Logs kept for triage." >&2
+      echo "ERROR: the log-privacy gate could not certify the B5 logs" \
+           "(rc=${scan_rc}, post-drive rc=${LOGSCAN_GATE_RC}) — see the lines" \
+           "above. The lane otherwise PASSED, so this is a real capture" \
+           "failure: an expected log was never written and the privacy scan" \
+           "therefore proved nothing. Logs kept for triage." >&2
       rc=1
     else
-      echo "NOTE: the secret-leak guard could not scan every B5 log" \
-           "(rc=${scan_rc}) because the lane aborted before those captures" \
-           "were written — see the UNUSABLE line(s) above and the" \
-           "B5-LANE-FAIL line for the actual failure. Preserving the original" \
-           "exit code ${rc}. Logs kept for triage." >&2
+      echo "NOTE: the log-privacy gate could not certify every B5 log" \
+           "(rc=${scan_rc}, post-drive rc=${LOGSCAN_GATE_RC}) because the lane" \
+           "aborted before those captures were written — see the lines above" \
+           "and the B5-LANE-FAIL line for the actual failure. Preserving the" \
+           "original exit code ${rc}. Logs kept for triage." >&2
     fi
   fi
   bash "${STOP_STRFRY}" >/dev/null 2>&1 || true
@@ -2118,11 +2215,10 @@ fail() {
   echo "---- app-op read-backs ----" >&2
   cat "${APPOPS_DENIED_DUMP}" "${APPOPS_RESTORED_DUMP}" 2>/dev/null \
     | sed 's/^/    /' >&2 || echo "(no appops dumps captured)" >&2
-  # The injected point is a hardcoded public landmark, so printing it is
-  # acceptable here (same posture as run-b1/b3/b6).
-  echo "---- emulator location state ----" >&2
-  adb -s "${DEVICE}" shell dumpsys location 2>/dev/null \
-    | grep -aiA 4 'last location\|fused\|gps provider' | head -40 >&2 \
+  # Which providers the platform has and which are mocked; never the position
+  # (Security Rule 15 — the point is synthetic, and still a needle).
+  echo "---- emulator location providers ----" >&2
+  adb -s "${DEVICE}" shell dumpsys location 2>/dev/null | location_provider_names >&2 \
     || echo "(dumpsys location unavailable)" >&2
   exit 1
 }
@@ -2308,25 +2404,34 @@ dump_permissions() {
   adb -s "${DEVICE}" shell dumpsys package "${PKG}" > "$1" 2>&1 || true
 }
 
-# report_drive <label> <logfile> <rc> — echoes the drive log (after a secret
-# scan) and sets DRIVE_FAILED/DRIVE_REASON for the caller.
+# report_drive <label> <logfile> <rc> — echoes the drive log (after the
+# log-privacy gate) and sets DRIVE_FAILED/DRIVE_REASON for the caller.
 #
-# Scans BEFORE echoing: the EXIT trap's scan runs far too late to protect the
+# Gates BEFORE echoing: the EXIT trap's scan runs far too late to protect the
 # STEP log, which has no retention control and cannot be redacted after the
-# fact — a wider, more permanent sink than the artifact upload.
+# fact — a wider, more permanent sink than the artifact upload. The gate is
+# the key-material floor AND the identifier scanner, sealed from the host
+# needles plus both points this lane injects; a leak deletes both captures.
+# The worse of the two acts' verdicts is what the EXIT trap folds in.
 DRIVE_FAILED=0
 DRIVE_REASON=""
 report_drive() {
   local label="$1" logfile="$2" drc="$3"
   DRIVE_FAILED=0
   DRIVE_REASON=""
-  local clean=1
-  if bash "${SECRET_SCAN}" "${logfile}"; then
+  local clean=1 gate_rc=0
+  logscan_gate host /tmp/haven-soak/needles --host-decl "coordinate=${GEO_LAT},${GEO_LON}" --host-decl "coordinate=${GEO_LAT_B},${GEO_LON}" -- \
+    --sink "logcat=${LOGCAT_FILE}" --sink "drive=${logfile}" \
+    --report "${LOGSCAN_REPORTS}/gate-${label}.ndjson" || gate_rc=$?
+  if (( gate_rc == 1 || LOGSCAN_GATE_RC == 0 )); then
+    LOGSCAN_GATE_RC="${gate_rc}"
+  fi
+  if (( gate_rc == 0 )); then
     cat "${logfile}" || true
   else
     clean=0
-    echo "${label} drive log withheld from the step log — secret-leak guard" \
-         "tripped." >&2
+    echo "${label} drive log withheld from the step log — log-privacy gate" \
+         "rc ${gate_rc}." >&2
   fi
   if (( drc != 0 )); then
     DRIVE_FAILED=1
@@ -2420,8 +2525,8 @@ done
 #
 # NOTE the argument order: `geo fix` takes LONGITUDE first, then LATITUDE.
 # ---------------------------------------------------------------------------
-echo "Phase 3/7 — seeding emulator GPS (lon=${GEO_LON} lat=${GEO_LAT}," \
-     "alternating with lat=${GEO_LAT_B})..."
+echo "Phase 3/7 — seeding emulator GPS (geo fix injected, alternating between" \
+     "two points ${GEO_STEP_DEG}° of latitude apart)..."
 # THE RELATION THAT MAKES THE APP-OP OBSERVATION MEAN ANYTHING, in both
 # directions. The drive target arms only on a fix newer than
 # APPOPS_MAX_ARMING_STREAM_AGE_MS (proof the stream is DELIVERING) and then

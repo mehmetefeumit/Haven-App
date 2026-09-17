@@ -116,6 +116,8 @@ import 'package:haven/src/services/clock_skew_detector.dart'
     show ClockSkewDetector, DeviceClockComplaint;
 import 'package:haven/src/services/nostr_relay_service.dart'
     show NostrRelayService;
+import 'package:haven/src/utils/log_alias.dart'
+    show LogAliasClass, logAliasHandle, magnitudeBucket;
 import 'package:haven/src/widgets/location/clock_skew_banner.dart'
     show ClockSkewBanner;
 import 'package:integration_test/integration_test.dart';
@@ -223,8 +225,11 @@ const int _expectedRetentionSecs = 228;
 const ({double lat, double lon}) _coordsBaseline = (lat: 52.3702, lon: 4.8952);
 const ({double lat, double lon}) _coordsFast = (lat: 48.8584, lon: 2.2945);
 const ({double lat, double lon}) _coordsFastProd = (lat: 55.6761, lon: 12.5683);
-const ({double lat, double lon}) _coordsPeerA = (lat: 40.4319, lon: 116.5704);
-const ({double lat, double lon}) _coordsPeerC = (lat: 37.8199, lon: -122.4783);
+const ({double lat, double lon}) _coordsSampleA = (lat: 40.4319, lon: 116.5704);
+const ({double lat, double lon}) _coordsSampleC = (
+  lat: 37.8199,
+  lon: -122.4783,
+);
 const ({double lat, double lon}) _coordsSlow = (lat: 41.9028, lon: 12.4964);
 const ({double lat, double lon}) _coordsRestored = (lat: 59.9139, lon: 10.7522);
 
@@ -247,6 +252,9 @@ void main() {
       /// Records a defect in the behaviour this lane GATES.
       void record(String phase, String detail) {
         final line = '$kFindingMarker $phase: $detail';
+        // phase/detail are this file's own compiled-in diagnostic literals
+        // (see the call sites below), never remote- or user-authored text.
+        // harness-log-ok: see above
         debugPrint(line);
         findings.add('$phase: $detail');
       }
@@ -255,6 +263,9 @@ void main() {
       /// imposes. Never gating.
       void note(String phase, String detail) {
         final line = '$kEvidenceMarker $phase: $detail';
+        // phase/detail are this file's own compiled-in diagnostic literals
+        // (see the call sites below), never remote- or user-authored text.
+        // harness-log-ok: see above
         debugPrint(line);
         evidence.add('$phase: $detail');
       }
@@ -326,7 +337,7 @@ void main() {
           circleType: 'location_sharing',
           relays: <String>[defaultStrfryUrl],
           creatorFallbackRelays: <String>[defaultStrfryUrl],
-          label: 'b8',
+          scenario: 'b8',
         );
       } finally {
         // Security Rule 9: minimise the Dart-side secret's lifetime.
@@ -336,8 +347,9 @@ void main() {
       }
       if (creation.welcomeEvents.length < 2) {
         throw StateError(
-          '[b8] createCircle produced ${creation.welcomeEvents.length} '
-          'Welcome(s) for two invitees.',
+          '[b8] createCircle produced '
+          '${magnitudeBucket(creation.welcomeEvents.length)} Welcome(s) '
+          'for two invitees.',
         );
       }
 
@@ -364,10 +376,12 @@ void main() {
         coords: _coordsBaseline,
       );
       if (!baseline.accepted) {
+        // log-scan-ok: _rejectionClass reduces this to an allowlisted tag.
         throw StateError(
           '[b8] the hermetic relay rejected the BASELINE publish at true time '
-          '("${baseline.rejection}"). The lane is unusable — fix the harness '
-          'before reading any finding below.',
+          // harness-log-ok: _rejectionClass allowlist-classifies this.
+          '("${_rejectionClass(baseline.rejection)}"). The lane is '
+          'unusable — fix the harness before reading any finding below.',
         );
       }
 
@@ -410,7 +424,7 @@ void main() {
       if (!gotBaseline) {
         throw StateError(
           '[b8] the BASELINE location never reached Bob at true time '
-          '(sweep: ${_describe(sweep1)}). The lane is unusable — this is a '
+          '(sweep: ${_sweepStats(sweep1)}). The lane is unusable — this is a '
           'harness failure, not a clock-skew finding.',
         );
       }
@@ -446,7 +460,8 @@ void main() {
           'forward-skew-publish',
           'a device whose clock is +${_skew.inHours}h cannot publish at all: '
           'the correctly-clocked relay refuses the kind-445 '
-          '("${fast.rejection}"). Every event this device signs carries a '
+          '("${_rejectionClass(fast.rejection)}"). Every event this '
+          'device signs carries a '
           'future `created_at` (peeler event.rs:180) and a spec-conformant '
           'relay bounds that. NOT GATED: the only local lever that clears it '
           'is signing a `created_at` the device clock does not hold, and that '
@@ -563,33 +578,37 @@ void main() {
       // ---------------------------------------------------------------------
 
       // 3-pre, at TRUE time: two independent members mint a reading each.
-      final peerA = await _publishLocation(
+      final sampleAPublish = await _publishLocation(
         alice: alice,
         circle: aliceCircle,
         relay: relay,
-        coords: _coordsPeerA,
+        coords: _coordsSampleA,
       );
-      if (!peerA.accepted) {
+      if (!sampleAPublish.accepted) {
+        // log-scan-ok: _rejectionClass reduces this to an allowlisted tag.
         throw StateError(
           "[b8] the relay refused Alice's peer-sample publish at TRUE time "
-          '("${peerA.rejection}"). Harness failure.',
+          // harness-log-ok: _rejectionClass allowlist-classifies this.
+          '("${_rejectionClass(sampleAPublish.rejection)}"). '
+          'Harness failure.',
         );
       }
-      final peerCId = await carol.publishLocation(
+      final sampleCEventId = await carol.publishLocation(
         circle: carolCircle,
-        latitude: _coordsPeerC.lat,
-        longitude: _coordsPeerC.lon,
+        latitude: _coordsSampleC.lat,
+        longitude: _coordsSampleC.lon,
         relay: relay,
       );
       // Fetch both BEFORE the jump: the relay still holds them at true time,
       // and reading them now keeps the sample acquisition independent of
       // whatever the skewed clock does to a later REQ.
-      final peerAOnWire = await _fetchById(relay, ngidHex, peerA.eventId);
-      final peerCOnWire = await _fetchById(relay, ngidHex, peerCId);
-      if (peerAOnWire == null || peerCOnWire == null) {
+      final sampleAOnWire =
+          await _fetchById(relay, ngidHex, sampleAPublish.eventId);
+      final sampleCOnWire = await _fetchById(relay, ngidHex, sampleCEventId);
+      if (sampleAOnWire == null || sampleCOnWire == null) {
         throw StateError(
           '[b8] a peer-sample kind-445 never appeared on the relay '
-          '(alice=${peerAOnWire != null} carol=${peerCOnWire != null}). '
+          '(alice=${sampleAOnWire != null} carol=${sampleCOnWire != null}). '
           'Harness failure.',
         );
       }
@@ -600,8 +619,8 @@ void main() {
       // time. Both events' NIP-40 expiration is ~6 h in this device's future,
       // so `SessionManager::process_event` passes them through untouched —
       // the receiver gate only bounds the past.
-      final sampleA = await _decryptPeerSample(bob, peerAOnWire);
-      final sampleC = await _decryptPeerSample(bob, peerCOnWire);
+      final sampleA = await _decryptPeerSample(bob, sampleAOnWire);
+      final sampleC = await _decryptPeerSample(bob, sampleCOnWire);
       if (sampleA == null || sampleC == null) {
         throw StateError(
           '[b8] a peer sample failed to decrypt under a -${_skew.inHours}h '
@@ -716,7 +735,8 @@ void main() {
             'a device whose clock is -${_skew.inHours}h cannot publish at all: '
             'the event is born already expired (NIP-40 expiration = created_at '
             '+ ${_expectedRetentionSecs}s, both from the skewed clock) and the '
-            'relay refuses it at ingest ("${slow.rejection}"). NOT GATED: the '
+            'relay refuses it at ingest '
+            '("${_rejectionClass(slow.rejection)}"). NOT GATED: the '
             'expiration is derived inside the engine from the '
             'message-retention component, so the only local lever is clock '
             'correction, which is deferred.',
@@ -726,7 +746,9 @@ void main() {
             'backward-skew-publish',
             'the relay refused a kind-445 from a device whose clock is '
             '-${_skew.inHours}h for a reason that is NOT the expected '
-            'born-expired one ("${slow.rejection}"). The born-expired refusal '
+            'born-expired one '
+            '("${_rejectionClass(slow.rejection)}"). The born-expired '
+            'refusal '
             "is this lane's declared delivery cost; anything else is a real, "
             'fixable regression.',
           );
@@ -804,7 +826,8 @@ void main() {
           if (natural.deadlineHit || widened.deadlineHit) {
             throw StateError(
               '[b8] a catch-up sweep hit its ${_sweepSecs}s deadline '
-              '(natural=${_describe(natural)} widened=${_describe(widened)}). '
+              '(natural=${_sweepStats(natural)} '
+              'widened=${_sweepStats(widened)}). '
               'The window comparison below would be meaningless — harness '
               'failure, not a finding.',
             );
@@ -842,10 +865,13 @@ void main() {
         coords: _coordsRestored,
       );
       if (!restored.accepted) {
+        // log-scan-ok: _rejectionClass reduces this to an allowlisted tag.
         throw StateError(
           '[b8] the relay rejected a publish AFTER the clock was restored '
-          '("${restored.rejection}") — the device clock never came back, so '
-          'nothing above is attributable. Harness failure.',
+          // harness-log-ok: _rejectionClass allowlist-classifies this.
+          '("${_rejectionClass(restored.rejection)}") — the device '
+          'clock never came back, so nothing above is attributable. Harness '
+          'failure.',
         );
       }
       await _sweep(relayManager, bob, _sweepSecs);
@@ -884,9 +910,12 @@ void main() {
 
       // Terminal marker FIRST: the shell needs to know the body ran to the
       // end even (especially) on a red run.
+      // Only the marker's PRESENCE is parsed (b8_has_marker); the shell
+      // independently derives its own finding/evidence counts by counting
+      // `[b8] FINDING`/`[b8] EVIDENCE` lines — bucket these freely.
       debugPrint(
-        '$kAllPhasesMarker findings=${findings.length} '
-        'evidence=${evidence.length}',
+        '$kAllPhasesMarker findings=${magnitudeBucket(findings.length)} '
+        'evidence=${magnitudeBucket(evidence.length)}',
       );
 
       try {
@@ -955,6 +984,10 @@ class _ClockServo {
 
     final monotonic = Stopwatch()..start();
     final wallStart = DateTime.now();
+    // Clock-skew servo protocol — the shell parses the requested offset to
+    // drive the jump (documented device-clock value by design, see the class
+    // doc); seq is this servo's own small request ordinal, not user data.
+    // harness-log-ok: see above
     debugPrint('$kReqClockMarker $seq $offsetSecs');
 
     final deadline = Stopwatch()..start();
@@ -964,12 +997,19 @@ class _ClockServo {
           DateTime.now().difference(wallStart).inSeconds -
           monotonic.elapsed.inSeconds;
       if ((observed - delta).abs() <= _clockMatchTolerance.inSeconds) {
+        // Clock-skew servo protocol — the shell parses the observed offset
+        // to confirm the jump landed (documented device-clock value by
+        // design, see the class doc); seq is the request ordinal, not user
+        // data.
+        // harness-log-ok: see above
         debugPrint('$kClockObservedMarker $seq $observed');
         _offsetSecs = offsetSecs;
         return;
       }
     }
+    // harness-log-ok: seq is the servo's request ordinal, not user data.
     debugPrint('$kClockTimeoutMarker $seq');
+    // harness-log-ok: seq is the servo's request ordinal, not user data.
     throw StateError(
       '[b8] requested a ${delta}s clock jump (seq $seq) and never observed '
       'it within ${_clockJumpTimeout.inSeconds}s. The shell servo did not '
@@ -1012,9 +1052,13 @@ Future<_PublishOutcome> _publishLocation({
   )).sent!;
   final (accepted, msg) = await relay.publishAndAwaitOk(encrypted.eventJson);
   final id = _eventIdOf(encrypted.eventJson);
+  // Never the event id (even truncated) or the relay's own OK message text
+  // (remote-authored prose) — Log anonymity pillar.
   debugPrint(
-    '[b8] publish accepted=$accepted evt=${_short(id)} '
-    '${accepted ? '' : 'relay="$msg"'}',
+    '[b8] publish accepted=$accepted '
+    'evt=${logAliasHandle(LogAliasClass.event, id)} '
+    // harness-log-ok: msg is reduced to a boolean, never rendered.
+    '${accepted ? '' : 'rejectionMessagePresent=${msg.isNotEmpty}'}',
   );
   return (accepted: accepted, rejection: msg, eventId: id);
 }
@@ -1058,9 +1102,10 @@ Future<({Object? error, String eventId})> _publishViaProductionPath({
     error = e;
   }
   // Security Rule 8: the type, never the message — a publish error can carry
-  // relay-controlled prose.
+  // relay-controlled prose. Never the event id, even truncated (Log
+  // anonymity pillar).
   debugPrint(
-    '[b8] production publish evt=${_short(id)} '
+    '[b8] production publish evt=${logAliasHandle(LogAliasClass.event, id)} '
     'threw=${error?.runtimeType ?? '-'}',
   );
   return (error: error, eventId: id);
@@ -1108,7 +1153,7 @@ Future<_SweepResult> _sweep(
     ownPubkeyHex: bob.pubkeyHex,
     maxDurationSecs: BigInt.from(maxSecs),
   );
-  final result = (
+  final counters = (
     circlesSwept: r.circlesSwept,
     eventsApplied: r.eventsApplied,
     eventsDeferred: r.eventsDeferred,
@@ -1116,8 +1161,8 @@ Future<_SweepResult> _sweep(
     deadlineHit: r.deadlineHit,
     relayErrors: r.relayErrors,
   );
-  debugPrint('[b8] sweep ${_describe(result)}');
-  return result;
+  debugPrint('[b8] sweep ${_sweepStats(counters)}');
+  return counters;
 }
 
 /// Counter view of one catch-up sweep. Mirrors `CatchupResultFfi`; note that
@@ -1135,10 +1180,38 @@ typedef _SweepResult = ({
   int relayErrors,
 });
 
-String _describe(_SweepResult r) =>
-    'circles=${r.circlesSwept} applied=${r.eventsApplied} '
-    'deferred=${r.eventsDeferred} cursors=${r.cursorsAdvanced} '
-    'deadlineHit=${r.deadlineHit} relayErrors=${r.relayErrors}';
+/// A relay's NIP-01 `OK` message is `<machine-readable-prefix>: <free text>`
+/// (e.g. `invalid: event expired`) — the free text after the colon is
+/// relay-authored prose that must never reach a log or panic message (Log
+/// anonymity pillar: "no remote-authored prose"). NIP-01 only lists its
+/// prefixes as a CONVENTION, not a closed set a relay is bound to, so
+/// trusting whatever precedes the first colon would let an uncooperative
+/// relay smuggle arbitrary — possibly identifying — text through as if it
+/// were a safe, protocol-defined value. Classifies against the fixed NIP-01
+/// vocabulary instead, which is what every call site below actually needs
+/// to tell one refusal reason from another.
+String _rejectionClass(String msg) {
+  final colon = msg.indexOf(':');
+  final candidate = colon < 0 ? msg : msg.substring(0, colon);
+  const knownPrefixes = {
+    'duplicate',
+    'pow',
+    'blocked',
+    'rate-limited',
+    'invalid',
+    'restricted',
+    'error',
+  };
+  return knownPrefixes.contains(candidate) ? candidate : 'unrecognised';
+}
+
+String _sweepStats(_SweepResult r) =>
+    'circles=${magnitudeBucket(r.circlesSwept)} '
+    'applied=${magnitudeBucket(r.eventsApplied)} '
+    'deferred=${magnitudeBucket(r.eventsDeferred)} '
+    'cursors=${magnitudeBucket(r.cursorsAdvanced)} '
+    'deadlineHit=${r.deadlineHit} '
+    'relayErrors=${magnitudeBucket(r.relayErrors)}';
 
 /// Whether [bob]'s persisted last-known table holds [coords] for [sender].
 ///
@@ -1257,7 +1330,7 @@ Future<List<String>> _renderBanner(
       .toList();
   // The copy itself is never logged — this log line is uploaded as a CI
   // artifact and there is no reason to widen what it carries.
-  debugPrint('[b8] banner painted ${texts.length} text(s)');
+  debugPrint('[b8] banner painted ${magnitudeBucket(texts.length)} text(s)');
   return texts;
 }
 
@@ -1284,7 +1357,3 @@ String _eventIdOf(String eventJson) {
       ? (decoded['id'] as String? ?? '')
       : '';
 }
-
-/// First 8 hex chars of an event id — enough to correlate a publish with a
-/// later log line, far too little to be a tracking vector.
-String _short(String hex) => hex.length <= 8 ? hex : hex.substring(0, 8);

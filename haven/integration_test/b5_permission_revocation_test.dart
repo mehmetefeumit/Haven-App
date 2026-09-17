@@ -191,6 +191,7 @@ import 'package:haven/src/services/location_service.dart'
     show LocationPermissionStatus, LocationServiceException, Position;
 import 'package:haven/src/services/nostr_circle_service.dart'
     show NostrCircleService;
+import 'package:haven/src/utils/log_alias.dart' show magnitudeBucket;
 import 'package:integration_test/integration_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -323,6 +324,18 @@ const String kAct2DoneMarker = '[b5] ACT2_DONE';
 /// Closes the capture in BOTH acts. Printed unconditionally, before the
 /// terminal assertion, so the shell's oracle always reads a complete window.
 const String kSequenceCompleteMarker = '[b5] SEQUENCE_COMPLETE';
+
+/// Buckets a duration into `<1s|1-9s|10-59s|60s+` for diagnostic printouts
+/// in this file that the shell does NOT parse (see the "PARSED" notes on
+/// the marker constants above for the ones that must stay exact) — never
+/// the millisecond magnitude itself (Log anonymity pillar).
+String _b5DurationBucket(Duration d) {
+  final s = d.inSeconds;
+  if (s < 1) return '<1s';
+  if (s < 10) return '1-9s';
+  if (s < 60) return '10-59s';
+  return '60s+';
+}
 
 /// How fresh the newest stream fix must be before ACT 1 arms the app-op
 /// phase.
@@ -599,11 +612,12 @@ void main() {
       // process would simply run ACT 1 again, publish, and the shell's
       // relay-side window would go red with a real finding rather than a
       // green run that proved nothing.
-      final permission = await locationService.checkPermission();
-      final isAct1 = permission == LocationPermissionStatus.whileInUse ||
-          permission == LocationPermissionStatus.always;
+      final permissionStatus = await locationService.checkPermission();
+      final isAct1 = permissionStatus == LocationPermissionStatus.whileInUse ||
+          permissionStatus == LocationPermissionStatus.always;
       debugPrint(
-        '$kPhaseMarker act=${isAct1 ? 1 : 2} perm=${permission.name} pid=$pid',
+        '$kPhaseMarker act=${isAct1 ? 1 : 2} '
+        'perm=${permissionStatus.name} pid=$pid',
       );
 
       // A creator-only circle is enough, and is deliberately simpler than
@@ -625,7 +639,7 @@ void main() {
           circleType: 'location_sharing',
           relays: <String>[defaultStrfryUrl],
           creatorFallbackRelays: <String>[defaultStrfryUrl],
-          label: 'b5',
+          scenario: 'b5',
         ),
       );
 
@@ -654,8 +668,11 @@ void main() {
               .timeout(_publishCycleTimeout);
         } on TimeoutException {
           wedgedCycles += 1;
+          // `i=` is not parsed (only APPOPS_DONE/ACT2_DONE's aggregate
+          // `wedged=` is) — bucket it; `after=` is the fixed
+          // `_publishCycleTimeout` constant, not a measurement.
           debugPrint(
-            '$kAct2WedgedMarker i=$wedgedCycles '
+            '$kAct2WedgedMarker i=${magnitudeBucket(wedgedCycles)} '
             'after=${_publishCycleTimeout.inSeconds}s',
           );
           return null;
@@ -734,6 +751,7 @@ void main() {
             'observes after the revoke can be attributed to it',
           );
         }
+        // harness-log-ok: n= parsed by b5_marker_number's [0-9]+ regex.
         debugPrint('$kBaselinePublishedMarker n=$baseline');
 
         await releaseProbe();
@@ -842,7 +860,13 @@ void main() {
           );
         }
 
-        // The shell denies the app-op when it sees this.
+        // The shell denies the app-op when it sees this. All three fields
+        // are parsed by b5_marker_number and gated against exact-ms/exact-
+        // count thresholds (APPOPS_MAX_ARMING_STREAM_AGE_MS,
+        // APPOPS_MAX_ARMING_READ_MS) — a bucket would break the shell's `((
+        // … ))` arithmetic. These are GPS-fix staleness/read-latency
+        // diagnostics local to this test run, not user-identifying.
+        // harness-log-ok: streamAgeMs=/eligible=/readMs= all parsed above.
         debugPrint(
           '$kAppOpsArmedMarker streamAgeMs=$armingStreamAgeMs '
           'eligible=$appOpsEligible readMs=$armingReadMs',
@@ -889,8 +913,10 @@ void main() {
         if (observedSilenceMs >= 0) {
           debugPrint(
             '$kAppOpsObservedMarker '
-            'after=${DateTime.now().difference(armedAt).inSeconds} '
-            'silenceMs=$observedSilenceMs',
+            // `after=` is not parsed by the shell (only `silenceMs=` is) —
+            // bucket it.
+            'after=${_b5DurationBucket(DateTime.now().difference(armedAt))} '
+            'silenceMs=$observedSilenceMs', // harness-log-ok: parsed, see above
           );
         } else {
           debugPrint(kAppOpsNotObservedMarker);
@@ -924,7 +950,13 @@ void main() {
           appOpsRefusal = e;
         }
         if (appOpsLeaked != null) {
-          debugPrint('$kAppOpsGpsLeakedMarker streamAgeMs=$ageAtProbeMs');
+          // Not parsed by the shell (only b5_has_marker checks this marker
+          // for presence, unlike its APPOPS_GPS_REFUSED sibling) — bucket.
+          final ageAtProbeDuration = Duration(milliseconds: ageAtProbeMs);
+          debugPrint(
+            '$kAppOpsGpsLeakedMarker '
+            'streamAge=${_b5DurationBucket(ageAtProbeDuration)}',
+          );
           failures.add(
             'getCurrentLocation() RETURNED A POSITION after location access '
             'was withdrawn from the running process. The permission gate '
@@ -935,12 +967,13 @@ void main() {
           // Type only, never the message (Security Rule 8).
           debugPrint(
             '$kAppOpsGpsRefusedMarker type=${appOpsRefusal.runtimeType} '
-            'streamAgeMs=$ageAtProbeMs',
+            'streamAgeMs=$ageAtProbeMs', // harness-log-ok: parsed, see above
           );
           if (ageAtProbe == null || ageAtProbe > kStreamPositionMaxAge) {
             failures.add(
               'the app-op probe refused, but the newest stream fix was '
-              '${ageAtProbeMs}ms old — outside kStreamPositionMaxAge '
+              '${_b5DurationBucket(Duration(milliseconds: ageAtProbeMs))} '
+              'old — outside kStreamPositionMaxAge '
               '(${kStreamPositionMaxAge.inMilliseconds}ms), so the cache '
               'would have been refused with the app-op untouched and this '
               'refusal discriminates nothing',
@@ -961,10 +994,16 @@ void main() {
           if (n != null && n > appOpsMax) {
             appOpsMax = n;
           }
-          debugPrint('$kAppOpsCycleMarker i=$appOpsCycles n=${n ?? -1}');
+          // Progress-only line; not parsed by the runner (unlike the
+          // ACT2_DONE summary below) — safe to bucket.
+          debugPrint(
+            '$kAppOpsCycleMarker i=${magnitudeBucket(appOpsCycles)} '
+            'n=${n == null ? "wedged" : magnitudeBucket(n)}',
+          );
           await Future<void>.delayed(_appOpsCycleSpacing);
         }
         final appOpsWedged = wedgedCycles - appOpsWedgedBefore;
+        // harness-log-ok: cycles=/max=/wedged= parsed by b5_marker_number.
         debugPrint(
           '$kAppOpsDoneMarker cycles=$appOpsCycles max=$appOpsMax '
           'wedged=$appOpsWedged',
@@ -977,7 +1016,8 @@ void main() {
         }
         if (appOpsWedged > 0) {
           failures.add(
-            '$appOpsWedged of $appOpsCycles app-op publish cycle(s) never '
+            '${magnitudeBucket(appOpsWedged)} of '
+            '${magnitudeBucket(appOpsCycles)} app-op publish cycle(s) never '
             'returned within ${_publishCycleTimeout.inSeconds}s. A publish '
             'path that hangs is not one that declined to publish, and this '
             'lane may not report the second when it observed the first',
@@ -985,9 +1025,10 @@ void main() {
         }
         if (appOpsMax > 0) {
           failures.add(
-            'the app published location to $appOpsMax circle(s) after the '
-            'location app-op was denied — access was withdrawn and the app '
-            'went on broadcasting the position it already held',
+            'the app published location to '
+            '${magnitudeBucket(appOpsMax)} circle(s) after the location '
+            'app-op was denied — access was withdrawn and the app went on '
+            'broadcasting the position it already held',
           );
         }
 
@@ -1018,8 +1059,8 @@ void main() {
         }
 
         if (observedRevoked) {
-          final after = await locationService.checkPermission();
-          debugPrint('$kRevokeObservedMarker perm=${after.name}');
+          final afterStatus = await locationService.checkPermission();
+          debugPrint('$kRevokeObservedMarker perm=${afterStatus.name}');
 
           // The process outlived the revoke, so the app's OWN behaviour
           // mid-session is observable. Measure how long publishing continues.
@@ -1033,13 +1074,19 @@ void main() {
           int? tailSeconds;
           while (DateTime.now().isBefore(deadline)) {
             final n = await publishNow();
-            final elapsed = DateTime.now().difference(revokedAt).inSeconds;
+            final elapsed = DateTime.now().difference(revokedAt);
             index += 1;
-            debugPrint('$kMidSessionCycleMarker i=$index t=$elapsed n=$n');
+            // Not parsed by the shell (unlike its MIDSESSION_TAIL sibling
+            // below) — bucket every field.
+            debugPrint(
+              '$kMidSessionCycleMarker i=${magnitudeBucket(index)} '
+              't=${_b5DurationBucket(elapsed)} '
+              'n=${n == null ? "wedged" : magnitudeBucket(n)}',
+            );
             if (n == 0) {
               consecutiveZeros += 1;
               if (consecutiveZeros >= _sustainedZeroChecks) {
-                tailSeconds = elapsed;
+                tailSeconds = elapsed.inSeconds;
                 break;
               }
             } else {
@@ -1057,6 +1104,7 @@ void main() {
               'permission to collect it',
             );
           } else {
+            // harness-log-ok: tail= parsed by b5_marker_number.
             debugPrint('$kMidSessionTailMarker tail=$tailSeconds');
           }
           debugPrint(kSurvivedRevokeMarker);
@@ -1066,7 +1114,7 @@ void main() {
         // ACT 2 — relaunched with the permission revoked. This is where the
         // production `denied` / `deniedForever` branches actually execute.
         // ===================================================================
-        if (permission == LocationPermissionStatus.notDetermined) {
+        if (permissionStatus == LocationPermissionStatus.notDetermined) {
           failures.add(
             'checkPermission() reported notDetermined — the app has never '
             'asked, which is not the post-revocation state this act exists '
@@ -1076,6 +1124,7 @@ void main() {
         }
 
         final eligible = await eligibleCircleCount();
+        // harness-log-ok: eligible= parsed by b5_marker_number.
         debugPrint('$kAct2ArmedMarker eligible=$eligible');
         if (eligible < 1) {
           failures.add(
@@ -1144,12 +1193,16 @@ void main() {
           if (n != null && n > maxPublished) {
             maxPublished = n;
           }
-          // `n=-1` for a wedged cycle: the marker's field stays numeric for
-          // the shell's parser, and -1 cannot collide with a real count.
-          debugPrint('$kAct2CycleMarker i=$cycles n=${n ?? -1}');
+          // Progress-only line; not parsed by the runner (unlike the
+          // ACT2_DONE summary below) — safe to bucket.
+          debugPrint(
+            '$kAct2CycleMarker i=${magnitudeBucket(cycles)} '
+            'n=${n == null ? "wedged" : magnitudeBucket(n)}',
+          );
           await Future<void>.delayed(_act2CycleSpacing);
         }
         final wedgedHere = wedgedCycles - wedgedBefore;
+        // harness-log-ok: cycles=/max=/wedged= parsed by b5_marker_number.
         debugPrint(
           '$kAct2DoneMarker cycles=$cycles max=$maxPublished '
           'wedged=$wedgedHere',
@@ -1163,7 +1216,8 @@ void main() {
         }
         if (wedgedHere > 0) {
           failures.add(
-            '$wedgedHere of $cycles ACT 2 publish cycle(s) never returned '
+            '${magnitudeBucket(wedgedHere)} of ${magnitudeBucket(cycles)} '
+            'ACT 2 publish cycle(s) never returned '
             'within ${_publishCycleTimeout.inSeconds}s. A publish path that '
             'hangs with the permission revoked is NOT the same as one that '
             'declines to publish, and this lane may not report the second '
@@ -1178,12 +1232,14 @@ void main() {
         }
         if (maxPublished > 0) {
           failures.add(
-            'the app published location to $maxPublished circle(s) with '
+            'the app published location to '
+            '${magnitudeBucket(maxPublished)} circle(s) with '
             'ACCESS_FINE_LOCATION revoked',
           );
         }
       }
 
+      // harness-log-ok: runner-grepped marker constant
       debugPrint(kSequenceCompleteMarker);
 
       // Single terminal assertion. Everything above has already been printed

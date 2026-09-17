@@ -58,6 +58,19 @@ pub struct SinkArg {
     pub paths: Vec<PathBuf>,
 }
 
+/// What a scan is entitled to conclude.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ScanMode {
+    /// A sealed manifest: needle terms, positive controls, structural rules and
+    /// line floors.
+    #[default]
+    Full,
+    /// No manifest: the structural rules and the line floors, and nothing else.
+    /// It certifies that the rules RAN over the capture — never that the values
+    /// a run minted are absent from it, because none were declared.
+    RulesOnly,
+}
+
 /// Whether a finding came from a needle term or a structural rule.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FindingKind {
@@ -117,6 +130,12 @@ pub struct Outcome {
     pub plants_caught: usize,
     /// Declared plant requirements.
     pub plants_required: usize,
+    /// What this scan was entitled to conclude, which the report says out loud.
+    pub mode: ScanMode,
+    /// Whether the sealed run had a channel to hand the app a Dart token. A
+    /// `plants 0/0` under `none` is a run with no channel, not a run whose
+    /// controls all passed, and the summary has to be able to tell them apart.
+    pub declared_plants: crate::plants::DeclaredPlants,
 }
 
 impl Outcome {
@@ -230,6 +249,10 @@ impl<'a> Needles<'a> {
 struct FileReport {
     bytes: u64,
     lines: u64,
+    /// Lines a framed sink (`logcat`, `ios`) could actually parse. Zero of them
+    /// in a non-empty file means the capture is not in the format the sink
+    /// class frames, so no structural rule ran over any of it.
+    framed: u64,
     /// `(term index, line, reassembled)` → `(count, sample)`.
     needles: BTreeMap<(usize, u64, bool), (u64, String)>,
     /// `(rule, line, tag)` → `(count, sample)`.
@@ -257,6 +280,10 @@ struct Reassembly {
 /// `plants_in` restricts plant reconciliation to one file per class (the lane
 /// passes its final-attempt drive slice, while both drive files are still scanned
 /// for needles).
+///
+/// Under [`ScanMode::RulesOnly`] the manifest declares nothing, so there are no
+/// needles to search and no positive controls to reconcile; the structural rules
+/// and the line floors are the whole verdict.
 #[must_use]
 pub fn scan_sinks(
     manifest: &Manifest,
@@ -265,8 +292,13 @@ pub fn scan_sinks(
     plants_in: &BTreeMap<String, PathBuf>,
     rules: &RuleSet,
     disclose: bool,
+    mode: ScanMode,
 ) -> Outcome {
-    let mut outcome = Outcome::default();
+    let mut outcome = Outcome {
+        mode,
+        declared_plants: manifest.declared_plants,
+        ..Outcome::default()
+    };
     let plant_shape = plants::shape_regex();
     // `(sink class, token)` → occurrences, so "present in logcat AND in drive"
     // is answerable rather than merely "present somewhere".
@@ -345,7 +377,9 @@ pub fn scan_sinks(
     }
 
     check_floors(manifest, sinks, &mut outcome);
-    check_plants(manifest, sinks, &plant_counts, &shape_seen, &mut outcome);
+    if mode == ScanMode::Full {
+        check_plants(manifest, sinks, &plant_counts, &shape_seen, &mut outcome);
+    }
     outcome
 }
 
@@ -397,6 +431,23 @@ fn scan_one(file: &SinkFile<'_>, tally: &mut PlantTally<'_>, outcome: &mut Outco
     };
     outcome.bytes_read += report.bytes;
     *outcome.lines.entry(file.class.to_owned()).or_default() += report.lines;
+
+    // A framed sink whose every line failed to parse is a capture in a rendering
+    // this sink class does not know — a different `log show --style`, a logcat
+    // without `-v threadtime`. Nothing else would say so: the rules simply skip
+    // every line and the file reads as clean. That is the one failure mode a
+    // scanner must never render as a pass, so it is the capture's rc, not the
+    // app's.
+    if file.spec.entry_format != EntryFormat::Plain && report.lines > 0 && report.framed == 0 {
+        outcome.problems.push(Problem {
+            rc: RC_UNUSABLE,
+            message: format!(
+                "no line of {} parsed as `{}` framing; the capture is in a rendering this sink class does not know, so no structural rule ran over any of it",
+                file.path.display(),
+                file.class
+            ),
+        });
+    }
 
     if file.reconcile_plants {
         for (token, count) in &report.plants {
@@ -515,11 +566,19 @@ fn check_plants(
     let classes: std::collections::BTreeSet<&str> =
         sinks.iter().map(|s| s.class.as_str()).collect();
     // The Dart plant is `debugPrint`ed, so it reaches the drive transcript and
-    // whichever device log the platform writes. Requiring it in exactly the
-    // classes this scan names derives the platform instead of hard-coding it.
-    let declared_classes: Vec<&str> = ["logcat", "ios", "drive"]
-        .into_iter()
-        .filter(|c| classes.contains(c))
+    // whichever device log the platform writes. WHICH classes must carry it is
+    // the policy's `declared_plants_expected`, read here rather than listed
+    // here: the one place that answer is written down is the policy, where a
+    // reviewer sees it next to the reason.
+    let declared_classes: Vec<&str> = classes
+        .iter()
+        .copied()
+        .filter(|class| {
+            manifest
+                .sinks
+                .get(*class)
+                .is_some_and(|spec| spec.declared_plants_expected)
+        })
         .collect();
 
     let declared: Vec<&PlantSlot> = manifest.plants.iter().collect();
@@ -759,6 +818,9 @@ fn handle_line(
     report: &mut FileReport,
 ) {
     let framed = frame(ctx.spec, text);
+    if framed.raw_tag.is_some() {
+        report.framed += 1;
+    }
     // Only for a line the window pass already matched on. The window pass for a
     // chunk completes before the line pass of the same chunk, and a match
     // straddling a chunk boundary lands on the line still open at that boundary
@@ -773,24 +835,26 @@ fn handle_line(
         *report.plants.entry(found.as_str().to_owned()).or_default() += 1;
     }
     if ctx.spec.structural_rules && framed.owned {
-        for hit in ctx
-            .rules
-            .evaluate(framed.body, ctx.sink_path, framed.tag.as_deref())
-        {
-            let entry = report
+        for segment in rule_segments(ctx.spec, framed.body) {
+            for hit in ctx
                 .rules
-                .entry((hit.rule, line_no, framed.tag.clone()))
-                .or_insert_with(|| {
-                    (
-                        0,
-                        if ctx.disclose {
-                            hit.matched.clone()
-                        } else {
-                            String::new()
-                        },
-                    )
-                });
-            entry.0 += 1;
+                .evaluate(segment, ctx.sink_path, framed.tag.as_deref())
+            {
+                let entry = report
+                    .rules
+                    .entry((hit.rule, line_no, framed.tag.clone()))
+                    .or_insert_with(|| {
+                        (
+                            0,
+                            if ctx.disclose {
+                                hit.matched.clone()
+                            } else {
+                                String::new()
+                            },
+                        )
+                    });
+                entry.0 += 1;
+            }
         }
     }
     if ctx.spec.reassemble {
@@ -828,6 +892,27 @@ fn handle_line(
             .buf
             .extend_from_slice(collapse_whitespace(framed.body, leading).as_bytes());
     }
+}
+
+/// The pieces of one physical line the structural rules are evaluated on.
+///
+/// A progress reporter writing to a pipe rewrites its status line with a
+/// CARRIAGE RETURN and no newline, so one physical line of `flutter test`'s
+/// compact output carries hundreds of independent updates — up to 231 in the
+/// transcripts this was measured on. Evaluated as one string, the tail of one
+/// update sits within S8's 24-character window of the next update's timestamp
+/// digits, and a test description ending in `key` reads as a key next to an
+/// encoded blob. They are separate records, so they are evaluated separately.
+///
+/// Only for `plain` sinks: a logcat or a `log show` entry is one record per
+/// line by construction, and a stray `\r` inside one is data, not a record
+/// boundary. The reported line number stays the PHYSICAL one — a segment index
+/// would name a position no editor can find.
+fn rule_segments<'a>(spec: &SinkSpec, body: &'a str) -> impl Iterator<Item = &'a str> {
+    let split = spec.entry_format == EntryFormat::Plain;
+    let mut once = (!split).then_some(body);
+    let mut parts = split.then(|| body.split('\r')).into_iter().flatten();
+    std::iter::from_fn(move || once.take().or_else(|| parts.next()))
 }
 
 /// Matches the re-joined run and reports only hits that SPAN a join.
@@ -914,22 +999,124 @@ fn frame<'a>(spec: &SinkSpec, text: &'a str) -> Framed<'a> {
             owned: true,
         },
         EntryFormat::Logcat => parse_logcat(spec, text),
-        EntryFormat::Ios => {
-            let process = spec
-                .owned_processes
-                .iter()
-                .find(|p| text.contains(p.as_str()))
-                .cloned();
-            Framed {
-                body: text,
-                owned: process.is_some(),
-                raw_tag: process.clone(),
-                tag: process,
-                pid: None,
-                tid: None,
-            }
-        }
+        EntryFormat::Ios => parse_ios(spec, text),
     }
+}
+
+/// A `log show` line, in either rendering the lanes can produce.
+///
+/// * **`--style syslog`**, which is what every iOS lane captures:
+///   `<date> <time+tz> <host> <process>[<pid>[:<tid>]] <<Type>>: <message>`.
+/// * the **default columnar** style:
+///   `<date> <time+tz> <thread> <type> <activity> <pid> <ttl> <process>: <message>`.
+///
+/// Both, because the capture is one `--style` flag away from the other and a
+/// rendering this function cannot frame is a rendering the structural rules
+/// silently skip. The rc-3 net in [`scan_one`] is what catches a THIRD one.
+///
+/// In both, `<process>` may carry the emitting library in parentheses
+/// (`Runner(Flutter)`), which is framing rather than identity; the message may
+/// open with the record's `[subsystem:category]` or an `NSLog` prefix, which
+/// stay in the body, because on iOS the process is `Runner` for everything
+/// Haven emits and the subsystem is the only thing that says which layer wrote
+/// the line.
+///
+/// Ownership is an EXACT match of the process name, never a substring. A
+/// substring test owns `RunnerHelper` and — the reason this matters — owns any
+/// vendor line whose MESSAGE happens to contain the word `Runner`, putting
+/// remote-authored text under Haven's structural rules. A line that does not
+/// parse is treated as NOT owned, so the rules skip it; needles are still
+/// searched in every byte of it.
+fn parse_ios<'a>(spec: &SinkSpec, text: &'a str) -> Framed<'a> {
+    parse_ios_syslog(spec, text)
+        .or_else(|| parse_ios_columnar(spec, text))
+        .unwrap_or(Framed {
+            body: text,
+            tag: None,
+            raw_tag: None,
+            pid: None,
+            tid: None,
+            owned: false,
+        })
+}
+
+/// `<date> <time+tz> <host> <process>[<pid>[:<tid>]] <<Type>>: <message>`.
+fn parse_ios_syslog<'a>(spec: &SinkSpec, text: &'a str) -> Option<Framed<'a>> {
+    let ([_date, _time, _host, token], cursor) = split_fields::<4>(text)?;
+    let (process, bracketed) = token.split_once('[')?;
+    // `[431]` and `[431:12345]` both occur; the thread half is framing.
+    let pid = bracketed.strip_suffix(']')?.split(':').next()?;
+    if pid.is_empty() || !pid.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let (kind, body) = text[cursor..]
+        .trim_start()
+        .strip_prefix('<')?
+        .split_once(">:")?;
+    if kind.is_empty() || !kind.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        return None;
+    }
+    framed_ios(spec, process, pid, body)
+}
+
+/// `<date> <time+tz> <thread> <type> <activity> <pid> <ttl> <process>: <message>`.
+fn parse_ios_columnar<'a>(spec: &SinkSpec, text: &'a str) -> Option<Framed<'a>> {
+    let ([_date, _time, thread, _type, activity, pid, ttl], cursor) = split_fields::<7>(text)?;
+    if !thread.starts_with("0x")
+        || !activity.starts_with("0x")
+        || !pid.bytes().all(|b| b.is_ascii_digit())
+        || !ttl.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    let (process, body) = text[cursor..].split_once(':')?;
+    framed_ios(spec, process, pid, body)
+}
+
+/// The half both `ios` renderings share: strip the library suffix, decide
+/// ownership by exact name, and hand the rules the message alone.
+fn framed_ios<'a>(spec: &SinkSpec, process: &str, pid: &str, body: &'a str) -> Option<Framed<'a>> {
+    let name = process
+        .split_once('(')
+        .map_or(process, |(name, _)| name)
+        .trim();
+    if name.is_empty() {
+        return None;
+    }
+    let owned = spec
+        .owned_processes
+        .iter()
+        .any(|candidate| candidate == name);
+    Some(Framed {
+        body: body.strip_prefix(' ').unwrap_or(body),
+        tag: owned.then(|| name.to_owned()),
+        raw_tag: Some(name.to_owned()),
+        pid: Some(pid.to_owned()),
+        tid: None,
+        owned,
+    })
+}
+
+/// The first `N` space-separated fields of `text`, and the offset just past
+/// them. `None` when the line holds fewer than `N`.
+fn split_fields<const N: usize>(text: &str) -> Option<([&str; N], usize)> {
+    let bytes = text.as_bytes();
+    let mut cursor = 0usize;
+    let mut fields = [""; N];
+    for field in &mut fields {
+        while cursor < bytes.len() && bytes[cursor] == b' ' {
+            cursor += 1;
+        }
+        let start = cursor;
+        while cursor < bytes.len() && bytes[cursor] != b' ' {
+            cursor += 1;
+        }
+        if start == cursor {
+            return None;
+        }
+        *field = &text[start..cursor];
+    }
+    Some((fields, cursor))
 }
 
 /// `MM-DD HH:MM:SS.mmm  pid  tid P tag: message` — `adb logcat -v threadtime`.
@@ -1023,6 +1210,8 @@ mod tests {
     use crate::{RC_GUARD, RC_UNUSABLE};
 
     const PUBKEY: &str = "0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9";
+    /// One line per documented `log show --style syslog` column variant.
+    const IOS_FORMAT: &str = include_str!("../fixtures/format.ios.log");
     const MLS_GROUP_ID: &str = "3f4a5b6c7d8e9f0a1b2c3d4e5f6071823f4a5b6c7d8e9f0a1b2c3d4e5f607182";
 
     /// A scratch directory, removed on drop.
@@ -1077,6 +1266,7 @@ mod tests {
             dropped: expansion.dropped,
             ledger: Vec::new(),
             plants: Vec::new(),
+            declared_plants: crate::plants::DeclaredPlants::Dart,
             floors: policy.sinks.keys().map(|name| (name.clone(), 0)).collect(),
             expect: BTreeMap::new(),
             scoped_out: policy
@@ -1111,6 +1301,7 @@ mod tests {
             &BTreeMap::new(),
             &rules(),
             false,
+            super::ScanMode::Full,
         )
     }
 
@@ -1385,6 +1576,159 @@ mod tests {
         assert_eq!(outcome.findings[0].line, 2);
     }
 
+    /// Every documented column variant of `log show`, in BOTH renderings.
+    ///
+    /// The lines that must fire are the owned ones of each rendering; the lines
+    /// that must NOT are a vendor process, a process whose name merely CONTAINS
+    /// an owned one, a vendor line whose message contains one, and a line that
+    /// is in neither format. The last two are the substring trap the first
+    /// implementation walked into: it owned any line with the word `Runner`
+    /// anywhere in it, which puts remote-authored text under Haven's rules.
+    #[test]
+    fn the_ios_column_variants_frame_exactly_the_owned_lines() {
+        let dir = Dir::new("iosformat");
+        let manifest = manifest(&[("pubkey", PUBKEY)]);
+        let path = dir.write("format.ios.log", IOS_FORMAT);
+        let outcome = run(&manifest, "ios", &[path]);
+
+        let rule_lines: Vec<u64> = outcome
+            .findings
+            .iter()
+            .filter(|f| f.kind == FindingKind::Rule)
+            .map(|f| f.line)
+            .collect();
+        assert_eq!(
+            rule_lines,
+            vec![15, 16, 17, 18, 23, 25, 26, 27],
+            "only the owned variants of either rendering may reach the rules"
+        );
+        // The tag is the process with the library stripped, and only where Haven
+        // owns it — `Runner` for everything Haven emits on iOS.
+        for finding in outcome
+            .findings
+            .iter()
+            .filter(|f| f.kind == FindingKind::Rule)
+        {
+            assert_eq!(finding.tag.as_deref(), Some("Runner"), "{finding:?}");
+        }
+        // A needle in a VENDOR line is still a disclosure in an uploaded
+        // artifact, so the term search covers the lines the rules skip.
+        let needle_lines: Vec<u64> = outcome
+            .findings
+            .iter()
+            .filter(|f| f.kind == FindingKind::Needle)
+            .map(|f| f.line)
+            .collect();
+        assert!(
+            !needle_lines.is_empty() && needle_lines.iter().all(|line| *line == 33),
+            "the declared pubkey sits on the un-owned last line: {needle_lines:?}"
+        );
+    }
+
+    /// The rules run on the MESSAGE, not on the framing — in both renderings.
+    #[test]
+    fn an_ios_body_excludes_the_framing_of_either_rendering() {
+        let spec = Policy::load().expect("policy").sinks["ios"].clone();
+        let columnar = super::frame(
+            &spec,
+            "2026-09-12 10:00:00.000000+0000 0x1e0f     Default     0x0                  431    0    Runner(libsystem_network.dylib): [frb_user:default] settled",
+        );
+        assert_eq!(columnar.body, "[frb_user:default] settled");
+        assert!(columnar.owned);
+        assert_eq!(columnar.raw_tag.as_deref(), Some("Runner"));
+        assert_eq!(columnar.pid.as_deref(), Some("431"));
+
+        let syslog = super::frame(
+            &spec,
+            "2026-09-12 10:00:00.000000+0000 localhost Runner(Flutter)[431:12345] <Notice>: flutter: settled",
+        );
+        assert_eq!(syslog.body, "flutter: settled");
+        assert!(syslog.owned);
+        assert_eq!(syslog.raw_tag.as_deref(), Some("Runner"));
+        assert_eq!(
+            syslog.pid.as_deref(),
+            Some("431"),
+            "the thread half of `[pid:tid]` is framing, not identity"
+        );
+
+        // A Haven record's CONTINUATION lines carry no process column at all, so
+        // they are un-owned in both renderings: the rules never see the body of
+        // a multi-line panic on iOS. Needles still are searched in every byte.
+        let continuation = super::frame(&spec, "    at haven_core::relay::manager (line 1)");
+        assert!(!continuation.owned);
+        assert!(continuation.raw_tag.is_none());
+    }
+
+    /// A progress reporter's carriage returns are RECORD boundaries, not text.
+    ///
+    /// `flutter test`'s compact reporter rewrites its status line with `\r` and
+    /// no newline when it writes to a pipe, so one physical line carries many
+    /// updates. Joined, the tail of one update (`… clears the key`) sits inside
+    /// S8's 24-character window of the next update's path and timestamp, and
+    /// every green Flutter lane would delete its own transcript. The control is
+    /// the same text with the `\r` replaced by a space: it MUST fire, or this
+    /// test would pass for the wrong reason.
+    #[test]
+    fn a_progress_reporters_carriage_returns_separate_records() {
+        let dir = Dir::new("cr");
+        let manifest = manifest(&[]);
+        let segments = "00:02 +58: haven/test/secrets_store_test.dart: SecretsStore reads the key";
+        let next = "00:02 +59: haven/test/providers/identity_provider_test.dart: ok";
+
+        let joined = dir.write("joined.drive.log", &format!("{segments} {next}\n"));
+        let control = run(&manifest, "drive", &[joined]);
+        assert_eq!(
+            control
+                .findings
+                .iter()
+                .filter(|f| f.rule.as_deref() == Some("S8"))
+                .count(),
+            1,
+            "the control must fire, or the split below proves nothing: {:?}",
+            control.findings
+        );
+
+        let split = dir.write("split.drive.log", &format!("{segments}\r{next}\n"));
+        let outcome = run(&manifest, "drive", &[split]);
+        assert!(
+            outcome.findings.is_empty(),
+            "two updates on one physical line are two records: {:?}",
+            outcome.findings
+        );
+        assert_eq!(
+            outcome.lines.get("drive"),
+            Some(&1),
+            "the reported line number stays the PHYSICAL one"
+        );
+    }
+
+    /// A capture in a rendering the sink class cannot frame is rc 3, never rc 0.
+    ///
+    /// It is the one failure that otherwise looks exactly like a clean run: the
+    /// rules skip every line and nothing says why.
+    #[test]
+    fn an_ios_capture_in_an_unknown_rendering_is_unusable() {
+        let dir = Dir::new("iosshape");
+        let manifest = manifest(&[]);
+        // A THIRD rendering: the BSD-style stamp older tooling writes, which is
+        // neither `log show` shape this sink class frames.
+        let path = dir.write(
+            "other.ios.log",
+            "Sep 12 10:00:00 iPhone Runner(Flutter)[431] <Notice>: fix -12.345678,98.765432\n\
+             Sep 12 10:00:01 iPhone Runner(Flutter)[431] <Notice>: settled\n",
+        );
+        let outcome = run(&manifest, "ios", &[path]);
+        assert_eq!(outcome.rc(), RC_UNUSABLE);
+        assert!(
+            outcome
+                .problems
+                .iter()
+                .any(|p| p.message.contains("does not know")),
+            "{:?}",
+            outcome.problems
+        );
+    }
+
     /// Repeats on one line are counted, not duplicated, and the last line counts
     /// even without a trailing newline.
     #[test]
@@ -1463,6 +1807,16 @@ mod tests {
                 "furniture.logcat.log",
                 include_str!("../fixtures/furniture.logcat.log"),
             ),
+            (
+                "rust-test",
+                "furniture.rust-test.log",
+                include_str!("../fixtures/furniture.rust-test.log"),
+            ),
+            (
+                "drive",
+                "furniture.flutter-test.log",
+                include_str!("../fixtures/furniture.flutter-test.log"),
+            ),
         ] {
             let path = dir.write(name, body);
             let outcome = run(&manifest, class, &[path]);
@@ -1498,6 +1852,7 @@ mod tests {
             &plants_in,
             &rules(),
             false,
+            super::ScanMode::Full,
         );
         assert_eq!(outcome.rc(), RC_GUARD);
     }
@@ -1518,6 +1873,7 @@ mod tests {
             &BTreeMap::new(),
             &rules(),
             false,
+            super::ScanMode::Full,
         );
         assert_eq!(outcome.rc(), RC_GUARD);
 

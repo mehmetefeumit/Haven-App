@@ -54,6 +54,12 @@ probe-send main#1/do_install#1/send_probe#*/nc-w:1#1 charge 1
 lib tooling/e2e/ci/app-install-lib.sh
 barrier */timeout:INSTALL_BARRIER_SECS#1 charge INSTALL_BARRIER_SECS
 
+lib tooling/e2e/ci/logscan-gate.sh
+# The log-privacy gate: the key-material floor and the identifier scanner over
+# files already on disk — no wait of its own, so its budget is the wrapper's,
+# which is nothing.
+scan */bash:scan-logs.sh#* charge @
+
 # ---------------------------------------------------------------------------
 # Single-target lanes
 # ---------------------------------------------------------------------------
@@ -63,7 +69,7 @@ install lib:install_fresh#1 charge @
 # The post-drive log-privacy gate: the key-material floor and the identifier
 # scanner over files already on disk — no wait of its own, so its budget is the
 # wrapper's, which is nothing.
-logscan log_privacy_gate#1/bash:scan-logs.sh#1 charge @
+logscan log_privacy_gate#1/lib:logscan_gate#1 charge @
 wifi-off sleep:2#1 charge WIFI_OFF_TIMEOUT_SECS
 route sleep:2#2 charge GUEST_NET_TIMEOUT_SECS
 # Only the last attempt can reach DRIVE_TIMEOUT: an attempt is retried after a
@@ -83,6 +89,10 @@ device wait-for-device#1 allowance
 install lib:install_fresh#1 charge @
 geo-drip sleep:GEO_REISSUE_SECS#1 concurrent
 drive timeout:DRIVE_TIMEOUT#1 charge DRIVE_TIMEOUT + DRIVE_KILL_AFTER_SECS
+# The log-privacy gate after the drive and over the whole evidence directory
+# at exit: files already on disk, no wait of its own (logscan-gate.sh).
+logscan lib:logscan_gate#1 charge @
+logscan-exit cleanup#1/lib:logscan_gate_dir#1 charge @
 
 unit tooling/e2e/ci/run-b1-fgs-publish.sh
 strfry bash:start-strfry.sh#1 charge @
@@ -97,6 +107,10 @@ drive timeout:DRIVE_TIMEOUT#1 charge DRIVE_TIMEOUT + DRIVE_KILL_AFTER_SECS
 # kills it if it is still running at the end.
 sampler-stop sleep:1#2 charge 3 * SAMPLE_PERIOD_SECS
 sampler sleep:SAMPLE_PERIOD_SECS#1 within sampler-stop the sampler is joined only after sampler-stop, which kills it if still running
+# The log-privacy gate after the drive and over the whole evidence directory
+# at exit: files already on disk, no wait of its own (logscan-gate.sh).
+logscan lib:logscan_gate#1 charge @
+logscan-exit cleanup#1/lib:logscan_gate_dir#1 charge @
 
 unit tooling/e2e/ci/run-b5-permission-revocation.sh
 strfry bash:start-strfry.sh#1 charge @
@@ -119,6 +133,11 @@ revoke-settle sleep:REVOKE_SETTLE#1 charge REVOKE_SETTLE
 reinstall lib:install_app#1 charge @
 act2 timeout:DRIVE2_TIMEOUT#1 charge DRIVE2_TIMEOUT + DRIVE_KILL_AFTER_SECS
 act2-relay sleep:RELAY_POLL_SECS#2 poll
+# The log-privacy gate after each act's drive and over the whole evidence
+# directory at exit: files already on disk, no wait of its own
+# (logscan-gate.sh).
+logscan report_drive#*/lib:logscan_gate#1 charge @
+logscan-exit cleanup#1/lib:logscan_gate_dir#1 charge @
 
 unit tooling/e2e/ci/run-b6-location-provider-toggle.sh
 strfry bash:start-strfry.sh#1 charge @
@@ -134,6 +153,10 @@ provider-off set_provider#2/sleep:1#1 charge PROVIDER_READBACK_SECS
 reenable-cue wait_for_marker#2/sleep:MARKER_POLL_SECS#1 within disable-cue after the drive exits only one cue wait polls: the second returns at once on a dead drive
 provider-restore set_provider#3/sleep:1#1 charge PROVIDER_READBACK_SECS
 provider-restore-else set_provider#4/sleep:1#1 within provider-restore the if and else restores are exclusive: exactly one runs
+# The log-privacy gate after the drive and over the whole evidence directory
+# at exit: files already on disk, no wait of its own (logscan-gate.sh).
+logscan lib:logscan_gate#1 charge @
+logscan-exit cleanup#1/lib:logscan_gate_dir#1 charge @
 
 unit tooling/e2e/ci/run-b8-clock-skew.sh
 strfry bash:start-strfry.sh#1 charge @
@@ -141,6 +164,10 @@ device wait-for-device#* allowance
 install lib:install_fresh#1 charge @
 clock-servo clock_servo#1/sleep:SERVO_POLL_SECS#1 concurrent
 drive timeout:DRIVE_TIMEOUT#1 charge DRIVE_TIMEOUT + DRIVE_KILL_AFTER_SECS
+# The log-privacy gate after the drive and over the whole evidence directory
+# at exit: files already on disk, no wait of its own (logscan-gate.sh).
+logscan lib:logscan_gate#1 charge @
+logscan-exit cleanup#1/lib:logscan_gate_dir#1 charge @
 
 unit tooling/e2e/ci/run-b9-network-reconnect.sh
 strfry bash:start-strfry.sh#1 charge @
@@ -154,6 +181,10 @@ down-cue wait_for_marker#1/sleep:MARKER_POLL_SECS#1 poll
 airplane-on set_airplane#2/sleep:1#1 charge AIRPLANE_READBACK_SECS
 up-cue wait_for_marker#2/sleep:MARKER_POLL_SECS#1 within down-cue after the drive exits only one cue wait polls: the second returns at once on a dead drive
 airplane-off set_airplane#3/sleep:1#1 charge AIRPLANE_READBACK_SECS
+# The log-privacy gate after the drive and over the whole evidence directory
+# at exit: files already on disk, no wait of its own (logscan-gate.sh).
+logscan lib:logscan_gate#1 charge @
+logscan-exit cleanup#1/lib:logscan_gate_dir#1 charge @
 
 unit tooling/e2e/ci/run-kp-rotation.sh
 strfry bash:start-strfry.sh#* charge @
@@ -163,6 +194,10 @@ wifi-off sleep:2#1 charge WIFI_OFF_TIMEOUT_SECS
 # Joined by stop_servo after the drive: the loop sees SERVO_STOP within a poll.
 clock-servo clock_servo#1/sleep:SERVO_POLL_SECS#1 poll
 drive timeout:DRIVE_TIMEOUT#1 charge DRIVE_TIMEOUT + DRIVE_KILL_AFTER_SECS
+# The log-privacy gate after the drive and over the whole evidence directory
+# at exit: files already on disk, no wait of its own (logscan-gate.sh).
+logscan lib:logscan_gate#1 charge @
+logscan-exit cleanup#1/lib:logscan_gate_dir#1 charge @
 
 # ---------------------------------------------------------------------------
 # Aggregate lanes: reaped by design. Budgeted in full all the same — the check
@@ -178,18 +213,24 @@ reaper e2e-background-catchup.yml::e2e_background_catchup three phase drives, a 
 unit tooling/e2e/ci/run-integration-tests.sh
 strfry run_one#1/bash:start-strfry.sh#1 charge @ times ARGC
 target run_one#1/bash:run-single-avd-scenario.sh#1 charge @ times ARGC
+logscan lib:logscan_gate_dir#1 charge @
 
 unit tooling/e2e/ci/run-relay-customization.sh
 relays run_one#1/reset_relays#1/*/bash:start-strfry.sh#1 charge @ times ARGC
 # The second run is the designed retry of a target whose first ended in 124.
 target run_one#1/bash:run-single-avd-scenario.sh#* charge @ times ARGC
+logscan lib:logscan_gate_dir#1 charge @
 
 unit tooling/e2e/ci/run-flake-stress.sh
 strfry bash:start-strfry.sh#1 charge @ times ITERATIONS
 iteration bash:run-single-avd-scenario.sh#1 charge @ times ITERATIONS
+logscan lib:logscan_gate_dir#1 charge @
 
 unit tooling/e2e/ci/run-m7-background-catchup.sh
 strfry */reset_strfry#1/bash:start-strfry.sh#1 charge @
+# The gate over each drive log before it is echoed, over a logcat before any
+# tail of it is, and over the whole evidence directory in the EXIT trap.
+logscan */lib:logscan_gate*#* charge @
 install */lib:install_*#1 charge @
 drive */drive_target#1/timeout:DRIVE_TIMEOUT#1 charge DRIVE_TIMEOUT + DRIVE_KILL_AFTER_SECS
 device */wait-for-device#* allowance

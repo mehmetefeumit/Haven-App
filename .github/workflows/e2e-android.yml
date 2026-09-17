@@ -97,6 +97,11 @@ jobs:
       # seals the needle manifest and runs every captured log through
       # tooling/e2e/ci/scan-logs.sh before echoing or keeping any of it.
       HAVEN_LOGSCAN: "true"
+      # `proxy`: the recorder's declaration sidecars are what the seal reads.
+      # The runner would infer the same from WIRE_UPSTREAM; stated here because
+      # check_logscan_wired_everywhere.sh (h) asks every proxy-starting job to
+      # say so, rather than leave it to an inference a reader cannot see.
+      HAVEN_LOGSCAN_PROFILE: proxy
 
     steps:
       - name: Checkout

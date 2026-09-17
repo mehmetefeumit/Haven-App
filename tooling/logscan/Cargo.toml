@@ -60,6 +60,15 @@ idna = "1.1"
 # absent from the build rather than merely unused, so a plant token can only
 # ever be minted from the OS CSPRNG.
 rand = { version = "0.9", default-features = false, features = ["os_rng"] }
+# secp256k1 for `seal --host-seed`, in PURE RUST: this crate is built on a
+# runner with no mobile toolchain and must not drag a C library (or haven-core's
+# whole MLS stack) in for one scalar multiplication. `arithmetic` is the only
+# feature needed — no signing, no verification, no ECDH.
+k256 = { version = "0.13", default-features = false, features = ["arithmetic"] }
+# Already in the lock through `k256`; taken as a DIRECT dependency so the decoded
+# seed bytes can be `Zeroizing` — a private key must not outlive its use in this
+# process's heap just because it came in on argv.
+zeroize = "1"
 
 [lints.rust]
 unsafe_code = "deny"

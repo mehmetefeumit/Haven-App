@@ -1444,6 +1444,31 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash tooling/e2e/ci/scan-logs.sh --self-test
 
+      # The host-needle library every proxy-less lane seals from: the four
+      # seeds, the role coordinates and the canary stems pinned literally
+      # against the harness (the crate's tie test cross-checks the same
+      # constants), the proxy and host argv, and the bash-3.2 constraint the
+      # macOS runners impose.
+      - name: E2E harness self-test (host needles)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/host-needles.sh --self-test
+
+      # The one gate every runner calls. Under a fake scanner with the REAL
+      # wrapper and floor: each profile's seal argv, every sink handed on, the
+      # two verdicts folded, containment on a leak even under a failed seal,
+      # fail-closed on an absent binary or sidecar, the directory walker's
+      # typing by name, and the flag-off arm being the floor alone.
+      - name: E2E harness self-test (log-privacy gate library)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/logscan-gate.sh --self-test
+
+      # The per-attempt needle-directory rotation the iOS retry command runs
+      # (a retry command may hold only tooling scripts): owner-only directory,
+      # every previous sidecar shape removed and nothing else.
+      - name: E2E harness self-test (needle-directory rotation)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/rotate-needle-dir.sh --self-test
+
       # The recorder's shutdown summary is the only place a run says whether
       # its declaration channel recorded, refused or lost anything, or found a
       # previous run's sidecar already there. e2e-android.yml reads it back
@@ -1865,6 +1890,43 @@ jobs:
       - name: Wire-reachability guard self-test
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_wire_oracle_lane_reachable.sh --self-test
+
+      # The wrapper is a guarantee only where it RUNS. Every job that captures
+      # a device, simulator or test log invokes scan-logs.sh or a gated runner
+      # from the checked-in list (each pinned to its own gate-before-echo
+      # fixture); every uploaded .log is a --sink earlier in the job; no
+      # cat/tail/head precedes the first scan; no set -x in the harness; no
+      # .logarchive or .txt upload; every tee'd test transcript is scanned;
+      # --rules-only stays in rust-check.yml/coverage.yml; a recording lane
+      # accounts and discards; a scanning lane builds and rotates.
+      - name: Every captured log reaches the log-privacy wrapper
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_logscan_wired_everywhere.sh
+
+      # Each of the nine rules has a fixture in both directions over a
+      # synthetic tree (an emulator `script:` lane, a retry `command:` lane, a
+      # `${RUNNER_TEMP}` tee, a self-test-only guards workflow), plus the
+      # floors and the extractor cross-check that make a silent parser BROKEN
+      # rather than clean. Count pinned by equality.
+      - name: Log-privacy wiring guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_logscan_wired_everywhere.sh --self-test
+
+      # The scanner's policy is what "clean" means in every lane. Read from
+      # the text without cargo: no deferral vocabulary, structural rules on
+      # except the listed relay sink, the declared-plant expectation pinned
+      # per sink and explained in the README, every allowlist entry shaped,
+      # live and proven, every class ledgered.
+      - name: Log-scanner policy and allowlist shape
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_logscan_policy.sh
+
+      # Both directions per rule over mutated copies of the shipped policy
+      # and README and allowlists written from scratch; a section the parser
+      # cannot find is BROKEN, never clean. Count pinned by equality.
+      - name: Log-scanner policy guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_logscan_policy.sh --self-test
 
       - name: Identity-delete prefs residue
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}

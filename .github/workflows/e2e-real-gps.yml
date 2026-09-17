@@ -55,14 +55,24 @@ jobs:
     # cap must clear the SUM of the step caps: below it, a run whose every step
     # is still inside its own cap can die here, and a job-cap death skips every
     # `if: failure()` step (e2e-android.yml states the rule). So: Build
-    # real-GPS test APK 30 + Create AVD snapshot (on an AVD-cache miss) 15 +
-    # the drive step 30 (derived there) + the most the work no step cap bounds
-    # has taken, 2.9 min over 33 runs of this job (ci.yml, 2026-07-29..09-10;
-    # 1.3 of it Free disk space, run 32661622879), taken as 3 = 78 -> 80.
+    # the runtime log scanner 10 + Build real-GPS test APK 30 + Create AVD
+    # snapshot (on an AVD-cache miss) 15 + the drive step 30 (derived there) +
+    # the most the work no step cap bounds has taken, 2.9 min over 33 runs of
+    # this job (ci.yml, 2026-07-29..09-10; 1.3 of it Free disk space, run
+    # 32661622879), taken as 3 = 88 -> 90.
     # job-uncapped-minutes: 2.9 (33 runs, worst 32661622879)
-    timeout-minutes: 80
+    timeout-minutes: 90
     env:
       HAVEN_E2E_RELAY: ws://10.0.2.2:7777
+      # The runtime identifier scanner (Security Rule 15): the orchestrator
+      # seals this run's needle manifest from the host-known needles
+      # (tooling/e2e/ci/host-needles.sh — the fixed seeds, the role and canary
+      # coordinates, the name stems) plus the point this lane injects, and
+      # runs every captured log through tooling/e2e/ci/scan-logs.sh before
+      # echoing or keeping any of it. `host`: this lane runs no recording
+      # proxy, so the host needles are the whole declaration.
+      HAVEN_LOGSCAN: "true"
+      HAVEN_LOGSCAN_PROFILE: host
 
       # Declared EXPLICITLY rather than inherited. `liveSyncEnabled` defaults
       # to true when the define is absent, so an omitted flag reads as "we
@@ -121,10 +131,21 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: haven-core
+          workspaces: |
+            haven-core
+            tooling/logscan
           # Distinct cache key from the other E2E jobs so they don't race on
           # one entry; all build the same x86_64-linux-android target.
           key: e2e-real-gps-x64
+
+      # The runtime log scanner, release-built ONCE, before Flutter and the
+      # emulator are resident (the same reasoning as the APK build below). The
+      # orchestrator seals and scans with it after the drive and at exit; the
+      # diagnostics step runs it over what it writes. Capped so a cargo stall
+      # fails fast; the cap is a term of the job cap's sum above.
+      - name: Build the runtime log scanner
+        timeout-minutes: 10
+        run: cargo build --release --manifest-path tooling/logscan/Cargo.toml
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -190,6 +211,15 @@ jobs:
         env:
           STRFRY_IMAGE: ${{ vars.STRFRY_IMAGE || 'dockurr/strfry@sha256:545555da5dd2c2b502f2c0d159f4dc4996d0e488e3bf25905ce881722d63d2c5' }}
         run: bash tooling/e2e/ci/start-strfry.sh
+
+      # The needle directory, rotated before anything can write to it: the
+      # orchestrator seals this run's manifest there, and a sidecar or manifest
+      # left by an earlier run on a reused runner would be sealed or scanned in
+      # its place.
+      - name: Rotate the needle directory
+        run: |
+          mkdir -m 0700 -p /tmp/haven-soak/needles
+          rm -f /tmp/haven-soak/needles/*.needles.decl /tmp/haven-soak/needles/*.needles.json /tmp/haven-soak/needles/*.canaries.json
 
       # All real logic lives in the checked-in orchestrator (single bash
       # invocation — the action runs each line of a multi-line `script:` in
@@ -276,20 +306,25 @@ jobs:
           # EXIT trap has already scanned, and the scanner's directory walk
           # only picks up `*.log`. A `.txt` here would be uploaded unscanned.
           } > /tmp/b3-logs/diag.log 2>&1 || true
-          # Scan what this step just wrote (Security Rule 6). Withhold rather
-          # than upload on a hit, matching the orchestrator's containment.
-          # rc 1 (a real leak) and rc 3 (absent/unreadable/empty log) are kept
-          # apart deliberately: both fail the step, but only a leak justifies
-          # destroying the diag.
+          # Scan what this step just wrote (Security Rules 6 and 15) with the
+          # wrapper the orchestrator uses — the key-material floor AND the
+          # identifier scanner, against the manifest the orchestrator sealed —
+          # which withholds (deletes) the diag on a hit, matching the
+          # orchestrator's containment. rc 1 (a real leak) and rc 2/3/4 (the
+          # diag absent/unreadable/empty, no manifest because the run never
+          # sealed one) are kept apart deliberately: both fail the step, but
+          # only a leak justifies destroying the diag.
           diag_scan_rc=0
-          bash tooling/e2e/ci/scan-logs-for-secrets.sh /tmp/b3-logs/diag.log \
-            || diag_scan_rc=$?
+          mkdir -p /tmp/b3-logscan
+          bash tooling/e2e/ci/scan-logs.sh \
+            --manifest /tmp/haven-soak/needles/*.needles.json \
+            --sink diag=/tmp/b3-logs/diag.log \
+            --report /tmp/b3-logscan/diag.ndjson || diag_scan_rc=$?
           if [ "${diag_scan_rc}" -eq 1 ]; then
-            rm -f /tmp/b3-logs/diag.log
-            echo "diag withheld: secret-leak guard tripped" > /tmp/b3-logs/DIAG_LEAK.txt
+            echo "diag withheld: log-privacy gate tripped" > /tmp/b3-logs/DIAG_LEAK.txt
             exit 1
           elif [ "${diag_scan_rc}" -ne 0 ]; then
-            echo "diag unscannable (rc=${diag_scan_rc}): absent, unreadable or empty" \
+            echo "diag uncertified (rc=${diag_scan_rc}): absent, unreadable, empty, or no manifest to scan against" \
               > /tmp/b3-logs/DIAG_UNSCANNABLE.txt
             echo "ERROR: diag log could not be scanned (rc=${diag_scan_rc})." >&2
             exit 1
@@ -306,6 +341,14 @@ jobs:
             /tmp/b3-logs/
           retention-days: 14
           if-no-files-found: ignore
+
+      # The manifest holds the run's declared identifiers verbatim and is never
+      # uploaded (check_wire_proxy_test_only.sh); it does not outlive the job
+      # either: removed on EVERY outcome, after every upload step, so a reused
+      # runner never starts the next run holding the last run's needles.
+      - name: Discard needle manifests
+        if: always()
+        run: rm -f /tmp/haven-soak/needles/*.needles.decl /tmp/haven-soak/needles/*.needles.json /tmp/haven-soak/needles/*.canaries.json
 
       - name: Tear down strfry relay
         if: always()

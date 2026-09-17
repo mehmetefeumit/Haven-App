@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -146,19 +147,21 @@ void main() {
       expect(exception, isA<Exception>());
     });
 
-    test('message hash size error includes actual size', () {
-      const size = 16;
-      const message = 'Message hash must be exactly 32 bytes, got $size';
-
-      expect(message, contains('32 bytes'));
-      expect(message, contains('got 16'));
-    });
-
-    test('error message format for different sizes', () {
-      for (final size in [0, 1, 16, 31, 33, 64]) {
-        final message = 'Message hash must be exactly 32 bytes, got $size';
-        expect(message, contains('$size'));
-      }
+    // sign() cannot be invoked here (see "Known Limitation"), so the promise
+    // is pinned at the source: the size-mismatch throw carries no
+    // interpolation, so the message cannot vary with — or leak — the
+    // caller-supplied buffer's length (Security Rule 15).
+    test('message hash size error is a fixed literal', () {
+      final source = File(
+        'lib/src/services/nostr_identity_service.dart',
+      ).readAsStringSync();
+      final throwSite = RegExp(
+        r'throw const IdentityServiceException\(\s*([^)]*)\)',
+      ).allMatches(source).map((m) => m.group(1)!).firstWhere(
+            (args) => args.contains('Message hash must be exactly 32 bytes'),
+          );
+      expect(throwSite, isNot(contains(r'$')));
+      expect(throwSite, isNot(contains('got')));
     });
   });
 

@@ -1,0 +1,83 @@
+# Negative control: REAL furniture, verbatim from a sanitised local `flutter
+# test` transcript of the Haven app — the capture `coverage.yml`'s Flutter job
+# scans with `--rules-only`. The transcript itself is not checked in anywhere;
+# these lines ARE the record. Selected line by line and reviewed against Rule 15
+# exactly as `furniture.drive.log` was, plus one extra exclusion: every line the
+# app printed with an alias handle in it (`event#...`, `peer#...`) is left OUT,
+# because the sanitiser masks those digests and a masked line is not verbatim.
+#
+# This is NOT the same shape as `furniture.drive.log`, which is a `flutter
+# drive` transcript. Two shapes live only here:
+#   * the compact reporter rewrites its status line with a CARRIAGE RETURN and
+#     no newline when it writes to a pipe, so several of the physical lines
+#     below carry more than one update. That is what `rule_segments` splits on,
+#     and what put a description ending in `key` within S8's 24-character window
+#     of the NEXT update's timestamp digits;
+#   * a Dart test description is a long camel-case run over the Shannon floor
+#     (`kBackgroundSessionReclaimAtMsKey`), and the reporter prints the
+#     repository path with it (`.../haven/test/providers/identity_provider_test`)
+#     - a long run of base64 characters joined by `/`. Both reddened S4 before
+#     `is_base64_payload` required digits or padding.
+Resolving dependencies...
+Downloading packages...
+  _fe_analyzer_shared 93.0.0 (108.0.0 available)
+  analyzer 10.0.1 (14.4.0 available)
+  archive 4.0.9 (4.3.0 available)
+  build 4.0.6 (4.0.11 available)
+  build_config 1.3.0 (1.3.3 available)
+  build_daemon 4.1.1 (4.1.6 available)
+  build_runner 2.15.0 (2.16.1 available)
+  built_value 8.12.6 (8.13.0 available)
+  cli_util 0.4.2 (0.6.0 available)
+  clock 1.1.2 (1.1.3 available)
+#6      main.<anonymous closure>.<anonymous closure> (file:///home/runner/work/Haven-App/Haven-App/haven/test/providers/identity_provider_test.dart:913:9)
+<asynchronous suspension>
+#7      Declarer.test.<anonymous closure>.<anonymous closure> (package:test_api/src/backend/declarer.dart:253:15)
+<asynchronous suspension>
+#8      Declarer.test.<anonymous closure> (package:test_api/src/backend/declarer.dart:250:11)
+<asynchronous suspension>
+#9      Invoker._waitForOutstandingCallbacks.<anonymous closure> (package:test_api/src/backend/invoker.dart:318:9)
+<asynchronous suspension>
+[BackgroundManager] disableBackgroundScheduling: stopService failed: MissingPluginException
+[BackgroundManager] disableBackgroundScheduling: complete
+[LogAlias] salt rotation unavailable: StateError
+[BackgroundManager] disableBackgroundScheduling: stopService failed: MissingPluginException
+[BackgroundManager] disableBackgroundScheduling: complete
+[LogAlias] salt rotation unavailable: StateError
+00:01 +31: /home/runner/work/Haven-App/Haven-App/haven/test/providers/location_sharing_provider_test.dart: memberLocationsProvider — self-exclusion returns all other locations when self location is absent from results
+[LocationService] Results: 2-4 new, 0 seen, 0 null, 0 failed
+[LocationFetch] Got 2-4 member location(s), showing 2-4 (excluding self)
+00:01 +32: /home/runner/work/Haven-App/Haven-App/haven/test/providers/location_sharing_provider_test.dart: ... — self-exclusion returns all other locations when self location is absent from results       00:01 +33: /home/runner/work/Haven-App/Haven-App/haven/test/providers/identity_provider_test.dart: ... — background publish-history residue clears kBackgroundSessionReclaimAtMsKey                         00:01 +33: /home/runner/work/Haven-App/Haven-App/haven/test/providers/location_sharing_provider_test.dart: memberLocationsProvider — self-exclusion returns empty list when the only location is the current user
+[LocationFetch] Fetching locations (1 relays)
+[LocationService] No cached last-known rows for circle
+00:01 +33: /home/runner/work/Haven-App/Haven-App/haven/test/providers/identity_provider_test.dart: IdentityNotifier.deleteIdentity — background publish-history residue clears kBackgroundSessionReclaimAtMsKey
+[BackgroundManager] disableBackgroundScheduling: stopService failed: MissingPluginException
+00:01 +33: /home/runner/work/Haven-App/Haven-App/haven/test/providers/location_sharing_provider_test.dart: memberLocationsProvider — self-exclusion returns empty list when the only location is the current user
+[LocationService] Fetched 1 event(s) from 1 relay(s) (since=none, cached=1)
+00:01 +33: /home/runner/work/Haven-App/Haven-App/haven/test/providers/identity_provider_test.dart: IdentityNotifier.deleteIdentity — background publish-history residue clears kBackgroundSessionReclaimAtMsKey
+[BackgroundManager] disableBackgroundScheduling: complete
+[LogAlias] salt rotation unavailable: StateError
+00:01 +34: /home/runner/work/Haven-App/Haven-App/haven/test/providers/location_sharing_provider_test.dart: ... — self-exclusion returns empty list when the only location is the current user               00:01 +34: /home/runner/work/Haven-App/Haven-App/haven/test/providers/location_sharing_provider_test.dart: memberLocationsProvider — self-exclusion returns empty list when the only location is the current user
+[LocationService] Results: 1 new, 0 seen, 0 null, 0 failed
+[LocationFetch] Got 1 member location(s), showing 0 (excluding self)
+00:01 +35: /home/runner/work/Haven-App/Haven-App/haven/test/providers/identity_provider_test.dart: ... container) clears kBackgroundIdleKey and kForegroundActiveAtMsKey via disableBackgroundScheduling    00:01 +35: /home/runner/work/Haven-App/Haven-App/haven/test/providers/identity_provider_test.dart: IdentityNotifier.deleteIdentity — background scheduling coordination keys (M7-A, full container) clears kBackgroundIdleKey and kForegroundActiveAtMsKey via disableBackgroundScheduling
+00:01 +50: /home/runner/work/Haven-App/Haven-App/haven/test/providers/location_sharing_provider_test.dart: ... — disclosure gate calls getCurrentLocation when disclosure flag is set (gate opens)          00:01 +50: /home/runner/work/Haven-App/Haven-App/haven/test/providers/location_sharing_provider_test.dart: ... gate returns 0 and never calls getCurrentLocation when disclosure key is explicitly false    00:01 +50: /home/runner/work/Haven-App/Haven-App/haven/test/providers/location_sharing_provider_test.dart: locationPublisherProvider — disclosure gate returns 0 and never calls getCurrentLocation when disclosure key is explicitly false
+[LocationPublish] Provider executing...
+[LocationPublish] Identity loaded
+[LocationPublish] Disclosure not accepted yet — skipping
+00:01 +51: /home/runner/work/Haven-App/Haven-App/haven/test/providers/location_sharing_provider_test.dart: ... gate returns 0 and never calls getCurrentLocation when disclosure key is explicitly false    00:01 +51: /home/runner/work/Haven-App/Haven-App/haven/test/providers/location_sharing_provider_test.dart: ... cutover exclusions excludes a legacy-orphaned (accepted, no members) circle from publish     00:01 +51: /home/runner/work/Haven-App/Haven-App/haven/test/providers/location_sharing_provider_test.dart: locationPublisherProvider — Dark Matter cutover exclusions excludes a legacy-orphaned (accepted, no members) circle from publish
+[LocationPublish] Provider executing...
+[LocationPublish] Identity loaded
+[LocationPublish] GPS fix acquired
+[LocationPublish] 2-4 visible circle(s), 1 accepted
+[LocationPublish] Encrypting (1 relays)
+[LocationService] Encrypting location via MLS...
+[LocationPublish] Published — accepted=1, rejected=0, failed=0
+00:01 +52: /home/runner/work/Haven-App/Haven-App/haven/test/providers/location_sharing_provider_test.dart: ... cutover exclusions excludes a legacy-orphaned (accepted, no members) circle from publish     00:01 +52: /home/runner/work/Haven-App/Haven-App/haven/test/providers/location_sharing_provider_test.dart: ... Matter cutover exclusions excludes a circle marked blocked (MLS Unrecoverable) from publish  00:01 +52: /home/runner/work/Haven-App/Haven-App/haven/test/providers/location_sharing_provider_test.dart: locationPublisherProvider — Dark Matter cutover exclusions excludes a circle marked blocked (MLS Unrecoverable) from publish
+[LocationPublish] Provider executing...
+[LocationPublish] Identity loaded
+[LocationPublish] GPS fix acquired
+[LocationPublish] 2-4 visible circle(s), 1 accepted
+[LocationPublish] Encrypting (1 relays)
+[LocationService] Encrypting location via MLS...
+[LocationPublish] Published — accepted=1, rejected=0, failed=0

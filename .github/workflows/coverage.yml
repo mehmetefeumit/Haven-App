@@ -8,7 +8,9 @@
 # When you add a
 # step here, add it there — the local gate's whole value is the claim that a
 # green run locally means a green run here, and each step that exists in only
-# one of the two erodes it.
+# one of the two erodes it. The two transcript-scan steps in the Flutter job
+# are the exception: they are Security Rule 15's gate over what the tests
+# PRINT, not a coverage gate, and the local script mirrors coverage verdicts.
 #
 # The measuring toolchains are PINNED (scripts/ci/coverage_toolchain.env),
 # unlike every other workflow, which floats on `stable`. Coverage is a ratio
@@ -221,16 +223,60 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
+      # The transcript of the run below is scanned by the runtime log-privacy
+      # scanner (tooling/logscan), a Rust binary this job otherwise has no
+      # toolchain for. `stable` is deliberate and outside the pin above: the
+      # pin is for the instrument that MEASURES, and the scanner only reads.
+      - name: Setup Rust (log scanner)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo (log scanner)
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tooling/logscan
+          key: coverage-logscan
+
+      # Before the transcript exists: the wrapper treats an absent scanner as a
+      # broken guard (rc 2), never as a skipped scan. `id` because this step
+      # immediately precedes the tests: "it succeeded" is the one
+      # standard-shaped `if:` predicate equal to "the tests started".
+      - name: Build the runtime log scanner
+        id: build-scanner
+        working-directory: ${{ github.workspace }}
+        run: cargo build --release --manifest-path tooling/logscan/Cargo.toml
+
       # `--file-reporter` writes a machine-readable JSON stream ALONGSIDE the
       # normal console reporter (unlike `--reporter`, which would replace it),
       # so the skip gate below gets per-test `skipped` verdicts without costing
       # a second full test run. This is the repo's only `flutter test` over the
       # whole suite — flutter-check.yml runs `flutter analyze` only — so it is
       # where the Dart half of the skip gate has to live.
+      #
+      # Tee'd for the scan step below; `set -o pipefail` because GitHub's
+      # `bash -e` does not set it, and `tee` would otherwise mask a failing
+      # exit code.
       - name: Run tests with coverage
-        run: >-
-          flutter test --coverage
-          --file-reporter=json:"${RUNNER_TEMP}/flutter-test-report.json"
+        run: |
+          set -o pipefail
+          flutter test --coverage --file-reporter=json:"${RUNNER_TEMP}/flutter-test-report.json" 2>&1 | tee "${RUNNER_TEMP}/flutter-test.log"
+
+      # Security Rule 15 over the transcript, before anything else reads it.
+      # `--rules-only`: a unit-test run mints no declarable value, so there is
+      # no manifest — the structural rules and the line floor run, and the
+      # verdict certifies that they ran, not that any declared value is absent.
+      # Containment here is detection only: `flutter test` already streamed
+      # every line into the JOB LOG, which nothing can retract, and the file
+      # is never uploaded — the wrapper still deletes it on a leak, but the
+      # red job IS the containment. Keyed on the build, not on the tests, so a
+      # failing test's printed expectation — exactly where an identifier would
+      # surface — is scanned too.
+      # `--exempt-endpoint 127.0.0.1` is explicit because no manifest exists to
+      # carry a sealed exemption: the loopback literal cargo prints from an
+      # `#[ignore = "…"]` reason would otherwise be an S12 hit on furniture.
+      - name: Scan the test transcript for identifiers
+        if: ${{ !cancelled() && steps.build-scanner.outcome == 'success' }}
+        working-directory: ${{ github.workspace }}
+        run: bash tooling/e2e/ci/scan-logs.sh --rules-only --exempt-endpoint 127.0.0.1 --sink drive="${RUNNER_TEMP}/flutter-test.log"
 
       # `flutter test` prints "~22" and exits 0; nothing asserted it. Those 22
       # are the pseudo-locale overflow sweep (gated on a deliberately
@@ -240,6 +286,7 @@ jobs:
       # Deliberately NOT applied to the flag-off step below: that runs two named
       # files, and a filtered run cannot prove the whole suite's skip set.
       - name: No undeclared test skips
+        id: skip-gate
         run: bash ../scripts/ci/check_no_undeclared_skips.sh dart flutter "${RUNNER_TEMP}/flutter-test-report.json"
 
       # The coverage run above passing NO --dart-define is load-bearing, not an
@@ -264,11 +311,23 @@ jobs:
       # the poll path at the integration level.) live_sync_provider_test is
       # deliberately NOT run here: it pins the compiled default, which is now ON.
       - name: Rollback-path flag-off unit check (retained short-poll path)
-        run: >-
-          flutter test
-          test/providers/identity_provider_test.dart
-          test/providers/location_sharing_provider_test.dart
-          --dart-define=HAVEN_LIVE_SYNC=false
+        run: |
+          set -o pipefail
+          flutter test test/providers/identity_provider_test.dart test/providers/location_sharing_provider_test.dart --dart-define=HAVEN_LIVE_SYNC=false 2>&1 | tee "${RUNNER_TEMP}/flutter-test-flag-off.log"
+
+      # The same gate over the flag-off transcript. Keyed on the step that
+      # immediately precedes the flag-off run, for the same reason the first
+      # scan keys on the build: it must run when those tests FAIL and must not
+      # run when they never started. The `drive` class's line floor is 100
+      # (tooling/logscan/policy.toml `min_lines`); this two-file run measured
+      # 394 lines locally when the scan was wired (2026-09-16), so the floor
+      # holds with ~4x headroom, and a transcript shrinking toward 100 is the
+      # signal that the run stopped printing what it used to — not a reason
+      # to lower the floor.
+      - name: Scan the flag-off test transcript for identifiers
+        if: ${{ !cancelled() && steps.skip-gate.outcome == 'success' }}
+        working-directory: ${{ github.workspace }}
+        run: bash tooling/e2e/ci/scan-logs.sh --rules-only --exempt-endpoint 127.0.0.1 --sink drive="${RUNNER_TEMP}/flutter-test-flag-off.log"
 
       # The exclusion set is defined ONCE, in a checked-in script that the local
       # gate calls too. It used to be `lcov --remove` here and a hand-written

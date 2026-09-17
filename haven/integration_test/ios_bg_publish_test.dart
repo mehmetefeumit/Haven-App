@@ -345,6 +345,8 @@ import 'package:haven/src/services/nostr_subscription_service.dart'
     show NostrSubscriptionService;
 import 'package:haven/src/services/subscription_service.dart'
     show SubscriptionServiceException;
+import 'package:haven/src/utils/log_alias.dart'
+    show LogAliasClass, logAliasHandle, magnitudeBucket;
 import 'package:integration_test/integration_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -943,11 +945,14 @@ Future<_ProfileObservation> _pollForCoarseProfile(
     if (!seen.contains(status.profile)) seen.add(status.profile);
     if (status.profile == IosLocationProfile.hundredMeters) {
       coarseSeen = true;
+      // wireName (`ios_location_source.dart`) is a fixed enum tag, an alias
+      // for `.name` used on the platform-channel wire — not user data.
+      // harness-log-ok: see above
       debugPrint(
         '[bg-publish] backgrounded accuracy profile: '
         '${status.profile.wireName} after '
         '${DateTime.now().difference(startedAt).inSeconds}s of polling '
-        '(poll #$polls).',
+        '(poll #${magnitudeBucket(polls)}).',
       );
       break;
     }
@@ -1367,7 +1372,7 @@ void main() {
             // Bob advertises no inbox relays, so the Welcome-delivery cascade
             // needs the admin's own relay as a fallback.
             creatorFallbackRelays: <String>[defaultStrfryUrl],
-            label: 'bg-publish',
+            scenario: 'bg-publish',
           ),
         );
       } finally {
@@ -1418,10 +1423,11 @@ void main() {
               .toList(growable: false);
       if (matchingCircles.length != 1) {
         throw StateError(
-          '[bg-publish] circlesProvider carries ${matchingCircles.length} '
-          "circles with this test's group id, although the publish scheduler "
-          'armed for it — so P2c has no single handle to read the '
-          'member-location cache through.',
+          '[bg-publish] circlesProvider carries '
+          '${magnitudeBucket(matchingCircles.length)} circles with this '
+          "test's group id, although the publish scheduler armed for it — "
+          'so P2c has no single handle to read the member-location cache '
+          'through.',
         );
       }
       final aliceCircle = matchingCircles.single;
@@ -1483,7 +1489,8 @@ void main() {
         foregroundStanding = foregroundPool.last;
         debugPrint(
           '[bg-publish] foreground standing subscriptions: '
-          '$foregroundStanding after ${foregroundPool.polls} read(s).',
+          '${magnitudeBucket(foregroundStanding ?? 0)} after '
+          '${magnitudeBucket(foregroundPool.polls)} read(s).',
         );
         expect(
           foregroundPool.matched,
@@ -1491,7 +1498,8 @@ void main() {
           reason:
               'The live-sync engine holds NO standing subscription while the '
               'app is foregrounded with an accepted circle (last count: '
-              '$foregroundStanding, ${foregroundPool.polls} read(s) over '
+              '${magnitudeBucket(foregroundStanding ?? 0)}, '
+              '${magnitudeBucket(foregroundPool.polls)} read(s) over '
               '${_standingRequestWindow.inSeconds}s). Two causes are real and '
               'both invalidate P2c rather than merely failing here: this build '
               'was compiled with HAVEN_LIVE_SYNC=false, so there is no '
@@ -1512,10 +1520,12 @@ void main() {
           // Rule 8: the type only — the FFI message is a Rust `Result` string.
           readError = e;
         }
+        final readCountBucket = readError == null
+            ? 'answered ${magnitudeBucket(readCount ?? 0)}'
+            : 'failed with ${readError.runtimeType}';
         debugPrint(
           '[bg-publish] HAVEN_LIVE_SYNC=false leg: the pool count read '
-          '${readError == null ? 'answered $readCount' : 'failed with '
-              '${readError.runtimeType}'}.',
+          '$readCountBucket.',
         );
         expect(
           readError,
@@ -1539,7 +1549,8 @@ void main() {
               'This build was compiled with HAVEN_LIVE_SYNC=false — the branch '
               'you are reading only runs when it was — yet the read did not '
               'report an ABSENT session. Either it answered a count '
-              '($readCount), or it threw something other than the null-handle '
+              '(${magnitudeBucket(readCount ?? 0)}), or it threw something '
+              'other than the null-handle '
               'refusal; both say a live session exists in a build whose flag '
               'documents that the engine is never started. Three causes, in '
               'the order to check them. (1) Something started one anyway. '
@@ -2021,7 +2032,7 @@ void main() {
         await pausePublishHeartbeat;
         debugPrint(
           '[bg-publish] pause-driven publishes seen before the P2a anchor: '
-          '${pauseDrivenEvents.length}.',
+          '${magnitudeBucket(pauseDrivenEvents.length)}.',
         );
 
         // From the tick to its kind-445 on the wire, every term a budget the
@@ -2163,9 +2174,13 @@ void main() {
         // Started at the transition and running ever since; awaited HERE
         // because its verdict belongs with P2b's.
         final profile = await profileFuture;
+        // wireName (`ios_location_source.dart`) is a fixed enum tag, an
+        // alias for `.name` used on the platform-channel wire — not user
+        // data.
+        // harness-log-ok: see above
         debugPrint(
           '[bg-publish] backgrounded profile poll: coarseSeen='
-          '${profile.coarseSeen} polls=${profile.polls} '
+          '${profile.coarseSeen} polls=${magnitudeBucket(profile.polls)} '
           'seen=${profile.seen.map((p) => p.wireName).toList()} '
           'wall=${profile.wall.inSeconds}s of '
           '${_coarseProfileWindow.inSeconds}s.',
@@ -2205,8 +2220,9 @@ void main() {
               'The backgrounded session never ran at '
               '${IosLocationProfile.hundredMeters.wireName} in the '
               '${_coarseProfileWindow.inSeconds}s after the REAL OS '
-              'backgrounding (${profile.polls} status reads; profiles '
-              'observed: ${profile.seen.map((p) => p.wireName).toList()}). '
+              'backgrounding (${magnitudeBucket(profile.polls)} status reads; '
+              'profiles observed: '
+              '${profile.seen.map((p) => p.wireName).toList()}). '
               'That window is kStationaryDwell + kStationaryConfirmMaxAge, so '
               'it covers the drop AND the worst case where nothing confirms '
               'and the deadline escalates straight back to Best. Check, in '
@@ -2223,7 +2239,8 @@ void main() {
           events.length,
           greaterThanOrEqualTo(2),
           reason:
-              'Only ${events.length} scheduler-timed kind-445 event(s) for '
+              'Only ${magnitudeBucket(events.length)} scheduler-timed '
+              'kind-445 event(s) for '
               'this circle reached the relay in the '
               '${_postBackgroundPublishWindow.inSeconds}s after the REAL '
               'OS backgrounding (window = 2 full 72-168s jitter intervals '
@@ -2255,7 +2272,9 @@ void main() {
               'Bob joins — so this count is not evidence that the timers kept '
               'firing, whatever its size.',
         );
-        debugPrint('$kBackgroundPublishMarker count=${events.length}');
+        debugPrint(
+          '$kBackgroundPublishMarker count=${magnitudeBucket(events.length)}',
+        );
 
         // The RECEIVE half, and which plane this build HAS decides which of
         // the two phases below runs. `liveSyncEnabled` is a compile-time
@@ -2323,7 +2342,8 @@ void main() {
           );
           debugPrint(
             '[bg-publish] peer published a location while Alice was '
-            'backgrounded (evt=${peerEventId.substring(0, 8)}…).',
+            'backgrounded (evt='
+            '${logAliasHandle(LogAliasClass.event, peerEventId)}).',
           );
 
           // The same production entry point P2a drives, for the same reason:
@@ -2465,13 +2485,14 @@ void main() {
               ? 'every read of the count FAILED across '
                     '${betweenBurstsWindow.inSeconds}s — there is no live '
                     'session to ask, or its lock is poisoned'
-              : 'the engine answered ${quiet.last} standing subscription(s) on '
-                    'the first read taken after the burst';
+              : 'the engine answered ${magnitudeBucket(quiet.last!)} standing '
+                    'subscription(s) on the first read taken after the burst';
           expect(
             quiet.matched,
             isTrue,
             reason:
-                '$quietDetail (${quiet.polls} read(s)), so the background '
+                '$quietDetail (${magnitudeBucket(quiet.polls)} read(s)), so '
+                'the background '
                 'receive plane is subscribed BETWEEN publish ticks — which is '
                 'a continuous "this pubkey is online" signal to every circle '
                 'relay and the 55 s keepalive traffic that goes with it, i.e. '
@@ -2486,11 +2507,13 @@ void main() {
                 'a burst that was still holding its own REQs, and well below '
                 'it the burst had finished and this is a pause that dropped '
                 'nothing. It cannot be a vacuous zero either: the same counter '
-                'read $foregroundStanding while the app was foregrounded.',
+                'read ${magnitudeBucket(foregroundStanding ?? 0)} while the '
+                'app was foregrounded.',
           );
           debugPrint(
-            '[bg-publish] between bursts: the engine answered ${quiet.last} '
-            'standing subscription(s) on read #${quiet.polls}, '
+            '[bg-publish] between bursts: the engine answered '
+            '${magnitudeBucket(quiet.last ?? 0)} standing subscription(s) on '
+            'read #${magnitudeBucket(quiet.polls)}, '
             '${quiet.wall.inSeconds}s after the burst.',
           );
           debugPrint(kBackgroundReceiveMarker);
@@ -2575,7 +2598,8 @@ void main() {
           );
           debugPrint(
             '[bg-publish] peer published a location while Alice was '
-            'backgrounded (evt=${peerEventId.substring(0, 8)}…).',
+            'backgrounded (evt='
+            '${logAliasHandle(LogAliasClass.event, peerEventId)}).',
           );
 
           // No tick is driven here, unlike P2c, and that IS the phase: the
@@ -2611,7 +2635,8 @@ void main() {
                 'process was OS-backgrounded, and '
                 '${_pollPathCatchupWindow.inSeconds}s later the persisted '
                 'last-known store still holds nothing from him '
-                '(${catchup.polls} read(s)). That window spans TWO of the '
+                '(${magnitudeBucket(catchup.polls)} read(s)). That window '
+                'spans TWO of the '
                 '${_pollPathReceiveInterval.inSeconds}s receive-timer ticks '
                 "plus the sweep's own deadline, so one missed tick is not an "
                 'explanation. Check, in this order: that P2a/P2b above passed '
@@ -2640,7 +2665,7 @@ void main() {
           expect(catchup.fix!.longitude, closeTo(_peerLongitude, 1e-6));
           debugPrint(
             "[bg-publish] poll-path catch-up: the peer's location reached the "
-            'persisted store on read #${catchup.polls}, '
+            'persisted store on read #${magnitudeBucket(catchup.polls)}, '
             '${catchup.wall.inSeconds}s after his publish.',
           );
           debugPrint(kBackgroundCatchupMarker);
@@ -2773,18 +2798,19 @@ void main() {
             .length;
         if (straggled > 0) {
           debugPrint(
-            '[bg-publish] $straggled in-flight publish(es) created at or '
-            'before the disable cutoff landed late — tolerated, not a '
-            'leak.',
+            '[bg-publish] ${magnitudeBucket(straggled)} in-flight '
+            'publish(es) created at or before the disable cutoff landed '
+            'late — tolerated, not a leak.',
           );
         }
         expect(
           leaked.map((TestRelayEvent e) => e.id).toList(growable: false),
           isEmpty,
           reason:
-              '${leaked.length} kind-445 event(s) for this circle were '
-              'created MORE than ${_inFlightGraceSecs}s after background '
-              'sharing was disabled (while still OS-backgrounded) and '
+              '${magnitudeBucket(leaked.length)} kind-445 event(s) for this '
+              'circle were created MORE than ${_inFlightGraceSecs}s after '
+              'background sharing was disabled (while still OS-backgrounded) '
+              'and '
               'reached the relay within the '
               '${_negativeSettleWindow.inSeconds}s settle window. '
               'Publishing must stop when the user withdraws consent — the '

@@ -59,6 +59,23 @@
 #                    the SAME string the host oracle anchors on. Same opt-in
 #                    shape again: unset elsewhere, so no other lane's compiled
 #                    defines change.
+#   HAVEN_LOGSCAN    'true' switches the post-drive gate to the identifier
+#                    scanner (tooling/e2e/ci/logscan-gate.sh); unset, the gate
+#                    is the key-material floor alone.
+#   HAVEN_LOGSCAN_PROFILE  The seal profile, declared per JOB: 'proxy' where
+#                    the recording wire proxy is in front of the relay (its
+#                    declaration sidecars are sealed), 'host' where it is not
+#                    (the host-knowable needles alone). Any other value is
+#                    refused before the build. Unset, it is inferred the way
+#                    run-single-avd-scenario.sh infers it: 'proxy' when the
+#                    workflow exported WIRE_UPSTREAM or handed this drive a
+#                    HAVEN_WIRE_SENTINEL — both exist only where the recorder
+#                    runs — else 'host'. A job that drops its env therefore
+#                    cannot fall to the weaker profile by default: the proxy
+#                    lane's own exports pick `proxy` for it.
+#   HAVEN_LOGSCAN_HOST_COORDINATE  'lat,lon' a lane seeded into the simulator
+#                    (run-b4-ios-real-gps.sh), declared at seal time beside the
+#                    host needles. Never echoed.
 #
 # Retry discipline (CI_HARDENING_BACKLOG.md A6):
 #   Both iOS callers wrap this script in `nick-fields/retry@v3` with no
@@ -77,6 +94,8 @@
 #
 # Side effects:
 #   - Writes /tmp/flutter-ios-test.log (uploaded as a CI failure artifact).
+#   - Writes /tmp/ios-logscan/sim.ndjson (the scanner's findings report; never
+#     uploaded).
 #   - Writes /tmp/haven-ios-retry-verdict-<scenario-slug> (cross-attempt state).
 #
 # Exit status: the `flutter test` exit code (0 = scenario passed).
@@ -90,6 +109,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_DIR
 # shellcheck source=tooling/e2e/ci/ios-flake-lib.sh
 source "${SCRIPT_DIR}/ios-flake-lib.sh"
+# The log-privacy gate: the key-material floor AND the identifier scanner, one
+# call, one verdict (Security Rules 6 and 15).
+# shellcheck source=tooling/e2e/ci/logscan-gate.sh
+source "${SCRIPT_DIR}/logscan-gate.sh"
 
 # How long after the Xcode build finishes the on-device suite has to say
 # ANYTHING before the watchdog calls it a launch/attach stall. Measured over 164
@@ -275,22 +298,28 @@ run_ios_test_with_watchdog() {
   wait "${follower_pid}" 2>/dev/null || true
 }
 
-# scan_log_or_contain <log>... — the secret-leak gate (Security Rules 6 and 15)
-# over the transcript the workflows upload `if: failure()`. A leak (rc 1) fails
-# the lane, and that failure is what triggers the upload — so the gate REMOVES
-# every log it scanned before returning. rc 3 (absent/empty) keeps them:
-# nothing there to contain. Reads SECRET_SCAN at call time so --self-test can
-# hand it a fake scanner.
+# scan_log_or_contain <log> — the log-privacy gate over the transcript the
+# workflows upload `if: failure()`, through logscan-gate.sh: with
+# HAVEN_LOGSCAN=true it seals the run's needle manifest under the job's
+# profile (HAVEN_LOGSCAN_PROFILE, or inferred from the recorder's own exports
+# — see the header) and runs the key-material floor AND the identifier
+# scanner; otherwise the floor alone. A leak (rc 1) fails the lane, and that
+# failure is what triggers the upload — so the gate REMOVES the log before
+# returning. A lane that seeded a position (B4) hands it in through
+# HAVEN_LOGSCAN_HOST_COORDINATE so the seal declares it beside the host
+# needles; that value is never echoed here. The transcript is one file, so
+# there is no final-attempt slice to narrow the plants to.
 scan_log_or_contain() {
-  local rc=0
-  bash "${SECRET_SCAN}" "$@" || rc=$?
-  if (( rc == 1 )); then
-    rm -f -- "$@"
-    echo "ERROR: secret-leak guard tripped (see the LEAK line(s) above); removed" \
-         "the scanned log(s) so the failure-artifact upload cannot publish" \
-         "them: $*" >&2
+  local profile="${HAVEN_LOGSCAN_PROFILE:-}"
+  if [[ -z "${profile}" ]]; then
+    if [[ -n "${WIRE_UPSTREAM:-}${HAVEN_WIRE_SENTINEL:-}" ]]; then profile=proxy; else profile=host; fi
   fi
-  return "${rc}"
+  local -a lane=()
+  [[ -z "${HAVEN_LOGSCAN_HOST_COORDINATE:-}" ]] \
+    || lane=(--host-decl "coordinate=${HAVEN_LOGSCAN_HOST_COORDINATE}")
+  logscan_gate "${profile}" /tmp/haven-soak/needles \
+    ${lane[@]+"${lane[@]}"} -- \
+    --sink "drive=$1" --report /tmp/ios-logscan/sim.ndjson
 }
 
 # ---------------------------------------------------------------------------
@@ -581,22 +610,26 @@ run_self_test() {
     fail=1
   fi
 
-  # (S1) THE SECRET-LEAK GATE CONTAINS. The workflows upload the transcript
+  # (S1) THE FLAG-OFF ARM CONTAINS. The workflows upload the transcript
   #      `if: failure()` and a leak is a failure, so unless the gate removes
   #      what it flagged the lane publishes the line it went red on. Driven
-  #      with a FAKE scanner: rc 1 removes the log, rc 3 (nothing scannable)
-  #      and rc 0 leave it, and the verdict comes back unchanged.
-  local fake_scan="${tmp}/fake-scan.sh" SECRET_SCAN gate_log want rc
+  #      through the REAL sourced gate with HAVEN_LOGSCAN pinned empty (a
+  #      lane's exported `true` must not pick the other arm) and a FAKE
+  #      key-material floor: rc 1 removes the log, rc 3 (nothing scannable)
+  #      and rc 0 leave it, the verdict comes back unchanged, and the
+  #      identifier scanner is never invoked.
+  local fake_scan="${tmp}/fake-scan.sh" gate_log want rc
   printf '%s\n' '#!/usr/bin/env bash' 'exit "${FAKE_SCAN_RC}"' > "${fake_scan}"
-  SECRET_SCAN="${fake_scan}"
   gate_log="${tmp}/gate.log"
   for want in 1 3 0; do
     printf 'transcript\n' > "${gate_log}"
-    export FAKE_SCAN_RC="${want}"
     rc=0
-    scan_log_or_contain "${gate_log}" 2>/dev/null || rc=$?
+    HAVEN_LOGSCAN= HAVEN_LOGSCAN_PROFILE= HAVEN_LOGSCAN_HOST_COORDINATE= \
+      SECRET_SCAN="${fake_scan}" FAKE_SCAN_RC="${want}" \
+      HAVEN_LOGSCAN_BIN="${tmp}/no-such-binary" \
+      scan_log_or_contain "${gate_log}" 2>/dev/null || rc=$?
     if (( rc != want )); then
-      echo "SELF-TEST FAIL (S1): the gate returned ${rc} for a scanner rc of ${want}" >&2
+      echo "SELF-TEST FAIL (S1): the gate returned ${rc} for a floor rc of ${want}" >&2
       fail=1
     fi
     if (( want == 1 )) && [[ -e "${gate_log}" ]]; then
@@ -604,57 +637,146 @@ run_self_test() {
            "the failure-artifact upload to publish" >&2
       fail=1
     elif (( want != 1 )) && [[ ! -e "${gate_log}" ]]; then
-      echo "SELF-TEST FAIL (S1): scanner rc ${want} removed a log it had no" \
+      echo "SELF-TEST FAIL (S1): floor rc ${want} removed a log it had no" \
            "leak to contain" >&2
       fail=1
     fi
   done
-  unset FAKE_SCAN_RC
 
-  # (S2) THE GATE IS HARD. Read from the real run (everything from the
-  #      scanner's definition down, comments stripped): the scanner's presence
-  #      is asserted with the `! -f` hard-fail form, the scan is invoked
-  #      through the containing gate at top level, and the former soft gate —
-  #      `-x "${SECRET_SCAN}"`, under which a non-executable scanner was
-  #      silently skipped and the lane went green having scanned nothing — is
-  #      gone.
-  local real_run
-  real_run="$(sed -n '/^readonly SECRET_SCAN=/,$p' "${BASH_SOURCE[0]}" \
+  # (S2) THE GATE IS HARD, AND FIRST. Read from the real run (everything from
+  #      the LOG_FILE definition down, comments stripped): the transcript goes
+  #      through the gate at top level, BEFORE the retry classification that
+  #      could re-roll a leak; no `cat`/`head`/`tail` of the transcript sits at
+  #      top level at all (the live follower inside the watchdog is a reader
+  #      of a log that is still being written, and the gate is what stands
+  #      between the finished transcript and the upload); the former soft
+  #      `-x` scanner gate is gone; no bare key-material floor call remains
+  #      (the floor runs inside the wrapper); the sourced gate reads
+  #      HAVEN_LOGSCAN; and a flag-on run refuses a STATED profile that is
+  #      not `proxy` or `host` BEFORE the build, so a job that mistyped one
+  #      costs seconds, not a 15-minute Xcode build scanned by nothing.
+  local real_run gate_line verdict_line
+  real_run="$(sed -n '/^readonly LOG_FILE=/,$p' "${BASH_SOURCE[0]}" \
                 | grep -v '^[[:space:]]*#')"
   if [[ -z "${real_run}" ]]; then
-    echo "SELF-TEST FAIL (S2): cannot find the real run's SECRET_SCAN definition" >&2
+    echo "SELF-TEST FAIL (S2): cannot find the real run's LOG_FILE definition" >&2
     fail=1
   fi
-  if grep -qF -- '-x "${SECRET_SCAN}"' <<<"${real_run}"; then
-    echo "SELF-TEST FAIL (S2): the soft \`-x\` scanner gate is back — a" \
-         "non-executable scanner would be skipped, not fatal" >&2
+  gate_line="$(grep -nE '^scan_log_or_contain "\$\{LOG_FILE\}"' <<<"${real_run}" \
+                 | cut -d: -f1 | head -n 1)"
+  verdict_line="$(grep -n 'ios_record_failure_verdict "${VERDICT_FILE}"' <<<"${real_run}" \
+                    | cut -d: -f1 | head -n 1)"
+  if [[ -z "${gate_line}" || -z "${verdict_line}" ]] || (( verdict_line < gate_line )); then
+    echo "SELF-TEST FAIL (S2): the real run must gate the transcript at top" \
+         "level and BEFORE the retry classification (gate='${gate_line}'," \
+         "classify='${verdict_line}')" >&2
     fail=1
   fi
-  if ! grep -qF -- '[[ ! -f "${SECRET_SCAN}" ]]' <<<"${real_run}"; then
-    echo "SELF-TEST FAIL (S2): the scanner's presence is no longer asserted" \
-         "with the hard-fail form" >&2
+  if grep -qE '^(cat|head|tail) .*LOG_FILE' <<<"${real_run}"; then
+    echo "SELF-TEST FAIL (S2): the transcript is echoed at top level — a leak" \
+         "would reach the job log outside the gate" >&2
     fail=1
   fi
-  if ! grep -qE '^scan_log_or_contain "\$\{LOG_FILE\}"' <<<"${real_run}"; then
-    echo "SELF-TEST FAIL (S2): the real run no longer scans the transcript" \
-         "through the containing gate" >&2
+  if grep -qE 'if[[:space:]]+\[\[[[:space:]]+-x[[:space:]]' <<<"${real_run}"; then
+    echo "SELF-TEST FAIL (S2): a soft \`if [[ -x …\` scanner gate is back — an" \
+         "unbuilt scanner would be skipped, not fatal" >&2
     fail=1
   fi
+  local floor='scan-logs-for-'
+  floor+='secrets.sh'
+  if grep -qF "${floor}" <<<"${real_run}"; then
+    echo "SELF-TEST FAIL (S2): a bare key-material floor call is back; the" \
+         "floor runs inside the wrapper, behind the gate" >&2
+    fail=1
+  fi
+  if ! declare -f logscan_gate | grep -q 'HAVEN_LOGSCAN'; then
+    echo "SELF-TEST FAIL (S2): the sourced gate no longer reads HAVEN_LOGSCAN;" \
+         "the identifier arm is unreachable" >&2
+    fail=1
+  fi
+  if ! grep -qE 'HAVEN_LOGSCAN_PROFILE.*\^\(proxy\|host\)\$' <<<"${real_run}"; then
+    echo "SELF-TEST FAIL (S2): the real run no longer refuses a flag-on run" \
+         "whose profile is not proxy|host before the build" >&2
+    fail=1
+  fi
+
+  # (S3) THE FLAG-ON CALL SITE. The library's own --self-test proves what
+  #      logscan_gate does with its arguments; what only this file can prove
+  #      is which arguments it is handed. A recording stub in place of the
+  #      sourced function: the job's profile, the fixed sidecar directory, the
+  #      transcript as the one drive sink, the report beside (never in) the
+  #      uploaded files, and a lane's seeded position declared beside the
+  #      host needles only when the lane hands one in; the verdict comes back
+  #      unchanged.
+  local gate_argv="${tmp}/gate-argv" real_gate
+  real_gate="$(declare -f logscan_gate)"
+  logscan_gate() { printf '%s\n' "$@" > "${gate_argv}"; return "${FAKE_GATE_RC}"; }
+  local -a want_argv=(proxy /tmp/haven-soak/needles --
+    --sink "drive=${gate_log}" --report /tmp/ios-logscan/sim.ndjson)
+  rc=0
+  HAVEN_LOGSCAN=true HAVEN_LOGSCAN_PROFILE=proxy HAVEN_LOGSCAN_HOST_COORDINATE= \
+    FAKE_GATE_RC=4 scan_log_or_contain "${gate_log}" || rc=$?
+  if (( rc != 4 )) || [[ "$(cat "${gate_argv}")" != "$(printf '%s\n' "${want_argv[@]}")" ]]; then
+    echo "SELF-TEST FAIL (S3): wanted rc 4 with argv '${want_argv[*]}', got rc" \
+         "${rc} with '$(tr '\n' ' ' < "${gate_argv}")'" >&2
+    fail=1
+  fi
+  want_argv=(host /tmp/haven-soak/needles --host-decl 'coordinate=-41.234567,-134.567890' --
+    --sink "drive=${gate_log}" --report /tmp/ios-logscan/sim.ndjson)
+  rc=0
+  HAVEN_LOGSCAN=true HAVEN_LOGSCAN_PROFILE=host \
+    HAVEN_LOGSCAN_HOST_COORDINATE='-41.234567,-134.567890' \
+    FAKE_GATE_RC=0 scan_log_or_contain "${gate_log}" || rc=$?
+  if (( rc != 0 )) || [[ "$(cat "${gate_argv}")" != "$(printf '%s\n' "${want_argv[@]}")" ]]; then
+    echo "SELF-TEST FAIL (S3): a seeded position must be declared as one" \
+         "--host-decl before the separator; got rc ${rc} with" \
+         "'$(tr '\n' ' ' < "${gate_argv}")'" >&2
+    fail=1
+  fi
+
+  # (S4) THE PROFILE IS INFERRED, NEVER DEFAULTED. With HAVEN_LOGSCAN_PROFILE
+  #      unset the gate is handed `proxy` when the recorder's exports are
+  #      present — WIRE_UPSTREAM (the job's proxy-start step) or
+  #      HAVEN_WIRE_SENTINEL (the drive's own half of the sentinel), either
+  #      alone — and `host` only when both are absent. Every variable the
+  #      inference reads is pinned on each call, so a lane's exported values
+  #      cannot leak into the fixture (the guards job inherits none, a lane
+  #      inherits all).
+  local inferred spec label sentinel upstream
+  for spec in 'sentinel|HAVEN_WIRE_SENTINEL:cafe||proxy' 'upstream||ws://127.0.0.1:7777|proxy' 'neither|||host'; do
+    IFS='|' read -r label sentinel upstream want <<<"${spec}"
+    rc=0
+    HAVEN_LOGSCAN=true HAVEN_LOGSCAN_PROFILE= HAVEN_LOGSCAN_HOST_COORDINATE= \
+      HAVEN_WIRE_SENTINEL="${sentinel}" WIRE_UPSTREAM="${upstream}" \
+      FAKE_GATE_RC=0 scan_log_or_contain "${gate_log}" || rc=$?
+    inferred="$(head -n 1 "${gate_argv}")"
+    if (( rc != 0 )) || [[ "${inferred}" != "${want}" ]]; then
+      echo "SELF-TEST FAIL (S4 ${label}): with the profile unset the gate must be" \
+           "handed '${want}', got '${inferred}' (rc ${rc})" >&2
+      fail=1
+    fi
+  done
+  eval "${real_gate}"
 
   if (( fail != 0 )); then
     echo "run-ios-sim-scenario.sh --self-test: FAILED" >&2
     return 1
   fi
-  echo "run-ios-sim-scenario.sh --self-test: all 8 watchdog fixtures and both" \
-       "secret-gate fixtures passed" \
+  echo "run-ios-sim-scenario.sh --self-test: all 8 watchdog fixtures and the" \
+       "four log-privacy-gate fixtures passed" \
        "(a post-build stall is caught, marked and accepted by the classifier," \
        "and stays retryable even when the process we kill overwrites the marker" \
        "on its way out; a running suite, a genuine failure, a slow build, a kill" \
        "this watchdog did not perform, and a previous attempt's stale verdict" \
        "are all correctly NOT retried; the streaming reporter the whole" \
-       "deadline rests on is still passed to flutter test; and the secret-leak" \
-       "gate is unconditional, hard-fails on a missing scanner, and removes the" \
-       "transcript on a leak and on nothing else)."
+       "deadline rests on is still passed to flutter test; and the log-privacy" \
+       "gate is the floor alone when HAVEN_LOGSCAN is unset, removing the" \
+       "transcript on a leak and on nothing else, stands at top level before" \
+       "the retry classification with no echo of the transcript beside it," \
+       "hands the sourced gate the job's profile, the transcript and a seeded" \
+       "position when a lane supplies one, infers proxy from either recorder" \
+       "export and host from neither when no profile is stated, and refuses a" \
+       "mistyped profile before the build)."
   return 0
 }
 
@@ -706,12 +828,22 @@ readonly LOG_FILE="/tmp/flutter-ios-test.log"
 # SCRIPT_DIR is set at the top of this file (the library source needs it).
 readonly REPO_ROOT="${SCRIPT_DIR}/../../.."
 readonly HAVEN_DIR="${REPO_ROOT}/haven"
-readonly SECRET_SCAN="${SCRIPT_DIR}/scan-logs-for-secrets.sh"
-
-if [[ ! -f "${SECRET_SCAN}" ]]; then
-  echo "ERROR: secret-leak guard missing at ${SECRET_SCAN}" >&2
-  exit 1
+# Under HAVEN_LOGSCAN=true a profile the job DID state must be one the seal
+# knows; refused HERE, before a 15-minute build: a lane whose recorder is in
+# front of the relay but which is sealed as `host` searches for fewer needles
+# than the run declared, and `rules` scans for none. Unset is not refused —
+# scan_log_or_contain infers it from the recorder's own exports.
+if [[ "${HAVEN_LOGSCAN:-}" == "true" && -n "${HAVEN_LOGSCAN_PROFILE:-}" \
+      && ! "${HAVEN_LOGSCAN_PROFILE}" =~ ^(proxy|host)$ ]]; then
+  echo "ERROR: HAVEN_LOGSCAN is true but HAVEN_LOGSCAN_PROFILE is neither 'proxy'" >&2
+  echo "       nor 'host' (got '${HAVEN_LOGSCAN_PROFILE}'). The job's env block" >&2
+  echo "       declares it beside HAVEN_LOGSCAN: proxy where the recording wire" >&2
+  echo "       proxy is in front of the relay, host everywhere else." >&2
+  exit 2
 fi
+# The scanner's findings reports (sink:line, class, rule — never a value) go
+# beside the uploaded files, never among them.
+mkdir -p /tmp/ios-logscan
 
 if [[ ! -f "${HAVEN_DIR}/${SCENARIO_FILE}" ]]; then
   echo "ERROR: scenario file not found: ${HAVEN_DIR}/${SCENARIO_FILE}" >&2
@@ -878,8 +1010,8 @@ TEST_RC=${ios_test_rc}
 set -e
 
 # ---------------------------------------------------------------------------
-# Security Rule #6: no key material may ever reach CI logs. Scan the captured
-# output and FAIL the lane if anything secret-shaped is present, even if the
+# Security Rules 6 and 15: no key material and no identifier may reach CI logs.
+# Gate the transcript and FAIL the lane on any non-zero verdict, even if the
 # scenario itself passed.
 #
 # Ordered BEFORE the retry classification on purpose: a leak is never
@@ -889,9 +1021,9 @@ set -e
 scan_rc=0
 scan_log_or_contain "${LOG_FILE}" || scan_rc=$?
 if (( scan_rc != 0 )); then
-  ios_retry_record "${VERDICT_FILE}" genuine 1 "secret-leak scan failed the test log (rc=${scan_rc})"
-  echo "ERROR: secret-leak scan failed for the iOS test log (rc=${scan_rc}:" \
-       "1 = leak, now removed; 3 = nothing scannable)" >&2
+  ios_retry_record "${VERDICT_FILE}" genuine 1 "log-privacy gate failed the test log (rc=${scan_rc})"
+  echo "ERROR: log-privacy gate failed for the iOS test log (rc=${scan_rc}:" \
+       "1 = leak, now removed; 2 = guard broken; 3 = unusable; 4 = meta floor)" >&2
   exit 1
 fi
 

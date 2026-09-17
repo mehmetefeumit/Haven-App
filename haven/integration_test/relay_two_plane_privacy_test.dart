@@ -86,14 +86,14 @@ void main() {
   Future<void> runLeakProof({
     required RelayTypeFfi category,
     required int listKind,
-    required String label,
+    required String scenario,
   }) async {
     try {
       await initKeyringStore();
     } on Object catch (e) {
       markTestSkipped(
         'Keyring unavailable on this runner (${e.runtimeType}); '
-        'skipping $label.',
+        'skipping $scenario.',
       );
       return;
     }
@@ -143,9 +143,9 @@ void main() {
         built.targets,
         equals(<String>[secondStrfryUrl]),
         reason:
-            '$label: built.targets must equal [R2] exactly. Containing R1 (a '
-            'current default) would mean the old publish union is back — '
-            'leaking the private relay onto a public relay.',
+            '$scenario: built.targets must equal [R2] exactly. Containing '
+            'R1 (a current default) would mean the old publish union is '
+            'back — leaking the private relay onto a public relay.',
       );
 
       // Observe R2 BEFORE publishing so we never race the EVENT frame.
@@ -180,8 +180,8 @@ void main() {
         relayTags.any((t) => t.length >= 2 && t[1] == secondStrfryUrl),
         isTrue,
         reason:
-            '$label: the kind $listKind event on R2 must name R2 in its '
-            "'$relayTagName' tags.",
+            '$scenario: the kind $listKind event on R2 must name R2 in its '
+            "'$relayTagName' tags.", // harness-log-ok: 'r'/'relay' only.
       );
 
       // NEGATIVE (anchored): the PUBLIC relay R1 must NEVER receive a kind
@@ -199,12 +199,12 @@ void main() {
         r1Events,
         isEmpty,
         reason:
-            '$label: two-plane leak invariant violated — a kind $listKind '
+            '$scenario: two-plane leak invariant violated — a kind $listKind '
             'relay-list event (which names the private relay R2) reached the '
             'public relay R1. It must publish to the user list ONLY.',
       );
 
-      debugPrint('[$label] PASS: kind $listKind on R2 only; R1 leak-free.');
+      debugPrint('[$scenario] PASS: kind $listKind on R2 only; R1 leak-free.');
     } finally {
       await dataDir.delete(recursive: true);
     }
@@ -217,7 +217,7 @@ void main() {
       await runLeakProof(
         category: RelayTypeFfi.inbox,
         listKind: 10050,
-        label: 'TP-INBOX',
+        scenario: 'TP-INBOX',
       );
     },
   );
@@ -232,7 +232,7 @@ void main() {
       await runLeakProof(
         category: RelayTypeFfi.nip65,
         listKind: 10002,
-        label: 'TP-KP',
+        scenario: 'TP-KP',
       );
     },
   );

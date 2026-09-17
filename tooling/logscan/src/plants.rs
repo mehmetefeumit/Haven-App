@@ -54,6 +54,45 @@ pub const PHASES: [&str; 2] = ["open", "close"];
 /// Emitters matched by shape rather than by declaration.
 pub const SHAPE_EMITTERS: [&str; 3] = ["rust", "kotlin", "swift"];
 
+/// Whether a run has a channel through which the app can be handed a token.
+///
+/// A plant proves the APP reached the sink, so the app has to PRINT it — which
+/// means somebody has to give it one. Only a lane with the wire proxy's
+/// declaration channel can: the harness mints a token, declares it back, and
+/// `debugPrint`s it. A proxy-less lane (every b-lane, the integration and
+/// profile lanes) has no such channel, so a seal that minted a Dart token there
+/// would be requiring a control the run cannot possibly satisfy — rc 3 on every
+/// green lane, which is how a positive control turns into noise and then into a
+/// deleted control. Those lanes declare `none` and keep the SHAPE plants, which
+/// need no channel.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DeclaredPlants {
+    /// The harness declares one Dart token per phase.
+    #[default]
+    Dart,
+    /// No declaration channel: only the shape plants prove sink reach.
+    None,
+}
+
+impl DeclaredPlants {
+    /// Parses the `--declared-plants` argument.
+    ///
+    /// # Errors
+    ///
+    /// Returns the reason, naming the two spellings.
+    pub fn parse(text: &str) -> Result<Self, String> {
+        match text {
+            "dart" => Ok(Self::Dart),
+            "none" => Ok(Self::None),
+            _ => Err(
+                "--declared-plants takes `dart` (a lane with the proxy's declaration channel) or `none` (a lane without one)"
+                    .to_owned(),
+            ),
+        }
+    }
+}
+
 /// Where a slot's token came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]

@@ -33,7 +33,7 @@ use sha2::{Digest, Sha256};
 
 use crate::expand::{Declared, Dropped, Term};
 use crate::ledger::Claim;
-use crate::plants::{DeclaredPlant, PlantSlot};
+use crate::plants::{DeclaredPlant, DeclaredPlants, PlantSlot};
 use crate::policy::{Policy, SinkSpec};
 
 /// The one directory a manifest or a sidecar may live in.
@@ -97,6 +97,11 @@ pub struct Manifest {
     pub ledger: Vec<Claim>,
     /// The declared positive controls.
     pub plants: Vec<PlantSlot>,
+    /// Whether this run had a channel to hand the app a Dart token at all.
+    /// Absent means `dart`: every manifest written before the host profile
+    /// existed came off a lane with the proxy's declaration channel.
+    #[serde(default)]
+    pub declared_plants: DeclaredPlants,
     /// Line floors per sink class, after `--floor` overrides.
     pub floors: BTreeMap<String, u64>,
     /// The declaration floors the run was checked against.
@@ -117,6 +122,44 @@ pub struct Manifest {
 }
 
 impl Manifest {
+    /// The manifest `scan --rules-only` runs against: the policy's sink specs
+    /// and line floors, and nothing at all to search for.
+    ///
+    /// It is built in memory and never written: a manifest on disk is the record
+    /// of what a run minted, and a rules-only scan is precisely the case where
+    /// nothing was declared.
+    #[must_use]
+    pub fn rules_only(policy: &Policy) -> Self {
+        Self {
+            schema: SCHEMA,
+            run_id: "rules-only".to_owned(),
+            roles: Vec::new(),
+            values: Vec::new(),
+            terms: Vec::new(),
+            dropped: Vec::new(),
+            ledger: Vec::new(),
+            plants: Vec::new(),
+            declared_plants: DeclaredPlants::None,
+            floors: policy
+                .sinks
+                .iter()
+                .map(|(name, spec)| (name.clone(), spec.min_lines))
+                .collect(),
+            expect: BTreeMap::new(),
+            scoped_out: policy
+                .classes
+                .iter()
+                .map(|(name, spec)| (name.clone(), spec.scoped_out.clone()))
+                .collect(),
+            sinks: policy.sinks.clone(),
+            base64_entropy_bits: policy.base64_entropy_bits,
+            // No `--exempt-endpoint`: exemptions are a property of the run that
+            // sealed them, and a rules-only scan sealed nothing. A lane that
+            // needs its loopback relay forgiven must declare and seal.
+            exempt_endpoints: Vec::new(),
+        }
+    }
+
     /// The line floor for `class`.
     #[must_use]
     pub fn floor(&self, class: &str) -> u64 {
@@ -250,7 +293,15 @@ pub fn parse_decl(
 ///
 /// # Errors
 ///
-/// Returns a message when the class is not declared in the policy.
+/// Returns a message when the class is not declared in the policy, when a plant
+/// is declared on the host, or when a `coordinate` is not `lat,lon`.
+///
+/// A host declaration comes from a runner's argument list rather than from the
+/// app, so a typo there is silent in a way a sidecar declaration is not: the
+/// expander would refuse the value later with the same rc, but only after the
+/// operator has read a message about an expander they never invoked. The
+/// coordinate shape is checked HERE, where the flag is, and the value is still
+/// withheld — a runner's argv reaches a public step log.
 pub fn add_host_decl(
     policy: &Policy,
     class: &str,
@@ -264,6 +315,11 @@ pub fn add_host_decl(
             "a plant cannot be declared on the host: a plant proves that the APP reached the sink"
                 .to_owned(),
         );
+    }
+    if matches!(spec.kind, crate::policy::ClassKind::Coordinate) && !is_lat_lon(value) {
+        return Err(format!(
+            "`--host-decl {class}=` needs `lat,lon` in decimal degrees (the value is withheld)"
+        ));
     }
     *next_id += 1;
     let id = format!("v{next_id}");
@@ -284,6 +340,13 @@ pub fn add_host_decl(
         },
     ));
     Ok(())
+}
+
+/// Whether `text` is two decimal axes separated by one comma.
+fn is_lat_lon(text: &str) -> bool {
+    text.split_once(',').is_some_and(|(lat, lon)| {
+        lat.trim().parse::<f64>().is_ok() && lon.trim().parse::<f64>().is_ok()
+    })
 }
 
 /// Every spelling of an exempt endpoint S7 and S12 skip.
@@ -487,6 +550,7 @@ mod tests {
             dropped: vec![],
             ledger: vec![],
             plants: vec![],
+            declared_plants: super::DeclaredPlants::Dart,
             floors: std::collections::BTreeMap::new(),
             expect: std::collections::BTreeMap::new(),
             scoped_out: std::collections::BTreeMap::new(),
@@ -684,6 +748,80 @@ mod tests {
         )
         .expect_err("a host plant proves nothing about the app");
         assert!(err.contains("the APP"), "{err}");
+    }
+
+    #[test]
+    fn a_host_declared_coordinate_must_be_lat_lon() {
+        let policy = Policy::load().expect("policy");
+        let mut ids = 0;
+        let mut into = Declarations::default();
+        for bad in [
+            "12.345678",
+            "12.345678;87.654321",
+            "north,east",
+            " , ",
+            "12,",
+        ] {
+            let err = add_host_decl(&policy, "coordinate", bad, &mut ids, &mut into)
+                .expect_err("a coordinate that is not `lat,lon` must be refused");
+            assert!(err.contains("lat,lon"), "{err}");
+            assert!(
+                !err.contains(bad),
+                "an error must not quote the value: {err}"
+            );
+        }
+        add_host_decl(
+            &policy,
+            "coordinate",
+            "-47.209318,-127.478205",
+            &mut ids,
+            &mut into,
+        )
+        .expect("the sanctioned shape");
+        assert_eq!(into.values.len(), 1);
+    }
+
+    /// A canary STEM is a legal host declaration, and it survives the strictest
+    /// sink's term floor — which is the whole reason a stem is worth declaring.
+    #[test]
+    fn a_host_declared_name_stem_is_searchable_in_the_strictest_sink() {
+        let policy = Policy::load().expect("policy");
+        let mut ids = 0;
+        let mut into = Declarations::default();
+        add_host_decl(&policy, "circle_name", "Qzvx CIRCLE ", &mut ids, &mut into)
+            .expect("a stem is a legal host declaration");
+        let declared: Vec<crate::expand::Declared> =
+            into.values.iter().map(|(d, _)| d.clone()).collect();
+        let expansion = crate::expand::expand(&policy, &declared).expect("expand");
+        let floor = policy.sinks["logcat"].term_floor;
+        let searchable = expansion
+            .terms
+            .iter()
+            .filter(|t| t.text.chars().count() >= floor)
+            .count();
+        assert!(
+            expansion.terms.iter().any(|t| t.text == "Qzvx CIRCLE "),
+            "the stem itself must be searched verbatim"
+        );
+        assert!(
+            searchable > 0,
+            "a stem below every sink's term floor would be a declaration that searches for nothing"
+        );
+    }
+
+    #[test]
+    fn a_rules_only_manifest_carries_the_floors_and_nothing_to_search_for() {
+        let policy = Policy::load().expect("policy");
+        let manifest = Manifest::rules_only(&policy);
+        assert!(manifest.terms.is_empty());
+        assert!(manifest.plants.is_empty());
+        assert!(manifest.values.is_empty());
+        assert!(manifest.exempt_endpoints.is_empty());
+        assert_eq!(
+            manifest.floor("rust-test"),
+            policy.sinks["rust-test"].min_lines
+        );
+        assert_eq!(manifest.floor("drive"), policy.sinks["drive"].min_lines);
     }
 
     #[test]

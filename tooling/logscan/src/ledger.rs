@@ -253,7 +253,7 @@ furniture = []
 [classes]
 geohash = {{ kind = "geohash" }}
 [sinks]
-drive = {{ term_floor = 6, structural_rules = true, reassemble = false, min_lines = 1, entry_format = "plain" }}
+drive = {{ term_floor = 6, declared_plants_expected = false, structural_rules = true, reassemble = false, min_lines = 1, entry_format = "plain" }}
 {ledger}
 "#
         );

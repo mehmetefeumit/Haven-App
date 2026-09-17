@@ -308,13 +308,17 @@ impl RuleSet {
         match id {
             "S4" => {
                 let blob = longest_base64_run(whole);
-                shannon_bits(blob) > self.entropy_bits
+                is_base64_payload(blob, whole.contains('='), self.entropy_bits)
             }
             // A geohash is base32: a bare run of digits next to the word "geo"
-            // is a number (a count, a port, a duration), not a cell.
-            "S6" => capture
-                .get(1)
-                .is_some_and(|m| m.as_str().chars().any(char::is_alphabetic)),
+            // is a number (a count, a port, a duration), not a cell. And a cell
+            // inside a code path is a module name.
+            "S6" => {
+                let (Some(all), Some(cell)) = (capture.get(0), capture.get(1)) else {
+                    return false;
+                };
+                cell.as_str().chars().any(char::is_alphabetic) && !is_code_path(line, all, cell)
+            }
             "S7" => !self.is_exempt_endpoint(whole),
             "S8" => capture.get(1).is_some_and(|blob| {
                 !runs_into_a_word(line, blob.start())
@@ -494,6 +498,53 @@ fn runs_into_a_word(line: &str, at: usize) -> bool {
         .chars()
         .next_back()
         .is_some_and(|c| c.is_ascii_alphabetic())
+}
+
+/// Whether an S6 match is a code path rather than a geohash field.
+///
+/// `location::geohash::tests::nan_latitude_returns_empty` is the shape: the
+/// keyword is a MODULE, `::` is the separator the rule allows, and `tests` is
+/// five letters of the geohash alphabet. Every `cargo test` transcript of this
+/// tree carries seven of them, so the rule has to tell a path from a field or
+/// the unit-test lanes redden on their own module names.
+///
+/// Two tells, both syntactic. The first is that the cell is not a whole token:
+/// a real cell ends the word it is in, while `geohash::tests::name`,
+/// `empty_geohash_returns_zero` and `geohash::encode(…)` all continue into `::`,
+/// `_`, `(` or another letter. The second is that the keyword itself is preceded
+/// by `::`. A real rendering — `geohash=u4pruyd`, `gh: u4pruyd`, the quoted JSON
+/// forms — has neither.
+fn is_code_path(line: &str, whole: regex::Match<'_>, cell: regex::Match<'_>) -> bool {
+    let after = &line[cell.end()..];
+    // Deliberately NOT "any alphanumeric": the cell is capped at twelve
+    // characters and stops at `a`/`i`/`l`/`o`, so a real cell can legitimately be
+    // followed by one, and suppressing those would lose the longest geohashes
+    // this app produces.
+    let continues =
+        after.starts_with("::") || after.chars().next().is_some_and(|c| c == '_' || c == '(');
+    continues || (whole.as_str().starts_with(':') && line[..whole.start()].ends_with(':'))
+}
+
+/// Whether an S4 run is base64 PAYLOAD rather than an identifier or a path.
+///
+/// The entropy floor alone cannot separate them: `kBackgroundSessionReclaimAtMsKey`
+/// scores 4.33 bits and a real 32-byte base64 blob scores 4.5–5.0, so the floor
+/// that admits the second admits the first. Base64 punctuation alone cannot
+/// either — `App/haven/test/providers/identity` is a path made of `/`.
+///
+/// What a base64 payload of random bytes has, and a camel-case identifier does
+/// not, is DIGITS: 10 of the 64 characters are digits, so fewer than two of them
+/// in 32 encoded characters happens in roughly one run out of thirty, and in 44
+/// (a 32-byte key) in roughly one out of two hundred. Trailing `=` padding is
+/// the other definitive tell. Both are checked alongside the entropy floor,
+/// never instead of it.
+///
+/// The recall this costs — a digit-free base64 blob — is carried by S1/S2 (hex),
+/// S8 (a blob next to a key word), the needle search for every value the run
+/// declared, and `scan-logs-for-secrets.sh`'s keyword-anchored patterns.
+fn is_base64_payload(blob: &str, padded: bool, entropy_bits: f64) -> bool {
+    let digits = blob.bytes().filter(u8::is_ascii_digit).count();
+    (digits >= 2 || padded) && shannon_bits(blob) > entropy_bits
 }
 
 /// Whether a keyword-adjacent run looks ENCODED rather than like an identifier.
@@ -735,8 +786,40 @@ mod tests {
             // Nine separator characters is past the bound: a cell that far from
             // its label is not a rendering, it is two facts on one line.
             "haven: geohash         u4pruyd",
+            // Verbatim from `cargo test` over haven-core: the keyword is a
+            // MODULE and the "cell" is the next path segment. Seven of these
+            // land in every transcript of this tree.
+            "test location::geohash::tests::nan_latitude_returns_empty ... ok",
+            "test location::geohash::tests::empty_geohash_returns_zero ... ok",
+            // A call whose NAME is geohash-alphabet-only, so the regex does match
+            // and it is the `(` that rejects it — the earlier fixture used
+            // `encode`, which the cell pattern never matched in the first place.
+            "haven: location::geohash::sweeps(2) returned",
         ] {
             assert!(!hits(clean).contains(&"S6"), "must not fire on {clean:?}");
+        }
+    }
+
+    /// S4 reads a base64 PAYLOAD, not an identifier and not a path.
+    ///
+    /// The negatives are verbatim from the `flutter test` transcripts of this
+    /// tree, which is where the shape was found: a Dart test description is a
+    /// long camel-case run over the Shannon floor, and a repository path is a
+    /// long run of base64 characters joined by `/`.
+    #[test]
+    fn s4_reads_a_base64_payload_and_not_an_identifier_or_a_path() {
+        for dirty in [
+            "haven: payload=7mK4pQz9XbR2vT8yLwN3cJ5hD6gF0aSeUiOpZxCvBnMq",
+            "haven: payload=q6DHwmDdd0LrxtQ9XmYUMdiNlUvKZPWaUXjZQFT8Vzo=",
+        ] {
+            assert!(hits(dirty).contains(&"S4"), "must fire on {dirty:?}");
+        }
+        for clean in [
+            "00:01 +33: identity_provider_test.dart: background residue clears kBackgroundSessionReclaimAtMsKey",
+            "00:04 +91: wire_frame_test.dart: anUnparseableFrameWithMultibytePreviewIsNotABlindSpot",
+            "00:01 +32: /home/runner/work/Haven-App/Haven-App/haven/test/providers/identity_provider_test.dart: ok",
+        ] {
+            assert!(!hits(clean).contains(&"S4"), "must not fire on {clean:?}");
         }
     }
 

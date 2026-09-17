@@ -16,6 +16,8 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
+import 'package:haven/src/utils/log_alias.dart'
+    show LogAliasClass, logAliasHandle, magnitudeBucket;
 import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
@@ -177,16 +179,26 @@ final RegExp _lowercaseHexOnly = RegExp(r'^[0-9a-f]+$');
 /// (Security Rule 6).
 String encodeWireMlsGroupId(List<int> mlsGroupId) {
   if (mlsGroupId.length > kMaxWireMlsGroupIdBytes) {
+    // A byte-length bound check, not the id itself (see the doc above:
+    // "names lengths and positions only"). Every group id is drawn from the
+    // same length range, so the length singles out no circle, and the bound
+    // is a fixed protocol constant, not per-instance data.
+    // log-scan-ok: length + a fixed protocol-constant bound, not an id
     throw ArgumentError(
+      // harness-log-ok: byte length, not the id
       'MLS group id is ${mlsGroupId.length} byte(s); the recording proxy '
+      // harness-log-ok: fixed protocol-constant bound, not the id
       'refuses anything over $kMaxWireMlsGroupIdBytes '
       '(MLS_GROUP_ID_MAX_HEX). Sending it would be refused silently and '
       'surface as an ack timeout that blames the proxy for a caller bug.',
     );
   }
   if (mlsGroupId.length < kMinWireMlsGroupIdBytes) {
+    // log-scan-ok: length + a fixed protocol-constant bound, not an id
     throw ArgumentError(
+      // harness-log-ok: byte length, not the id
       'MLS group id is ${mlsGroupId.length} byte(s); the wire-correlation '
+      // harness-log-ok: fixed protocol-constant bound, not the id
       'oracle needs at least $kMinWireMlsGroupIdBytes so the literal it '
       'searches for cannot collide with ordinary frame content. A short id '
       'here is usually the pre-accept gift-wrap stand-in rather than the real '
@@ -212,6 +224,7 @@ String encodeWireMlsGroupId(List<int> mlsGroupId) {
   // and report clean. The loop above cannot currently produce one; the check
   // costs nothing and pins the property for whoever changes the encoding.
   if (hex.length.isOdd || !_lowercaseHexOnly.hasMatch(hex)) {
+    // log-scan-ok: a shape check on the encoded length only, not the id
     throw ArgumentError(
       'MLS group id did not encode to even-length lowercase hex '
       '(${hex.length} char(s)); the host oracle would search the journal for '
@@ -630,6 +643,7 @@ class TestRelay {
     final subs = _subs.values.toList(growable: false);
     _subs.clear();
     for (final s in subs) {
+      // log-scan-ok: message is a fixed literal from the sole caller
       s.completeWithError(StateError(message));
     }
   }
@@ -734,6 +748,7 @@ class TestRelay {
     try {
       return await attempt();
     } on _SocketDied catch (died) {
+      // log-scan-ok: died.message is always a fixed harness literal
       throw StateError(died.message);
     }
   }
@@ -1179,11 +1194,7 @@ class TestRelay {
     // malformed event but the test failure would be confusing).
     final decoded = jsonDecode(eventJson);
     if (decoded is! Map<String, dynamic>) {
-      throw ArgumentError.value(
-        eventJson,
-        'eventJson',
-        'must decode to a JSON object',
-      );
+      throw ArgumentError('eventJson must decode to a JSON object');
     }
     _channel.sink.add(jsonEncode(<dynamic>['EVENT', decoded]));
   }
@@ -1226,19 +1237,11 @@ class TestRelay {
     }
     final decoded = jsonDecode(eventJson);
     if (decoded is! Map<String, dynamic>) {
-      throw ArgumentError.value(
-        eventJson,
-        'eventJson',
-        'must decode to a JSON object',
-      );
+      throw ArgumentError('eventJson must decode to a JSON object');
     }
     final eventId = decoded['id'];
     if (eventId is! String) {
-      throw ArgumentError.value(
-        eventJson,
-        'eventJson',
-        'event JSON must include an "id" string',
-      );
+      throw ArgumentError('eventJson must include an "id" string');
     }
     final completer = Completer<(bool, String)>();
     final pending = _PendingOk(eventId: eventId, completer: completer);
@@ -1255,7 +1258,7 @@ class TestRelay {
     } on TimeoutException {
       throw TimeoutException(
         'TestRelay.publishAndAwaitOk timed out after ${timeout.inSeconds}s '
-        'for event $eventId',
+        'for event ${logAliasHandle(LogAliasClass.event, eventId)}',
       );
     } finally {
       _pendingOks.remove(pending);
@@ -1333,10 +1336,16 @@ class TestRelay {
       unawaited(
         _timeoutDiagnostic(filter).then((diagnostic) {
           if (completer.isCompleted) return;
+          // Render the filter's SHAPE only — kind numbers are a protocol
+          // constant, not an identifier — never its values: `authors`,
+          // `#p`/`#h`/`#e` and `since` carry pubkeys, group ids and
+          // absolute instants (Rule 15).
+          final otherKeys = filter.keys.where((k) => k != 'kinds').join(', ');
           completer.completeError(
             TimeoutException(
               'TestRelay.firstWhere timed out after ${timeout.inSeconds}s '
-              'with filter $filter.$diagnostic',
+              "for kind(s) ${filter['kinds']} scoped by [$otherKeys]."
+              '$diagnostic',
             ),
           );
         }),
@@ -1380,9 +1389,9 @@ class TestRelay {
       }
       final kinds = held.map((e) => e.kind).toSet().toList()..sort();
       return ' Diagnostic: for the same author/tag scope the relay holds '
-          '${held.length} event(s) of kind(s) $kinds (kind constraint '
-          'dropped) — a mismatch against the waited-for kind usually means '
-          'the wait filters a stale/retired wire kind.';
+          '${magnitudeBucket(held.length)} event(s) of kind(s) $kinds (kind '
+          'constraint dropped) — a mismatch against the waited-for kind '
+          'usually means the wait filters a stale/retired wire kind.';
     } on Object {
       return '';
     }
@@ -1413,7 +1422,7 @@ class TestRelay {
       throw StateError('TestRelay is closed');
     }
     if (count <= 0) {
-      throw ArgumentError.value(count, 'count', 'must be positive');
+      throw ArgumentError('count must be positive');
     }
     final completer = Completer<List<TestRelayEvent>>();
     final collected = <TestRelayEvent>[];

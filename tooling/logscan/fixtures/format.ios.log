@@ -1,0 +1,33 @@
+# SPECIFICATION-DERIVED, not captured: no iOS lane has ever run this scanner, so
+# there is no `log show` corpus to mine yet and every line below is written from
+# the two renderings the tool documents. The first iOS lane's upload is the
+# corpus source, exactly as CI run 34766632019 was for Android, and until then
+# the rc-3 "no line parsed as `ios` framing" net is what turns a THIRD rendering
+# into a red lane instead of a quiet pass.
+#
+# One line per column variant of each rendering. The process is always `Runner`
+# on a Haven-owned line: `frb_user` is the os_log SUBSYSTEM and `HavenSLC` /
+# `HavenBGTask` are NSLog message prefixes, so both belong in the message, not in
+# the process column. The coordinate is synthetic and is not a declared needle;
+# the only declared value here is the pubkey on the last line, which sits on an
+# UN-OWNED line on purpose.
+# --- `log show` default columnar style ---
+2026-09-12 10:00:00.000001+0000 0x1e0f     Default     0x0                  431    0    Runner: fix -12.345678,98.765432
+2026-09-12 10:00:00.000002+0000 0x1e0f     Default     0x0                  431    0    Runner(libsystem_network.dylib): fix -12.345678,98.765432
+2026-09-12 10:00:00.000003+0000 0x1e10     Info        0x0                  431    0    Runner: [frb_user:default] fix -12.345678,98.765432
+2026-09-12 10:00:00.000004+0000 0x1e11     Debug       0x0                  431    0    Runner: [HavenSLC] fix -12.345678,98.765432
+2026-09-12 10:00:00.000005+0000 0x2f20     Default     0x0                  77     0    locationd: fix -12.345678,98.765432
+2026-09-12 10:00:00.000006+0000 0x2f21     Default     0x0                  512    0    RunnerHelper: fix -12.345678,98.765432
+2026-09-12 10:00:00.000007+0000 0x2f22     Default     0x0                  77     0    locationd: Runner requested fix -12.345678,98.765432
+        continuation of the previous record: fix -12.345678,98.765432
+2026-09-12 10:00:00.000009+0000 0xdeadbeef Error       0xfeedface           4321   5    Runner: fix -12.345678,98.765432
+# --- `log show --style syslog`, which is what every iOS lane captures ---
+2026-09-12 10:00:00.000010+0000 localhost Runner[431] <Notice>: fix -12.345678,98.765432
+2026-09-12 10:00:00.000011+0000 localhost Runner(Flutter)[431] <Notice>: flutter: fix -12.345678,98.765432
+2026-09-12 10:00:00.000012+0000 localhost Runner[431:12345] <Debug>: [frb_user:default] fix -12.345678,98.765432
+2026-09-12 10:00:00.000013+0000 localhost locationd[77] <Notice>: fix -12.345678,98.765432
+2026-09-12 10:00:00.000014+0000 localhost RunnerHelper[512] <Notice>: fix -12.345678,98.765432
+2026-09-12 10:00:00.000015+0000 localhost locationd[77] <Notice>: Runner requested fix -12.345678,98.765432
+2026-09-12 10:00:00.000016+0000 localhost Runner[431] <Notice>: logscan-plant-rust-open-MNPQRSTUVW
+2026-09-12 10:00:00.000017+0000 localhost Runner[431] <Notice>: logscan-plant-swift-open-QRSTUVWXYZ
+2026-09-12 10:00:00.000018+0000 localhost locationd[77] <Notice>: cached identity 0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9

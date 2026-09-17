@@ -337,15 +337,29 @@ Usage: simctl privacy <device> <action> <service> [<bundle identifier>]
   rc=0; b4_proof_marker_present "${tmp}/empty.log" || rc=$?
   _check "M3b an empty log is refused" 1 "${rc}"
 
+  # --- (G1) The seeded position reaches the delegate's log-privacy gate as a
+  #     needle: the delegate invocation (its continuation lines joined) carries
+  #     HAVEN_LOGSCAN_HOST_COORDINATE built from the seed, so the runner's
+  #     seal declares the one value this lane proves is encrypted. Read from
+  #     the real run, so this fixture's own text cannot satisfy it.
+  local joined
+  joined="$(sed -n '/^# Real run$/,$p' "${BASH_SOURCE[0]}" | grep -v '^[[:space:]]*#' \
+              | sed -e ':a' -e '/\\$/N; s/\\\n//; ta')"
+  rc=0
+  grep -qE '^HAVEN_LIVE_SYNC=.* HAVEN_LOGSCAN_HOST_COORDINATE="\$\{GEO_LAT\},\$\{GEO_LON\}" +bash "\$\{SIM_RUNNER\}" "\$\{SCENARIO_FILE\}" "\$\{SIM_UDID\}"$' \
+    <<<"${joined}" || rc=1
+  _check "G1 the delegate is handed the seeded position for the log-privacy seal" 0 "${rc}"
+
   if (( fail != 0 )); then
     echo "run-b4-ios-real-gps.sh --self-test: FAILED" >&2
     return 1
   fi
-  echo "run-b4-ios-real-gps.sh --self-test: all 17 fixtures passed (simctl" \
+  echo "run-b4-ios-real-gps.sh --self-test: all 18 fixtures passed (simctl" \
        "location/privacy support is probed not assumed and the two failure" \
        "modes are distinguished; coordinate seeds are range- and type-checked" \
-       "and the null island is refused; and a run that exits 0 without" \
-       "reaching its proof is refused)."
+       "and the null island is refused; a run that exits 0 without" \
+       "reaching its proof is refused; and the seeded position is handed to" \
+       "the delegate's log-privacy seal as a needle)."
   return 0
 }
 
@@ -390,8 +404,14 @@ GEO_TOLERANCE="${HAVEN_B4_GEO_TOLERANCE_DEG:-1e-5}"
 readonly GEO_LAT GEO_LON GEO_TOLERANCE
 
 if ! b4_coordinates_usable "${GEO_LAT}" "${GEO_LON}"; then
+  # Which axis failed, never the values: a coordinate is a needle even when it
+  # is the one the operator mistyped.
+  FAILED_AXES=()
+  b4_valid_coordinate "${GEO_LAT}" 90 || FAILED_AXES+=(latitude)
+  b4_valid_coordinate "${GEO_LON}" 180 || FAILED_AXES+=(longitude)
+  (( ${#FAILED_AXES[@]} > 0 )) || FAILED_AXES=('both zero, the null island')
   echo "ERROR: HAVEN_B4_GEO_LAT/HAVEN_B4_GEO_LON are not a usable seed" >&2
-  echo "       (got '${GEO_LAT}' / '${GEO_LON}'). They must be finite decimals" >&2
+  echo "       (failed: ${FAILED_AXES[*]}; values not echoed). They must be finite decimals" >&2
   echo "       within +/-90 and +/-180, and must not be (0, 0) — the null" >&2
   echo "       island is what a simulator with NO simulated location reports," >&2
   echo "       so seeding it would make this lane unable to tell a delivered" >&2
@@ -554,6 +574,11 @@ echo "B4 — seeded the simulator location (value withheld from the log)"
 # secret-leak scan are inherited rather than reimplemented.
 # HAVEN_E2E_IOS_SKIP_UNINSTALL is the one opt-in this lane needs from the shared
 # runner: its own uninstall would erase the grant made three lines above.
+# HAVEN_LOGSCAN_HOST_COORDINATE hands the seeded position to the runner's
+# log-privacy gate, which declares it as a needle beside the host-knowable ones
+# (tooling/e2e/ci/host-needles.sh documents it as this lane's): the one value
+# this lane exists to prove is encrypted must be the one its logs are searched
+# for. The gate's arm and profile arrive from the job env.
 set +e
 HAVEN_LIVE_SYNC="${LIVE_SYNC}" \
 HAVEN_E2E_RELAY="${RELAY_URL}" \
@@ -562,6 +587,7 @@ HAVEN_E2E_IOS_SKIP_UNINSTALL=1 \
 HAVEN_B4_GEO_LAT="${GEO_LAT}" \
 HAVEN_B4_GEO_LON="${GEO_LON}" \
 HAVEN_B4_GEO_TOLERANCE_DEG="${GEO_TOLERANCE}" \
+HAVEN_LOGSCAN_HOST_COORDINATE="${GEO_LAT},${GEO_LON}" \
   bash "${SIM_RUNNER}" "${SCENARIO_FILE}" "${SIM_UDID}"
 DRIVE_RC=$?
 set -e

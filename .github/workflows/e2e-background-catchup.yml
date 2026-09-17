@@ -46,14 +46,14 @@ jobs:
     # Three APK builds + boot + four phases including a guest reboot. The job
     # cap must clear the SUM of the step caps: below it, a run whose every step
     # is still inside its own cap can die here, and a job-cap death skips every
-    # `if: failure()` step (e2e-android.yml states the rule). So: Build
-    # background-worker test APKs 30 + Create AVD snapshot (on an AVD-cache
-    # miss) 15 + the emulator step 40 (derived there) + the most the work no
-    # step cap bounds has taken, 3.6 min over 52 runs of this job (ci.yml,
-    # 2026-07-29..09-10; 2.3 of it Free disk space, run 34488512808), taken as
-    # 4 = 89 -> 90.
+    # `if: failure()` step (e2e-android.yml states the rule). So: Build the
+    # runtime log scanner 10 + Build background-worker test APKs 30 + Create
+    # AVD snapshot (on an AVD-cache miss) 15 + the emulator step 40 (derived
+    # there) + the most the work no step cap bounds has taken, 3.6 min over 52
+    # runs of this job (ci.yml, 2026-07-29..09-10; 2.3 of it Free disk space,
+    # run 34488512808), taken as 4 = 99 -> 100.
     # job-uncapped-minutes: 3.6 (52 runs, worst 34488512808)
-    timeout-minutes: 90
+    timeout-minutes: 100
     env:
       HAVEN_E2E_RELAY: ws://10.0.2.2:7777
       # Receive path, DECLARED — not inherited. `liveSyncEnabled` defaults to
@@ -75,6 +75,15 @@ jobs:
       # scripts/ci/check_m7_background_delivery_assertion.sh.
       M7_REQUIRE_DECRYPT: "1"
       FLUTTER_SUPPRESS_ANALYTICS: "true"
+      # The runtime log scanner (tooling/logscan) is wired into this lane. The
+      # runner reads the flag: it seals the run's needle manifest and runs every
+      # captured log through tooling/e2e/ci/scan-logs.sh before echoing or
+      # keeping any of it. No recording proxy runs here, so the needles are the
+      # host-known constants of tooling/e2e/ci/host-needles.sh (the `host`
+      # profile): the fixed role seeds, the role and canary coordinates and the
+      # canary name stems.
+      HAVEN_LOGSCAN: "true"
+      HAVEN_LOGSCAN_PROFILE: host
 
     steps:
       - name: Checkout
@@ -100,10 +109,30 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: haven-core
+          workspaces: |
+            haven-core
+            tooling/logscan
           # Distinct cache key from the other E2E jobs so they don't race on one
           # entry; all build the same x86_64-linux-android target.
           key: e2e-background-catchup-x64
+
+      # The runtime log scanner, release-built ONCE, before Flutter and the
+      # emulator are resident (same reasoning as the APK build below). Capped
+      # so a cargo stall fails fast; the cap is a term of the job cap's sum
+      # above.
+      - name: Build the runtime log scanner
+        timeout-minutes: 10
+        run: cargo build --release --manifest-path tooling/logscan/Cargo.toml
+
+      # The needle directory is rotated BEFORE any drive: a manifest left by an
+      # earlier run on a reused runner would be reused as this run's (the
+      # host-profile gate reuses the manifest already at its out path).
+      # Owner-only, because what lands there is every identifier the run
+      # declares, verbatim.
+      - name: Rotate the needle directory
+        run: |
+          mkdir -m 0700 -p /tmp/haven-soak/needles
+          rm -f /tmp/haven-soak/needles/*.needles.decl /tmp/haven-soak/needles/*.needles.json /tmp/haven-soak/needles/*.canaries.json
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -279,23 +308,29 @@ jobs:
             adb shell dumpsys jobscheduler | grep -A3 com.oblivioustech.haven || true
           } > /tmp/m7-logs/diag.log 2>&1 || true
 
-      # The rest of /tmp/m7-logs/ is scanned by run-m7-background-catchup.sh
+      # The rest of /tmp/m7-logs/ was gated by run-m7-background-catchup.sh
+      # (HAVEN_LOGSCAN above: each drive log before it is echoed, and the whole
+      # directory typed by name in its EXIT trap, through tooling/e2e/ci/
+      # scan-logs.sh — the key-material floor AND the identifier scanner,
+      # against the manifest sealed from the host needles — deleting on a leak)
       # before this file is written; the diag is the one uploaded log it never
-      # sees.
-      # Scan-before-upload, as its OWN step on every outcome short of a
-      # cancellation: a leak (rc 1) deletes the scanned files and fails the lane
-      # even on an otherwise green run, so the upload finds nothing to publish;
-      # an unscannable log (rc 3) fails it and leaves the files as they are. The
-      # standard guard condition (not `always()`) is what lets
-      # docs/privacy/privacy_invariants.json cite this step as the runtime
-      # scanner's enforcing run.
+      # sees, scanned HERE against the SAME manifest as a `diag` sink (a
+      # one-line floor, no plant requirement). Scan-before-upload, as its OWN
+      # step on every outcome short of a cancellation: a leak (rc 1) deletes
+      # the scanned file and fails the lane even on an otherwise green run, so
+      # the upload finds nothing to publish; an unscannable log (rc 3), a
+      # broken guard (rc 2) or an unmet floor (rc 4) fails it and leaves the
+      # file as it is. The standard guard condition (not `always()`) is what
+      # lets docs/privacy/privacy_invariants.json cite this step as the
+      # runtime scanner's enforcing run.
       - name: Scan captured logs for secrets before upload
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: |
-          logs=(/tmp/m7-logs/diag.log)
           rc=0
-          bash tooling/e2e/ci/scan-logs-for-secrets.sh "${logs[@]}" || rc=$?
-          if [ "${rc}" -eq 1 ]; then rm -f -- "${logs[@]}"; fi
+          bash tooling/e2e/ci/scan-logs.sh \
+            --manifest /tmp/haven-soak/needles/*.needles.json \
+            --sink diag=/tmp/m7-logs/diag.log \
+            --report /tmp/logscan-report-upload.ndjson || rc=$?
           exit "${rc}"
 
       # Upload all per-phase evidence (logcat, drive logs, strfry logs, diag).
@@ -310,6 +345,14 @@ jobs:
             /tmp/m7-logs/
           retention-days: 14
           if-no-files-found: ignore
+
+      # The sealed manifest holds the run's identifiers verbatim. It is never
+      # uploaded (check_wire_proxy_test_only.sh) and does not outlive the job
+      # either: removed on EVERY outcome, after every upload step, so a reused
+      # runner never starts the next run holding the last run's needles.
+      - name: Discard needle manifests
+        if: always()
+        run: rm -f /tmp/haven-soak/needles/*.needles.decl /tmp/haven-soak/needles/*.needles.json /tmp/haven-soak/needles/*.canaries.json
 
       # Relay teardown — runs LAST and if: always() so the strfry container + its
       # host data dir are removed on every outcome. Best-effort (always exits 0).

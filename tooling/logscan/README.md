@@ -10,7 +10,9 @@ and a handful of diag files, and then uploads them to a public repository for 14
 days. This crate is what decides whether that is safe:
 
 * the run **declares** every value it mints over the wire proxy's control channel
-  (`HAVEN_NEEDLE_DECL`, written to `/tmp/haven-soak/needles/<role>.needles.decl`);
+  (`HAVEN_NEEDLE_DECL`, written to `/tmp/haven-soak/needles/<role>.needles.decl`),
+  or, on a lane with no proxy, the host declares the constants the harness is
+  seeded from (`--host-decl`, `--host-seed`);
 * `seal` **expands** each declared value into every encoding this tree can render
   it in and writes a sealed manifest;
 * `scan` streams every captured sink once, looking for those terms plus the
@@ -34,12 +36,16 @@ cargo run --release -- --self-test
 
 ```
 haven-logscan seal  --run-id <id> [--decl <file.needles.decl>]...
-                    [--host-decl <class>=<value>]... [--expect <class>=<min>]...
+                    [--host-decl <class>=<value>]... [--host-seed <64-hex>]...
+                    [--declared-plants dart|none] [--expect <class>=<min>]...
                     [--floor <sink>=<min-lines>]... [--exempt-endpoint <url|host|ip>]...
                     --out /tmp/haven-soak/needles/<run-id>.needles.json
 haven-logscan scan  --manifest <path> [--sink <class>=<path>[,<path>...]]...
                     [--segments <class>=<n>]... [--plants-in <class>=<path>]...
                     [--report <path.ndjson>] [--disclose-values]
+haven-logscan scan  --rules-only --sink <class>=<path>[,<path>...]...
+                    [--segments <class>=<n>]... [--exempt-endpoint <url|host|ip>]...
+                    [--report <path.ndjson>]
 haven-logscan plant --manifest <path> --sink dart --phase open|close
 haven-logscan --self-test
 ```
@@ -64,6 +70,80 @@ stderr naming the file it writes into, and is banned from every workflow and
 non-interactive runner by `scripts/ci/check_wire_proxy_test_only.sh`. Use it
 locally, on a reproduction, and delete what it writes.
 
+## Declaring from the host
+
+A lane with the wire proxy declares every value it mints over the control
+channel. A lane **without** one — every b-lane, the integration, relay-
+customization, flake-stress and profile lanes — mints its identities from
+constants that are checked into the harness, so the host can declare them
+instead. Two flags do that, and the difference between them is what the manifest
+is allowed to hold.
+
+* **`--host-decl <class>=<value>`** declares a value the host knows verbatim: a
+  role coordinate, a canary stem, a relay URL. A `coordinate` must be `lat,lon`
+  in decimal degrees and is refused at the flag rather than deep in the expander
+  — a runner's argv is not somewhere a typo should surface three layers down —
+  and the refusal withholds the value, because argv reaches a public step log.
+* A `circle_name`/`petname` host declaration may be a **stem** rather than a
+  whole name: the canary names are `"Qzvx CIRCLE <10 random>"`, and only
+  `"Qzvx CIRCLE "` is host-knowable. A stem is searched verbatim and through the
+  expander's `utf8-drop1..4` prefix ladder, so it is a real term **only while it
+  is at least as long as the sink's term floor** — 8 characters for `logcat` and
+  `ios`, 6 elsewhere. The canary stems are 12 characters, so every ladder rung
+  down to `drop4` clears both floors; a four-character stem would expand to
+  nothing but recorded drops and the seal would refuse the manifest as searching
+  for nothing.
+* **`--host-seed <64-hex>`** (repeatable) takes the 32-byte secret the harness
+  seeds an identity from (`test_user.dart:48-71`) and declares **two** values:
+  the derived x-only pubkey as class `pubkey` — public, so every encoding of it
+  is searched, `npub` included — and the seed itself as class `nsec`, which is
+  secret-class, so the manifest carries `sha256(raw)` and nothing else. The
+  derivation is `k256`, a pure-Rust secp256k1: this crate must build on a runner
+  with no mobile toolchain, and `haven-core` would drag the whole MLS stack in
+  for one scalar multiplication. `seed.rs` pins the harness's three seeds and the
+  generator against x-coordinates computed by two independent implementations
+  outside this crate. `--expect pubkey=N` counts them like any other declaration,
+  so a runner that dropped a seed cannot seal a manifest that reads as complete.
+
+A malformed seed is rc 2 and the error never quotes it. Neither does anything
+else: `logscan_never_prints_a_needle` drives every output path with a seed in
+argv and asserts that neither the seed nor its pubkey appears in stdout, stderr,
+the NDJSON report or the `plant` output — the manifest file is the one place the
+pubkey lives, as a searchable term, and the seed never lives anywhere.
+
+The seeds are 32 repeated bytes from a checked-in test file, shared by every run
+and never used outside an emulator. They are handled as secret-class because the
+SHAPE is what the discipline keys on; do not read that as a claim that argv on a
+CI runner is a safe place for a real key.
+
+## Rules-only scans
+
+`scan --rules-only` runs the structural rules and the line floors over a capture
+with **no manifest at all**: no needle search, no plant reconciliation, and a
+summary that says `rules-only (no manifest: no needle searched, no plant
+reconciled)` rather than `plants 0/0`, which would read as controls that passed.
+
+It exists because the unit-test lanes have nothing to declare. A `cargo test` run
+mints no circle, no identity and no coordinate that any channel could report, so
+the only honest thing a scanner can certify over `rust-check.yml`'s four tee'd
+`cargo test` logs and `coverage.yml`'s `flutter test` log is *that the rules
+ran*. That is worth certifying — S1, S5, S10 and S12 over a transcript nobody
+reads is how a stray `println!` of a group id gets caught — and it is worth
+saying out loud that it is all that was certified.
+
+`--rules-only` and `--manifest` are mutually exclusive (rc 2), as is
+`--plants-in` with it: a flag that is silently ignored is a false claim of
+coverage. `--exempt-endpoint` is accepted **here and only here** (with a manifest
+the exemptions are the sealed ones), because a `cargo test` transcript carries
+the `#[ignore]` reason that names a local Blossom server by loopback URL, and
+S12 is right to see it. Nothing is exempt implicitly.
+
+**Every device lane must NOT use it.** A logcat, a `log show` export or a drive
+transcript comes from a run that minted real values, so the manifest is
+available and the needle search is the point;
+`scripts/ci/check_logscan_wired_everywhere.sh` forbids `--rules-only` outside
+`rust-check.yml` and `coverage.yml`.
+
 ## Exit codes
 
 | rc | meaning | who fixes it |
@@ -71,7 +151,7 @@ locally, on a reproduction, and delete what it writes.
 | 0 | clean: every sink present, regular, readable, above its floor, segments and ledger reconciled, every positive control caught | — |
 | 1 | **leak**: a needle term or a non-allowlisted structural hit | the app (and the caller deletes the sink before any upload) |
 | 2 | **guard broken**: bad arguments, a mis-shaped manifest, a bad out path, an expired allowlist entry, a dangling proof, a plant that trips a structural rule | the instrument |
-| 3 | **unusable**: an absent/irregular/unreadable/empty sink, a declaration sidecar that cannot be read or parsed, a ledger mismatch, a segment-count mismatch, **any** missed or undeclared positive control | the capture, not the app |
+| 3 | **unusable**: an absent/irregular/unreadable/empty sink, a capture in a rendering its sink class cannot frame, a declaration sidecar that cannot be read or parsed, a ledger mismatch, a segment-count mismatch, **any** missed or undeclared positive control | the capture, not the app |
 | 4 | **meta floor**: below a line floor, no manifest, a declaration floor unmet, a manifest with no searchable term at all, a value nobody confirmed was planted | the scenario |
 
 Aggregation across sinks is `1 > 2 > 3 > 4 > 0`: a leak anywhere takes the
@@ -125,8 +205,39 @@ dead capture and a mis-installed log backend all look clean to a needle search.
   `rust` and a `kotlin` **opening** token, `ios` a `rust` and a `swift` one, at
   least once per sink class. Only the `-open-` phase counts, because what these
   prove is that the emitter's backend was installed at launch.
+  **What they bound is weaker than a declared token, and knowingly so**: a fixed
+  literal proves the backend reached *this capture at some point in this process
+  or boot*, not that it reached it *during this run*. On Android `adb logcat -c`
+  before the capture closes most of that gap. On iOS nothing does — `log collect`
+  spans the whole simulator boot, and the Swift token is a literal that an
+  earlier launch could have written — so an `ios` shape plant is evidence the
+  backend exists and is installed, not evidence that this run's records are in
+  the file. The per-run DECLARED token is what carries that claim, and it is
+  exactly what `ios` does not have yet (`declared_plants_expected = false`).
+* **A lane with no declaration channel declares none.** A plant proves that the
+  APP reached the sink, so the app has to print it, so somebody has to hand it
+  one — and only the proxy's channel can. On a proxy-less lane a seal that minted
+  a Dart token would demand a control the run cannot possibly satisfy: rc 3 on
+  every green lane, which is how a positive control becomes noise and then gets
+  deleted. Those lanes seal `--declared-plants none`; the manifest records it,
+  `scan` reconciles no Dart token, `plant --sink dart` is rc 2 ("no declaration
+  channel"), and both summaries say `declared plants: none (host profile)`. The
+  **shape** plants still apply, so a dead capture is still caught. Declaring
+  `none` while a sidecar declared a plant is rc 2: the two claims cannot both be
+  true.
+* Which sink classes must carry the declared tokens is the policy's
+  `declared_plants_expected`, not a list in the code. It is `true` for `logcat`
+  and `drive`, and `false` for `ios`: no captured `log show` export has yet shown
+  a Dart token. That is "unproven", not "impossible" — the Flutter engine routes
+  `debugPrint` through `vsyslog`, which does reach the unified log as
+  `Runner(Flutter)[pid] … flutter: <msg>` — and the first iOS capture that
+  carries one flips the flag to `true` for good. It is `false` for the classes
+  that carry no app output at all (`rust-test`, `proxy`, `diag`, `relay`).
+  Demanding an unproven control would make every iOS lane rc 3 for a reason that
+  is not a privacy fact.
 * Each declared token must appear **at least once** in every scanned sink class
-  that carries Dart output (`logcat`/`ios` and `drive`). "At least once", not
+  that carries Dart output (the classes with `declared_plants_expected` —
+  `logcat` and `drive` today). "At least once", not
   "exactly once", because the retry legitimately leaves both attempts' tokens in
   a concatenated log; `--plants-in <class>=<path>` narrows reconciliation to one
   file of the class (the lane passes its final-attempt drive slice) while every
@@ -223,14 +334,72 @@ Three notes on the encoders:
 `coord/plus-code` and the 3-decimal single axes are declared out of scope in
 `policy.toml`'s `not_gaps`, each with the sentence why.
 
+## Sink framing
+
+A sink class says how its lines are shaped, and the shape decides where the
+Haven-owned part of a line starts — which is what the structural rules are
+allowed to read.
+
+* **`logcat`** — `MM-DD HH:MM:SS.mmm  pid  tid P tag: message`, from
+  `adb logcat -v threadtime`. Owned when the tag matches one of the sink's
+  `owned_tags` as a prefix (`android_logger` truncates a module path to 23
+  characters).
+* **`ios`** — a `log show` export in EITHER rendering, because the capture is
+  one `--style` flag away from the other:
+  * `--style syslog`, which is what all five iOS lanes capture:
+    `<date> <time+tz> <host> <process>[<pid>[:<tid>]] <<Type>>: <message>`;
+  * the default columnar style:
+    `<date> <time+tz> <thread> <type> <activity> <pid> <ttl> <process>: <message>`.
+
+  In both, `<process>` may carry the emitting library in parentheses
+  (`Runner(Flutter)`), which is framing rather than identity and is stripped, and
+  the message may open with the record's `[subsystem:category]` or an `NSLog`
+  prefix, which stay in the body — on iOS the process is `Runner` for everything
+  Haven emits, so the subsystem is the only thing that says which layer wrote the
+  line. Ownership is an **exact** match of the process name against
+  `owned_processes` — never a substring, because a substring test owns
+  `RunnerHelper` and, worse, owns any vendor line whose message merely contains
+  the word `Runner`, putting remote-authored text under Haven's rules.
+* **`plain`** — every line is Haven's in full (drive transcripts, `cargo test`
+  and `flutter test` logs, relay and diag files).
+
+A line that does not parse is treated as **not owned**: the rules skip it and
+every byte of it is still searched for needles, because a declared value in a
+vendor line is still a disclosure in an uploaded artifact. On `ios` that includes
+a Haven record's own CONTINUATION lines — a wrapped message or a multi-line panic
+body carries no process column, so the structural rules never see anything but
+the first line of it, and the needle search is what covers the rest.
+
+A framed sink whose lines **all** fail to parse is rc 3, not rc 0. That is the
+one failure mode that otherwise looks exactly like a clean run — a different
+`log show --style`, a logcat captured without `-v threadtime`, and the rules
+silently do not run over any of it.
+
+`fixtures/format.ios.log` holds one line per documented column variant of BOTH
+renderings (plain process, process with a library, a `[subsystem:category]`
+message, an `NSLog`-prefixed one, wide columns, `[pid:tid]`, a vendor process, a
+process whose NAME contains an owned one, a vendor line whose MESSAGE does, an
+unparseable continuation, the two shape plants, and a needle on an un-owned
+line), and case P of `--self-test` pins exactly which of them reach the rules.
+The file is **specification-derived**, and its header says so, because there is
+deliberately **no captured iOS furniture corpus yet**: no iOS lane has ever run the scanner, so the first run is
+the corpus source, and it will be mined from a failing run's upload exactly as
+the Android one was (run 34766632019). Until then the `ios` framing is proved
+against the documented format rather than against a capture, and the rc-3 above
+is what turns the difference between the two into a red lane instead of a quiet
+pass.
+
 ## Structural rules
 
 `S1` 64-hex run · `S2` 32–63-hex run · `S3` bech32 of any HRP · `S4` base64 ≥ 32
-characters above a Shannon floor · `S5` decimal coordinate pair · `S6`
+characters above a Shannon floor **and carrying two digits or `=` padding** ·
+`S5` decimal coordinate pair · `S6`
 geohash-shaped token adjacent to `geohash|geo|gh` (the keyword must be delimited
 and separated from the cell by one to eight non-alphanumeric characters, which
 covers `geohash=u4pruyd`, `gh: u4pruyd`, `"geohash" : "u4pruyd"` and the
-escaped-JSON form while keeping the rule out of a plant token) · `S7` any `wss?://` URL (the
+escaped-JSON form while keeping the rule out of a plant token; **a cell that
+continues into `::`, `_`, `(` or another letter is a code path, not a cell**) ·
+`S7` any `wss?://` URL (the
 default pool included — owner-directed) · `S8` `secret|nsec|seed|key` within 24
 characters of a blob that looks ENCODED (two digits, base64 punctuation or S4's
 entropy floor) and that no letter runs into, so `KeyPackageMaintenanceFailed`
@@ -244,12 +413,50 @@ delimiters and the digit are what keep the rule off `haven_core::relay::manager`
 and `Option::Some`, which the first CI run of this scanner read as addresses
 hundreds of times per transcript.
 
+Two of those qualifiers narrow what the rules catch, so they are written down as
+**declared residuals** — the same discipline the ledger's `not_gaps` follow: a
+boundary stated in one sentence beats a boundary discovered by an adversarial
+reader later.
+
+| residual | what is no longer caught | what carries it instead |
+|---|---|---|
+| **S4** | a base64 run of 32 or more characters with no `=` padding and fewer than two digits (roughly one random 44-character blob in two hundred) | S1/S2 for the hex spellings, S8 when a key word is within 24 characters, the needle search for every value the run declared, and `scan-logs-for-secrets.sh`'s keyword-anchored patterns |
+| **S6** | a geohash cell immediately followed by `_`, `(` or `::` | the needle search for a declared coordinate's `geohash` renderings; an undeclared cell in that position is a code path in every capture this tree has produced |
+
+Both qualifiers were paid for by a real transcript, and both are in
+`furniture.rust-test.log` / `furniture.flutter-test.log` now. S4's entropy floor
+cannot separate `kBackgroundSessionReclaimAtMsKey` (4.33 bits) from a 32-byte
+base64 blob (4.5–5.0), and base64 punctuation cannot either, because
+`App/haven/test/providers/identity` is a path made of `/`; what a base64 payload
+of random bytes has and an identifier does not is DIGITS — 10 of the 64
+characters, so fewer than two of them in 32 encoded characters happens in roughly
+one run out of thirty, and in a 44-character key roughly one out of two hundred.
+That recall is carried by S1/S2, by S8, by the
+needle search and by `scan-logs-for-secrets.sh`. S6's code-path test is what
+keeps `location::geohash::tests::nan_latitude_returns_empty` — a delimited
+keyword, `::` as the separator, and five geohash-alphabet letters — from
+reddening every `cargo test` transcript this tree produces.
+
 They run on **Haven-owned lines only** (tag/process scoping) and never on a
 `relay` sink. On a `logcat` sink they see the message body (the host's own
-timestamp is a documented residual); on `ios` and `plain` sinks the body is the
-whole line — a relay log holding pubkeys and event ids is
-not a Haven leak, and a guard that cries wolf on vendor output is a guard that
-gets deleted. The seven patterns of
+timestamp is a documented residual); on `ios` sinks the message after the
+columns; on `plain` sinks the whole line — a relay log holding pubkeys and event
+ids is not a Haven leak, and a guard that cries wolf on vendor output is a guard
+that gets deleted.
+
+On a `plain` sink one physical line is split on **carriage returns** before the
+rules see it. A progress reporter writing to a pipe rewrites its status line with
+`\r` and no newline, so one line of `flutter test`'s compact output carries
+hundreds of independent updates; evaluated as one string, a description ending in
+`key` sits inside S8's 24-character window of the NEXT update's timestamp digits.
+They are separate records and are evaluated separately. The reported line number
+stays the physical one — a segment index would name a position no editor can
+find — and needle matching is unaffected, because the window pass reads every
+byte either way. The residual: a structural SHAPE that straddles a literal `\r`
+inside one physical line is no longer matched, since no segment holds all of it.
+A value split across a reporter's status rewrite is not a rendering anything
+produces, and the needle search — byte-level, `\r` included — still finds every
+declared value across the split. The seven patterns of
 `tooling/e2e/ci/scan-logs-for-secrets.sh` are **not** duplicated here; that
 script stays the toolchain-free key-material floor and the wrapper runs both.
 
@@ -322,7 +529,7 @@ a real key, and never a wire-canary value, so a canary and a needle can never be
 mistaken for each other. The dirty fixtures deliberately contain shapes that also
 trip `scan-logs-for-secrets.sh`; the clean ones contain none.
 
-`furniture.drive.log` and `furniture.logcat.log` are the one exception, and the
+The four `furniture.*.log` corpora are the one exception, and the
 reason is the point: they are **real** lines, verbatim from the uploaded
 transcripts of CI run 34766632019, whose first scan returned rc 1 on nothing but
 false positives. A synthetic clean fixture only says what the author of a rule
@@ -336,3 +543,21 @@ a vendor-tagged line is skipped by tag scoping and would prove nothing. They are
 asserted twice: case N of `--self-test` (with the sealed manifest, so needles
 count too) and `real_furniture_trips_no_structural_rule` under `cargo test`.
 A rule tightening that would redden a real lane is red here first.
+
+`furniture.rust-test.log` and `furniture.flutter-test.log` are the same thing for
+the two UNIT-test transcripts, mined from sanitised local transcripts of this tree's
+own `cargo test` and `flutter test` runs, reviewed line by line — the files
+themselves are the record — and they carry the three
+shapes those transcripts trip that a device log never does: the module path
+`location::geohash::tests::…` (S6), a camel-case Dart test description and a
+repository path over the Shannon floor (S4), and the compact reporter's
+carriage-return-joined status line (S8). Each file's header says what was
+selected and what was deliberately left out — the `#[ignore]` reason that names a
+local Blossom server by loopback URL is NOT in the cargo corpus, because it is a
+real address that S12 is right to see and the lanes exempt it explicitly instead;
+the app lines whose alias handles the sanitiser masked are not in the Flutter
+corpus, because a masked line is not verbatim.
+
+`format.ios.log` is documented under **Sink framing** above: one line per column
+variant, and the only fixture in the tree whose shape comes from a specification
+rather than from a capture.

@@ -60,21 +60,24 @@ jobs:
     # retry restores the app its failed attempt's teardown uninstalled), so ten
     # are ~392 minutes of bounded waits — past 360 before the 11.0-13.7 minutes
     # of steps ahead of the loop (8 nightly runs, 2026-09). The stress step's
-    # 310m deadline is what reaps a degraded loop, or a dispatch with too many
+    # 300m deadline is what reaps a degraded loop, or a dispatch with too many
     # `iterations`, by name.
     #
     # The job cap must clear the SUM of the step caps: below it, a run whose
     # every step is still inside its own cap can die here, and a job-cap death
     # skips every `if: failure()` step (e2e-android.yml states the rule). That
-    # sum is Build E2E test APK 22 + Create AVD snapshot (on an AVD-cache miss)
-    # 15 + the stress step 320 (derived there) + the most the work no step cap
-    # bounds has taken, 2.2 min over all 96 runs of this job (2026-06-08..
-    # 09-11; 1.0 of it Setup Flutter, run 32446197604) = 359.2 -> 360, which
-    # is also GitHub's ceiling on a hosted job: this cap cannot rise, so a step
-    # cap raised here must come off another. The build step gave the 3 minutes
-    # that took (sized there), not the stress step, whose every minute is
-    # stress coverage; the snapshot step has never run in this job (96 of 96
-    # runs restored the AVD cache), so there is no measurement to trim it by.
+    # sum is Build the runtime log scanner 10 + Build E2E test APK 22 + Create
+    # AVD snapshot (on an AVD-cache miss) 15 + the stress step 310 (derived
+    # there) + the most the work no step cap bounds has taken, 2.2 min over all
+    # 96 runs of this job (2026-06-08..09-11; 1.0 of it Setup Flutter, run
+    # 32446197604) = 359.2 -> 360, which is also GitHub's ceiling on a hosted
+    # job: this cap cannot rise, so a step cap raised here must come off
+    # another. The build step gave the 3 minutes its sum first needed (sized
+    # there), and the stress step gave the scanner build its 10 — at ~6 min an
+    # iteration the default loop is under an hour, so 300m still reaps a
+    # degraded loop and nothing else; the snapshot step has never run in this
+    # job (96 of 96 runs restored the AVD cache), so there is no measurement
+    # to trim it by.
     # job-uncapped-minutes: 2.2 (96 runs, worst 32446197604)
     timeout-minutes: 360
     env:
@@ -113,6 +116,15 @@ jobs:
       # so fall back to 10. run-flake-stress.sh validates this is a
       # positive integer and caps it.
       FLAKE_ITERATIONS: ${{ github.event.inputs.iterations || '10' }}
+      # The runtime log scanner (tooling/logscan) is wired into this lane. The
+      # runner reads the flag: it seals the run's needle manifest and runs every
+      # captured log through tooling/e2e/ci/scan-logs.sh before echoing or
+      # keeping any of it. No recording proxy runs here, so the needles are the
+      # host-known constants of tooling/e2e/ci/host-needles.sh (the `host`
+      # profile): the fixed role seeds, the role and canary coordinates and the
+      # canary name stems.
+      HAVEN_LOGSCAN: "true"
+      HAVEN_LOGSCAN_PROFILE: host
 
     steps:
       - name: Free disk space
@@ -142,10 +154,30 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: haven-core
+          workspaces: |
+            haven-core
+            tooling/logscan
           # Distinct cache key so this lane doesn't race e2e_android /
           # e2e_integration on the same cache entry.
           key: e2e-flake-stress-x64
+
+      # The runtime log scanner, release-built ONCE, before Flutter and the
+      # emulator are resident (same reasoning as the APK build below). Capped
+      # so a cargo stall fails fast; the cap is a term of the job cap's sum
+      # above.
+      - name: Build the runtime log scanner
+        timeout-minutes: 10
+        run: cargo build --release --manifest-path tooling/logscan/Cargo.toml
+
+      # The needle directory is rotated BEFORE any drive: a manifest left by an
+      # earlier run on a reused runner would be reused as this run's (the
+      # host-profile gate reuses the manifest already at its out path).
+      # Owner-only, because what lands there is every identifier the run
+      # declares, verbatim.
+      - name: Rotate the needle directory
+        run: |
+          mkdir -m 0700 -p /tmp/haven-soak/needles
+          rm -f /tmp/haven-soak/needles/*.needles.decl /tmp/haven-soak/needles/*.needles.json /tmp/haven-soak/needles/*.canaries.json
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -244,19 +276,19 @@ jobs:
       #   20m  per-iteration `flutter drive` (run-single-avd-scenario.sh's
       #        default HAVEN_DRIVE_TIMEOUT; this lane is poll-path, so the
       #        default applies).
-      #  310m  this step's inner deadline (run-with-deadline.sh below) — the
+      #  300m  this step's inner deadline (run-with-deadline.sh below) — the
       #        AGGREGATE bound over the whole iteration loop, and the only one
       #        that reliably reaps (CI_HARDENING_BACKLOG.md A8).
-      #  320m  this step's timeout-minutes = 310 + 1 (kill grace) + 7
+      #  310m  this step's timeout-minutes = 300 + 1 (kill grace) + 7
       #        (emulator-boot-timeout) + margin; 360m job cap above.
       # Sizing evidence: 8 successful nightly runs put the DEFAULT 10-iteration
-      # loop at p50 43.7 / max 59.4 min (~6 min/iteration). 310m is ~5x that.
+      # loop at p50 43.7 / max 59.4 min (~6 min/iteration). 300m is ~5x that.
       # NOTE the iteration count is a workflow input (default 10, script cap
       # 1000): at ~6 min/iteration this deadline covers ~50 iterations, the
-      # same exposure the 320m step cap already had. A deliberately long
+      # same exposure the 310m step cap already had. A deliberately long
       # stress run needs all three numbers raised together.
       - name: Stress-run e2e_combined on the emulator
-        timeout-minutes: 320
+        timeout-minutes: 310
         uses: reactivecircus/android-emulator-runner@v2
         env:
           # STRFRY_IMAGE is set HERE (not at job level) because the
@@ -289,7 +321,7 @@ jobs:
           # action runs it — this does not rely on the action's subshell
           # inheriting the job-level env var. run-flake-stress.sh still
           # validates the value is a positive integer and caps it.
-          script: bash tooling/e2e/ci/run-with-deadline.sh 310m "e2e-flakiness-stress loop" -- bash tooling/e2e/ci/run-flake-stress.sh "${{ env.FLAKE_ITERATIONS }}" integration_test/e2e/e2e_combined.dart
+          script: bash tooling/e2e/ci/run-with-deadline.sh 300m "e2e-flakiness-stress loop" -- bash tooling/e2e/ci/run-flake-stress.sh "${{ env.FLAKE_ITERATIONS }}" integration_test/e2e/e2e_combined.dart
 
       - name: Collect strfry logs
         if: always()
@@ -320,22 +352,33 @@ jobs:
             top -bn1 | head -40 || true
           } > /tmp/diag.log 2>&1
 
-      # /tmp/flake-logs/ is scanned by run-flake-stress.sh; these are the
-      # uploaded logs it never sees.
-      # Scan-before-upload, as its OWN step on every outcome short of a
-      # cancellation: a leak (rc 1) deletes the scanned files and fails the lane
-      # even on an otherwise green run, so the upload finds nothing to publish;
-      # an unscannable log (rc 3) fails it and leaves the files as they are. The
-      # standard guard condition (not `always()`) is what lets
+      # Where each uploaded log is scanned, and by what. The per-target logcat
+      # and drive logs go through the runner's log-privacy gate (HAVEN_LOGSCAN
+      # above): tooling/e2e/ci/scan-logs.sh — the key-material floor AND the
+      # identifier scanner, against the manifest sealed from the host needles —
+      # deleting them on a leak, before any drive log is echoed. What is left
+      # is scanned HERE, against the SAME manifest, by the same wrapper: the
+      # relay log(s) (structural rules off — a relay legitimately holds pubkeys
+      # and event ids) and the host diagnostics as a `diag` sink (a one-line
+      # floor, no plant requirement). Scan-before-upload, as its OWN step on
+      # every outcome short of a cancellation: a leak (rc 1) deletes every
+      # scanned file and fails the lane even on an otherwise green run, so the
+      # upload finds nothing to publish; an unscannable log (rc 3), a broken
+      # guard (rc 2) or an unmet floor (rc 4) fails it and leaves the files as
+      # they are. The standard guard condition (not `always()`) is what lets
       # docs/privacy/privacy_invariants.json cite this step as the runtime
       # scanner's enforcing run.
+      # /tmp/flake-logs/ was gated by run-flake-stress.sh (typed by name,
+      # against the same manifest).
       - name: Scan captured logs for secrets before upload
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: |
-          logs=(/tmp/strfry.log /tmp/diag.log)
           rc=0
-          bash tooling/e2e/ci/scan-logs-for-secrets.sh "${logs[@]}" || rc=$?
-          if [ "${rc}" -eq 1 ]; then rm -f -- "${logs[@]}"; fi
+          bash tooling/e2e/ci/scan-logs.sh \
+            --manifest /tmp/haven-soak/needles/*.needles.json \
+            --sink relay=/tmp/strfry.log \
+            --sink diag=/tmp/diag.log \
+            --report /tmp/logscan-report-upload.ndjson || rc=$?
           exit "${rc}"
 
       # run-flake-stress.sh copies each FAILED iteration's logcat +
@@ -353,6 +396,14 @@ jobs:
             /tmp/diag.log
           retention-days: 14
           if-no-files-found: ignore
+
+      # The sealed manifest holds the run's identifiers verbatim. It is never
+      # uploaded (check_wire_proxy_test_only.sh) and does not outlive the job
+      # either: removed on EVERY outcome, after every upload step, so a reused
+      # runner never starts the next run holding the last run's needles.
+      - name: Discard needle manifests
+        if: always()
+        run: rm -f /tmp/haven-soak/needles/*.needles.decl /tmp/haven-soak/needles/*.needles.json /tmp/haven-soak/needles/*.canaries.json
 
       - name: Tear down strfry relay
         if: always()

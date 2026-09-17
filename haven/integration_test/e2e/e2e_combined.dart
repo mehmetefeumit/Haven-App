@@ -381,16 +381,16 @@ const Duration _teardownTimeout = Duration(seconds: 15);
 /// Runs [cleanup] but never lets it hang past [_teardownTimeout] or throw
 /// out of a `tearDownAll` block — a slow or failing teardown must degrade to
 /// a bounded, named diagnostic (`debugPrint`), never mask whatever the test
-/// itself already reported. [label] identifies the cleanup in CI logs.
+/// itself already reported. [step] identifies the cleanup in CI logs.
 Future<void> _boundedTeardown(
-  String label,
+  String step,
   Future<void> Function() cleanup,
 ) async {
   try {
     await cleanup().timeout(_teardownTimeout);
   } on Object catch (e) {
     debugPrint(
-      '[e2e_combined:tearDownAll] $label did not complete within '
+      '[e2e_combined:tearDownAll] $step did not complete within '
       '${_teardownTimeout.inSeconds}s (or threw): ${e.runtimeType}. '
       'Best-effort cleanup only — never rethrown.',
     );
@@ -486,9 +486,9 @@ void main() {
 
     debugPrint(
       '[e2e_combined:setUpAll] '
-      'alice.pubkey=${_redactPk(_alicePubkeyHex())} '
-      'bob.pubkey=${_redactPk(bob.pubkeyHex)} '
-      'carol.pubkey=${_redactPk(carol.pubkeyHex)}',
+      'alice.pubkey=${_pkHandle(_alicePubkeyHex())} '
+      'bob.pubkey=${_pkHandle(bob.pubkeyHex)} '
+      'carol.pubkey=${_pkHandle(carol.pubkeyHex)}',
     );
   });
 
@@ -740,7 +740,7 @@ void main() {
           reason:
               'PRE-ADD: the first kind-445 landing after the subscription '
               'should be the event Bob just published '
-              '(id=${_redactEventId(preAddEventId)}). A mismatch means a stale '
+              '(id=${_eventHandle(preAddEventId)}). A mismatch means a stale '
               'or unexpected event arrived instead.',
         );
 
@@ -800,14 +800,15 @@ void main() {
           tester,
           mlsGroupId,
         );
+        final preAddDriftDelta =
+            aliceEpochAfterPreAdd - aliceEpochBeforePreAdd;
         expect(
           aliceEpochAfterPreAdd,
           equals(aliceEpochBeforePreAdd),
           reason:
               'PRE-ADD epoch baseline: Alice must not advance her MLS epoch '
               "while decrypting Bob's pre-add location message "
-              '(before=$aliceEpochBeforePreAdd, '
-              'after=$aliceEpochAfterPreAdd). A drift means the engine '
+              '(delta=$preAddDriftDelta). A drift means the engine '
               'auto-committed during a pure application-message decrypt.',
         );
 
@@ -838,14 +839,18 @@ void main() {
         );
         debugPrint(
           '[e2e_combined] PRE-ADD location publish + Alice-positive-control '
-          '+ Bob own-echo pin OK — eventId=${_redactEventId(preAddEventId)}',
+          '+ Bob own-echo pin OK — eventId=${_eventHandle(preAddEventId)}',
         );
 
         final epochBeforeAdd = await _aliceEpochForTest(tester, mlsGroupId);
         final bobEpochBeforeAdd = await bob.currentEpoch(mlsGroupId);
+        // Never the absolute epoch (Log anonymity pillar) — only whether the
+        // two members already agree before the Add commit.
+        final preAddEpochDelta = bobEpochBeforeAdd - epochBeforeAdd;
         debugPrint(
-          '[e2e_combined] PHASE 2b pre-add epochs — '
-          'alice=$epochBeforeAdd bob=$bobEpochBeforeAdd',
+          '[e2e_combined] PHASE 2b pre-add epoch — '
+          // harness-log-ok: an in-run delta, never the absolute epoch.
+          'bob-vs-alice delta=$preAddEpochDelta (expected 0)',
         );
 
         final carolCircle = await _aliceAddsCarolViaUi(
@@ -982,9 +987,14 @@ void main() {
             await bob.currentEpoch(bobCircle.circle.mlsGroupId);
         final carolEpochBeforeHandoff =
             await carol.currentEpoch(carolCircle.circle.mlsGroupId);
+        // Never the absolute epoch (Log anonymity pillar) — only whether the
+        // two members already agree before the handoff.
+        final preHandoffEpochDelta =
+            carolEpochBeforeHandoff - bobEpochBeforeHandoff;
         debugPrint(
-          '[e2e_combined] PHASE 5 pre-handoff epochs — '
-          'bob=$bobEpochBeforeHandoff carol=$carolEpochBeforeHandoff',
+          '[e2e_combined] PHASE 5 pre-handoff epoch — '
+          // harness-log-ok: an in-run delta, never the absolute epoch.
+          'carol-vs-bob delta=$preHandoffEpochDelta (expected 0)',
         );
 
         final handoffInbox = _ArrivalOrderedInbox(
@@ -1057,14 +1067,18 @@ void main() {
             await bob.currentEpoch(residualBobCircle.circle.mlsGroupId);
         final carolEpochAfterHandoff =
             await carol.currentEpoch(residualCarolCircle.circle.mlsGroupId);
+        final bobHandoffEpochDelta =
+            bobEpochAfterHandoff - bobEpochBeforeHandoff;
+        final carolHandoffEpochDelta =
+            carolEpochAfterHandoff - carolEpochBeforeHandoff;
         expect(
           bobEpochAfterHandoff,
           equals(bobEpochBeforeHandoff + 3),
           reason:
               "PHASE 5: Bob's epoch must advance by exactly 3 after the "
               'AdminHandoff (3 commits: AdminHandoff → SelfDemote → '
-              'SelfRemove). Before=$bobEpochBeforeHandoff, '
-              'after=$bobEpochAfterHandoff.',
+              // harness-log-ok: an in-run delta, never the absolute epoch.
+              'SelfRemove). delta=$bobHandoffEpochDelta.',
         );
         expect(
           carolEpochAfterHandoff,
@@ -1073,13 +1087,15 @@ void main() {
               "PHASE 5: Carol's epoch must advance by exactly 3 after "
               'the AdminHandoff (single-committer election: loser '
               "adopts winner's commit). "
-              'Before=$carolEpochBeforeHandoff, '
-              'after=$carolEpochAfterHandoff.',
+              // harness-log-ok: an in-run delta, never the absolute epoch.
+              'delta=$carolHandoffEpochDelta.',
         );
         debugPrint(
           '[e2e_combined] PHASE 5 epoch deltas OK — '
-          'bob: $bobEpochBeforeHandoff → $bobEpochAfterHandoff (+3), '
-          'carol: $carolEpochBeforeHandoff → $carolEpochAfterHandoff (+3)',
+          // harness-log-ok: an in-run delta, never the absolute epoch.
+          'bob delta=$bobHandoffEpochDelta (+3), '
+          // harness-log-ok: an in-run delta, never the absolute epoch.
+          'carol delta=$carolHandoffEpochDelta (+3)',
         );
         _assertResidualGroupAfterHandoff(
           label: 'bob',
@@ -1129,23 +1145,27 @@ void main() {
             await phase6.admin.currentEpoch(
               phase6.adminResidual.circle.mlsGroupId,
             );
-        final adminEpochBeforeLeave = phase6.admin.label == 'bob'
+        final adminEpochBeforeLeave = phase6.admin.role == 'bob'
             ? bobEpochBeforeNonAdminLeave
             : carolEpochBeforeNonAdminLeave;
+        final adminLeaveEpochDelta =
+            adminEpochAfterLeave - adminEpochBeforeLeave;
         expect(
           adminEpochAfterLeave,
           equals(adminEpochBeforeLeave + 1),
           reason:
               "PHASE 6: the admin's epoch must advance by exactly 1 after "
               "the non-admin's SelfRemove commit is applied. "
-              'admin=${phase6.admin.label}, '
-              'before=$adminEpochBeforeLeave, '
-              'after=$adminEpochAfterLeave.',
+              'admin=${phase6.admin.role}, '
+              // harness-log-ok: an in-run delta, never the absolute epoch.
+              'delta=$adminLeaveEpochDelta.',
         );
         debugPrint(
+          // harness-log-ok: fixed harness role name, not user text
           '[e2e_combined] PHASE 6 epoch delta OK — '
-          '${phase6.admin.label}: $adminEpochBeforeLeave → '
-          '$adminEpochAfterLeave (+1, non-admin SelfRemove)',
+          // harness-log-ok: an in-run delta, never the absolute epoch.
+          '${phase6.admin.role}: delta=$adminLeaveEpochDelta '
+          '(+1, non-admin SelfRemove)',
         );
 
         // -----------------------------------------------------------
@@ -1182,7 +1202,7 @@ void main() {
             isTrue,
             reason:
                 'a kind-0 profile was authored by a NON-identity pubkey '
-                '(${_redactPk(e.pubkey)}) — profiles must only ever be '
+                '(${_pkHandle(e.pubkey)}) — profiles must only ever be '
                 'signed by a long-term identity key, never an ephemeral '
                 'kind-445 key (that would deanonymize the group stream).',
           );
@@ -1364,7 +1384,7 @@ void main() {
       // dataDir. FE-2 only ever references fe2Alice.pubkeyHex
       // dynamically, so the offset changes nothing it asserts.
       fe2Alice = await SyntheticUser.bootstrap(
-        label: 'fe2_alice',
+        role: 'fe2_alice',
         seed: aliceSeed,
         relay: fe2Relay,
         seedOffset: 1,
@@ -1378,8 +1398,8 @@ void main() {
       fe2DidInitDave = true;
 
       debugPrint(
-        '[FE-2:setUpAll] alice=${_redactPk(fe2Alice.pubkeyHex)} '
-        'dave=${_redactPk(fe2Dave.pubkeyHex)}',
+        '[FE-2:setUpAll] alice=${_pkHandle(fe2Alice.pubkeyHex)} '
+        'dave=${_pkHandle(fe2Dave.pubkeyHex)}',
       );
     });
 
@@ -1480,12 +1500,12 @@ void main() {
           'Regression in the Rust-side gift-wrap generation.',
         ),
       );
-      final (daveWelcomeAccepted, daveWelcomeMsg) =
+      final (daveWelcomeAccepted, _) =
           await fe2Relay.publishAndAwaitOk(daveWelcome.eventJson);
       if (!daveWelcomeAccepted) {
-        throw StateError(
-          '[FE-2] relay rejected the gift-wrap for Dave: $daveWelcomeMsg',
-        );
+        // Never the relay's OK reason text (remote-authored prose, Security
+        // Rule 15) — the boolean rejection is the whole diagnostic here.
+        throw StateError('[FE-2] relay rejected the gift-wrap for Dave');
       }
 
       // ------------------------------------------------------------------
@@ -1595,8 +1615,8 @@ void main() {
         equals(fe2Alice.pubkeyHex.toLowerCase()),
         reason:
             '[FE-2] the pending invitation must name Alice '
-            '(${_redactPk(fe2Alice.pubkeyHex)}) as the inviter; got '
-            '${_redactPk(daveInvites.single.inviterPubkey)}. A mismatch means '
+            '(${_pkHandle(fe2Alice.pubkeyHex)}) as the inviter; got '
+            '${_pkHandle(daveInvites.single.inviterPubkey)}. A mismatch means '
             'the seal-author attribution regressed, and the accept screen '
             'would attribute the invite to the wrong key.',
       );
@@ -1651,9 +1671,9 @@ void main() {
         ]),
         reason:
             '[FE-2] the inviter roster must be exactly the creator '
-            '(${_redactPk(fe2Alice.pubkeyHex)}) and the invited Dave '
-            '(${_redactPk(fe2Dave.pubkeyHex)}). Got '
-            '${aliceMemberPubkeys.map(_redactPk).toList()}.',
+            '(${_pkHandle(fe2Alice.pubkeyHex)}) and the invited Dave '
+            '(${_pkHandle(fe2Dave.pubkeyHex)}). Got '
+            '${aliceMemberPubkeys.map(_pkHandle).toList()}.',
       );
 
       debugPrint(
@@ -1764,14 +1784,15 @@ void main() {
             senderPubkeyHex: bob.pubkeyHex,
           );
           debugPrint(
-            '[M11:a] live location surfaced in ${latency.inMilliseconds}ms '
+            '[M11:a] live location surfaced in '
+            '${_durationBucket(latency)} '
             '(engine stream; poller gated off)',
           );
           expect(
             latency,
             lessThan(const Duration(seconds: 20)),
             reason:
-                '[M11:a] the location took ${latency.inMilliseconds}ms to '
+                '[M11:a] the location took ${_durationBucket(latency)} to '
                 'reach memberLocationsProvider. Under live-sync the 30s poll '
                 'is OFF, so any delivery is the live stream — it must land '
                 'well under the old 30s floor.',
@@ -1965,16 +1986,20 @@ void main() {
             reason: '[M11:H1] Alice must remain in her own roster.',
           );
           final epochAfter = await _aliceEpochForTest(tester, mlsGroupId);
+          final removeEpochDelta = epochAfter - epochBefore;
           expect(
             epochAfter,
             greaterThan(epochBefore),
             reason:
-                '[M11:H1] the MLS epoch must advance past $epochBefore after '
-                'the remove converged; got $epochAfter.',
+                '[M11:H1] the MLS epoch must advance past the pre-remove '
+                'baseline after the remove converged; got delta='
+                // harness-log-ok: an in-run delta, never the absolute epoch.
+                '$removeEpochDelta.',
           );
           debugPrint(
             '[M11:H1] remove converged under Location noise: epoch '
-            '$epochBefore->$epochAfter, '
+            // harness-log-ok: an in-run delta, never the absolute epoch.
+            'delta=$removeEpochDelta, '
             'roster=${magnitudeBucket(roster.length)}.',
           );
         } finally {
@@ -2130,10 +2155,13 @@ void main() {
               '[M11:f] Bob createCircle produced no Welcome for Alice.',
             ),
           );
-          final (ok, msg) =
+          final (ok, _) =
               await m11Relay.publishAndAwaitOk(aliceWelcome.eventJson);
           if (!ok) {
-            throw StateError('[M11:f] relay rejected the Welcome: $msg');
+            // Never the relay's OK reason text (remote-authored prose,
+            // Security Rule 15) — the boolean rejection is the whole
+            // diagnostic here.
+            throw StateError('[M11:f] relay rejected the Welcome');
           }
 
           // The engine's inbox plane (#p=Alice, 7-day lookback) delivers the
@@ -2632,10 +2660,13 @@ void main() {
               '[M11:g] Bob createCircle produced no Welcome for Alice.',
             ),
           );
-          final (ok, msg) =
+          final (ok, _) =
               await m11Relay.publishAndAwaitOk(aliceWelcome.eventJson);
           if (!ok) {
-            throw StateError('[M11:g] relay rejected the Welcome: $msg');
+            // Never the relay's OK reason text (remote-authored prose,
+            // Security Rule 15) — the boolean rejection is the whole
+            // diagnostic here.
+            throw StateError('[M11:g] relay rejected the Welcome');
           }
 
           // DM-4: match on the gift-wrap event id — the stand-in key pending
@@ -2767,6 +2798,8 @@ void main() {
           wireSeq: sentinel.wireSeq,
         );
         debugPrint(
+          // harness-log-ok: recording-proxy journal ordinals, not user data
+          // — parsed verbatim by e2e-android.yml/e2e-ios.yml's conn_id grep.
           '[e2e_combined] wire-journal sentinel acked — '
           'wire_seq=${sentinel.wireSeq} conn=${sentinel.connId}',
         );
@@ -2830,13 +2863,12 @@ void main() {
         );
       }
 
-      final carrierEventCount = magnitudeBucket(
-        manifest.carrierEventIds.values.expand((e) => e).length,
-      );
+      final carrierEvents =
+          manifest.carrierEventIds.values.expand((e) => e).length;
       debugPrint(
         '[e2e_combined] wire-canary manifest announced '
         '(${magnitudeBucket(CanaryId.all.length)} canaries, '
-        '$carrierEventCount carrier events).',
+        '${magnitudeBucket(carrierEvents)} carrier events).',
       );
 
       // Same "a missing proof is not a pass" floor, for the OTHER host input:
@@ -3000,8 +3032,8 @@ Future<String> _aliceCreatesTwoMemberCircle({
     description: 'circle selector active row for the newly created circle',
   );
   expect(
-    find.byKey(WidgetKeys.circleSelectorActive(familyHex)),
-    findsOneWidget,
+    find.byKey(WidgetKeys.circleSelectorActive(familyHex)).evaluate(),
+    hasLength(1),
     reason:
         'After Create Circle returns to MapShell, the circle selector '
         'trigger row must display the newly created circle as the '
@@ -3045,8 +3077,9 @@ Future<String> _aliceCreatesTwoMemberCircle({
   if (initCommits.isEmpty) {
     throw StateError(
       '[e2e_combined:alice] no kind-445 commit found for the new circle '
-      '(nostrGroupIdHex: $familyHex) after Phase 2a. The create-circle '
-      'flow must publish the init commit to the relay before returning.',
+      '(${logAliasHandle(LogAliasClass.circle, familyHex)}) after Phase '
+      '2a. The create-circle flow must publish the init commit to the '
+      'relay before returning.',
     );
   }
   // There should be exactly one init commit; take the first (earliest
@@ -3065,7 +3098,7 @@ Future<String> _aliceCreatesTwoMemberCircle({
 
   debugPrint(
     '[e2e_combined:alice] PHASE 2a complete (2-member circle, '
-    'initCommitPubkey=${_redactPk(initCommitPubkey)}).',
+    'initCommitPubkey=${_pkHandle(initCommitPubkey)}).',
   );
   return initCommitPubkey;
 }
@@ -3336,12 +3369,18 @@ Future<CircleWithMembersFfi> _aliceAddsCarolViaUi({
     reason:
         'PHASE 2b: the Add kind-445 commit must carry an #h tag.',
   );
+  final hTagHandle = hTag!.length >= 2
+      ? logAliasHandle(LogAliasClass.circle, hTag[1])
+      : '<none>';
   expect(
-    hTag!.length >= 2 && hTag[1].toLowerCase() == nostrGroupIdHex,
+    hTag.length >= 2 && hTag[1].toLowerCase() == nostrGroupIdHex,
     isTrue,
     reason:
         'PHASE 2b: the Add commit #h tag must equal the nostr_group_id. '
-        'Got: $hTag, expected: $nostrGroupIdHex (Security Rule 4).',
+        'Got: $hTagHandle, '
+        'expected: '
+        '${logAliasHandle(LogAliasClass.circle, nostrGroupIdHex)} '
+        '(Security Rule 4).',
   );
 
   // 3. The Add commit must have a LATER created_at than the init commit.
@@ -3363,8 +3402,8 @@ Future<CircleWithMembersFfi> _aliceAddsCarolViaUi({
     isNot(equals(initCommitPubkey.toLowerCase())),
     reason:
         'PHASE 2b: the Add commit must be signed by a DISTINCT ephemeral '
-        'key (MIP-03 rule 2). initCommit=${_redactPk(initCommitPubkey)}, '
-        'addCommit=${_redactPk(addCommit.pubkey)}.',
+        'key (MIP-03 rule 2). initCommit=${_pkHandle(initCommitPubkey)}, '
+        'addCommit=${_pkHandle(addCommit.pubkey)}.',
   );
 
   // 5. The Add commit carries NO `expiration` tag — expiration belongs on
@@ -3482,8 +3521,8 @@ Future<CircleWithMembersFfi> _aliceAddsCarolViaUi({
 
   debugPrint(
     '[e2e_combined:alice] PHASE 2b relay assertions OK — '
-    'carol gift-wrap ${_redactEventId(carolGiftWrap.id)}, '
-    'add commit ${_redactEventId(addCommit.id)} '
+    'carol gift-wrap ${_eventHandle(carolGiftWrap.id)}, '
+    'add commit ${_eventHandle(addCommit.id)} '
     'distinct ephemeral key, no expiration tag, no MLS group id leakage, '
     'welcome cardinality OK (1 carol gift-wrap, 0 bob gift-wraps; '
     'commit cardinality via epoch delta).',
@@ -3497,27 +3536,27 @@ Future<CircleWithMembersFfi> _aliceAddsCarolViaUi({
   // 10s to cover any async flush between the FFI finalize and the in-process
   // MDK state being queryable.
   final epochAfterAdd = await _pollUntil<int>(
-    describe:
-        "Alice's epoch advancing by 1 after the Add commit (expected "
-        '${epochBeforeAdd + 1})',
+    describe: "Alice's epoch advancing by 1 after the Add commit",
     probe: () => _aliceEpochForTest(tester, mlsGroupId),
     satisfied: (epoch) => epoch == epochBeforeAdd + 1,
     budget: const Duration(seconds: 10),
     interval: const Duration(milliseconds: 500),
   );
+  final aliceAddEpochDelta = epochAfterAdd - epochBeforeAdd;
   expect(
     epochAfterAdd,
     equals(epochBeforeAdd + 1),
     reason:
         "PHASE 2b: Alice's MLS epoch must advance by exactly 1 after "
-        'the Add commit finalizes. Before=$epochBeforeAdd, '
-        'after=$epochAfterAdd. An epoch delta != 1 means either the '
-        "commit did not finalize on Alice's side or MDK advanced by "
-        'an unexpected number of steps.',
+        // harness-log-ok: an in-run delta, never the absolute epoch.
+        'the Add commit finalizes. delta=$aliceAddEpochDelta. An epoch '
+        "delta != 1 means either the commit did not finalize on Alice's "
+        'side or MDK advanced by an unexpected number of steps.',
   );
   debugPrint(
     '[e2e_combined:alice] PHASE 2b epoch OK — '
-    'alice: $epochBeforeAdd → $epochAfterAdd (+1)',
+    // harness-log-ok: an in-run delta, never the absolute epoch.
+    'alice delta=$aliceAddEpochDelta (+1)',
   );
 
   // -------------------------------------------------------------------
@@ -3530,9 +3569,7 @@ Future<CircleWithMembersFfi> _aliceAddsCarolViaUi({
   // uses, and his MDK advances.
   // -------------------------------------------------------------------
   await _pollUntil<int>(
-    describe:
-        "Bob's epoch advancing by 1 after draining the Add commit "
-        '(expected ${bobEpochBeforeAdd + 1})',
+    describe: "Bob's epoch advancing by 1 after draining the Add commit",
     probe: () async {
       // Drain the Add commit (and any surrounding events) via Bob's normal
       // decrypt path. Pass `since` anchored to our Phase 2b start time so
@@ -3548,20 +3585,22 @@ Future<CircleWithMembersFfi> _aliceAddsCarolViaUi({
     satisfied: (epoch) => epoch == bobEpochBeforeAdd + 1,
   );
   final bobEpochAfterAdd = await bob.currentEpoch(mlsGroupId);
+  final bobAddEpochDelta = bobEpochAfterAdd - bobEpochBeforeAdd;
   expect(
     bobEpochAfterAdd,
     equals(bobEpochBeforeAdd + 1),
     reason:
         "PHASE 2b: Bob's MLS epoch must advance by exactly 1 after he "
-        'processes the Add commit from the relay. '
-        'Before=$bobEpochBeforeAdd, after=$bobEpochAfterAdd. '
+        // harness-log-ok: an in-run delta, never the absolute epoch.
+        'processes the Add commit from the relay. delta=$bobAddEpochDelta. '
         'An epoch delta != 1 signals that the Add commit was not '
         "routed to the relay's #h index or Bob's "
         'drainPendingCommits did not process it.',
   );
   debugPrint(
     '[e2e_combined:bob] PHASE 2b epoch OK — '
-    'bob: $bobEpochBeforeAdd → $bobEpochAfterAdd (+1)',
+    // harness-log-ok: an in-run delta, never the absolute epoch.
+    'bob delta=$bobAddEpochDelta (+1)',
   );
 
   debugPrint(
@@ -3651,28 +3690,36 @@ Future<void> _carolAcceptsAndEpochCheck({
   // -------------------------------------------------------------------
   final carolEpoch = await carol.currentEpoch(mlsGroupId);
   final aliceEpochAfterAdd = await _aliceEpochForTest(tester, mlsGroupId);
+  final carolVsAliceEpochDelta = carolEpoch - aliceEpochAfterAdd;
   expect(
     carolEpoch,
     equals(aliceEpochAfterAdd),
     reason:
-        "PHASE 3b: Carol's epoch ($carolEpoch) must equal Alice's "
-        'current epoch ($aliceEpochAfterAdd). Carol joined via the Add '
+        "PHASE 3b: Carol's epoch must equal Alice's current epoch "
+        // harness-log-ok: an in-run delta, never the absolute epoch.
+        '(delta=$carolVsAliceEpochDelta). Carol joined via the Add '
         "Welcome at the post-add epoch; a mismatch means Carol's MDK "
         "accepted a Welcome at the wrong epoch or Alice's epoch was not "
         'correctly read.',
   );
+  final carolEpochDeltaFromBaseline = carolEpoch - epochBeforeAdd;
+  final aliceEpochDeltaFromBaseline = aliceEpochAfterAdd - epochBeforeAdd;
   expect(
-    carolEpoch,
-    equals(epochBeforeAdd + 1),
+    carolEpochDeltaFromBaseline,
+    equals(1),
     reason:
-        "PHASE 3b: Carol's epoch ($carolEpoch) must be exactly "
-        '${epochBeforeAdd + 1} (epochBeforeAdd=$epochBeforeAdd + 1). '
-        'Carol joined at the Add epoch.',
+        "PHASE 3b: Carol's epoch must be exactly the pre-add baseline + 1 "
+        // harness-log-ok: an in-run delta, never the absolute epoch.
+        '(delta=$carolEpochDeltaFromBaseline). Carol joined at the Add '
+        'epoch.',
   );
   debugPrint(
     '[e2e_combined] PHASE 3b epoch check OK — '
-    'carol=$carolEpoch alice=$aliceEpochAfterAdd '
-    '(both == ${epochBeforeAdd + 1})',
+    // harness-log-ok: an in-run delta, never the absolute epoch.
+    'carol delta=$carolEpochDeltaFromBaseline '
+    // harness-log-ok: an in-run delta, never the absolute epoch.
+    'alice delta=$aliceEpochDeltaFromBaseline '
+    '(both expected +1 from the pre-add baseline)',
   );
 
   // -------------------------------------------------------------------
@@ -3837,10 +3884,10 @@ Future<void> _carolAcceptsAndEpochCheck({
     reason:
         'FORWARD SECRECY VIOLATION (Add / epoch boundary): Carol decrypted '
         "Bob's pre-add location "
-        '(id=${_redactEventId(preAddLocationEvent.id)}). '
-        'Carol joined at epoch ${epochBeforeAdd + 1} via the Add Welcome; '
-        'the pre-add event was encrypted at epoch $epochBeforeAdd whose '
-        "exporter secret was NEVER part of Carol's Welcome (RFC 9420 §8.1). "
+        '(id=${_eventHandle(preAddLocationEvent.id)}). '
+        'Carol joined via the Add Welcome one epoch after the pre-add '
+        'event was encrypted, whose exporter secret was NEVER part of '
+        "Carol's Welcome (RFC 9420 §8.1). "
         'A non-null decrypt here means MDK delivered the pre-add epoch '
         'secret to Carol through the Add Welcome — a cryptographic '
         'protocol violation. '
@@ -4098,11 +4145,11 @@ Future<void> _publishAndObserveThreeWayLocations({
   // underlying fetch pipeline keeps running exactly as before — only
   // driven entirely by the app's own background pollers now, with zero
   // test-owned awaits left in this probe to orphan.
-  await _pollUntil<Set<String>>(
+  await _pollUntil<int>(
     describe:
         'alice: memberLocationsProvider convergence — expected '
-        '${expectedPeerSet.length} peers '
-        '(${expectedPeerSet.map(_redactPk).join(", ")})',
+        '${magnitudeBucket(expectedPeerSet.length)} peers '
+        '(${expectedPeerSet.map(_pkHandle).join(", ")})',
     probe: () async {
       // Three short pumps cover any rebuild listeners the app's own
       // background pollers (JoinWatcher / MapShell timers) scheduled
@@ -4123,6 +4170,9 @@ Future<void> _publishAndObserveThreeWayLocations({
       aliceLastLocs = locs;
       final present = locs.map((l) => l.pubkey.toLowerCase()).toSet();
       final missing = expectedPeerSet.difference(present);
+      // Returning the missing COUNT rather than the Set<String> of pubkeys
+      // means a timed-out `_pollUntil` never has a printable identifier
+      // set to render, even by accident (Rule 15).
       if (missing.isNotEmpty) {
         debugPrint(
           '[e2e_combined:alice] PHASE 4 poll — '
@@ -4130,9 +4180,9 @@ Future<void> _publishAndObserveThreeWayLocations({
           'peers',
         );
       }
-      return missing;
+      return missing.length;
     },
-    satisfied: (missing) => missing.isEmpty,
+    satisfied: (missingCount) => missingCount == 0,
   );
   // `_pollUntil` throws a `StateError` on timeout, so reaching here
   // guarantees the satisfied predicate held. The explicit `expect` below
@@ -4180,7 +4230,7 @@ Future<void> _publishAndObserveThreeWayLocations({
   // decrypted location.
   // -----------------------------------------------------------------
   final bobDecryptedCoords = await _drainUntilLocationsVisible(
-    peer: bob,
+    actor: bob,
     relay: ctx.relay,
     circle: bobCircle,
     expectedSenders: <String>{
@@ -4189,7 +4239,7 @@ Future<void> _publishAndObserveThreeWayLocations({
     },
   );
   final carolDecryptedCoords = await _drainUntilLocationsVisible(
-    peer: carol,
+    actor: carol,
     relay: ctx.relay,
     circle: carolCircle,
     expectedSenders: <String>{
@@ -4282,13 +4332,18 @@ bool _isApplicationMessage(TestRelayEvent event) {
 /// Repeatedly awaits [probe] until [satisfied] holds or [budget]
 /// elapses, sleeping [interval] between attempts; returns the last
 /// probe result on success and throws a `StateError` tagged with
-/// [describe] (and the final result) on timeout.
+/// [describe] (and whether a probe ever completed) on timeout.
 ///
 /// Centralizes the convergence-poll skeleton the relay/MLS phases
 /// share — relay + MLS convergence is genuinely async with no single
 /// gating wire event, so the phases poll. Keeping the cadence and the
 /// actionable timeout message here avoids the copy-pasted
 /// `while (deadline) { … delay … }` blocks each phase used to carry.
+///
+/// The timeout message deliberately never renders the probe's VALUE —
+/// `T` ranges over pubkey sets, MLS epochs and petnames across call
+/// sites, all of which Rule 15 forbids in any thrown message — only
+/// whether a probe completed and its `runtimeType`.
 Future<T> _pollUntil<T>({
   required Future<T> Function() probe,
   required bool Function(T result) satisfied,
@@ -4297,7 +4352,8 @@ Future<T> _pollUntil<T>({
   Duration interval = _convergencePollInterval,
 }) async {
   final deadline = DateTime.now().add(budget);
-  Object? lastResult;
+  var hasResult = false;
+  Type? lastResultType;
   while (DateTime.now().isBefore(deadline)) {
     // Bound each probe by the remaining budget. A bare `await probe()`
     // lets a single non-completing probe Future block forever — the loop
@@ -4311,18 +4367,22 @@ Future<T> _pollUntil<T>({
     } on TimeoutException {
       break;
     }
-    lastResult = result;
+    hasResult = true;
+    lastResultType = result.runtimeType;
     if (satisfied(result)) return result;
     await Future<void>.delayed(interval);
   }
+  final probeStatus = hasResult
+      ? 'completed, type=$lastResultType'
+      : 'none completed within budget';
+  // log-scan-ok: every describe: here is role tags/handles/buckets/prose.
   throw StateError(
     '[e2e_combined] convergence timed out after ${budget.inSeconds}s: '
-    '$describe (last result: '
-    '${lastResult ?? "<no probe completed within budget>"})',
+    '$describe (last probe: $probeStatus)',
   );
 }
 
-/// Drains kind-445 events from [relay] for [peer]'s circle until
+/// Drains kind-445 events from [relay] for [actor]'s circle until
 /// every pubkey in [expectedSenders] has been observed as the sender
 /// of at least one successfully-decrypted location event.
 ///
@@ -4337,7 +4397,7 @@ Future<T> _pollUntil<T>({
 /// contains the first-seen coordinates per sender (lowercase hex key)
 /// and is the basis for post-drain coordinate assertions.
 Future<Map<String, DecryptedCoords>> _drainUntilLocationsVisible({
-  required SyntheticUser peer,
+  required SyntheticUser actor,
   required TestRelay relay,
   required CircleWithMembersFfi circle,
   required Set<String> expectedSenders,
@@ -4346,10 +4406,10 @@ Future<Map<String, DecryptedCoords>> _drainUntilLocationsVisible({
   final accumulatedCoords = <String, DecryptedCoords>{};
   await _pollUntil<Set<String>>(
     describe:
-        '${peer.label} location convergence — expected '
-        '${expectedSenders.length} distinct senders',
+        '${actor.role} location convergence — expected '
+        '${magnitudeBucket(expectedSenders.length)} distinct senders',
     probe: () async {
-      final summary = await peer.drainPendingCommits(
+      final summary = await actor.drainPendingCommits(
         relay: relay,
         circle: circle,
       );
@@ -4365,7 +4425,7 @@ Future<Map<String, DecryptedCoords>> _drainUntilLocationsVisible({
     satisfied: (missing) => missing.isEmpty,
   );
   debugPrint(
-    '[e2e_combined:${peer.label}] location convergence ok '
+    '[e2e_combined:${actor.role}] location convergence ok '
     '(${magnitudeBucket(accumulatedSenders.length)}/'
     '${magnitudeBucket(expectedSenders.length)} distinct senders decrypted)',
   );
@@ -4439,17 +4499,22 @@ Future<void> _aliceLeavesViaUi({
     find.byKey(WidgetKeys.circleSelectorActive(nostrGroupIdHex)),
     timeout: const Duration(seconds: 60),
     description:
-        'circle selector active-tile (id: ${nostrGroupIdHex.substring(0, 8)}…) '
+        'circle selector active-tile '
+        '(id: ${logAliasHandle(LogAliasClass.circle, nostrGroupIdHex)}) '
         'disappearing after Alice taps Leave',
   );
 
   expect(find.byType(MapShell), findsOneWidget);
   expect(
-    find.byKey(WidgetKeys.circleSelectorActive(nostrGroupIdHex)),
-    findsNothing,
+    find
+        .byKey(WidgetKeys.circleSelectorActive(nostrGroupIdHex))
+        .evaluate(),
+    isEmpty,
     reason:
-        'After AdminHandoff completes, the "$_circleName" circle '
-        '(nostrGroupId: ${nostrGroupIdHex.substring(0, 8)}…) must no '
+        'After AdminHandoff completes, the '
+        '${logAliasHandle(LogAliasClass.circle, _circleName)} circle '
+        '(nostrGroupId: '
+        '${logAliasHandle(LogAliasClass.circle, nostrGroupIdHex)}) must no '
         "longer appear as the active selection in Alice's circle selector.",
   );
   debugPrint('[e2e_combined:alice] PHASE 5 (Leave via UI) complete.');
@@ -4665,10 +4730,10 @@ _reconcileHandoff({
   // each round so each peer sees whatever the other just published.
   var probeRound = 0;
   final converged = await _pollUntil<_HandoffConvergence>(
-    describe: "${bob.label} + ${carol.label} converging on Alice's "
+    describe: "${bob.role} + ${carol.role} converging on Alice's "
         'handoff burst (both peers auto-commit the SelfRemove; the engine '
         'must resolve the resulting fork onto ONE branch, proven by '
-        '${carol.label} decrypting a location ${bob.label} minted at his '
+        '${carol.role} decrypting a location ${bob.role} minted at his '
         'current epoch)',
     probe: () async {
       // Re-snapshot per peer: Bob's publish inside his own drain must be
@@ -4712,10 +4777,12 @@ _reconcileHandoff({
         s.bobEpoch == s.carolEpoch &&
         s.crossDecrypted,
   );
+  final handoffEpochAgreementDelta = converged.bobEpoch - converged.carolEpoch;
   debugPrint(
     '[e2e_combined] handoff convergence poll satisfied — '
-    'bobEpoch=${converged.bobEpoch} carolEpoch=${converged.carolEpoch}, '
-    '${carol.label} read a location ${bob.label} minted at that epoch '
+    // harness-log-ok: an in-run delta, never the absolute epoch.
+    'epoch agreement delta=$handoffEpochAgreementDelta, '
+    '${carol.role} read a location ${bob.role} minted at that epoch '
     '(one shared branch, not two branches at one epoch number)',
   );
 
@@ -4737,18 +4804,25 @@ _reconcileHandoff({
   if (!_residualMembersOk(bobFinal, aliceHex) ||
       !_residualMembersOk(carolFinal, aliceHex) ||
       bobEpoch != carolEpoch) {
+    // Never the absolute epoch numbers (Security Rule 15) — only a delta,
+    // which says "how far apart" without saying "at what number".
+    final epochDelta = bobEpoch - carolEpoch;
     throw StateError(
       '[e2e_combined] handoff election left an unexpected residual: '
-      'bobMembers=${bobFinal.members.length} '
-      'carolMembers=${carolFinal.members.length} '
-      'bobEpoch=$bobEpoch carolEpoch=$carolEpoch (expected Alice gone, '
+      'bobMembers=${magnitudeBucket(bobFinal.members.length)} '
+      'carolMembers=${magnitudeBucket(carolFinal.members.length)} '
+      // harness-log-ok: a DELTA between two epochs, never an absolute one
+      'epochDelta=$epochDelta (expected Alice gone, '
       '2 members, 1 admin, and equal epochs on both peers).',
     );
   }
+  final finalEpochDeltaFromConverged = bobEpoch - converged.bobEpoch;
   debugPrint(
     '[e2e_combined] handoff converged — both peers independently applied '
-    'the arrival-ordered buffer and landed on ONE branch at epoch '
-    '$bobEpoch (proven by the cross-decrypt, not by the epoch number).',
+    'the arrival-ordered buffer and landed on ONE branch, epoch delta from '
+    // harness-log-ok: an in-run delta, never the absolute epoch.
+    'the poll above=$finalEpochDeltaFromConverged (proven by the '
+    'cross-decrypt, not by the epoch number).',
   );
   return (bob: bobFinal, carol: carolFinal);
 }
@@ -5000,7 +5074,7 @@ Future<void> _assertWirePrivacyInvariants({
       isFalse,
       reason:
           'a kind-445 was signed by a long-term identity pubkey '
-          '(${_redactPk(pk)}) instead of a fresh ephemeral key '
+          '(${_pkHandle(pk)}) instead of a fresh ephemeral key '
           '(MIP-03 rule 2).',
     );
   }
@@ -5017,7 +5091,7 @@ Future<void> _assertWirePrivacyInvariants({
       hMatches,
       isTrue,
       reason:
-          'kind-445 ${_redactEventId(e.id)} must carry the nostr_group_id in '
+          'kind-445 ${_eventHandle(e.id)} must carry the nostr_group_id in '
           'its h tag, not the real MLS group id (Security Rule 4).',
     );
     for (final tag in e.tags) {
@@ -5027,7 +5101,7 @@ Future<void> _assertWirePrivacyInvariants({
           isFalse,
           reason:
               'the real MLS group id leaked into a kind-445 tag on event '
-              '${_redactEventId(e.id)} (Security Rule 4).',
+              '${_eventHandle(e.id)} (Security Rule 4).',
         );
       }
     }
@@ -5041,7 +5115,7 @@ Future<void> _assertWirePrivacyInvariants({
       e.tag('p'),
       isNull,
       reason:
-          'kind-445 ${_redactEventId(e.id)} carries a `p` (recipient) tag — '
+          'kind-445 ${_eventHandle(e.id)} carries a `p` (recipient) tag — '
           'that deanonymizes circle membership at the relay. Group '
           'messages must route by the `h` tag alone (MIP-03).',
     );
@@ -5107,8 +5181,13 @@ Future<void> _announceMlsGroupId({
   }
   await relay.announceMlsGroupId(mlsGroupId: mlsGroupId);
   _announcedMlsGroupIds += 1;
+  // `#<n>` is parsed by e2e-android.yml's C5.8 completeness check
+  // (`announced MLS group id #[0-9]+`, largest-wins) against the proxy
+  // sidecar's own count.
   debugPrint(
+    // harness-log-ok: running announcement counter, not derived from the id
     '[e2e_combined] announced MLS group id #$_announcedMlsGroupIds to the '
+    // harness-log-ok: 16-byte id -> 32 hex chars; label is a fixed tag.
     'recording proxy ($label, ${mlsGroupId.length * 2} hex chars). The id is '
     'intercepted by the proxy, never forwarded to a relay, never journalled, '
     'and never logged or put in the canary manifest.',
@@ -5169,8 +5248,9 @@ _nonAdminLeavesAndAdminObserves({
     adminCircle = carolCircle;
   }
   debugPrint(
-    '[e2e_combined] PHASE 6 — ${nonAdmin.label} leaves '
-    '(${admin.label} remains admin).',
+    // harness-log-ok: fixed harness role name, not user text
+    '[e2e_combined] PHASE 6 — ${nonAdmin.role} leaves '
+    '(${admin.role} remains admin).',
   );
 
   // Choose the non-admin's circle handle (the up-to-date residual
@@ -5191,7 +5271,7 @@ _nonAdminLeavesAndAdminObserves({
 
   final current = await _pollUntil<CircleWithMembersFfi>(
     describe:
-        '${admin.label} observing non-admin ${nonAdmin.label} leave — '
+        '${admin.role} observing non-admin ${nonAdmin.role} leave — '
         'leaver should vanish from the member list',
     probe: () async {
       final summary = await admin.drainPendingCommits(
@@ -5200,13 +5280,15 @@ _nonAdminLeavesAndAdminObserves({
       );
       final refreshed = await admin.getCircle(mlsGroupId);
       if (refreshed == null) {
+        // log-scan-ok: fixed harness role name (bob/carol), not user text
         throw StateError(
-          '[e2e_combined:${admin.label}] circle vanished from local MDK '
+          '[e2e_combined:${admin.role}] circle vanished from local MDK '
           'during non-admin leave drain.',
         );
       }
       debugPrint(
-        '[e2e_combined:${admin.label}] post-leave drain '
+        // harness-log-ok: fixed harness role name, not user text
+        '[e2e_combined:${admin.role}] post-leave drain '
         'groupUpdates=${magnitudeBucket(summary.groupUpdatesProcessed)} '
         'members=${magnitudeBucket(refreshed.members.length)} '
         'stillHasLeaver=${stillHasLeaver(refreshed)}',
@@ -5219,7 +5301,7 @@ _nonAdminLeavesAndAdminObserves({
     current.members.length,
     equals(1),
     reason:
-        '[e2e_combined:${admin.label}] residual member count after '
+        '[e2e_combined:${admin.role}] residual member count after '
         'non-admin left is ${current.members.length}, expected exactly 1 '
         '(the admin themselves).',
   );
@@ -5227,7 +5309,7 @@ _nonAdminLeavesAndAdminObserves({
     current.members.first.pubkey.toLowerCase(),
     equals(admin.pubkeyHex.toLowerCase()),
     reason:
-        '[e2e_combined:${admin.label}] sole remaining member is not the '
+        '[e2e_combined:${admin.role}] sole remaining member is not the '
         'admin — `leaveAsNonAdmin` evicted the wrong pubkey.',
   );
   debugPrint('[e2e_combined] PHASE 6 complete.');
@@ -5289,9 +5371,10 @@ Future<void> _assertForwardSecrecyAfterRemoval({
 }) async {
   final adminHex = admin.pubkeyHex.toLowerCase();
   debugPrint(
+    // harness-log-ok: fixed harness role name, not user text
     '[e2e_combined] PHASE 7 — forward secrecy after removal: '
-    '${admin.label} publishes a post-removal location; '
-    '${leaver.label} (evicted) must not decrypt it.',
+    '${admin.role} publishes a post-removal location; '
+    '${leaver.role} (evicted) must not decrypt it.',
   );
 
   // Step 1 — the admin publishes a FRESH location on its current,
@@ -5302,7 +5385,7 @@ Future<void> _assertForwardSecrecyAfterRemoval({
   // (the values are immaterial to this assertion — we test decrypt
   // success/failure, not coordinates — but staying on-sentinel keeps
   // the wire consistent with Phase 4).
-  final (double adminLat, double adminLon) = admin.label == 'bob'
+  final (double adminLat, double adminLon) = admin.role == 'bob'
       ? (bobFakeLatitude, bobFakeLongitude)
       : (carolFakeLatitude, carolFakeLongitude);
   final eventId = await admin.publishLocation(
@@ -5348,7 +5431,7 @@ Future<void> _assertForwardSecrecyAfterRemoval({
         summary.decryptedLocations.containsKey(adminHex);
     if (decryptedAdmin) break;
     debugPrint(
-      '[e2e_combined:${leaver.label}] PHASE 7 attempt $attempt — '
+      '[e2e_combined:${leaver.role}] PHASE 7 attempt $attempt — '
       'post-removal event not decrypted (expected); '
       'decryptFailed=${magnitudeBucket(summary.decryptFailed)} '
       'locations=${magnitudeBucket(summary.locationsProcessed)}',
@@ -5360,17 +5443,18 @@ Future<void> _assertForwardSecrecyAfterRemoval({
     decryptedAdmin,
     isFalse,
     reason:
-        'FORWARD SECRECY VIOLATION: ${leaver.label} was removed from the '
-        "circle yet decrypted ${admin.label}'s post-removal kind-445 "
-        '(event ${_redactEventId(eventId)}). A removed member MUST NOT read '
+        'FORWARD SECRECY VIOLATION: ${leaver.role} was removed from the '
+        "circle yet decrypted ${admin.role}'s post-removal kind-445 "
+        '(event ${_eventHandle(eventId)}). A removed member MUST NOT read '
         'messages sent after their removal — broken if `complete_leave` '
         "failed to purge the leaver's MLS state or the post-removal "
         'epoch advance did not take effect. Leaver decrypted-location '
-        'keys: ${lastKeys.map(_redactPk).toList()}.',
+        'keys: ${lastKeys.map(_pkHandle).toList()}.',
   );
   debugPrint(
-    '[e2e_combined] PHASE 7 complete — ${leaver.label} could NOT decrypt '
-    "${admin.label}'s post-removal location (forward secrecy holds).",
+    // harness-log-ok: fixed harness role name, not user text
+    '[e2e_combined] PHASE 7 complete — ${leaver.role} could NOT decrypt '
+    "${admin.role}'s post-removal location (forward secrecy holds).",
   );
 }
 
@@ -5400,24 +5484,24 @@ void _assertMemberLocationCoordinates({
     isNotNull,
     reason:
         '$label: no MemberLocation entry found for sender '
-        "${senderPubkeyHex.substring(0, 8)}… in alice's "
-        'memberLocationsProvider.',
+        '${logAliasHandle(LogAliasClass.peer, senderPubkeyHex)} in '
+        "alice's memberLocationsProvider.",
   );
   if (entry == null) return; // unreachable after expect above; satisfies type
+  // Never the coordinates (Log anonymity pillar) — only whether the
+  // decrypted value is within tolerance of the expected one.
   expect(
     (entry.latitude - expectedLatitude).abs(),
     lessThan(epsilon),
     reason:
-        '$label: latitude mismatch — got ${entry.latitude}, '
-        'expected $expectedLatitude (within $epsilon). '
+        '$label: latitude mismatch (outside $epsilon epsilon). '
         'Decrypt succeeded but returned corrupt coordinates.',
   );
   expect(
     (entry.longitude - expectedLongitude).abs(),
     lessThan(epsilon),
     reason:
-        '$label: longitude mismatch — got ${entry.longitude}, '
-        'expected $expectedLongitude (within $epsilon). '
+        '$label: longitude mismatch (outside $epsilon epsilon). '
         'Decrypt succeeded but returned corrupt coordinates.',
   );
 }
@@ -5444,25 +5528,25 @@ void _assertDecryptedCoords({
     isNotNull,
     reason:
         '$label: no decrypted coordinates found for sender '
-        '${senderPubkeyHex.substring(0, 8)}… — either the drain '
-        'did not yield a location result or the summary map was not '
-        'accumulated correctly.',
+        '${logAliasHandle(LogAliasClass.peer, senderPubkeyHex)} — either '
+        'the drain did not yield a location result or the summary map was '
+        'not accumulated correctly.',
   );
   if (entry == null) return; // unreachable after expect above; satisfies type
+  // Never the coordinates (Log anonymity pillar) — only whether the
+  // decrypted value is within tolerance of the expected one.
   expect(
     (entry.latitude - expectedLatitude).abs(),
     lessThan(epsilon),
     reason:
-        '$label: latitude mismatch — got ${entry.latitude}, '
-        'expected $expectedLatitude (within $epsilon). '
+        '$label: latitude mismatch (outside $epsilon epsilon). '
         'Decrypt succeeded but returned corrupt coordinates.',
   );
   expect(
     (entry.longitude - expectedLongitude).abs(),
     lessThan(epsilon),
     reason:
-        '$label: longitude mismatch — got ${entry.longitude}, '
-        'expected $expectedLongitude (within $epsilon). '
+        '$label: longitude mismatch (outside $epsilon epsilon). '
         'Decrypt succeeded but returned corrupt coordinates.',
   );
 }
@@ -5543,7 +5627,7 @@ Future<void> _plantPetnameCanary({
   final observed = await _pollUntil<String?>(
     describe:
         'alice: circlesProvider surfacing the canary petname for '
-        '${_redactPk(memberPubkeyHex)} (wire-canary plant proof)',
+        '${_pkHandle(memberPubkeyHex)} (wire-canary plant proof)',
     budget: const Duration(seconds: 30),
     probe: () async {
       container.invalidate(circlesProvider);
@@ -5575,14 +5659,14 @@ Future<void> _plantPetnameCanary({
     equals(_canaries.petname),
     reason:
         "Alice's circlesProvider must surface the canary petname for "
-        '${_redactPk(memberPubkeyHex)} after setContactDisplayName. The '
+        '${_pkHandle(memberPubkeyHex)} after setContactDisplayName. The '
         'local override is what the wire-canary oracle then forbids from '
         'every recorded frame; if it was never stored, that forbid check '
         'proves nothing.',
   );
   debugPrint(
     '[e2e_combined:alice] wire-canary petname planted + read back for '
-    '${_redactPk(memberPubkeyHex)}',
+    '${_pkHandle(memberPubkeyHex)}',
   );
 }
 
@@ -5629,12 +5713,21 @@ Future<void> _assertAliceCirclesProviderHasFamily({
   // host, which is the honest verdict for "the forbid half was searching for
   // something other than what this run put on the wire".
   _canaries.confirmCircleNamePlanted(family.displayName);
-  expect(
+  // Compare HANDLES, not raw names — two handles differ iff the names
+  // differ (same per-process salt), so the assertion is unchanged, but
+  // neither the matcher's own Expected/Actual output nor the reason can
+  // ever render the canary circle name (Rule 15).
+  final familyNameHandle = logAliasHandle(
+    LogAliasClass.circle,
     family.displayName,
-    equals(_circleName),
+  );
+  final expectedNameHandle = logAliasHandle(LogAliasClass.circle, _circleName);
+  expect(
+    familyNameHandle,
+    equals(expectedNameHandle),
     reason:
         "The single circle in Alice's circlesProvider must be named "
-        '"$_circleName". Got "${family.displayName}". A name mismatch '
+        '$expectedNameHandle. Got $familyNameHandle. A name mismatch '
         'indicates the production CircleService is returning a stale or '
         'different circle.',
   );
@@ -5649,7 +5742,7 @@ Future<void> _assertAliceCirclesProviderHasFamily({
     reason:
         "Alice's circlesProvider returned a member set "
         '(${actualSet.length} members) that does not match the '
-        'expected 3-member set ${expectedSet.map(_redactPk).toList()}. '
+        'expected 3-member set ${expectedSet.map(_pkHandle).toList()}. '
         'Either Bob or Carol is missing from the roster the production '
         'CircleService returns, after both accepted their invitations.',
   );
@@ -5769,9 +5862,20 @@ Future<void> _prepareAlicePubkey() async {
 // pillar bans a pubkey/event id "at any truncation", not merely in full — so
 // both redactors route through the per-process salted handle instead of
 // slicing the string.
-String _redactPk(String hex) => logAliasHandle(LogAliasClass.peer, hex);
+String _pkHandle(String hex) => logAliasHandle(LogAliasClass.peer, hex);
 
-String _redactEventId(String hex) => logAliasHandle(LogAliasClass.event, hex);
+String _eventHandle(String hex) => logAliasHandle(LogAliasClass.event, hex);
+
+/// Buckets a measured duration into `<1s|1-9s|10-59s|60s+` — never the exact
+/// millisecond magnitude — for diagnostic printouts of elapsed time that no
+/// tooling parses numerically (Log anonymity pillar).
+String _durationBucket(Duration d) {
+  final s = d.inSeconds;
+  if (s < 1) return '<1s';
+  if (s < 10) return '1-9s';
+  if (s < 60) return '10-59s';
+  return '60s+';
+}
 
 /// Reads the current MLS epoch for [mlsGroupId] from Alice's production
 /// `CircleManagerFfi`.
@@ -5916,7 +6020,7 @@ void _m11ScenarioTestWidgets(
     try {
       await callback(tester, generation);
     } on _M11ScenarioSuperseded catch (e) {
-      debugPrint('[M11] $e');
+      debugPrint('[M11] ${e.runtimeType}');
     }
   });
 }
@@ -5938,9 +6042,9 @@ void _m11ScenarioTestWidgets(
 /// Best-effort, like the M11 teardown helpers this backs: swallows a
 /// timeout/failure (`${e.runtimeType}` only — Security Rule 8) and NEVER
 /// rethrows, so one slow step can never mask the scenario's own assertion or
-/// block the rest of teardown. [label] identifies the step in CI logs.
+/// block the rest of teardown. [step] identifies the step in CI logs.
 Future<void> _m11Bounded(
-  String label,
+  String step,
   Future<void> Function() op, {
   Duration timeout = const Duration(seconds: 25),
 }) async {
@@ -5948,7 +6052,7 @@ Future<void> _m11Bounded(
     await op().timeout(timeout);
   } on Object catch (e) {
     debugPrint(
-      '[M11] $label did not complete within ${timeout.inSeconds}s (or '
+      '[M11] $step did not complete within ${timeout.inSeconds}s (or '
       'threw): ${e.runtimeType}',
     );
   }
@@ -6063,12 +6167,14 @@ Future<CircleFfi> _m11AliceCreatesCircle({
   // KP even when a prior M11 scenario reused the same sentinel seed.
   final relayManager = await RelayManagerFfi.newInstance();
   final members = <MemberKeyPackageFfi>[];
-  for (final peer in invitees) {
-    await waitForKeyPackage(relay: relay, authorPubkeyHex: peer.pubkeyHex);
-    final kp = await relayManager.fetchMemberKeypackage(pubkey: peer.pubkeyHex);
+  for (final invitee in invitees) {
+    await waitForKeyPackage(relay: relay, authorPubkeyHex: invitee.pubkeyHex);
+    final kp = await relayManager.fetchMemberKeypackage(
+      pubkey: invitee.pubkeyHex,
+    );
     if (kp == null) {
       throw StateError(
-        '[M11] fetchMemberKeypackage returned null for ${peer.label}',
+        '[M11] fetchMemberKeypackage returned null for ${invitee.role}',
       );
     }
     members.add(kp);
@@ -6099,7 +6205,7 @@ Future<CircleFfi> _m11AliceCreatesCircle({
       // inbox (the hermetic relay) as the Welcome-delivery fallback — exactly
       // what the production admin flow does (see the FE-2 note).
       creatorFallbackRelays: <String>[relay.url],
-      label: 'M11',
+      scenario: 'M11',
     );
   } finally {
     secret.fillRange(0, secret.length, 0);
@@ -6109,12 +6215,18 @@ Future<CircleFfi> _m11AliceCreatesCircle({
   // at this point covers all of them — including the two the multi-circle
   // scenario creates back to back, whose 445s are exactly what C5.8 scans.
   // Announced before the provider mutation below, which is what starts the
-  // live-sync engine publishing into the new group.
+  // live-sync engine publishing into the new group. The label carries a
+  // circle HANDLE, never `name` (a harness circle name is still a circle
+  // name — Security Rule 15).
+  final circleHandle = logAliasHandle(
+    LogAliasClass.circle,
+    _hexLower(Uint8List.fromList(result.circle.nostrGroupId)),
+  );
   await _announceMlsGroupId(
     relay: relay,
     mlsGroupId: result.circle.mlsGroupId,
     nostrGroupId: result.circle.nostrGroupId,
-    label: 'M11 circle "$name"',
+    label: 'M11 circle $circleHandle',
   );
 
   // Mirror the UI's post-create provider mutation: refresh circlesProvider (so
@@ -6295,9 +6407,9 @@ Future<Duration> _m11AwaitLiveLocation(
     },
     description: expectedLatitude == null
         ? 'memberLocationsProvider surfaces a live location from '
-              '${_redactPk(senderPubkeyHex)}'
+              '${_pkHandle(senderPubkeyHex)}'
         : 'memberLocationsProvider surfaces the EXPECTED coordinates from '
-              '${_redactPk(senderPubkeyHex)}',
+              '${_pkHandle(senderPubkeyHex)}',
     timeout: timeout,
     shouldAbort: () => _m11Superseded(generation),
   );
@@ -6339,9 +6451,9 @@ Future<void> _m11PumpUntilRosterDrops(
     if (!roster.contains(gone)) return;
   }
   throw StateError(
-    '[M11] ${_redactPk(gonePubkeyHex)} still in the roster after '
-    '${timeout.inSeconds}s (size $lastSize); the engine did not converge the '
-    'removal.',
+    '[M11] ${_pkHandle(gonePubkeyHex)} still in the roster after '
+    '${timeout.inSeconds}s (size ${magnitudeBucket(lastSize)}); the engine '
+    'did not converge the removal.',
   );
 }
 
@@ -6385,8 +6497,8 @@ Future<void> _m11PumpUntilInvitation(
   }
   throw StateError(
     '[M11] no pendingInvitation for the target circle after '
-    '${timeout.inSeconds}s (saw $lastCount); the inbox stream did not deliver '
-    'the Welcome.',
+    '${timeout.inSeconds}s (saw ${magnitudeBucket(lastCount)}); the inbox '
+    'stream did not deliver the Welcome.',
   );
 }
 

@@ -71,8 +71,40 @@
 # `panic!`, `unreachable!`, the `assert!` family (their operands render as
 # `{:?}` on failure) and `.expect(` are scanned like log calls.
 #
-# Not covered, deliberately: generated bindings, `haven/integration_test`
-# (Phase 0b — the harness announces canaries on purpose), Rust `#[cfg(test)]`
+# A thrown Dart message is a log line too: `flutter drive` prints an uncaught
+# exception's `toString()` into the drive transcript, the same uploaded sink a
+# panic message reaches on the Rust side — so the Dart `CALL` vocabulary scans
+# `fail(` and ANY bare (unnamed) constructor call whose own name ends in
+# `Exception(` or `Error(` — Dart's own `StateError`/`ArgumentError`/
+# `FormatException`/`Exception`/`UnsupportedError`/`RangeError`/
+# `TimeoutException` and every project-defined one alike (`NpubValidation
+# Exception(`, `IdentityServiceException(`, …) — exactly like `debugPrint`/
+# `print`. The name must start with an (optionally `_`-prefixed) UPPERCASE
+# letter — Dart's own class-naming convention — or be the bare word
+# `Exception`; this is what keeps an ordinary camelCase method or function
+# DECLARATION that happens to end in `Error` (`recordPublishError(Object
+# error) {`, `_setError(String? message) {`, a `flutter gen-l10n` string
+# builder like `circleMemberRemoveError(String name)`) from being misread as
+# a constructor call — the regex sees only `NAME(` shape and cannot tell a
+# declaration from a call any other way. Only the bare (unnamed) constructor
+# form is recognised —
+# `ArgumentError.value(`/`RangeError.range(` are a known gap, not scanned by
+# this guard or the harness lint of the same name, because the call name
+# immediately preceding `(` is the method (`value`/`range`), not the
+# type. As of the 2026-09-16 H6 pass the tree has NO value-bearing
+# named-constructor call — every `.value(`/`.range(` site under
+# `haven/integration_test` was converted to the bare form or drops the value
+# entirely — so the gap is empty, not just unscanned; the self-test pins
+# `ArgumentError.value(` as unmatched so a future regression is a tested
+# property, not an assumption.
+#
+# `haven/integration_test` is scanned as its own root with its own floor: a
+# harness print lands in the drive transcript, which is uploaded on failure,
+# so the pillar applies; the harness's own `// harness-log-ok: <reason>` marker
+# (the one haven/test/lints/harness_assertion_redaction_test.dart honours) is
+# honoured there and only there, under the same reason-required rule.
+#
+# Not covered, deliberately: generated bindings, Rust `#[cfg(test)]`
 # modules (a test's panic message is its diagnostic and never ships; the
 # in-process LogCapture tests cover what production code logs UNDER test),
 # the `assert!` family, and `format!` strings that become FFI error strings
@@ -95,14 +127,22 @@ readonly SCRIPT_NAME='check_no_identifier_logging'
 # key guard measured (Rust 92, Dart 479). A parser that stopped recognising
 # invocations collapses well past them.
 readonly MIN_RUST_SITES=70
-readonly MIN_DART_SITES=380
+# Re-measured 2026-09-16 (H6): the Dart CALL vocabulary widened from a fixed
+# exception-name list to ANY (optionally `_`-prefixed) PascalCase identifier
+# ending in `Exception`/`Error` (plus the bare word `Exception`), which raised
+# the count from 479 to 776 invocations under haven/lib (constructor
+# DECLARATIONS forwarding `this.`/`super.` are not calls); floor(776 × 0.8).
+readonly MIN_DART_SITES=620
+# Re-measured 2026-09-16 (H6), same CALL widening as MIN_DART_SITES: 459 to
+# 481 invocations under haven/integration_test; floor(481 × 0.8).
+readonly MIN_ITEST_SITES=384
 
 # The vocabulary. Whole decamelled identifiers and every `_`-part of them.
 # STRONG words identify on their own; WEAK words are magnitudes and instants,
 # which a delta/bucket/duration part may relativise.
 readonly STRONG_WORDS='nostr_group_id group_hex group_id gid group circle circle_id h_tag npub nsec pubkey pub_key public_key pk author sender recipient inviter event_id evt evt_id evt_tag evt_prefix d_tag slot sub_id subscription_id relay relays relay_url url urls host domain endpoint uri ip ssid display_name petname nickname circle_name name title label about notes blossom picture avatar sha256 digest hash hex bech32 hash_code lat latitude lon longitude geohash altitude speed heading accuracy device_id locale tz timezone id ids peer peers member members contact contacts owner admin admins index idx ordinal seq sequence serial'
 readonly WEAK_WORDS='epoch since until created_at timestamp at_ms instant count size total len'
-readonly PROSE_WORDS='e err error exception ex cause stack_trace stack trace panic reason message msg notice detail details description text body content payload raw json response resp line summary'
+readonly PROSE_WORDS='e err error exception ex cause stack_trace stack trace panic reason message msg notice detail details description text body content payload raw json response resp line summary result describe rejection'
 readonly BOOL_PREFIXES='is has was were are can could should needs did does will had have must may'
 readonly BOOL_SUFFIXES='ok enabled disabled present known ready changed stale fresh valid missing configured allowed dirty reachable healthy acked sent done empty matched verified exists supported granted denied needed required connected'
 # A name that says it is a classification, not a value.
@@ -159,7 +199,7 @@ BEGIN {
   RELP   = words_re(ENVIRON["RELATIVE_PARTS"])
   nshapes = split(ENVIRON[(lang == "rust") ? "SHAPES_RUST" : "SHAPES_DART"], SH, "\n")
   for (i = 1; i <= nshapes; i++) { split(SH[i], kv, "\t"); SLABEL[i] = kv[1]; SRE[i] = kv[2] }
-  MARKER = "log-scan-ok:[ \t]*[^ \t]"
+  MARKER = "(" markers "):[ \t]*[^ \t]"
   if (lang == "rust") {
     CALL  = "(log::(log|trace|debug|info|warn|error)|(^|[^A-Za-z0-9_:])(trace|debug|info|warn|error|println|eprintln|print|eprint|dbg|panic|unreachable|assert|assert_eq|assert_ne|debug_assert|debug_assert_eq|debug_assert_ne))![ \t]*\\(|\\.expect\\([ \t]*&?format!\\("
     WRAP  = "(^|[^A-Za-z0-9_])(log_alias::[a-z_]+|[a-z0-9_]*_(handle|alias)|magnitude_bucket|bucket|relative_secs|relative_ms|since_origin)[ \t]*\\("
@@ -167,13 +207,15 @@ BEGIN {
     COUNT = "[A-Za-z_][A-Za-z0-9_.]*\\.(len|count)\\(\\)"
     UNKNOWN = "(^|[^A-Za-z0-9_])[A-Za-z0-9_]+::(trace|debug|info|warn|error|event)!"
   } else {
-    CALL  = "(^|[^A-Za-z0-9_.])(debugPrint|debugPrintThrottled|print|developer\\.log|dev\\.log|stderr\\.write|stderr\\.writeln|stdout\\.write|stdout\\.writeln|assert)[ \t]*\\("
+    CALL  = "(^|[^A-Za-z0-9_.])(debugPrint|debugPrintThrottled|print|developer\\.log|dev\\.log|stderr\\.write|stderr\\.writeln|stdout\\.write|stdout\\.writeln|assert|fail|Exception|_?[A-Z][A-Za-z0-9_]*(Exception|Error))[ \t]*\\("
     WRAP  = "(^|[^A-Za-z0-9_.])(logAliasHandle|logAlias|(_?[a-z][a-zA-Z0-9_]*)?(Handle|Alias)|magnitudeBucket|bucket|relativeSecs|relativeMs|sinceOrigin)[ \t]*\\("
-    # `.name` on an enum is Dart's variant-name idiom (`outcome.name`); on a
-    # circle it is user text. The receiver's last segment decides.
+    # `.name` on an enum is Dart's variant-name idiom (`outcome.name`,
+    # `expectedTier.name`); on a circle it is user text. The receiver's last
+    # segment decides, by its last decamelled part.
     # `details.library` is FlutterErrorDetails' library NAME ("widgets library").
-    SAFE  = "[A-Za-z_][A-Za-z0-9_.]*\\.(runtimeType|isEmpty|isNotEmpty|code|kind|library)|([A-Za-z_][A-Za-z0-9_.]*\\.)?(kind|mode|status|state|outcome|decision|category|phase|tier|action|policy|verdict|class|variant|level)\\.name"
-    COUNT = "[A-Za-z_][A-Za-z0-9_.]*\\.(length|size)"
+    # `?.` is the null-aware spelling of the same accessor.
+    SAFE  = "[A-Za-z_][A-Za-z0-9_.]*\\??\\.(runtimeType|isEmpty|isNotEmpty|code|kind|library)|([A-Za-z_][A-Za-z0-9_.]*\\??\\.)?(kind|mode|status|state|outcome|decision|category|phase|tier|action|policy|verdict|class|variant|level)\\.name|[A-Za-z_][A-Za-z0-9_.]*(Kind|Mode|Status|State|Outcome|Decision|Category|Phase|Tier|Action|Policy|Verdict|Class|Variant|Level)\\.name"
+    COUNT = "[A-Za-z_][A-Za-z0-9_.]*\\??\\.(length|size)"
     UNKNOWN = ""
   }
   BOUND = "([^A-Za-z0-9_(]|$)"
@@ -426,6 +468,11 @@ FNR == 1 { INMAC = 0; INQ = 0; ESC = 0; prev_supp = 0; CFGTEST = 0; SKIPPING = 0
       emit(); INMAC = 0; rest = TAIL
     } else {
       if (!match(rest, CALL)) break
+      # `const FooException(this.message)` / `({required super.message})` is a
+      # constructor DECLARATION sharing a call's shape; it renders nothing.
+      if (lang == "dart" && substr(rest, RSTART + RLENGTH) ~ /^[ \t]*[{[]?[ \t]*(required[ \t]+)?(this|super)\./) {
+        rest = substr(rest, RSTART + RLENGTH); continue
+      }
       INMAC = 1; PH = ""; ARGS = ""; TAIL = ""; DBG = 0; HEXF = 0
       m = substr(rest, RSTART, RLENGTH)
       DEPTH = gsub(/\(/, "(", m)                # `.expect(&format!(` opens two
@@ -554,9 +601,11 @@ wrappers() {
   log "OK: ${label} — ${defs:-0} alias/bucket wrapper definition(s), every one built on log_alias."
 }
 
+# The markers a scan honours: `log-scan-ok` everywhere, plus `harness-log-ok`
+# under haven/integration_test (SCAN_MARKERS set by the caller).
 run_awk() { # run_awk <lang> <file...>
   local lang="$1"; shift
-  awk -v lang="${lang}" "${SCAN_AWK}" "$@"
+  awk -v lang="${lang}" -v markers="${SCAN_MARKERS:-log-scan-ok}" "${SCAN_AWK}" "$@"
 }
 
 # scan <lang> <min-sites> <label> <file...>
@@ -594,10 +643,16 @@ camelize() { awk -F_ '{ out = $1; for (i = 2; i <= NF; i++) out = out toupper(su
 # contact with the tree (an alias, a bucket, a relative offset, a boolean, a
 # delta, `runtimeType`, `.code`) and the marker rules.
 # ---------------------------------------------------------------------------
-# 2 languages x (86 STRONG + 11 WEAK + 27 PROSE) words + 91 hand-written cases
-# (shapes, format specs, markers, known-good, floors). An equality pin: a fixture added or lost
-# without this line changing is a self-test that no longer says what it runs.
-readonly DECLARED_CASES=341
+# 2 languages x (86 STRONG + 11 WEAK + 30 PROSE) words + 109 hand-written
+# cases (shapes, format specs, markers, known-good, floors, and — Phase 0c —
+# the Dart exception-constructor/fail( CALL vocabulary). PROSE grew by 3
+# (`result`, `describe`, `rejection` — 2026-09-16, the H6 security-review
+# pass) over a `_pollUntil`/rejection-classifier leak the loop now catches
+# by construction, and the hand cases grew by 1 for the pinned
+# `ArgumentError.value(` gap fixture. An equality pin: a fixture added or
+# lost without this line changing is a self-test that no longer says what
+# it runs.
+readonly DECLARED_CASES=365
 
 self_test() {
   local tmp fails=0 checked=0
@@ -605,11 +660,11 @@ self_test() {
   # shellcheck disable=SC2064
   trap "rm -rf '${tmp}'" RETURN
 
-  _case() { # _case <label> <lang> <expect-hit:0|1> <ext> <content> [<expect-substring>]
-    local label="$1" lang="$2" want="$3" ext="$4" content="$5" need="${6:-}" out got
+  _case() { # _case <label> <lang> <expect-hit:0|1> <ext> <content> [<expect-substring>] [<markers>]
+    local label="$1" lang="$2" want="$3" ext="$4" content="$5" need="${6:-}" markers="${7:-log-scan-ok}" out got
     checked=$(( checked + 1 ))
     printf '%s' "${content}" > "${tmp}/f.${ext}"
-    out="$(run_awk "${lang}" "${tmp}/f.${ext}")"
+    out="$(SCAN_MARKERS="${markers}" run_awk "${lang}" "${tmp}/f.${ext}")"
     got=$(grep -cv '^#sites ' <<<"${out}" || true)
     (( got > 0 )) && got=1
     if [[ "${got}" -eq "${want}" ]] && { [[ -z "${need}" ]] || grep -qF -- "${need}" <<<"${out}"; }; then
@@ -670,6 +725,18 @@ self_test() {
   _case "println! rendering an identifier FAILS" rust 1 rs 'fn f() { println!("{}", relay_url); }' 'identifier(relay_url)'
   _case "Dart print( FAILS" dart 1 dart "void f() { print('\$relayUrl'); }" 'identifier(relay_url)'
   _case "Dart developer.log( FAILS" dart 1 dart "void f() { developer.log('\$npub'); }" 'identifier(npub)'
+  _case "Dart StateError( with an identifier FAILS" dart 1 dart "void f() { throw StateError('leak: \$relayUrl'); }" 'identifier(relay_url)'
+  _case "Dart fail( with a relay URL FAILS" dart 1 dart "void f() { fail('leak: \$relayUrl'); }" 'identifier(relay_url)'
+  _case "Dart ArgumentError( with an identifier FAILS" dart 1 dart "void f() { throw ArgumentError('bad \$npub'); }" 'identifier(npub)'
+  _case "Dart FormatException( with an identifier FAILS" dart 1 dart "void f() { throw FormatException('bad \$relayUrl'); }" 'identifier(relay_url)'
+  _case "Dart Exception( with an identifier FAILS" dart 1 dart "void f() { throw Exception('bad \$pubkey'); }" 'identifier(pubkey)'
+  _case "Dart UnsupportedError( with an identifier FAILS" dart 1 dart "void f() { throw UnsupportedError('bad \$npub'); }" 'identifier(npub)'
+  _case "Dart RangeError( with an identifier FAILS" dart 1 dart "void f() { throw RangeError('bad \$relayUrl'); }" 'identifier(relay_url)'
+  _case "Dart TimeoutException( with an identifier FAILS" dart 1 dart "void f() { throw TimeoutException('bad \$eventId'); }" 'identifier(event_id)'
+  _case "Dart StateError( with runtimeType passes" dart 0 dart "void f() { throw StateError('failed: \${e.runtimeType}'); }"
+  _case "a Dart constructor declaration forwarding this.message is not a call" dart 0 dart "class FooException implements Exception { const FooException(this.message); final String message; }"
+  _case "a Dart constructor declaration with a named required this.message is not a call" dart 0 dart "class FooError extends Error { FooError({required this.message}); final String message; }"
+  _case "Dart FormatException( with a fixed literal passes" dart 0 dart "void f() { throw FormatException('a fixed, non-identifying message'); }"
   _case "tracing::info! trips the unknown-macro trap" rust 1 rs 'fn f() { tracing::info!("ok"); }' 'unknown-macro(tracing::'
   _case "#[instrument] trips the unknown-macro trap" rust 1 rs '#[instrument]
 fn f(gid: &str) {}
@@ -766,7 +833,9 @@ mod log_anonymity_tests {
   _case "Rust relative offset passes" rust 0 rs 'fn f() { log::debug!("at {}", relative_secs(created_at)); }'
   _case "Dart relative offset passes" dart 0 dart "void f() { debugPrint('at \${relativeSecs(createdAt)}'); }"
   _case "Dart runtimeType passes" dart 0 dart "void f() { debugPrint('fetch failed: \${e.runtimeType}'); }"
+  _case "Dart null-aware ?.runtimeType passes" dart 0 dart "void f() { debugPrint('threw=\${error?.runtimeType ?? '-'}'); }"
   _case "Dart enum variant name passes (outcome.name)" dart 0 dart "void f() { debugPrint('stop=\${outcome.name} (\${state.mode.name})'); }"
+  _case "Dart enum variant name passes on a class-suffixed receiver (expectedTier.name)" dart 0 dart "void f() { debugPrint('tier=\${expectedTier.name} (\${observedTier.name})'); }"
   _case "Dart user text does NOT pass as a variant name (circle.name)" dart 1 dart "void f() { debugPrint('joined \${circle.name}'); }" 'identifier(circle, name)'
   _case "Dart error.code passes" dart 0 dart "void f() { debugPrint('bg task error: \${error.code}'); }"
   _case "Rust e.kind() passes" rust 0 rs 'fn f() { log::warn!("io: {}", e.kind()); }'
@@ -805,6 +874,19 @@ fn f() {
     log::debug!("{}", pubkey);
 }
 '
+  _case "harness-log-ok with a reason suppresses under the harness marker set" dart 0 dart "void f() {
+  // harness-log-ok: parsed by the runner's marker grep
+  debugPrint('\$kMarker \$seq');
+}
+" '' 'log-scan-ok|harness-log-ok'
+  _case "harness-log-ok with NO reason does not suppress" dart 1 dart "void f() {
+  debugPrint('\$kMarker \$seq'); // harness-log-ok:
+}
+" 'identifier(seq)' 'log-scan-ok|harness-log-ok'
+  _case "harness-log-ok is not honoured outside the harness (haven/lib keeps log-scan-ok only)" dart 1 dart "void f() {
+  debugPrint('\$kMarker \$seq'); // harness-log-ok: harness-only marker
+}
+" 'identifier(seq)'
   _case "a log call inside a comment is not scanned" rust 0 rs 'fn f() {
     // log::debug!("{}", pubkey);
     log::info!("ok");
@@ -858,6 +940,7 @@ fn f() { log::info!("{}", relay_url); }
 }
 '
   _case "Dart .print( on a receiver is not a print call" dart 0 dart "void f() { buffer.print(relayUrl); }"
+  _case "Dart ArgumentError.value( is the documented named-constructor gap (unmatched, not a pass)" dart 0 dart "void f() { throw ArgumentError.value(npub, 'npub', 'bad'); }"
 
   log "self-test: anti-vacuity floor"
   local out sites
@@ -903,17 +986,27 @@ main() {
   local core="${REPO_ROOT}/haven-core/src"
   local ffi="${REPO_ROOT}/haven/rust_builder/src"
   local dart="${REPO_ROOT}/haven/lib"
+  local itest="${REPO_ROOT}/haven/integration_test"
   [[ -d "${core}" ]] || misconfig "${core} not found"
   [[ -d "${ffi}"  ]] || misconfig "${ffi} not found"
   [[ -d "${dart}" ]] || misconfig "${dart} not found"
+  [[ -d "${itest}" ]] || misconfig "${itest} not found"
 
   local status=0 rc
-  local -a rust_files dart_files
+  local -a rust_files dart_files itest_files
   mapfile -t rust_files < <(find "${core}" "${ffi}" -name '*.rs' ! -name 'frb_generated.rs' | sort)
-  # `haven/lib/src/rust/` is the generated Dart binding — machine output.
-  mapfile -t dart_files < <(find "${dart}" -name '*.dart' -not -path '*/src/rust/*' | sort)
+  # `haven/lib/src/rust/` is the generated Dart binding, and `haven/lib/l10n/`
+  # is `flutter gen-l10n` output — both machine output, and an l10n string
+  # BUILDER (`String circleMemberRemoveError(String name) => 'Remove $name…'`)
+  # is UI copy, not a log/print/panic call; the regex's `NAME(` shape cannot
+  # tell that declaration from a call, so a translated key ending in `Error`/
+  # `Exception` (e.g. `circleMemberRemoveError`) would otherwise false-positive
+  # on every locale file.
+  mapfile -t dart_files < <(find "${dart}" -name '*.dart' -not -path '*/src/rust/*' -not -path '*/l10n/*' | sort)
+  mapfile -t itest_files < <(find "${itest}" -name '*.dart' | sort)
   (( ${#rust_files[@]} > 0 )) || misconfig "no Rust sources found under ${core} / ${ffi}"
   (( ${#dart_files[@]} > 0 )) || misconfig "no Dart sources found under ${dart}"
+  (( ${#itest_files[@]} > 0 )) || misconfig "no Dart sources found under ${itest}"
 
   rc=0; scan rust "${MIN_RUST_SITES}" 'haven-core/src + rust_builder/src' "${rust_files[@]}" || rc=$?
   (( rc == 2 )) && exit 2
@@ -923,8 +1016,12 @@ main() {
   (( rc == 2 )) && exit 2
   (( rc == 0 )) || status=1
 
+  rc=0; SCAN_MARKERS='log-scan-ok|harness-log-ok' scan dart "${MIN_ITEST_SITES}" 'haven/integration_test' "${itest_files[@]}" || rc=$?
+  (( rc == 2 )) && exit 2
+  (( rc == 0 )) || status=1
+
   wrappers rust 'Rust wrapper definitions' "${rust_files[@]}" || status=1
-  wrappers dart 'Dart wrapper definitions' "${dart_files[@]}" || status=1
+  wrappers dart 'Dart wrapper definitions' "${dart_files[@]}" "${itest_files[@]}" || status=1
 
   exit "${status}"
 }

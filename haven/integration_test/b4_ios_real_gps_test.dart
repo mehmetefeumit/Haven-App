@@ -144,6 +144,7 @@ import 'package:haven/src/services/location_service.dart'
     show LocationPermissionStatus;
 import 'package:haven/src/services/nostr_circle_service.dart'
     show NostrCircleService;
+import 'package:haven/src/utils/log_alias.dart' show magnitudeBucket;
 import 'package:integration_test/integration_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -209,7 +210,7 @@ const String kToleranceDefine = String.fromEnvironment(
 const Duration _authWaitBudget = Duration(seconds: 90);
 
 /// How long Bob is given to see and decrypt Alice's kind-445.
-const Duration _peerDecryptBudget = Duration(seconds: 120);
+const Duration _decryptWaitBudget = Duration(seconds: 120);
 
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
@@ -242,19 +243,23 @@ void main() {
         isTrue,
         reason:
             'HAVEN_B4_GEO_LAT / HAVEN_B4_GEO_LON were not compiled into this '
-            'build (got "$kExpectedLatitudeDefine" / '
-            '"$kExpectedLongitudeDefine"). These name the coordinates the '
-            'runner handed to `simctl location set`; without them this test '
-            'has nothing to compare a decrypt against, and defaulting would '
-            'make it assert that Dart agrees with Dart. Drive this target '
-            'through tooling/e2e/ci/run-b4-ios-real-gps.sh.',
+            'build (present='
+            '${kExpectedLatitudeDefine.isNotEmpty}/'
+            '${kExpectedLongitudeDefine.isNotEmpty}, parsed='
+            '${expectedLatitude != null}/${expectedLongitude != null}). '
+            'These name the coordinates the runner handed to '
+            '`simctl location set`; without them this test has nothing to '
+            'compare a decrypt against, and defaulting would make it assert '
+            'that Dart agrees with Dart. Drive this target through '
+            'tooling/e2e/ci/run-b4-ios-real-gps.sh.',
       );
       expect(
         tolerance != null && tolerance > 0,
         isTrue,
         reason:
-            'HAVEN_B4_GEO_TOLERANCE_DEG is not a positive number (got '
-            '"$kToleranceDefine"). A non-positive tolerance makes the '
+            'HAVEN_B4_GEO_TOLERANCE_DEG is not a positive number '
+            '(present=${kToleranceDefine.isNotEmpty}, parsed='
+            '${tolerance != null}). A non-positive tolerance makes the '
             'coordinate comparison unsatisfiable rather than strict.',
       );
 
@@ -423,7 +428,7 @@ void main() {
               // Welcome-delivery cascade needs the admin's own relay as a
               // fallback (mirrors the production admin flow).
               creatorFallbackRelays: <String>[defaultStrfryUrl],
-              label: 'b4',
+              scenario: 'b4',
             ),
           );
         } finally {
@@ -469,7 +474,7 @@ void main() {
               'locationServiceProvider override in play, the usual causes are '
               'a lost GPS fix or the location-disclosure gate.',
         );
-        debugPrint('$kPublishedMarker n=$publishedTo');
+        debugPrint('$kPublishedMarker n=${magnitudeBucket(publishedTo)}');
 
         // =====================================================================
         // 5 — THE PROOF: a peer decrypts, and the VALUE is the simulator's.
@@ -527,15 +532,11 @@ void main() {
         // Printed LAST, after every coordinate assertion above has passed, so
         // the runner's grep for it is a genuine out-of-process proof that the
         // drive reached the end of the proof rather than merely exiting 0.
-        // Deltas, not coordinates: the absolute position is the payload this
-        // lane exists to prove is encrypted, and CI logs are uploaded as
-        // artifacts.
-        debugPrint(
-          '$kPeerDecryptMatchMarker '
-          'dLat=${(coords.latitude - expectedLatitude).abs()} '
-          'dLon=${(coords.longitude - expectedLongitude).abs()} '
-          'tol=$tolerance',
-        );
+        // Never the coordinates or their delta (Log anonymity pillar) — the
+        // two `closeTo` expects above already proved both axes are within
+        // tolerance, so `withinTolerance=true` always holds here.
+        // harness-log-ok: runner-grepped marker constant
+        debugPrint('$kPeerDecryptMatchMarker withinTolerance=true');
       } finally {
         // Best-effort, and never allowed to mask the real verdict: a dispose
         // failure after a passing proof is noise, and after a failing one it
@@ -615,7 +616,7 @@ Future<DecryptedCoords> _awaitAliceCoordinates({
 }) async {
   final wanted = alicePubkeyHex.toLowerCase();
   final accumulated = <String, DecryptedCoords>{};
-  final deadline = DateTime.now().add(_peerDecryptBudget);
+  final deadline = DateTime.now().add(_decryptWaitBudget);
   var rounds = 0;
 
   while (DateTime.now().isBefore(deadline)) {
@@ -634,9 +635,10 @@ Future<DecryptedCoords> _awaitAliceCoordinates({
 
   throw StateError(
     '[b4] Bob never decrypted a location from Alice within '
-    '${_peerDecryptBudget.inSeconds}s ($rounds drain rounds; senders seen: '
-    '${accumulated.length}). The production publisher reported success, so '
-    'look at the relay round trip or MLS epoch convergence rather than at the '
-    'GPS stack — steps 1-2 already proved CoreLocation delivered the fix.',
+    '${_decryptWaitBudget.inSeconds}s ($rounds drain rounds; senders seen: '
+    '${magnitudeBucket(accumulated.length)}). The production publisher '
+    'reported success, so look at the relay round trip or MLS epoch '
+    'convergence rather than at the GPS stack — steps 1-2 already proved '
+    'CoreLocation delivered the fix.',
   );
 }

@@ -524,12 +524,13 @@ class WireCanaryManifest {
 
     final rawCarriers = require<Map<String, dynamic>>('carrier_event_ids');
     final carriers = <String, List<String>>{};
-    for (final id in CanaryId.all) {
-      final list = rawCarriers[id];
+    for (final canaryId in CanaryId.all) {
+      final list = rawCarriers[canaryId];
       if (list is! List) {
+        // harness-log-ok: CanaryId.* are fixed harness literals (see CanaryId)
         throw FormatException(
-          'wire-canary manifest carrier_event_ids."$id" is missing or is '
-          'not a list',
+          'wire-canary manifest carrier_event_ids."$canaryId" is missing '
+          'or is not a list',
         );
       }
       // Checked, never cast. `(e as String)` throws a TypeError, which is an
@@ -537,13 +538,14 @@ class WireCanaryManifest {
       // this file's callers wrap the parse in, and the CLI that promises five
       // exit codes exits 255 with a stack trace instead of reporting an
       // unreadable manifest.
-      carriers[id] = <String>[
+      carriers[canaryId] = <String>[
         for (final e in list)
           if (e is String)
             e.trim().toLowerCase()
           else
+            // harness-log-ok: CanaryId.* are fixed harness literals.
             throw FormatException(
-              'wire-canary manifest carrier_event_ids."$id" holds a '
+              'wire-canary manifest carrier_event_ids."$canaryId" holds a '
               '${e.runtimeType} where an event id string was expected',
             ),
       ];
@@ -625,7 +627,7 @@ class WireCanaryManifest {
     CanaryId.circleDisplayName => circleDisplayName,
     CanaryId.petname => petname,
     CanaryId.coordinate => formatCoordinateProof(latitude, longitude),
-    _ => throw ArgumentError.value(canaryId, 'canaryId', 'unknown canary'),
+    _ => throw ArgumentError('unknown canary'),
   };
 
   /// JSON form.
@@ -670,9 +672,12 @@ class WireCanaryManifest {
       try {
         decoded = jsonDecode(payload);
       } on FormatException catch (e) {
+        // Never the decoder's own message (Security Rule 15) — it can echo
+        // a fragment of the malformed payload, which may carry a planted
+        // canary value.
         throw FormatException(
           'a line carries $kCanaryManifestMarker but its payload is not '
-          'JSON: ${e.message}',
+          'JSON (${e.runtimeType})',
         );
       }
       if (decoded is! Map<String, dynamic>) {
@@ -1172,7 +1177,7 @@ abstract final class CanaryEncodingLedger {
       switch (canaryId) {
         CanaryId.circleDisplayName || CanaryId.petname => stringValue,
         CanaryId.coordinate => coordinate,
-        _ => throw ArgumentError.value(canaryId, 'canaryId', 'unknown canary'),
+        _ => throw ArgumentError('unknown canary'),
       };
 
   /// Reconciles [set] against this ledger, canary by canary.
@@ -2652,9 +2657,8 @@ abstract final class WireCanaryScanner {
             vacuities.add(
               '[${m.role}] canary "$canaryId": ${missing.length} of '
               '${carriers.length} carrier event(s) are ABSENT from the '
-              'journal (e.g. ${_redactId(missing.first)}). The frames that '
-              'carried this canary were not recorded, so scanning the '
-              'journal for it proves nothing.',
+              'journal. The frames that carried this canary were not '
+              'recorded, so scanning the journal for it proves nothing.',
             );
             continue;
           }
@@ -2788,7 +2792,4 @@ abstract final class WireCanaryScanner {
         (c >= 0x41 && c <= 0x5a) ||
         (c >= 0x61 && c <= 0x7a);
   }
-
-  static String _redactId(String id) =>
-      id.length <= 12 ? id : '${id.substring(0, 12)}...';
 }

@@ -44,8 +44,9 @@ import 'test_relay.dart' show TestRelay;
 /// 3-member M11 scenarios would then fail later, on an unrelated assertion).
 /// So any rejection rolls the create back and throws immediately.
 ///
-/// [label] prefixes the [StateError]s raised on a rejected Welcome or a failed
-/// confirm so a harness failure names the scenario that caused it.
+/// [scenario] prefixes the [StateError]s raised on a rejected Welcome or a
+/// failed confirm so a harness failure names the scenario that caused it —
+/// a fixed harness tag (e.g. `'M11'`, `'FE-2'`), never circle/user data.
 ///
 /// Returns the [CircleCreationResultFfi] whose `pending` has already been
 /// resolved; callers must not confirm it a second time.
@@ -61,7 +62,7 @@ Future<CircleCreationResultFfi> createCircleConfirmed({
   required String circleType,
   required List<String> relays,
   required List<String> creatorFallbackRelays,
-  String label = 'e2e',
+  String scenario = 'e2e',
 }) async {
   final result = await manager.createCircle(
     identitySecretBytes: identitySecretBytes,
@@ -73,37 +74,42 @@ Future<CircleCreationResultFfi> createCircleConfirmed({
   );
 
   // Publish every Welcome first — the engine may only apply the staged create
-  // once the network has had a chance to observe it.
-  var rejection = '';
+  // once the network has had a chance to observe it. Never the relay's OK
+  // reason text (remote-authored prose, Security Rule 15) — only the
+  // rejection boolean and, best-effort, the exception's runtimeType.
+  var rejected = false;
+  String? exceptionType;
   for (final welcome in result.welcomeEvents) {
     try {
-      final (ok, msg) = await relay.publishAndAwaitOk(welcome.eventJson);
-      if (!ok && rejection.isEmpty) rejection = msg;
+      final (ok, _) = await relay.publishAndAwaitOk(welcome.eventJson);
+      if (!ok) rejected = true;
     } on Object catch (e) {
       // Security Rule 8: runtimeType only — a raw error can carry MLS state.
-      if (rejection.isEmpty) rejection = '${e.runtimeType}';
+      rejected = true;
+      exceptionType ??= '${e.runtimeType}';
     }
   }
 
-  if (rejection.isNotEmpty) {
+  if (rejected) {
+    final suffix = exceptionType == null ? '' : ' ($exceptionType)';
     // Roll the staged create back so the group does not linger in
     // PendingPublish and silently buffer every later inbound message.
     try {
       await manager.publishFailed(pending: result.pending);
     } on Object catch (e) {
       throw StateError(
-        '[$label] a Welcome was rejected ($rejection) and the create '
+        '[$scenario] a Welcome was rejected$suffix and the create '
         'rollback also failed: ${e.runtimeType}',
       );
     }
-    throw StateError('[$label] relay rejected a Welcome: $rejection');
+    throw StateError('[$scenario] relay rejected a Welcome$suffix');
   }
 
   try {
     await manager.confirmPublished(pending: result.pending);
   } on Object catch (e) {
     throw StateError(
-      '[$label] createCircle confirmPublished failed: ${e.runtimeType}',
+      '[$scenario] createCircle confirmPublished failed: ${e.runtimeType}',
     );
   }
   return result;

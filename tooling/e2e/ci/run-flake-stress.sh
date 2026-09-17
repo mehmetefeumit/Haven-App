@@ -64,45 +64,31 @@
 
 set -euo pipefail
 
-# scan_dir_or_contain <dir> — the secret-leak gate (Security Rules 6 and 15)
-# over the evidence directory the workflow uploads `if: always()`. A leak
-# (rc 1) REMOVES every *.log the scan walked and leaves a LEAK.marker naming
-# only the pattern label(s), so the upload publishes the verdict and not the
-# line; rc 3 (nothing scannable) keeps the directory as it is. Reads
-# SECRET_SCAN at call time so --self-test can hand it a fake scanner.
-scan_dir_or_contain() {
-  local dir="$1" rc=0 err
-  err="$(mktemp)"
-  bash "${SECRET_SCAN}" "${dir}" 2>"${err}" || rc=$?
-  cat "${err}" >&2
-  if (( rc == 1 )); then
-    find "${dir}" -type f -name '*.log' -exec rm -f -- {} +
-    {
-      echo "secret-leak scan: LEAK — every *.log under this directory was removed before upload (scan-logs-for-secrets.sh rc 1)"
-      sed -n 's/^LEAK: .* \[\(.*\)\] at line(s):.*$/pattern: \1/p' "${err}" | sort -u
-    } > "${dir}/LEAK.marker"
-    echo "ERROR: secret-leak guard tripped on ${dir}; removed its *.log files and" \
-         "left ${dir}/LEAK.marker (pattern labels only)." >&2
-  fi
-  rm -f "${err}"
-  return "${rc}"
-}
+# The log-privacy gate (logscan_gate_dir): one implementation for every
+# runner, sourced BEFORE the --self-test dispatch so the self-test exercises a
+# runner wired exactly like the real one.
+# shellcheck source=tooling/e2e/ci/logscan-gate.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/logscan-gate.sh"
 
-# --self-test — hermetic: no device, no docker, no relay. Proves the gate
-# CONTAINS, driven with a FAKE scanner: rc 1 removes every *.log under the
-# directory (and nothing else) and leaves a LEAK.marker naming the pattern
-# label only; rc 3 and rc 0 leave the directory untouched; the verdict comes
-# back unchanged.
+# Where this runner's gate writes its findings report (sink:line, class, rule
+# ids — never a value). Outside LOG_DIR, which the workflow uploads whole.
+readonly LOGSCAN_REPORT="/tmp/logscan-report-flake-stress.ndjson"
+
+# --self-test — hermetic: no device, no docker, no relay. Two things are under
+# test. (1) CONTAINMENT: through logscan-gate.sh's floor arm with a FAKE
+# scanner, a leak (rc 1) removes every *.log under the evidence directory and
+# nothing else; rc 3 and rc 0 leave it untouched; the verdict comes back
+# unchanged. (2) THE WIRING, read from this file: the gate library is sourced,
+# the real call site hands LOG_DIR to logscan_gate_dir with the report outside
+# it, and no soft `if [[ -x …` gate is in front of the scanner — an unbuilt
+# scanner would be skipped, not fatal.
 run_self_test() {
-  local tmp fail=0 dir fake want rc SECRET_SCAN
+  local tmp fail=0 dir fake want rc real_run
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
   trap "rm -rf '${tmp}'" RETURN
   fake="${tmp}/fake-scan.sh"
-  printf '%s\n' '#!/usr/bin/env bash' \
-    'if [[ "${FAKE_SCAN_RC}" == 1 ]]; then echo "LEAK: $1/iter-3.logcat.log [bech32 nsec (private key)] at line(s): 7" >&2; fi' \
-    'exit "${FAKE_SCAN_RC}"' > "${fake}"
-  SECRET_SCAN="${fake}"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit "${FAKE_SCAN_RC}"' > "${fake}"
   dir="${tmp}/logs"
   for want in 1 3 0; do
     rm -rf "${dir}"
@@ -110,9 +96,9 @@ run_self_test() {
     printf 'a\n' > "${dir}/iter-3.logcat.log"
     printf 'b\n' > "${dir}/nested/drive.log"
     printf 'c\n' > "${dir}/notes.txt"
-    export FAKE_SCAN_RC="${want}"
     rc=0
-    scan_dir_or_contain "${dir}" 2>/dev/null || rc=$?
+    HAVEN_LOGSCAN= SECRET_SCAN="${fake}" FAKE_SCAN_RC="${want}" \
+      logscan_gate_dir host "${tmp}/needles" "${dir}" "${tmp}/report.ndjson" 2>/dev/null || rc=$?
     if (( rc != want )); then
       echo "SELF-TEST FAIL: the gate returned ${rc} for a scanner rc of ${want}" >&2
       fail=1
@@ -127,28 +113,34 @@ run_self_test() {
         echo "SELF-TEST FAIL: rc 1 removed a file the scan never walked" >&2
         fail=1
       fi
-      if [[ ! -f "${dir}/LEAK.marker" ]]; then
-        echo "SELF-TEST FAIL: rc 1 left no LEAK.marker, so the upload carries no verdict" >&2
-        fail=1
-      elif ! grep -qF 'pattern: bech32 nsec (private key)' "${dir}/LEAK.marker"; then
-        echo "SELF-TEST FAIL: LEAK.marker does not name the pattern label" >&2
-        fail=1
-      elif grep -qE 'iter-3|at line' "${dir}/LEAK.marker"; then
-        echo "SELF-TEST FAIL: LEAK.marker carries more than the label (a file or line)" >&2
-        fail=1
-      fi
-    elif [[ ! -e "${dir}/iter-3.logcat.log" || ! -e "${dir}/nested/drive.log" \
-            || -e "${dir}/LEAK.marker" ]]; then
+    elif [[ ! -e "${dir}/iter-3.logcat.log" || ! -e "${dir}/nested/drive.log" ]]; then
       echo "SELF-TEST FAIL: scanner rc ${want} touched a directory it had no leak to contain" >&2
       fail=1
     fi
   done
-  unset FAKE_SCAN_RC
+  real_run="$(sed -n '1,/^run_self_test() {/p' "${BASH_SOURCE[0]}"; sed -n '/^if \[\[ "${1:-}" == "--self-test" \]\]; then/,$p' "${BASH_SOURCE[0]}")"
+  real_run="$(grep -v '^[[:space:]]*#' <<<"${real_run}")"
+  if ! grep -qE '^source .*/logscan-gate\.sh"$' <<<"${real_run}"; then
+    echo "SELF-TEST FAIL (wiring): logscan-gate.sh is no longer sourced" >&2
+    fail=1
+  fi
+  if (( "$(grep -cE '^  logscan_gate_dir host /tmp/haven-soak/needles "\$\{LOG_DIR\}" "\$\{LOGSCAN_REPORT\}"' <<<"${real_run}")" != 1 )); then
+    echo "SELF-TEST FAIL (wiring): expected exactly one gate call over LOG_DIR with the report outside it" >&2
+    fail=1
+  fi
+  if grep -qE 'if[[:space:]]+\[\[[[:space:]]+-x[[:space:]]' <<<"${real_run}"; then
+    echo "SELF-TEST FAIL (wiring): a soft \`if [[ -x …\` scanner gate is in the real run" >&2
+    fail=1
+  fi
+  if grep -qE '(^|[;&|][[:space:]]*)[[:space:]]*(cat|head|tail|less|more)[[:space:]]+[^|]*\.log' <<<"${real_run}"; then
+    echo "SELF-TEST FAIL (wiring): this runner echoes a captured log itself; only the AVD runner may, after its gate" >&2
+    fail=1
+  fi
   if (( fail )); then
     echo "run-flake-stress.sh: SELF-TEST FAILED" >&2
     return 1
   fi
-  echo "run-flake-stress.sh: self-test passed (the secret-leak gate removes exactly the *.log files it scanned on a leak, leaves a labels-only LEAK.marker, and touches nothing on rc 3 or rc 0)."
+  echo "run-flake-stress.sh: self-test passed (the log-privacy gate removes exactly the *.log files it scanned on a leak and touches nothing on rc 3 or rc 0; the gate library is sourced, the one gate call covers LOG_DIR with its report outside the upload, no soft scanner gate, no captured-log echo of its own)."
   return 0
 }
 
@@ -181,8 +173,8 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SINGLE_AVD="${script_dir}/run-single-avd-scenario.sh"
 readonly START_STRFRY="${script_dir}/start-strfry.sh"
 readonly STOP_STRFRY="${script_dir}/stop-strfry.sh"
-# Secret-leak guard (Security Rule #6) — run over the preserved-evidence dir;
-# see the call site for why it is scoped to the failing-iteration path.
+# The key-material floor the gate's flag-off arm runs (logscan-gate.sh reads it
+# at call time); the flag-on arm runs it through scan-logs.sh.
 readonly SECRET_SCAN="${script_dir}/scan-logs-for-secrets.sh"
 
 for dep in "${SINGLE_AVD}" "${START_STRFRY}" "${STOP_STRFRY}" "${SECRET_SCAN}"; do
@@ -265,19 +257,21 @@ if (( ${#FAILED_ITERS[@]} > 0 )); then
   # /tmp/flutter-drive.log, because a leak there exits non-zero and would have
   # marked the iteration FAILED. The only logs this lane can publish unscanned
   # are the ones preserved from failing iterations, whose inner runner may have
-  # died before its own scan — which is exactly what this call covers.
+  # died before its own scan — which is exactly what this call covers. Each
+  # file is typed by its name (logcat / drive) and scanned against the manifest
+  # the first iteration's gate sealed for this run.
   #
   # No exit-code handling needed: this block already ends in `exit 1`, so the
   # scan can only add diagnosis, never rescue a run. Kept `|| scan_rc=$?` so
   # `set -e` cannot abort before the fail-rate summary is printed.
   # -------------------------------------------------------------------------
-  echo "== Secret-leak scan over ${LOG_DIR} (Security Rule 6) =="
+  echo "== Log-privacy gate over ${LOG_DIR} (Security Rules 6 and 15) =="
   scan_rc=0
-  scan_dir_or_contain "${LOG_DIR}" || scan_rc=$?
+  logscan_gate_dir host /tmp/haven-soak/needles "${LOG_DIR}" "${LOGSCAN_REPORT}" || scan_rc=$?
   if (( scan_rc != 0 )); then
-    echo "ERROR: secret-leak guard tripped on ${LOG_DIR} (rc=${scan_rc}) — see the" \
-         "LEAK / UNUSABLE line(s) above. rc=1 means key material reached the" \
-         "preserved logs; rc=3 means a failing iteration left no readable log." >&2
+    echo "ERROR: log-privacy gate failed on ${LOG_DIR} (rc=${scan_rc}) — see the" \
+         "line(s) above. rc=1 means key material or a declared identifier reached" \
+         "the preserved logs; rc=3 means a failing iteration left no readable log." >&2
   fi
   echo
   # A flake test fails on ANY failure — even 1/N is a flake worth

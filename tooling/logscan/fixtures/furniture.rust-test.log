@@ -1,0 +1,101 @@
+# Negative control: REAL furniture, verbatim from a sanitised local `cargo test`
+# transcript of haven-core — the capture `rust-check.yml` scans with
+# `--rules-only`. The transcript itself is not checked in anywhere; these lines
+# ARE the record. Selected line by line and
+# reviewed against Rule 15 exactly as `furniture.drive.log` was: no key
+# material, no pubkey, no URL, host or address, no coordinate, no name, no
+# wall-clock instant, nothing about a run.
+#
+# Two selections are deliberate and neither is an oversight:
+#   * the `Running unittests … (target/debug/deps/<crate>-<16 hex>)` line IS
+#     here. Sixteen hex characters is a cargo build hash — a compiler artifact,
+#     not an identifier — and no rule may read it as one: S2 starts at 32. Every
+#     cargo lane emits it, so a tightening that reddened it would delete a real
+#     transcript.
+#   * the `#[ignore]` reason that names a local Blossom server by loopback URL
+#     is NOT here. It carries a real address, so S12 is RIGHT to see it; the
+#     unit-test lanes exempt the loopback with `--exempt-endpoint`, and that is
+#     proved by
+#     `a_rules_only_scan_takes_exempt_endpoints_and_nothing_else`
+#     rather than by a fixture that would have to carry an address to stay
+#     green. (This paragraph may not spell the address out either: S12 reads a
+#     comment exactly as it reads a log line, which is the point of the rule.)
+#
+# The seven `location::geohash::tests::…` lines are the point of the file: the
+# delimited keyword `geohash`, `::` as the separator S6 admits, and a following
+# path segment made of geohash-alphabet letters. They reddened this lane before
+# `is_code_path` existed.
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.44s
+     Running unittests src/lib.rs (target/debug/deps/haven_core-521ec6d6aa32dd35)
+
+running 1654 tests
+test api::tests::multiple_initialize_calls_are_idempotent ... ok
+test api::tests::initialize_sets_initialized_flag ... ok
+test api::tests::get_location_settings_returns_defaults ... ok
+test api::tests::set_location_settings_updates_settings ... ok
+test api::tests::new_creates_initialized_instance ... ok
+test api::tests::debug_trait_implementation ... ok
+test avatar::image::tests::allowlist_accepts_jpeg_png_webp_and_rejects_others ... ok
+test api::tests::update_location_preserves_exact_coordinates ... ok
+test api::tests::update_location_generates_geohash ... ok
+test avatar::image::tests::corrupt_image_fails_closed ... ok
+test api::tests::default_creates_uninitialized_instance ... ok
+test avatar::image::tests::inbound_corrupt_body_fails_closed_without_panic ... ok
+test avatar::error::tests::every_other_variant_is_data_free_in_both_renderings ... ok
+test avatar::image::tests::inbound_rejects_image_over_inbound_byte_cap ... ok
+test avatar::image::tests::oversized_input_rejected_pre_decode ... ok
+test avatar::image::tests::processed_avatar_debug_redacts_bytes_and_content_hash ... ok
+test avatar::error::tests::avatar_error_display_redacts_the_wrapped_storage_detail ... ok
+test avatar::image::tests::jpeg_exif_orientation_all_eight_come_out_upright ... ok
+test avatar::image::tests::decode_bomb_rejected_under_inbound_limits ... ok
+test avatar::image::tests::staged_picture_debug_redacts_bytes_and_hash ... ok
+test keyring_policy::migration::tests::migrate_once_no_entry_is_ok ... ok
+test keyring_policy::migration::tests::migrate_once_preserves_bytes_and_creates_marker ... ok
+test keyring_policy::migration::tests::migrate_once_recovers_from_stranded_backup ... ok
+test keyring_policy::migration::tests::migrate_once_restores_primary_when_recreate_fails ... ok
+test location::geohash::tests::empty_geohash_returns_zero ... ok
+test location::geohash::tests::geohash_length_matches_precision ... ok
+test location::geohash::tests::geohash_roundtrip_within_tolerance ... ok
+test location::geohash::tests::invalid_geohash_returns_zero ... ok
+test location::geohash::tests::nan_latitude_returns_empty ... ok
+test location::geohash::tests::nan_longitude_returns_empty ... ok
+test location::geohash::tests::out_of_range_returns_empty ... ok
+test directory::sanitize::tests::prop_sanitize_is_idempotent_and_bounded ... ok
+test location::ttl::tests::jitter_max_interval_no_overflow ... ok
+test location::ttl::tests::jitter_two_consecutive_calls_differ ... ok
+test location::ttl::tests::jitter_distribution_not_degenerate ... ok
+test location::ttl::tests::jitter_zero_interval_returns_none ... ok
+test location::ttl::tests::publish_interval_jitter_fraction_bp_is_pinned ... ok
+test location::types::tests::location_retention_secs_is_pinned_at_one_day ... ok
+test location::types::tests::location_settings_default_values ... ok
+test location::types::tests::new_client_ignores_legacy_display_name_field_in_location_json ... ok
+test location::types::tests::unknown_legacy_fields_are_ignored ... ok
+test log_alias::tests::a_handle_renders_question_marks_when_the_salt_is_absent ... ok
+test log_alias::tests::buckets_never_state_an_exact_magnitude ... ok
+test log_alias::tests::class_debug_is_only_a_variant_name ... ok
+test relay::manager::tests::relay_tag_extracts_wss_url ... ok
+test relay::manager::tests::relay_tag_ignores_r_tags ... ok
+test relay::manager::tests::relay_tag_malformed_single_element_ignored ... ok
+test relay::manager::tests::relay_tag_multiple_urls ... ok
+test relay::maintenance::key_package::tests::build_key_package_event_rejects_empty_d ... ok
+test relay::manager::tests::the_publish_socket_sleeps_after_a_burst_and_wakes_for_the_next ... ok
+
+test result: ok. 1653 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 120.23s
+test src/relay/cursor.rs - relay::cursor::cap_timestamp_to_now (line 168) ... ok
+test src/nostr/identity/keypair.rs - nostr::identity::keypair::IdentityKeypair::generate (line 73) ... ok
+test src/nostr/tags.rs - nostr::tags::TagBuilder::expiration_tag (line 63) ... ok
+test src/nostr/tags.rs - nostr::tags::TagBuilder::d_tag (line 87) ... ok
+test src/nostr/tags.rs - nostr::tags::TagBuilder (line 17) ... ok
+test src/relay/cursor.rs - relay::cursor::cursor_ms_for_window (line 278) ... ok
+test src/nostr/tags.rs - nostr::tags::TagBuilder::geohash_tag (line 115) ... ok
+test src/relay/cursor.rs - relay::cursor::cursor_ms_for_event (line 217) ... ok
+test src/relay/live_sync/health.rs - relay::live_sync::health::health_needs_resubscribe (line 178) ... ok
+test src/relay/live_sync/health.rs - relay::live_sync::health::delivery_is_silent (line 268) ... ok
+test src/relay/cursor.rs - relay::cursor::since_for_stream (line 328) ... ok
+test src/relay/live_sync/planes/group.rs - relay::live_sync::planes::group::group_filter (line 25) ... ok
+test src/relay/live_sync/health.rs - relay::live_sync::health::health_still_connecting (line 287) ... ok
+test src/relay/live_sync/planes/inbox.rs - relay::live_sync::planes::inbox::inbox_filter (line 16) ... ok
+test src/relay/live_sync/health.rs - relay::live_sync::health::health_needs_targeted_reanchor (line 230) ... ok
+
+test result: ok. 40 passed; 0 failed; 13 ignored; 0 measured; 0 filtered out; finished in 5.84s
+

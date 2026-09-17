@@ -64,7 +64,15 @@ import 'package:flutter_test/flutter_test.dart';
 VoidCallback installChainedThrowTimeHandler() {
   final previousOnError = FlutterError.onError;
   FlutterError.onError = (FlutterErrorDetails details) {
-    debugPrint('[throw-time attribution] $details');
+    // harness-log-ok: full FlutterErrorDetails by design. This capture exists
+    // to recover the widget-tree attribution (types + file:line) of a
+    // throw-time layout error, pinned by
+    // throw_time_error_capture_behavior_test.dart; the drive log it lands in
+    // is scanned by the runtime log scanner like every other line, so an
+    // identifier in a details string reds the lane rather than shipping.
+    debugPrint(
+      '[throw-time attribution] $details', // harness-log-ok: see above
+    );
     previousOnError?.call(details);
   };
   return () => FlutterError.onError = previousOnError;

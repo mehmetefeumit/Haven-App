@@ -188,7 +188,7 @@ void main() {
           // Welcome-delivery cascade needs the admin's own relay as a fallback
           // (mirrors the production admin flow / the FE-2 scenario).
           creatorFallbackRelays: <String>[defaultStrfryUrl],
-          label: 'm7-setup',
+          scenario: 'm7-setup',
         );
       } finally {
         for (var i = 0; i < aliceSecret.length; i++) {

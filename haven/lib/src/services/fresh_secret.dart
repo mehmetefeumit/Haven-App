@@ -52,9 +52,10 @@ Future<T> withFreshSecret<T>(
   final secret = takeSecretOwnership(await secretProvider());
   try {
     if (secret.length != 32) {
-      throw CircleServiceException(
-        'Invalid identity secret bytes length: expected 32, got '
-        '${secret.length}',
+      // Never the actual length (Security Rule 6: no key-material exposure,
+      // and a wrong secret length is itself a fact about key material).
+      throw const CircleServiceException(
+        'Invalid identity secret bytes length',
       );
     }
     return await use(secret);

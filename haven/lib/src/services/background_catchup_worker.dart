@@ -584,7 +584,7 @@ Future<void> _runCatchupViaWorkerBootstrap() async {
     // 7. Terminate in the M7 chokepoint — receive-only sweep, NOT the FGS
     //    authoring cycle. isBackgroundWake:true re-checks consent inside
     //    (C3). maxDurationSecs: 25 per D3 (bounds the Rust sweep only).
-    final result = await CatchupService(
+    final sweep = await CatchupService(
       circleManagerFactory: () async => circleManager,
       ownPubkeyHex: () async => pubkeyHex,
       relayService: relayService,
@@ -599,27 +599,29 @@ Future<void> _runCatchupViaWorkerBootstrap() async {
         return p.getBool(kBackgroundSharingKey) ?? false;
       },
     ).runCatchup(isBackgroundWake: true, maxDurationSecs: 25);
-    // Presence-only counters (CatchupResult is counters-only by
-    // construction) — the exact line Phase A of the CI lane parses via
+    // Every counter is bucketed, never dropped (Rule 15 forbids an exact
+    // circle/event count in a log at any level, this line included) — the
+    // exact line Phase A of the CI lane parses via
     // `tooling/e2e/ci/run-m7-background-catchup.sh`'s `parse_counter`
-    // (circles / locations / relayErrors). Dark Matter folds the
-    // pre-migration locations/commits/auto-commits-staged split into one
-    // `eventsApplied` counter (see `CatchupResultFfi`), so `locations=` now
-    // reports that combined counter — CI's `locations >= 1` decryption-
-    // observed heuristic still holds (an applied Location event is a subset
-    // of eventsApplied). `deferred=` is new, informational-only output that
-    // CI does not parse.
-    // relayErrors is bucketed, not dropped: `run-m7-background-catchup.sh`'s
-    // `parse_counter` only ever branches on zero vs non-zero
-    // (`relayErrors==0` / `!=0`), and `magnitudeBucket` preserves that
-    // boundary — 0→"0", 1→"1", 2-4→"2-4", 5+→"5+" all parse with a
-    // non-zero leading digit when non-zero.
+    // (circles / locations / relayErrors) only ever branches on zero vs
+    // non-zero (`circles<1`, `locations>=1`/`<1`, `relayErrors==0`/`!=0`),
+    // and `magnitudeBucket` preserves that boundary — 0→"0", 1→"1",
+    // 2-4→"2-4", 5+→"5+" all parse with a non-zero leading digit when
+    // non-zero, and only "0" parses as exactly zero. `cursors=`/`deferred=`
+    // are informational-only output that no CI lane parses. Dark Matter
+    // folds the pre-migration locations/commits/auto-commits-staged split
+    // into one `eventsApplied` counter (see `CatchupResultFfi`), so
+    // `locations=` now reports that combined counter — CI's `locations >=
+    // 1` decryption-observed heuristic still holds (an applied Location
+    // event is a subset of eventsApplied).
     debugPrint(
-      '$kCatchupWorkerSweepCompletePrefix circles=${result.circlesSwept} '
-      'locations=${result.eventsApplied} deferred=${result.eventsDeferred} '
-      'cursors=${result.cursorsAdvanced} '
-      'deadline=${result.deadlineHit} '
-      'relayErrors=${magnitudeBucket(result.relayErrors)}',
+      '$kCatchupWorkerSweepCompletePrefix '
+      'circles=${magnitudeBucket(sweep.circlesSwept)} '
+      'locations=${magnitudeBucket(sweep.eventsApplied)} '
+      'deferred=${magnitudeBucket(sweep.eventsDeferred)} '
+      'cursors=${magnitudeBucket(sweep.cursorsAdvanced)} '
+      'deadline=${sweep.deadlineHit} '
+      'relayErrors=${magnitudeBucket(sweep.relayErrors)}',
     );
   } finally {
     try {

@@ -311,6 +311,7 @@ import 'package:haven/src/services/background_location_manager.dart'
 import 'package:haven/src/services/fresh_secret.dart' show withFreshSecret;
 import 'package:haven/src/services/nostr_circle_service.dart'
     show NostrCircleService;
+import 'package:haven/src/utils/log_alias.dart' show LogOrigin, relativeSecs;
 import 'package:integration_test/integration_test.dart';
 import 'package:path_provider/path_provider.dart'
     show getApplicationSupportDirectory;
@@ -676,7 +677,7 @@ void main() {
             // Welcome-delivery cascade needs the admin's own relay as a
             // fallback (mirrors the production admin flow).
             creatorFallbackRelays: <String>[defaultStrfryUrl],
-            label: 'b1',
+            scenario: 'b1',
           ),
         );
       } finally {
@@ -795,7 +796,7 @@ void main() {
       // and correct: nothing this loop waits on is in the widget tree — the FGS
       // is a different isolate — and real timers, platform-channel replies and
       // Rust callbacks all keep running regardless of frame production.
-      Future<void> holdMounted(Duration duration, String label) async {
+      Future<void> holdMounted(Duration duration, String phase) async {
         final deadline = DateTime.now().add(duration);
         var elapsedHeartbeats = 0;
         while (DateTime.now().isBefore(deadline)) {
@@ -808,10 +809,16 @@ void main() {
             // heartbeat of runs 34511084722 and 34642726338 printed.
             final lastPublish =
                 await BackgroundLocationManager.readLastPublishTime();
+            // Relative offset from "now", never the wall-clock instant
+            // itself (Log anonymity pillar: no absolute timestamps on the
+            // publish/receive path).
+            final lastPublishRel = lastPublish == null
+                ? 'none yet'
+                : relativeSecs(LogOrigin.now(), lastPublish);
             debugPrint(
-              '[b1] $label (~${elapsedHeartbeats * 10}s of '
+              '[b1] $phase (~${elapsedHeartbeats * 10}s of '
               '${duration.inSeconds}s) — lastBackgroundPublish='
-              '${lastPublish?.toIso8601String() ?? "none yet"}',
+              '$lastPublishRel',
             );
           }
         }

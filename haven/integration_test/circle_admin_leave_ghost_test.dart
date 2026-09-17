@@ -61,6 +61,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/rust/api.dart';
+import 'package:haven/src/utils/log_alias.dart' show magnitudeBucket;
 import 'package:integration_test/integration_test.dart';
 
 import 'e2e/_lib/test_user.dart';
@@ -286,16 +287,17 @@ void main() {
             equals(2),
             reason:
                 'FN-4: the circle must have TWO admins (Alice + the promoted '
-                'Bob) before the gate assertion. Got $adminCount. A count of '
-                '1 means proposeAdminHandoff silently failed to grant admin, '
-                'which would make the rejection below ambiguous — it could '
-                'then be explained by the group being left admin-less rather '
-                'than by the self-demote gate this test exists to pin.',
+                'Bob) before the gate assertion. Got '
+                '${magnitudeBucket(adminCount)}. A count of 1 means '
+                'proposeAdminHandoff silently failed to grant admin, which '
+                'would make the rejection below ambiguous — it could then be '
+                'explained by the group being left admin-less rather than by '
+                'the self-demote gate this test exists to pin.',
           );
 
           debugPrint(
             '[admin_leave_gate_test] FN-4 preconditions OK — '
-            'Alice isAdmin=true, adminCount=$adminCount',
+            'Alice isAdmin=true, adminCount=${magnitudeBucket(adminCount)}',
           );
 
           // --------------------------------------------------------------

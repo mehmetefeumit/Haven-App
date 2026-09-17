@@ -332,6 +332,7 @@ class NostrCircleService implements CircleService {
     if (_handedOff) {
       if (_handoffHolds) {
         return Future.error(
+          // log-scan-ok: _handoffRefusalMessage is the fixed literal above.
           const CircleServiceException(_handoffRefusalMessage),
         );
       }
@@ -425,6 +426,7 @@ class NostrCircleService implements CircleService {
         _initialized = false;
         _initCompleter = null;
         completer.completeError(
+          // log-scan-ok: both branches are fixed literals, never live data.
           CircleServiceException(
             _wiped ? 'circle service was wiped' : _handoffRefusalMessage,
           ),
@@ -683,9 +685,10 @@ class NostrCircleService implements CircleService {
     try {
       // Validate identity secret bytes length
       if (identitySecretBytes.length != 32) {
-        throw CircleServiceException(
-          'Invalid identity secret bytes length: '
-          'expected 32, got ${identitySecretBytes.length}',
+        // Never the actual length (Security Rule 6: no key-material
+        // exposure, and a wrong secret length is itself a fact about it).
+        throw const CircleServiceException(
+          'Invalid identity secret bytes length',
         );
       }
 

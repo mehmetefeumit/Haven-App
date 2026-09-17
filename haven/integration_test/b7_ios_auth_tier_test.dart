@@ -735,7 +735,7 @@ void main() {
             // Bob advertises no inbox relays, so the Welcome-delivery cascade
             // needs the admin's own relay as a fallback.
             creatorFallbackRelays: <String>[defaultStrfryUrl],
-            label: 'b7',
+            scenario: 'b7',
           ),
         );
       } finally {

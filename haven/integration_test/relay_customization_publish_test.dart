@@ -34,6 +34,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/rust/api.dart';
+import 'package:haven/src/utils/log_alias.dart' show LogAliasClass, logAliasHandle;
 import 'package:integration_test/integration_test.dart';
 
 import 'e2e/_lib/synthetic_user.dart';
@@ -106,10 +107,11 @@ void main() {
       defaultRelays(),
       isNot(contains(secondStrfryUrl)),
       reason:
-          'R2 ($secondStrfryUrl) must NOT be in the process-global default '
-          'relay list before any test.  If it is, the proofs below cannot '
-          'distinguish "events landed because R2 was added" from "events '
-          'landed because R2 was already a default".',
+          'R2 (${logAliasHandle(LogAliasClass.relay, secondStrfryUrl)}) must '
+          'NOT be in the process-global default relay list before any '
+          'test.  If it is, the proofs below cannot distinguish "events '
+          'landed because R2 was added" from "events landed because R2 was '
+          'already a default".',
     );
   });
 
@@ -379,8 +381,8 @@ void main() {
           // only and r2Kp30443Future would time out here → test red.
           debugPrint(
             '[FFI-KP-1] PASS: '
-            '30443 on R2 id=${kp30443OnR2.id.substring(0, 8)}, '
-            '10002 on R2 id=${kpListOnR2.id.substring(0, 8)}',
+            '30443 on R2 id=${logAliasHandle(LogAliasClass.event, kp30443OnR2.id)}, '
+            '10002 on R2 id=${logAliasHandle(LogAliasClass.event, kpListOnR2.id)}',
           );
         } finally {
           // Best-effort wipe of secret bytes in Dart's managed heap.
@@ -499,7 +501,8 @@ void main() {
             r2InboxTag,
             isNotNull,
             reason:
-                "kind 10050 must carry ['relay', '$secondStrfryUrl'].",
+                "kind 10050 must carry a ['relay', …] tag naming "
+                '${logAliasHandle(LogAliasClass.relay, secondStrfryUrl)}.',
           );
           final rTags = listTags
               .where((t) => t.isNotEmpty && t.first == 'r')
@@ -512,7 +515,7 @@ void main() {
           );
           debugPrint(
             '[FFI-INBOX-1] PASS: 10050 on R2 id='
-            '${inbox10050OnR2.id.substring(0, 8)}',
+            '${logAliasHandle(LogAliasClass.event, inbox10050OnR2.id)}',
           );
         } finally {
           for (var i = 0; i < secretBytes.length; i++) {
@@ -631,8 +634,9 @@ void main() {
                 isTrue,
                 reason:
                     'nostrGroupId hex must be 64 lowercase hex chars '
-                    '(32 bytes). Got "${nostrGroupIdHex.length}" chars: '
-                    '$nostrGroupIdHex',
+                    '(32 bytes). Got '
+                    '${logAliasHandle(LogAliasClass.circle, nostrGroupIdHex)}, '
+                    'which does not have that shape.',
               );
 
               // Confirm the real MLS group ID differs from nostrGroupId.
@@ -726,9 +730,10 @@ void main() {
                 isTrue,
                 reason:
                     'kind 445 on R1 must carry an h-tag with nostrGroupIdHex '
-                    '($nostrGroupIdHex). Missing or wrong h-tag breaks relay '
-                    'routing and (if the MLS group id is used instead) leaks '
-                    'the internal group identifier.',
+                    '(${logAliasHandle(LogAliasClass.circle, nostrGroupIdHex)}). '
+                    'Missing or wrong h-tag breaks relay routing and (if the '
+                    'MLS group id is used instead) leaks the internal group '
+                    'identifier.',
               );
               expect(
                 hasCorrectHTag(ev445OnR2.tags),
@@ -751,7 +756,8 @@ void main() {
                 isTrue,
                 reason:
                     'MIP-00 Rule 4: the real MLS group id must NEVER appear '
-                    'in h-tags on the relay. Got mlsGroupIdHex=$mlsGroupIdHex '
+                    'in h-tags on the relay. Got mlsGroupIdHex='
+                    '${logAliasHandle(LogAliasClass.circle, mlsGroupIdHex)} '
                     'which must differ from the h-tag value.',
               );
               expect(
@@ -762,9 +768,10 @@ void main() {
 
               debugPrint(
                 '[FFI-445-POS] PASS: '
-                '445 on R1 id=${ev445OnR1.id.substring(0, 8)}, '
-                '445 on R2 id=${ev445OnR2.id.substring(0, 8)}, '
-                'nostrGroupIdHex=${nostrGroupIdHex.substring(0, 8)}...',
+                '445 on R1 id=${logAliasHandle(LogAliasClass.event, ev445OnR1.id)}, '
+                '445 on R2 id=${logAliasHandle(LogAliasClass.event, ev445OnR2.id)}, '
+                'nostrGroupIdHex='
+                '${logAliasHandle(LogAliasClass.circle, nostrGroupIdHex)}',
               );
             } finally {
               // Nothing peer-specific to scrub at this level any more —
@@ -827,7 +834,7 @@ void main() {
           // Bootstrapping publishes it via `maintainKeyPackage` (Dark
           // Matter's ONE publish path), so Alice can fetch it from R1 below.
           final bob = await SyntheticUser.bootstrap(
-            label: 'bob_neg',
+            role: 'bob_neg',
             seed: bobSeed,
             relay: r1,
             seedOffset: 1,
@@ -937,14 +944,17 @@ void main() {
                 isEmpty,
                 reason:
                     'Relay-metadata privacy invariant violated: kind 445 for '
-                    'this circle (h-tag $nostrGroupIdHex) must NEVER reach R2 '
-                    'because R2 is not in circle.relays.  If R2 receives it, '
-                    'the publish path fell back to default relays for group '
-                    'messages — a group-membership disclosure.',
+                    'this circle (h-tag '
+                    '${logAliasHandle(LogAliasClass.circle, nostrGroupIdHex)}) '
+                    'must NEVER reach R2 because R2 is not in circle.relays.  '
+                    'If R2 receives it, the publish path fell back to default '
+                    'relays for group messages — a group-membership '
+                    'disclosure.',
               );
               debugPrint(
                 '[FFI-445-NEG] PASS: 445 reached R1 but not R2 '
-                '(nostrGroupIdHex=${nostrGroupIdHex.substring(0, 8)}...)',
+                '(nostrGroupIdHex='
+                '${logAliasHandle(LogAliasClass.circle, nostrGroupIdHex)})',
               );
             } finally {
               // Nothing peer-specific to scrub at this level any more —
@@ -1020,7 +1030,7 @@ void main() {
           // Bootstrapping publishes it via `maintainKeyPackage` (Dark
           // Matter's ONE publish path), so Alice can fetch it from R1 below.
           final bob = await SyntheticUser.bootstrap(
-            label: 'bob_snap',
+            role: 'bob_snap',
             seed: bobSeed,
             relay: r1,
             seedOffset: 2,
@@ -1143,7 +1153,8 @@ void main() {
               debugPrint(
                 '[FFI-445-SNAPSHOT] PASS: 445 not on R2 after personal '
                 'relay add '
-                '(nostrGroupIdHex=${nostrGroupIdHex.substring(0, 8)}...)',
+                '(nostrGroupIdHex='
+                '${logAliasHandle(LogAliasClass.circle, nostrGroupIdHex)})',
               );
             } finally {
               // Nothing peer-specific to scrub at this level any more —

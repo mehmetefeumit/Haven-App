@@ -26,6 +26,7 @@ library;
 
 import 'package:haven/src/services/clock_skew_detector.dart';
 import 'package:haven/src/services/relay_service.dart';
+import 'package:haven/src/utils/log_alias.dart' show magnitudeBucket;
 
 /// The wire tokens `DeviceClockComplaint::wire_token` can produce.
 ///
@@ -200,7 +201,8 @@ String? checkFaultSurfaced({
         'surface existed.';
   }
   if (!renderedTexts.contains(expectedBody)) {
-    return 'the $fault banner rendered ${renderedTexts.length} text(s) but '
+    return 'the $fault banner rendered '
+        '${magnitudeBucket(renderedTexts.length)} text(s) but '
         'none of them is the copy this fault is supposed to show.';
   }
   return null;
@@ -246,7 +248,8 @@ String? checkSoleSourceCopyHedged({
   }
   if (!renderedTexts.contains(hedgedTitle) ||
       !renderedTexts.contains(hedgedBody)) {
-    return 'the sole-source verdict rendered ${renderedTexts.length} text(s), '
+    return 'the sole-source verdict rendered '
+        '${magnitudeBucket(renderedTexts.length)} text(s), '
         'but not the hedged title AND body this case is required to show.';
   }
   return null;
@@ -268,8 +271,9 @@ String? checkFaultCopyDistinct({
 }) {
   if (rejectedBody.isEmpty || behindBody.isEmpty) {
     return 'one of the two fault bodies is empty '
-        '(rejected=${rejectedBody.length} chars, '
-        'behind=${behindBody.length} chars), so one fault has no copy at all.';
+        '(rejected=${magnitudeBucket(rejectedBody.length)} chars, '
+        'behind=${magnitudeBucket(behindBody.length)} chars), so one fault '
+        'has no copy at all.';
   }
   if (rejectedBody == behindBody) {
     return 'both faults render the SAME body. "your location is not reaching '

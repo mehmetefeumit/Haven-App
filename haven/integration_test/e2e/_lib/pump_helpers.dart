@@ -17,6 +17,22 @@
 /// after any UI action that triggers a route change, an FFI call, or
 /// a provider invalidation cascade — i.e. the exact situations where
 /// `pumpAndSettle` is known to hang in our two-AVD scenarios.
+///
+/// ## `description` never carries live data
+///
+/// Every `description`/`label` argument in this file is a fixed, harness-
+/// authored English phrase naming WHAT is being waited for (e.g. `'MapShell
+/// after pumpWidget'`) — verified: no call site anywhere under
+/// `integration_test/` interpolates a relay/circle/user value into one. When
+/// `description` is omitted the fallback is [finder]'s `runtimeType`, NEVER
+/// `finder.toString()` — a [Finder]'s own `toString()` renders what it
+/// searched for (a raw key, including one built from a pubkey/nostrGroupId
+/// hex — see `WidgetKeys`), and `runtimeType` is unconditionally safe
+/// because it names only the finder's Dart class regardless of what any
+/// caller ever passes in, structural or not. Keep `description` that way
+/// too — a future `description: 'waiting for $someCoordinate'` would reach
+/// the thrown [StateError] below unredacted, since this is caller-supplied
+/// prose this file cannot itself sanitise.
 library;
 
 import 'package:flutter/widgets.dart';
@@ -45,7 +61,7 @@ Future<void> pumpUntilFound(
   String? description,
   bool Function()? shouldAbort,
 }) async {
-  final label = description ?? '$finder';
+  final label = description ?? finder.runtimeType.toString();
   final deadline = DateTime.now().add(timeout);
   var pumps = 0;
   while (DateTime.now().isBefore(deadline)) {
@@ -57,6 +73,7 @@ Future<void> pumpUntilFound(
     // Optional and generic/M11-agnostic: unset for every non-M11 caller, so
     // this is a no-op change for them.
     if (shouldAbort != null && shouldAbort()) {
+      // log-scan-ok: label is a fixed phrase or finder.runtimeType (see doc)
       throw StateError(
         'pumpUntilFound: aborted waiting for $label — shouldAbort() '
         'returned true (the caller is no longer current).',
@@ -66,8 +83,10 @@ Future<void> pumpUntilFound(
     pumps += 1;
     if (finder.evaluate().isNotEmpty) return;
   }
+  // log-scan-ok: label is a fixed phrase or finder.runtimeType (see doc)
   throw StateError(
     'pumpUntilFound: $label did not appear within '
+    // harness-log-ok: timeout/pumpInterval are fixed; pumps is a loop counter.
     '${timeout.inSeconds}s ($pumps pumps at ${pumpInterval.inMilliseconds}ms). '
     'If the widget should be visible, the page may not have mounted; '
     'if it should not, the test expectation is inverted.',
@@ -88,13 +107,14 @@ Future<void> pumpUntilGone(
   String? description,
   bool Function()? shouldAbort,
 }) async {
-  final label = description ?? '$finder';
+  final label = description ?? finder.runtimeType.toString();
   final deadline = DateTime.now().add(timeout);
   var pumps = 0;
   while (DateTime.now().isBefore(deadline)) {
     // See pumpUntilFound's identical guard above for why this is checked
     // before `tester.pump` with no intervening await.
     if (shouldAbort != null && shouldAbort()) {
+      // log-scan-ok: label is a fixed phrase or finder.runtimeType (see doc)
       throw StateError(
         'pumpUntilGone: aborted waiting for $label — shouldAbort() '
         'returned true (the caller is no longer current).',
@@ -104,8 +124,10 @@ Future<void> pumpUntilGone(
     pumps += 1;
     if (finder.evaluate().isEmpty) return;
   }
+  // log-scan-ok: label is a fixed phrase or finder.runtimeType (see doc)
   throw StateError(
     'pumpUntilGone: $label was still present after '
+    // harness-log-ok: timeout/pumpInterval are fixed; pumps is a loop counter.
     '${timeout.inSeconds}s ($pumps pumps at ${pumpInterval.inMilliseconds}ms). '
     'The action that should have removed it from the tree may not '
     'have fired or its side effect may not have propagated.',
@@ -144,7 +166,7 @@ Future<void> tapWhenHittable(
   Duration pumpInterval = const Duration(milliseconds: 100),
   String? description,
 }) async {
-  final label = description ?? '$finder';
+  final label = description ?? finder.runtimeType.toString();
   final deadline = DateTime.now().add(timeout);
   var pumps = 0;
   while (DateTime.now().isBefore(deadline)) {
@@ -168,8 +190,10 @@ Future<void> tapWhenHittable(
     await tester.pump(pumpInterval);
     pumps += 1;
   }
+  // log-scan-ok: label is a fixed phrase or finder.runtimeType (see doc)
   throw StateError(
     'tapWhenHittable: $label did not become hit-testable within '
+    // harness-log-ok: timeout/pumpInterval are fixed; pumps is a loop counter.
     '${timeout.inSeconds}s ($pumps pumps at ${pumpInterval.inMilliseconds}ms). '
     'The widget may be below the fold / behind the keyboard with no scrollable '
     'to reveal it, offstage, obscured, or behind an ancestor pointer barrier '
@@ -220,6 +244,7 @@ Future<void> pumpUntilCondition(
     // See pumpUntilFound's identical guard above for why this is checked
     // before `tester.pump` with no intervening await.
     if (shouldAbort != null && shouldAbort()) {
+      // log-scan-ok: description is a fixed harness phrase (see file doc)
       throw StateError(
         'pumpUntilCondition: aborted waiting for "$description" — '
         'shouldAbort() returned true (the caller is no longer current).',
@@ -229,8 +254,10 @@ Future<void> pumpUntilCondition(
     pumps += 1;
     if (condition()) return;
   }
+  // log-scan-ok: description is a fixed harness phrase (see file doc)
   throw StateError(
     'pumpUntilCondition: "$description" was not satisfied within '
+    // harness-log-ok: timeout/pumpInterval are fixed; pumps is a loop counter.
     '${timeout.inSeconds}s ($pumps pumps at ${pumpInterval.inMilliseconds}ms).',
   );
 }
@@ -280,6 +307,7 @@ Future<void> waitUntilAsync(
     polls += 1;
     await Future<void>.delayed(pollInterval);
   }
+  // log-scan-ok: description is a fixed harness phrase (see file doc)
   throw StateError(
     'waitUntilAsync: "$description" was not satisfied within '
     '${timeout.inSeconds}s ($polls polls at ${pollInterval.inSeconds}s '

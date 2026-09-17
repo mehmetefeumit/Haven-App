@@ -140,13 +140,13 @@ class SyntheticUser {
   /// Throws if the relay rejects the event (an indicator of a
   /// strfry misconfiguration or a malformed event).
   static Future<SyntheticUser> bootstrap({
-    required String label,
+    required String role,
     required Uint8List seed,
     required TestRelay relay,
     int seedOffset = 0,
   }) async {
     final user = await TestUser.bootstrap(
-      label: label,
+      role: role,
       seed: _seedWithOffset(seed, seedOffset),
     );
     try {
@@ -199,26 +199,27 @@ class SyntheticUser {
                       'bootstrap did not install the hermetic relay.'
                   : outcome.respondersProbed == 0
                       ? ' Hint: action=alreadyHealthy with '
-                          'relaysTargeted=${outcome.relaysTargeted} but '
+                          'relaysTargeted='
+                          '${magnitudeBucket(outcome.relaysTargeted)} but '
                           'respondersProbed=0 means every relay was '
                           'unreachable on this tick, so the maintenance tick '
                           'correctly failed closed. Suspect the guest network '
                           '(a default-network handover strands a freshly '
                           'opened socket), not the KeyPackage code.'
                       : ' Hint: action=alreadyHealthy with '
-                          '${outcome.respondersProbed} responder(s) means the '
-                          'probe saw a tracked slot already served — check '
-                          'for a reused dataDir.',
+                          '${magnitudeBucket(outcome.respondersProbed)} '
+                          'responder(s) means the probe saw a tracked slot '
+                          'already served — check for a reused dataDir.',
             _ => '',
           };
           throw StateError(
-            "$label's KeyPackage maintenance did not reach the hermetic "
+            "$role's KeyPackage maintenance did not reach the hermetic "
             'relay (action=${outcome.action.name}, '
-            'errors=${outcome.relayErrors}).$hint',
+            'errors=${magnitudeBucket(outcome.relayErrors)}).$hint',
           );
         }
         debugPrint(
-          '[SyntheticUser:$label] KeyPackage published '
+          '[SyntheticUser:$role] KeyPackage published '
           '(action=${outcome.action.name})',
         );
 
@@ -255,7 +256,7 @@ class SyntheticUser {
   /// is unaffected.
   static Future<SyntheticUser> bob(TestRelay relay, {int seedOffset = 0}) =>
       bootstrap(
-        label: 'bob',
+        role: 'bob',
         seed: _seedWithOffset(bobSeed, seedOffset),
         relay: relay,
       );
@@ -264,7 +265,7 @@ class SyntheticUser {
   /// [relay]. See [bob]'s [seedOffset] doc for the rationale.
   static Future<SyntheticUser> carol(TestRelay relay, {int seedOffset = 0}) =>
       bootstrap(
-        label: 'carol',
+        role: 'carol',
         seed: _seedWithOffset(carolSeed, seedOffset),
         relay: relay,
       );
@@ -276,7 +277,7 @@ class SyntheticUser {
   /// FE-2 "decline/ignore invitation" scenario where a peer receives a
   /// gift-wrapped Welcome but never calls `acceptInvitation`.
   static Future<SyntheticUser> dave(TestRelay relay) =>
-      bootstrap(label: 'dave', seed: daveSeed, relay: relay);
+      bootstrap(role: 'dave', seed: daveSeed, relay: relay);
 
   /// Returns [base] unchanged when [offset] is `0`; otherwise a 32-byte
   /// copy with its trailing byte shifted by [offset] (wrapping mod 256).
@@ -299,8 +300,8 @@ class SyntheticUser {
   /// always `[strfryUrl]`.
   final List<String> keyPackageRelays;
 
-  /// Short label used in log lines ("bob", "carol", …).
-  String get label => user.label;
+  /// Short role used in log lines ("bob", "carol", …).
+  String get role => user.role;
 
   /// The user's pubkey in NIP-19 bech32 form.
   String get npub => user.npub;
@@ -329,8 +330,8 @@ class SyntheticUser {
     Duration timeout = const Duration(seconds: 90),
   }) async {
     debugPrint(
-      '[SyntheticUser:$label] waiting for gift-wrap addressed to '
-      '${_redactPk(pubkeyHex)}',
+      '[SyntheticUser:$role] waiting for gift-wrap addressed to '
+      '${_pkHandle(pubkeyHex)}',
     );
     // Wait for the first gift-wrap addressed to us.
     final first = await relay.firstWhere(
@@ -355,7 +356,7 @@ class SyntheticUser {
     if (firstResult != null) return firstResult;
 
     debugPrint(
-      '[SyntheticUser:$label] first gift-wrap did not apply (likely stale); '
+      '[SyntheticUser:$role] first gift-wrap did not apply (likely stale); '
       'scanning for other gift-wraps addressed to us',
     );
     final others = await relay.collectN(
@@ -373,8 +374,8 @@ class SyntheticUser {
       if (result != null) return result;
     }
     throw StateError(
-      '[SyntheticUser:$label] no gift-wrap addressed to '
-      '${_redactPk(pubkeyHex)} yielded an applicable Welcome',
+      '[SyntheticUser:$role] no gift-wrap addressed to '
+      '${_pkHandle(pubkeyHex)} yielded an applicable Welcome',
     );
   }
 
@@ -398,7 +399,7 @@ class SyntheticUser {
       );
     } on Object catch (e) {
       debugPrint(
-        '[SyntheticUser:$label] gift-wrap ${_redactEventId(giftWrap.id)} '
+        '[SyntheticUser:$role] gift-wrap ${_eventHandle(giftWrap.id)} '
         'did not process (${e.runtimeType}); trying another',
       );
     } finally {
@@ -420,15 +421,15 @@ class SyntheticUser {
         invitation.circleName,
       );
       debugPrint(
-        '[SyntheticUser:$label] acceptInvitation OK '
+        '[SyntheticUser:$role] acceptInvitation OK '
         '(circle=$circleHandle, '
-        'inviter=${_redactPk(invitation.inviterPubkey)}, '
+        'inviter=${_pkHandle(invitation.inviterPubkey)}, '
         'members=${magnitudeBucket(accepted.members.length)})',
       );
       return accepted;
     } on Object catch (e) {
       debugPrint(
-        '[SyntheticUser:$label] acceptInvitation did not apply '
+        '[SyntheticUser:$role] acceptInvitation did not apply '
         '(${e.runtimeType}); trying another gift-wrap',
       );
       return null;
@@ -466,12 +467,14 @@ class SyntheticUser {
       longitude: longitude,
       updateIntervalSecs: BigInt.from(updateInterval.inSeconds),
     )).sent!;
-    final (accepted, msg) = await relay.publishAndAwaitOk(
+    final (accepted, _) = await relay.publishAndAwaitOk(
       encrypted.eventJson,
     );
     if (!accepted) {
+      // Never the relay's OK reason text (remote-authored prose, Security
+      // Rule 15) — the boolean rejection is the whole diagnostic here.
       throw StateError(
-        '[SyntheticUser:$label] relay rejected location event: $msg',
+        '[SyntheticUser:$role] relay rejected location event',
       );
     }
     final decoded = jsonDecode(encrypted.eventJson);
@@ -485,10 +488,8 @@ class SyntheticUser {
     // performed. Sentinel coords are not personally identifying
     // today, but a future change that wires a real geofix into
     // this helper would silently regress the privacy posture.
-    debugPrint(
-      '[SyntheticUser:$label] published location evt='
-      '${id == null ? "?" : _redactEventId(id)}',
-    );
+    final evtHandle = id == null ? '?' : _eventHandle(id);
+    debugPrint('[SyntheticUser:$role] published location evt=$evtHandle');
     return id ?? '<unknown>';
   }
 
@@ -700,21 +701,21 @@ class SyntheticUser {
               groupUpdatesProcessed++;
             case LocationMessageResultKindFfi.unrecoverable:
               debugPrint(
-                '[SyntheticUser:$label] $context: group entered '
-                'Unrecoverable state for evt=${_redactEventId(event.id)}',
+                '[SyntheticUser:$role] $context: group entered '
+                'Unrecoverable state for evt=${_eventHandle(event.id)}',
               );
           }
         }
       } on Object catch (e) {
         decryptFailed++;
         debugPrint(
-          '[SyntheticUser:$label] decrypt failed for evt='
-          '${_redactEventId(event.id)}: ${e.runtimeType}',
+          '[SyntheticUser:$role] decrypt failed for evt='
+          '${_eventHandle(event.id)}: ${e.runtimeType}',
         );
       }
     }
     debugPrint(
-      '[SyntheticUser:$label] $context: '
+      '[SyntheticUser:$role] $context: '
       'events=${magnitudeBucket(events.length)} '
       'locations=${magnitudeBucket(locationsProcessed)} '
       'groupUpdates=${magnitudeBucket(groupUpdatesProcessed)} '
@@ -760,19 +761,21 @@ class SyntheticUser {
     for (final commit in autoCommits) {
       var published = false;
       try {
-        final (accepted, msg) = await relay.publishAndAwaitOk(
+        final (accepted, _) = await relay.publishAndAwaitOk(
           commit.commitEventJson,
         );
         published = accepted;
         if (!accepted) {
+          // Never the relay's OK reason text (remote-authored prose, Security
+          // Rule 15) — the boolean rejection is the whole diagnostic here.
           debugPrint(
-            '[SyntheticUser:$label] $context: relay rejected '
-            'receive-side auto-commit: $msg',
+            '[SyntheticUser:$role] $context: relay rejected '
+            'receive-side auto-commit',
           );
         }
       } on Object catch (e) {
         debugPrint(
-          '[SyntheticUser:$label] $context: auto-commit publish '
+          '[SyntheticUser:$role] $context: auto-commit publish '
           'failed: ${e.runtimeType}',
         );
       }
@@ -786,15 +789,15 @@ class SyntheticUser {
               : null;
           if (id != null) publishedIds.add(id);
           debugPrint(
-            '[SyntheticUser:$label] $context: published + confirmed '
-            'receive-side auto-commit evt=${_redactEventId(id ?? "?")}',
+            '[SyntheticUser:$role] $context: published + confirmed '
+            'receive-side auto-commit evt=${_eventHandle(id ?? "?")}',
           );
         } else {
           await user.circleManager.publishFailed(pending: commit.pending);
         }
       } on Object catch (e) {
         debugPrint(
-          '[SyntheticUser:$label] $context: auto-commit '
+          '[SyntheticUser:$role] $context: auto-commit '
           '${published ? "confirm" : "fail-report"} failed: ${e.runtimeType}',
         );
       }
@@ -824,7 +827,7 @@ class SyntheticUser {
       selfPubkeyHex: pubkeyHex,
     );
     debugPrint(
-      '[SyntheticUser:$label] planLeave → ${plan.kind.name}',
+      '[SyntheticUser:$role] planLeave → ${plan.kind.name}',
     );
     // Exhaustive switch with explicit arms per LeavePlanKindFfi
     // variant. Future variants added to `haven-core`'s LeavePlan
@@ -840,7 +843,7 @@ class SyntheticUser {
       case LeavePlanKindFfi.abandon:
       case LeavePlanKindFfi.orphanLocalOnly:
         throw StateError(
-          '[SyntheticUser:$label] leaveAsNonAdmin invoked but planLeave '
+          '[SyntheticUser:$role] leaveAsNonAdmin invoked but planLeave '
           'returned ${plan.kind.name}. Test invariant violated: this '
           'synthetic peer should not be admin (or sole-remaining / '
           'orphaned) in the residual group.',
@@ -853,17 +856,19 @@ class SyntheticUser {
     final proposalEventJson = await user.circleManager.proposeLeave(
       mlsGroupId: circle.circle.mlsGroupId,
     );
-    final (accepted, msg) = await relay.publishAndAwaitOk(proposalEventJson);
+    final (accepted, _) = await relay.publishAndAwaitOk(proposalEventJson);
     if (!accepted) {
+      // Never the relay's OK reason text (remote-authored prose, Security
+      // Rule 15) — the boolean rejection is the whole diagnostic here.
       throw StateError(
-        '[SyntheticUser:$label] relay rejected SelfRemove: $msg',
+        '[SyntheticUser:$role] relay rejected SelfRemove',
       );
     }
     await user.circleManager.completeLeave(
       mlsGroupId: circle.circle.mlsGroupId,
     );
     debugPrint(
-      '[SyntheticUser:$label] leaveAsNonAdmin complete',
+      '[SyntheticUser:$role] leaveAsNonAdmin complete',
     );
   }
 
@@ -947,11 +952,11 @@ class SyntheticUser {
   /// Per-process salted handle for a pubkey (Security Rule 15 / the Log
   /// anonymity pillar): a truncated hex prefix is still a partial
   /// identifier, so this never slices the string — it aliases it.
-  static String _redactPk(String hex) =>
+  static String _pkHandle(String hex) =>
       logAliasHandle(LogAliasClass.peer, hex);
 
   /// Same, for an event id — a distinct [LogAliasClass] so a pubkey and an
   /// event id that happen to share bytes never alias to the same handle.
-  static String _redactEventId(String hex) =>
+  static String _eventHandle(String hex) =>
       logAliasHandle(LogAliasClass.event, hex);
 }

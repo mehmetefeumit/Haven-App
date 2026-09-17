@@ -382,7 +382,7 @@ void main() {
           circleType: 'location_sharing',
           relays: <String>[defaultStrfryUrl],
           creatorFallbackRelays: <String>[defaultStrfryUrl],
-          label: 'b6',
+          scenario: 'b6',
         ),
       );
 
@@ -434,12 +434,14 @@ void main() {
           'afterwards can be attributed to the toggle',
         );
       }
+      // harness-log-ok: n= parsed by b6_marker_number.
       debugPrint('$kBaselinePublishedMarker n=$baseline');
 
       // Anti-vacuity: if an error surface is ALREADY up while healthy, a
       // later "surfaced" reading proves nothing.
       await tester.pump();
       final baselineSurfacing = surfacingVisible();
+      // harness-log-ok: present= parsed by b6_marker_flag.
       debugPrint('$kSurfacingBaselineMarker present=$baselineSurfacing');
       debugPrint(kArmedMarker);
 
@@ -522,6 +524,8 @@ void main() {
             pollInterval: _sustainedCheckSpacing,
           );
           final tail = DateTime.now().difference(disabledAt).inSeconds;
+          // harness-log-ok: tail= parsed by b6_marker_number; checks= is a
+          // fixed constant, not a measurement.
           debugPrint(
             '$kPublishStoppedMarker tail=${tail}s '
             'checks=$_sustainedZeroChecks',
@@ -600,6 +604,7 @@ void main() {
             timeout: _publishResumeTimeout,
             pollInterval: const Duration(seconds: 6),
           );
+          // harness-log-ok: n= parsed by b6_marker_number.
           debugPrint('$kPublishResumedMarker n=$resumed');
         } on Object catch (e) {
           debugPrint('$kPublishNotResumedMarker reason=${e.runtimeType}');
@@ -633,6 +638,7 @@ void main() {
         debugPrint(streamBack ? kStreamRecoveredMarker : kStreamDeadMarker);
       }
 
+      // harness-log-ok: runner-grepped marker constant
       debugPrint(kSequenceCompleteMarker);
 
       // Single terminal assertion. Everything above has already been printed

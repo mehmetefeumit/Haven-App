@@ -660,7 +660,8 @@ void main() {
     test('invalid secret bytes length error', () {
       final invalidBytes = List<int>.filled(16, 0);
       expect(invalidBytes.length, 16);
-      // Should throw: "Invalid identity secret bytes length: expected 32, got 16"
+      // Should throw: "Invalid identity secret bytes length" (never the
+      // actual length — Security Rule 6 forbids exposing key material).
     });
 
     test('error messages start with Failed to', () {

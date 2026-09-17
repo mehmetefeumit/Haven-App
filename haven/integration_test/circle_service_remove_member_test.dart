@@ -59,6 +59,7 @@ import 'package:haven/src/services/nostr_circle_service.dart';
 import 'package:haven/src/services/nostr_relay_service.dart';
 import 'package:haven/src/services/relay_service.dart';
 import 'package:haven/src/test_keys.dart';
+import 'package:haven/src/utils/log_alias.dart' show magnitudeBucket;
 import 'package:haven/src/widgets/circles/circles_bottom_sheet.dart';
 import 'package:integration_test/integration_test.dart';
 
@@ -348,9 +349,9 @@ void main() {
             reason:
                 'removeMember must NOT fall back to DEFAULT_RELAYS when the '
                 'circle relay list is unavailable. publishEvent was called '
-                '${relayRecorder.publishEventCalls.length} time(s) — this is '
-                'a relay-level group-membership disclosure. See '
-                'docs/LOCATION_SHARING_SECURITY_BACKLOG.md.',
+                '${magnitudeBucket(relayRecorder.publishEventCalls.length)} '
+                'time(s) — this is a relay-level group-membership disclosure. '
+                'See docs/LOCATION_SHARING_SECURITY_BACKLOG.md.',
           );
 
           // Defence in depth: the fire-and-forget and welcome paths must
@@ -530,9 +531,10 @@ void main() {
           memberCountBefore,
           equals(2),
           reason:
-              'Pre-removal: Alice + Bob = 2 members. Got $memberCountBefore. '
-              'A mismatch means createCircle or acceptInvitation did not '
-              'sync the member list correctly.',
+              'Pre-removal: Alice + Bob = 2 members. Got '
+              '${magnitudeBucket(memberCountBefore)}. A mismatch means '
+              'createCircle or acceptInvitation did not sync the member '
+              'list correctly.',
         );
 
         // ----------------------------------------------------------------
@@ -600,10 +602,11 @@ void main() {
           memberCountAfter,
           equals(memberCountBefore - 1),
           reason:
-              'After removing Bob, member count must be '
-              '${memberCountBefore - 1}. Got $memberCountAfter. '
-              'A regression in finalizePendingCommit or removeMembers would '
-              'leave the member count unchanged.',
+              'After removing Bob, member count must drop by one. Got '
+              '${magnitudeBucket(memberCountAfter)} (was '
+              '${magnitudeBucket(memberCountBefore)}). A regression in '
+              'finalizePendingCommit or removeMembers would leave the '
+              'member count unchanged.',
         );
 
         // Alice must no longer see Bob in the member list.
@@ -721,8 +724,8 @@ void main() {
 
         debugPrint(
           '[remove_member_test] Forward secrecy OK — '
-          'memberCountBefore=$memberCountBefore, '
-          'memberCountAfter=$memberCountAfter, '
+          'memberCountBefore=${magnitudeBucket(memberCountBefore)}, '
+          'memberCountAfter=${magnitudeBucket(memberCountAfter)}, '
           'bobRecoveredLocation=false (confirmed null)',
         );
       } finally {
@@ -892,8 +895,8 @@ void main() {
           WidgetKeys.memberRemoveButton(bobPubkeyHex),
         );
         expect(
-          removeButton,
-          findsOneWidget,
+          removeButton.evaluate(),
+          hasLength(1),
           reason: 'an admin looking at a co-member must be offered the '
               'removal — this is the wiring that did not exist before',
         );
@@ -923,7 +926,10 @@ void main() {
         );
 
         // And the list the admin is looking at agrees.
-        expect(find.byKey(WidgetKeys.memberTile(bobPubkeyHex)), findsNothing);
+        expect(
+          find.byKey(WidgetKeys.memberTile(bobPubkeyHex)).evaluate(),
+          isEmpty,
+        );
       } finally {
         for (final dir in [aliceDir, bobDir]) {
           try {

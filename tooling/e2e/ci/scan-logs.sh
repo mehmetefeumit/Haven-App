@@ -32,9 +32,21 @@
 #   scan-logs.sh --manifest <path>.needles.json --sink <class>=<path>[,<path>...] \
 #                [--sink ...] [--segments <class>=<n>]... [--plants-in <class>=<path>]... \
 #                [--report <path>.ndjson]
+#   scan-logs.sh --rules-only [--exempt-endpoint <url|host|ip>]... \
+#                --sink <class>=<path>[,<path>...] [--sink ...] [--report <path>.ndjson]
 #   scan-logs.sh --self-test
 #
 #   --manifest   the manifest `haven-logscan seal` wrote; must end in `.needles.json`
+#   --rules-only no manifest: the structural rules and the line floors alone,
+#                for a sink no needle is declarable for (a unit-test transcript).
+#                It certifies that the rules ran, NOT that any declared value is
+#                absent, so no device or simulator lane may use it — exactly one
+#                of --manifest and --rules-only, never both
+#   --exempt-endpoint  (--rules-only only) an endpoint the URL and IP rules
+#                skip, in host, host:port and URL spellings: a rules-only scan
+#                has no manifest to carry a sealed exemption (cargo prints an
+#                `#[ignore]` reason naming http://127.0.0.1:<port>). With a
+#                manifest the exemptions are sealed, so passing one here is rc 2
 #   --sink       a sink CLASS (logcat, drive, ios, rust-test, relay, proxy, diag)
 #                and the file(s) of that class, comma-separated; repeatable
 #   --segments   how many rotated files the class is expected to have
@@ -75,7 +87,7 @@ readonly SECRET_SCAN="${script_dir}/scan-logs-for-secrets.sh"
 readonly DEFAULT_LOGSCAN_BIN="${script_dir}/../../logscan/target/release/haven-logscan"
 
 usage() {
-  echo "Usage: $0 --manifest <path>.needles.json --sink <class>=<path>[,<path>...]... [--segments <class>=<n>]... [--plants-in <class>=<path>]... [--report <path>.ndjson]  |  $0 --self-test" >&2
+  echo "Usage: $0 --manifest <path>.needles.json --sink <class>=<path>[,<path>...]... [--segments <class>=<n>]... [--plants-in <class>=<path>]... [--report <path>.ndjson]  |  $0 --rules-only [--exempt-endpoint <url|host|ip>]... --sink <class>=<path>[,<path>...]... [--report <path>.ndjson]  |  $0 --self-test" >&2
 }
 
 usage_error() {
@@ -114,8 +126,8 @@ verdict_word() {
 }
 
 main() {
-  local manifest="" report=""
-  local -a sink_files=() scanner_args=()
+  local manifest="" report="" rules_only=0
+  local -a sink_files=() scanner_args=() exempt_args=()
   local spec class paths part
   local -a parts
 
@@ -126,6 +138,16 @@ main() {
         [[ $# -ge 2 ]] || usage_error "--manifest takes a path"
         [[ -z "${manifest}" ]] || usage_error "--manifest given twice (a second manifest means the needle directory was not rotated)"
         manifest="$2"
+        shift 2
+        ;;
+      --rules-only)
+        rules_only=1
+        shift
+        ;;
+      --exempt-endpoint)
+        [[ $# -ge 2 && -n "$2" && "$2" != *[[:space:]]* ]] \
+          || usage_error "--exempt-endpoint takes <url|host|ip>"
+        exempt_args+=(--exempt-endpoint "$2")
         shift 2
         ;;
       --sink)
@@ -170,11 +192,16 @@ main() {
         ;;
     esac
   done
-  [[ -n "${manifest}" ]] || usage_error "--manifest is required"
-  # The suffix is the contract the sidecar guard keys its bans on; a manifest
-  # under another name is a manifest nothing protects.
-  [[ "${manifest}" == *.needles.json ]] \
-    || usage_error "--manifest must end in .needles.json, got '${manifest##*/}'"
+  if (( rules_only )); then
+    [[ -z "${manifest}" ]] || usage_error "--rules-only and --manifest are exclusive: a manifest means needles are declarable, so they must be searched"
+  else
+    (( ${#exempt_args[@]} == 0 )) || usage_error "--exempt-endpoint is for --rules-only: with a manifest the exemptions were sealed into it"
+    [[ -n "${manifest}" ]] || usage_error "--manifest is required (or --rules-only for a sink no needle is declarable for)"
+    # The suffix is the contract the sidecar guard keys its bans on; a manifest
+    # under another name is a manifest nothing protects.
+    [[ "${manifest}" == *.needles.json ]] \
+      || usage_error "--manifest must end in .needles.json, got '${manifest##*/}'"
+  fi
   (( ${#sink_files[@]} > 0 )) || usage_error "at least one --sink is required"
   if [[ ! -f "${SECRET_SCAN}" ]]; then
     echo "ERROR: key-material floor missing at ${SECRET_SCAN}" >&2
@@ -194,9 +221,10 @@ main() {
          "never a skipped scan." >&2
     scan_rc="${RC_GUARD}"
   else
-    local -a report_args=()
+    local -a report_args=() source_args=(--manifest "${manifest}")
     [[ -z "${report}" ]] || report_args=(--report "${report}")
-    "${bin}" scan --manifest "${manifest}" "${scanner_args[@]}" \
+    (( ! rules_only )) || source_args=(--rules-only ${exempt_args[@]+"${exempt_args[@]}"})
+    "${bin}" scan "${source_args[@]}" "${scanner_args[@]}" \
       ${report_args[@]+"${report_args[@]}"} || scan_rc=$?
   fi
 
@@ -208,8 +236,10 @@ main() {
          "the scanned logs so the failure-artifact upload cannot publish them:" \
          "${sink_files[*]}" >&2
   fi
+  local basis="manifest ${manifest##*/}"
+  (( ! rules_only )) || basis="rules-only, no manifest"
   echo "scan-logs: $(verdict_word "${rc}") (rc ${rc}) — key-material floor rc ${floor_rc}," \
-       "identifier scanner rc ${scan_rc}; ${#sink_files[@]} sink file(s); manifest ${manifest##*/}"
+       "identifier scanner rc ${scan_rc}; ${#sink_files[@]} sink file(s); ${basis}"
   exit "${rc}"
 }
 
@@ -220,7 +250,13 @@ main() {
 # so the integration under test is the actual one. Every fixture count is
 # pinned by equality: a deleted fixture is the one way a self-test reports
 # success for work it did not do.
-readonly SELF_TEST_FIXTURES=33
+readonly SELF_TEST_FIXTURES=43
+# The iOS lanes run this wrapper on macOS under /bin/bash 3.2 (no mapfile,
+# no associative arrays, no case conversion); fixture (10) pins that
+# statically, since macOS cannot be run here.
+# bash-4-only: mapfile/readarray, coproc, declare -A, case conversion, |&, ;;&,
+# negative substring offsets.
+readonly BASH4_ONLY_RE='(^|[^[:alnum:]_])(mapfile|readarray|coproc)([^[:alnum:]_]|$)|declare[[:space:]]+-[a-zA-Z]*A|\$\{[A-Za-z_][A-Za-z0-9_]*(,,|\^\^)|\|&|;;&|\$\{[^}]*:([[:space:]]+-[0-9]|[0-9]+:[[:space:]]*-[0-9])'
 
 run_self_test() {
   local tmp fail=0 ran=0
@@ -349,6 +385,49 @@ run_self_test() {
   expect "--plants-in without a path"                   2 kept    0 "${fake}" -- "${sinks[@]}" --plants-in "drive="
   expect "unknown option"                               2 kept    0 "${fake}" -- "${sinks[@]}" --no-such-option
   expect "no arguments"                                 2 kept    0 "${fake}"
+  expect "--rules-only with a manifest"                 2 kept    0 "${fake}" -- --rules-only "${sinks[@]}"
+  if [[ -e "${argv}" ]]; then
+    echo "SELF-TEST FAIL: --rules-only beside --manifest still ran the scanner" >&2
+    fail=1
+  fi
+
+  # (5b) --rules-only: no manifest, the floor still first, the scanner told so
+  #      and nothing else re-derived; a leak still contains; the verdict line
+  #      says what the scan was based on.
+  reset_sinks
+  expect "rules-only clean"                             0 kept    0 "${fake}" -- --rules-only --sink "logcat=${a}" --sink "drive=${b},${c}" --report "${tmp}/rules.ndjson"
+  local -a want_rules=(scan --rules-only --sink "logcat=${a}" --sink "drive=${b},${c}" --report "${tmp}/rules.ndjson")
+  got="$(< "${argv}")"
+  ran=$(( ran + 1 ))
+  if [[ "${got}" != "$(printf '%s\n' "${want_rules[@]}")" ]]; then
+    echo "SELF-TEST FAIL: --rules-only invoked the scanner with '${got//$'\n'/ }', expected '${want_rules[*]}'" >&2
+    fail=1
+  fi
+  ran=$(( ran + 1 ))
+  if ! grep -qF 'rules-only, no manifest' "${tmp}/out"; then
+    echo "SELF-TEST FAIL: the rules-only verdict line does not say it ran without a manifest" >&2
+    fail=1
+  fi
+  reset_sinks; plant_key_material "${a}"
+  expect "rules-only floor leak contains"               1 deleted 0 "${fake}" -- --rules-only --sink "logcat=${a}" --sink "drive=${b},${c}"
+  # An exempt endpoint rides a rules-only scan verbatim, repeatably; with a
+  # manifest it is a usage error (the seal carried the exemptions).
+  reset_sinks
+  expect "rules-only exempt endpoints pass through"     0 kept    0 "${fake}" -- --rules-only --exempt-endpoint 127.0.0.1 --sink "rust-test=${a}" --exempt-endpoint http://127.0.0.1:4545
+  want_rules=(scan --rules-only --exempt-endpoint 127.0.0.1 --exempt-endpoint http://127.0.0.1:4545 --sink "rust-test=${a}")
+  got="$(< "${argv}")"
+  ran=$(( ran + 1 ))
+  if [[ "${got}" != "$(printf '%s\n' "${want_rules[@]}")" ]]; then
+    echo "SELF-TEST FAIL: --exempt-endpoint reached the scanner as '${got//$'\n'/ }', expected '${want_rules[*]}'" >&2
+    fail=1
+  fi
+  reset_sinks
+  expect "exempt endpoint with a manifest is 2"         2 kept    0 "${fake}" -- "${sinks[@]}" --exempt-endpoint 127.0.0.1
+  if [[ -e "${argv}" ]]; then
+    echo "SELF-TEST FAIL: --exempt-endpoint beside --manifest still ran the scanner" >&2
+    fail=1
+  fi
+  expect "exempt endpoint without a value"              2 kept    0 "${fake}" -- --rules-only --sink "logcat=${a}" --exempt-endpoint
 
   # (6) Pass-through: the scanner receives exactly the typed-sink arguments,
   #     nothing re-derived, and the report survives a leak (it holds sink:line
@@ -360,11 +439,12 @@ run_self_test() {
     echo "SELF-TEST FAIL: the leak verdict deleted the findings report along with the sinks" >&2
     fail=1
   fi
-  local -a got=() want_argv=(scan --manifest "${manifest}" --sink "logcat=${a}" --sink "drive=${b},${c}" --segments logcat=1 --plants-in "drive=${b}" --report "${rep}")
-  mapfile -t got < "${argv}"
+  local got
+  local -a want_argv=(scan --manifest "${manifest}" --sink "logcat=${a}" --sink "drive=${b},${c}" --segments logcat=1 --plants-in "drive=${b}" --report "${rep}")
+  got="$(< "${argv}")"
   ran=$(( ran + 1 ))
-  if [[ "${got[*]}" != "${want_argv[*]}" ]]; then
-    echo "SELF-TEST FAIL: the scanner was invoked with '${got[*]}', expected '${want_argv[*]}'" >&2
+  if [[ "${got}" != "$(printf '%s\n' "${want_argv[@]}")" ]]; then
+    echo "SELF-TEST FAIL: the scanner was invoked with '${got//$'\n'/ }', expected '${want_argv[*]}'" >&2
     fail=1
   fi
 
@@ -403,6 +483,13 @@ run_self_test() {
     echo "SELF-TEST FAIL (no reads): the real run reads a file it was only asked to scan" >&2
     fail=1
   fi
+  # (10) Runs on macOS's bash 3.2 too: no bash-4-only construct in this file.
+  ran=$(( ran + 1 ))
+  if grep -vF 'BASH4_ONLY_RE=' "${BASH_SOURCE[0]}" | grep -v '^[[:space:]]*#' \
+       | grep -qE "${BASH4_ONLY_RE}"; then
+    echo "SELF-TEST FAIL (bash 3.2): a bash-4-only construct is in this file (the constructs are listed at the regex definition); macOS's /bin/bash cannot run it" >&2
+    fail=1
+  fi
 
   if (( fail )); then
     echo "scan-logs: SELF-TEST FAILED" >&2
@@ -412,7 +499,7 @@ run_self_test() {
     echo "scan-logs: SELF-TEST FAILED — ran ${ran} fixture(s), expected exactly ${SELF_TEST_FIXTURES}; a fixture was added or removed without moving the pin" >&2
     return 1
   fi
-  echo "scan-logs: self-test passed (${ran}/${SELF_TEST_FIXTURES} fixtures: verdicts fold 1 > 2 > 3 > 4 > 0 across both scanners, only a leak deletes and it deletes every sink, the key-material floor contains on its own and before the binary is looked for, an absent or non-executable scanner is rc 2 and never a skip, usage errors run nothing, arguments pass through untouched, the report survives containment, the manifest is named by basename only, and the gate keeps its hard-fail shape)."
+  echo "scan-logs: self-test passed (${ran}/${SELF_TEST_FIXTURES} fixtures: verdicts fold 1 > 2 > 3 > 4 > 0 across both scanners, only a leak deletes and it deletes every sink, the key-material floor contains on its own and before the binary is looked for, an absent or non-executable scanner is rc 2 and never a skip, usage errors run nothing, arguments pass through untouched, the report survives containment, the manifest is named by basename only, the gate keeps its hard-fail shape, and no bash-4-only construct is in the file)."
   return 0
 }
 

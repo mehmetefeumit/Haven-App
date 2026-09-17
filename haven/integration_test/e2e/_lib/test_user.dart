@@ -24,6 +24,8 @@ import 'package:haven/src/providers/onboarding_provider.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/rust/frb_generated.dart';
 import 'package:haven/src/services/nostr_identity_service.dart';
+import 'package:haven/src/utils/log_alias.dart'
+    show LogAliasClass, logAliasHandle;
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// Convenience: lowercase hex encoding of [bytes].
@@ -33,7 +35,7 @@ String bytesToHex(List<int> bytes) =>
 /// Convenience: decodes a 64-char hex string into a 32-byte list.
 Uint8List hexToBytes(String hex) {
   if (hex.length.isOdd) {
-    throw ArgumentError.value(hex, 'hex', 'odd-length hex string');
+    throw ArgumentError('odd-length hex string');
   }
   final out = Uint8List(hex.length ~/ 2);
   for (var i = 0; i < out.length; i++) {
@@ -77,7 +79,7 @@ final Uint8List daveSeed = Uint8List.fromList(List<int>.filled(32, 4));
 /// methods directly (e.g. to assert local state independently of the UI).
 class TestUser {
   TestUser._({
-    required this.label,
+    required this.role,
     required this.seed,
     required this.dataDir,
     required this.identity,
@@ -125,10 +127,12 @@ class TestUser {
       // `_parseProfileRelayPool` also enforces >= PROFILE_POOL_MIN distinct
       // entries and disjointness from the circle relay); this is the floor
       // every caller gets for free.
-      for (final url in <String>[...relays, ...?profileRelays]) {
-        if (!_isLoopback(url)) {
+      final allUrls = <String>[...relays, ...?profileRelays];
+      for (var i = 0; i < allUrls.length; i++) {
+        if (!_isLoopback(allUrls[i])) {
           throw StateError(
-            'E2E tests must use a loopback relay URL; got "$url". '
+            'E2E tests must use a loopback relay URL; the relay at index '
+            '$i is not loopback. '
             'Override with allowPublicRelay: true only with non-sentinel '
             'seeds.',
           );
@@ -239,9 +243,24 @@ class TestUser {
     // failure here would leave the suite hitting production relays.
     final effective = defaultRelays();
     if (!_listsEqual(effective, relays)) {
+      // Never the raw relay URLs (Security Rule 15) — a per-process salted
+      // handle per entry is enough to see whether the two lists actually
+      // match. Rendering the two lists whole (rather than bucketing their
+      // length) does reveal the exact relay COUNT, but that count is a
+      // lane constant (1-2) fixed by the calling workflow's own env
+      // (`HAVEN_E2E_RELAY`/`docs/E2E_TROUBLESHOOTING.md`), never a real
+      // user's roster — bucketing it would lose the harness-debugging value
+      // (which handle is missing) for no privacy the workflow file itself
+      // does not already disclose.
+      // harness-log-ok: lane-constant relay count (1-2) from the workflow env
+      final expectedHandles =
+          relays.map((r) => logAliasHandle(LogAliasClass.relay, r)).toList();
+      final gotHandles = effective
+          .map((r) => logAliasHandle(LogAliasClass.relay, r))
+          .toList();
       throw StateError(
-        'Relay override did not propagate: expected $relays, '
-        'got $effective. The OnceLock may already be set, or the '
+        'Relay override did not propagate: expected $expectedHandles, '
+        'got $gotHandles. The OnceLock may already be set, or the '
         'debug_assertions build flag is off.',
       );
     }
@@ -274,15 +293,15 @@ class TestUser {
   /// Each `TestUser` gets its own temp directory so two roles in the
   /// same process don't share SQLCipher state.
   static Future<TestUser> bootstrap({
-    required String label,
+    required String role,
     required Uint8List seed,
   }) async {
     if (seed.length != 32) {
-      // Length only — never embed the secret seed bytes in an error/log.
+      // log-scan-ok: byte length, a fixed-size check, never the seed
       throw ArgumentError('seed must be exactly 32 bytes (got ${seed.length})');
     }
     final dataDir = await Directory.systemTemp.createTemp(
-      'haven_e2e_${label}_',
+      'haven_e2e_${role}_',
     );
     final identity = await NostrIdentityManager.newInstance();
     final publicIdentity = await identity.loadFromBytes(secretBytes: seed);
@@ -296,7 +315,7 @@ class TestUser {
       identitySecretBytes: seed,
     );
     return TestUser._(
-      label: label,
+      role: role,
       seed: Uint8List.fromList(seed),
       dataDir: dataDir,
       identity: identity,
@@ -307,13 +326,13 @@ class TestUser {
   }
 
   /// Convenience: Alice with the canonical sentinel seed.
-  static Future<TestUser> alice() => bootstrap(label: 'alice', seed: aliceSeed);
+  static Future<TestUser> alice() => bootstrap(role: 'alice', seed: aliceSeed);
 
   /// Convenience: Bob with the canonical sentinel seed.
-  static Future<TestUser> bob() => bootstrap(label: 'bob', seed: bobSeed);
+  static Future<TestUser> bob() => bootstrap(role: 'bob', seed: bobSeed);
 
   /// Convenience: Carol with the canonical sentinel seed.
-  static Future<TestUser> carol() => bootstrap(label: 'carol', seed: carolSeed);
+  static Future<TestUser> carol() => bootstrap(role: 'carol', seed: carolSeed);
 
   /// Returns just the `(pubkeyHex, npub)` pair derived from [seed]
   /// without constructing a [CircleManagerFfi] or opening any
@@ -338,7 +357,7 @@ class TestUser {
     Uint8List seed,
   ) async {
     if (seed.length != 32) {
-      // Length only — never embed the secret seed bytes in an error/log.
+      // log-scan-ok: byte length, a fixed-size check, never the seed
       throw ArgumentError('seed must be exactly 32 bytes (got ${seed.length})');
     }
     final identity = await NostrIdentityManager.newInstance();
@@ -370,7 +389,7 @@ class TestUser {
     required Uint8List seed,
   }) async {
     if (seed.length != 32) {
-      // Length only — never embed the secret seed bytes in an error/log.
+      // log-scan-ok: byte length, a fixed-size check, never the seed
       throw ArgumentError('seed must be exactly 32 bytes (got ${seed.length})');
     }
     // 1. Identity into secure storage. Format mirrors
@@ -426,7 +445,7 @@ class TestUser {
   }
 
   /// Short identifier used in logs and temp-dir names ("alice", "bob").
-  final String label;
+  final String role;
 
   /// The deterministic seed bytes used to construct this identity.
   ///
@@ -478,7 +497,7 @@ class TestUser {
     try {
       await dataDir.delete(recursive: true);
     } on Object catch (e) {
-      debugPrint('[TestUser:$label] temp-dir cleanup failed: $e');
+      debugPrint('[TestUser:$role] temp-dir cleanup failed: ${e.runtimeType}');
     }
   }
 }

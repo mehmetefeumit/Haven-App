@@ -331,16 +331,19 @@ jobs:
     #   setup, UNCAPPED: checkout, Rust + Flutter toolchains, the cargo
     #     cache restore, `flutter pub get`, and a cold `cargo build` of
     #     the host-native relay                                      <= 15m
+    #   scanner build step cap                                          10m
     #   boot step cap                                                   15m
     #   drive step cap                                       135m / poll 129m
     #   diagnostics + artifact upload, UNCAPPED: a `log collect` of a
     #     multi-GB .logarchive, then (since 2026-09-12) two `log show`
-    #     passes over it and the secret scan of the exports — unmeasured
-    #     yet: re-measure. Deliberately left uncapped — a step cap that
+    #     passes over it and the secret scan of the exports, and (since
+    #     0c) the seal + identifier scan in the runner and at the scan
+    #     step — unmeasured yet: re-measure. Deliberately left uncapped
+    #     — a step cap that
     #     killed a diagnostic would turn a green run red, which is the
     #     failure this whole ladder exists to avoid; and a job-cap death
     #     skips the upload, so nothing unscanned can be published  <= 10m
-    #                                                       = 175m / poll 169m
+    #                                                       = 185m / poll 179m
     # This was 155 while the same header sized setup at 10-15m, so by its own
     # numbers the worst case was 160-165m and the cap could fire first. The
     # drive step's own cap is still the bound that should fire on a wedged run;
@@ -351,7 +354,7 @@ jobs:
     # own inner bounds can never reach, which is the inoperative-bound shape C3
     # exists to name.
     # job-uncapped-minutes: 6.7 (19 runs, worst 34488512808)
-    timeout-minutes: ${{ matrix.live_sync == 'true' && 175 || 169 }}
+    timeout-minutes: ${{ matrix.live_sync == 'true' && 185 || 179 }}
     env:
       HAVEN_E2E_RELAY: ws://localhost:7777
       FLUTTER_SUPPRESS_ANALYTICS: "true"
@@ -379,6 +382,14 @@ jobs:
       # into the artifact as well as acted on, so an unstated one would not be
       # neutral, it would be a second When-In-Use job wearing this job's name.
       HAVEN_BGP_AUTH_TIER: ${{ matrix.tier }}
+      # The runtime log scanner is wired into this lane: run-ios-sim-scenario.sh
+      # (the wrapper's delegate) reads the flag and, after the drive, seals the
+      # run's needle manifest — the host-knowable needles alone, since no
+      # recording proxy is in front of this relay — and runs the transcript
+      # through tooling/e2e/ci/scan-logs.sh before the retry classification can
+      # see it; the wrapper then gates the copy it preserves the same way.
+      HAVEN_LOGSCAN: "true"
+      HAVEN_LOGSCAN_PROFILE: host
 
     steps:
       - name: Checkout
@@ -397,8 +408,18 @@ jobs:
           workspaces: |
             haven-core
             tooling/e2e/local-relay
+            tooling/logscan
           # Per-leg, so the matrix jobs never race each other's cache save.
           key: e2e-ios-bg-publish-${{ matrix.leg }}
+
+      # The runtime log scanner, release-built ONCE, before Flutter and the
+      # simulator are resident. The runner seals and scans with it after the
+      # drive; the scan step at the bottom runs it over the exports and the
+      # upload-only logs. Capped so a cargo stall fails fast; the cap is a term
+      # of the job cap's sum above.
+      - name: Build the runtime log scanner
+        timeout-minutes: 10
+        run: cargo build --release --manifest-path tooling/logscan/Cargo.toml
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -521,6 +542,16 @@ jobs:
       # lets scripts/ci/check_e2e_step_timeout_ordering.sh classify this step
       # as a simulator drive (its classifier reads step bodies for the shared
       # runner's name; the wrapper's own name is not in its marker list).
+      # The needle directory the runner seals into, rotated before the drive
+      # and owner-only: a manifest left by an earlier run on a reused runner
+      # would be reused as this run's (the host profile treats a manifest at
+      # its out path as its own), and what lands there is every identifier the
+      # run declares, verbatim.
+      - name: Rotate the needle directory
+        run: |
+          mkdir -m 0700 -p /tmp/haven-soak/needles
+          rm -f /tmp/haven-soak/needles/*.needles.decl /tmp/haven-soak/needles/*.needles.json /tmp/haven-soak/needles/*.canaries.json
+
       - name: Run the iOS background-publish lane (${{ matrix.leg }})
         timeout-minutes: ${{ matrix.live_sync == 'true' && 135 || 129 }}
         uses: nick-fields/retry@v3
@@ -557,19 +588,26 @@ jobs:
           cp /tmp/haven-local-relay.log /tmp/relay.log 2>/dev/null || true
 
       # Scan-before-upload, as its OWN step: every `.log` the upload step names
-      # goes through the scanner here on every outcome short of a cancellation,
-      # so a leak (rc 1) deletes the scanned files and fails the lane even on an
-      # otherwise green run, and an unscannable log (rc 3) fails it and leaves
-      # them as they are. The standard guard condition (not `always()`) is what
-      # lets docs/privacy/privacy_invariants.json cite this step as the runtime
-      # scanner's enforcing run.
+      # goes through tooling/e2e/ci/scan-logs.sh here — the key-material floor
+      # AND the identifier scanner, against the manifest the runner sealed —
+      # on every outcome short of a cancellation, so a leak (rc 1) deletes the
+      # scanned files and fails the lane even on an otherwise green run, and an
+      # unscannable log (rc 3), a broken guard (rc 2) or an unmet floor (rc 4)
+      # fails it and leaves them as they are. The standard guard condition
+      # (not `always()`) is what lets docs/privacy/privacy_invariants.json
+      # cite this step as the runtime scanner's enforcing run. Typed sinks: the
+      # two `log show` exports are `ios`, the transcripts are `drive`, the
+      # relay's own log is `relay`.
       - name: Scan captured logs for secrets before upload
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: |
-          logs=(/tmp/sim-unified.log /tmp/sim-unified-full.log /tmp/bg-publish-ios.log /tmp/flutter-ios-test.log /tmp/relay.log)
           rc=0
-          bash tooling/e2e/ci/scan-logs-for-secrets.sh "${logs[@]}" || rc=$?
-          if [ "${rc}" -eq 1 ]; then rm -f -- "${logs[@]}"; fi
+          bash tooling/e2e/ci/scan-logs.sh \
+            --manifest /tmp/haven-soak/needles/*.needles.json \
+            --sink ios=/tmp/sim-unified.log,/tmp/sim-unified-full.log \
+            --sink drive=/tmp/bg-publish-ios.log,/tmp/flutter-ios-test.log \
+            --sink relay=/tmp/relay.log \
+            --report /tmp/logscan-report-upload.ndjson || rc=$?
           exit "${rc}"
 
       - name: Upload failure artifacts
@@ -587,6 +625,14 @@ jobs:
             /tmp/sim-unified-full.log
           retention-days: 14
           if-no-files-found: ignore
+
+      # The sealed manifest holds the run's identifiers verbatim. It is never
+      # uploaded (check_wire_proxy_test_only.sh) and does not outlive the job
+      # either: removed on EVERY outcome, after every upload step, so a reused
+      # runner never starts the next run holding the last run's needles.
+      - name: Discard needle manifests
+        if: always()
+        run: rm -f /tmp/haven-soak/needles/*.needles.decl /tmp/haven-soak/needles/*.needles.json /tmp/haven-soak/needles/*.canaries.json
 
       # Relay teardown. Runs LAST and `if: always()` so the relay process is
       # killed on every outcome. The script always exits 0, so teardown can

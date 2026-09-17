@@ -275,7 +275,7 @@
 # deliver.
 #
 # Everything else — the first-test watchdog, the narrowed retry gate, the
-# secret-leak scan — is inherited by delegating the drive to
+# log-privacy gate — is inherited by delegating the drive to
 # `run-ios-sim-scenario.sh` rather than reimplementing `flutter test` here.
 #
 # Usage:
@@ -301,9 +301,17 @@
 #                     deadlines (1440 / 1310), each derived from its own leg's
 #                     phase sum. Overriding either is a debugging affordance,
 #                     never a fix: see the derivation above for both bounds.
+#   HAVEN_LOGSCAN / HAVEN_LOGSCAN_PROFILE  the post-drive log-privacy gate's
+#                     arm and seal profile, declared per JOB and inherited by
+#                     the delegate; an unset profile is inferred from the
+#                     recorder's exports exactly as run-ios-sim-scenario.sh
+#                     infers it (proxy under WIRE_UPSTREAM or
+#                     HAVEN_WIRE_SENTINEL, else host), never defaulted.
 #
 # Side effects:
 #   - Writes /tmp/bg-publish-ios.log (uploaded as a CI failure artifact).
+#   - Writes /tmp/ios-logscan/bg-publish.ndjson (the scanner's findings
+#     report; never uploaded).
 #   - Leaves the app UNINSTALLED from the simulator on completion.
 #
 # Exit status:
@@ -320,6 +328,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_DIR
+# The log-privacy gate: the key-material floor AND the identifier scanner, one
+# call, one verdict (Security Rules 6 and 15).
+# shellcheck source=tooling/e2e/ci/logscan-gate.sh
+source "${SCRIPT_DIR}/logscan-gate.sh"
 
 # The drive target, relative to haven/ (the shared runner resolves it there).
 readonly SCENARIO_FILE="integration_test/ios_bg_publish_test.dart"
@@ -826,24 +838,23 @@ bgp_wait_until() {
   done
 }
 
-# bgp_scan_or_contain <log>... — the secret-leak gate (Security Rules 6 and 15)
-# over the logs the workflow uploads `if: failure()`. The delegate scans the
-# shared transcript at ITS end; this is the belt over the copy this lane
-# preserves, for the case where the delegate was killed before it got there.
-# A leak (rc 1) fails the lane, and that failure is what triggers the upload —
-# so the gate REMOVES every log it scanned before returning. rc 3
-# (absent/empty) keeps them: nothing there to contain. Reads SECRET_SCAN at
-# call time so --self-test can hand it a fake scanner.
+# bgp_scan_or_contain <preserved-log> <shared-log> — the log-privacy gate
+# (Security Rules 6 and 15) over the logs the workflow uploads `if: failure()`,
+# through logscan-gate.sh under the job's HAVEN_LOGSCAN and its profile
+# (HAVEN_LOGSCAN_PROFILE, or inferred from the recorder's exports — the same
+# rule as run-ios-sim-scenario.sh, so the belt and the delegate seal alike).
+# The delegate gates the shared transcript at ITS end; this is the belt over
+# the copy this lane preserves, for the case where the delegate was killed
+# before it got there. A leak (rc 1) fails the lane, and that failure is what
+# triggers the upload — so the gate REMOVES every log it scanned before
+# returning. rc 3 (absent/empty) keeps them: nothing there to contain.
 bgp_scan_or_contain() {
-  local rc=0
-  bash "${SECRET_SCAN}" "$@" || rc=$?
-  if (( rc == 1 )); then
-    rm -f -- "$@"
-    echo "ERROR: secret-leak guard tripped (see the LEAK line(s) above); removed" \
-         "the scanned log(s) so the failure-artifact upload cannot publish" \
-         "them: $*" >&2
+  local profile="${HAVEN_LOGSCAN_PROFILE:-}"
+  if [[ -z "${profile}" ]]; then
+    if [[ -n "${WIRE_UPSTREAM:-}${HAVEN_WIRE_SENTINEL:-}" ]]; then profile=proxy; else profile=host; fi
   fi
-  return "${rc}"
+  logscan_gate "${profile}" /tmp/haven-soak/needles -- \
+    --sink "drive=$1,$2" --report /tmp/ios-logscan/bg-publish.ndjson
 }
 
 # ---------------------------------------------------------------------------
@@ -857,7 +868,7 @@ run_self_test() {
   # check_ios_background_publish.sh's SELF_TEST_FIXTURES enforces). A count in
   # the summary line alone reports whatever ran: a fixture deleted with the
   # code it covered would print a smaller number and still say "all passed".
-  local -r SELF_TEST_FIXTURES=68
+  local -r SELF_TEST_FIXTURES=73
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
   trap "rm -rf '${tmp}'" RETURN
@@ -1558,22 +1569,23 @@ Usage: simctl location <device> <action> [<arguments>]
   _check "H8 the DISABLE deadline is per-leg and selected from LIVE_SYNC" \
     0 "${rc}"
 
-  # --- (G1-G3) The secret-leak gate CONTAINS. The workflow uploads this lane's
+  # --- (G1-G3) The flag-off arm CONTAINS. The workflow uploads this lane's
   #     log `if: failure()` and a leak is a failure, so unless the gate removes
-  #     what it flagged the lane publishes the line it went red on. Driven with
-  #     a FAKE scanner: rc 1 removes every scanned log, rc 3 (nothing scannable)
-  #     and rc 0 leave them, and the verdict comes back unchanged.
-  local fake_scan="${tmp}/fake-scan.sh" SECRET_SCAN gate_a gate_b want got
+  #     what it flagged the lane publishes the line it went red on. Driven
+  #     through the REAL sourced gate with HAVEN_LOGSCAN pinned empty and a
+  #     FAKE key-material floor: rc 1 removes every scanned log, rc 3 (nothing
+  #     scannable) and rc 0 leave them, and the verdict comes back unchanged.
+  local fake_scan="${tmp}/fake-scan.sh" gate_a gate_b want got
   printf '%s\n' '#!/usr/bin/env bash' 'exit "${FAKE_SCAN_RC}"' > "${fake_scan}"
-  SECRET_SCAN="${fake_scan}"
   gate_a="${tmp}/gate-a.log"
   gate_b="${tmp}/gate-b.log"
   for want in 1 3 0; do
     printf 'a\n' > "${gate_a}"
     printf 'b\n' > "${gate_b}"
-    export FAKE_SCAN_RC="${want}"
     rc=0
-    bgp_scan_or_contain "${gate_a}" "${gate_b}" 2>/dev/null || rc=$?
+    HAVEN_LOGSCAN= HAVEN_LOGSCAN_PROFILE= SECRET_SCAN="${fake_scan}" FAKE_SCAN_RC="${want}" \
+      HAVEN_LOGSCAN_BIN="${tmp}/no-such-binary" \
+      bgp_scan_or_contain "${gate_a}" "${gate_b}" 2>/dev/null || rc=$?
     # One observation per verdict: "<rc> <a present> <b present>".
     got="${rc} $([[ -e "${gate_a}" ]] && echo 1 || echo 0) $([[ -e "${gate_b}" ]] && echo 1 || echo 0)"
     if (( want == 1 )); then
@@ -1584,18 +1596,16 @@ Usage: simctl location <device> <action> [<arguments>]
       _check "G3 a clean scan (rc 0) keeps the logs" "0 1 1" "${got}"
     fi
   done
-  unset FAKE_SCAN_RC
 
-  # --- (G4) STRUCTURAL: the real run asserts the scanner's presence with the
-  #     hard-fail form and passes the preserved log AND the shared transcript
-  #     through the gate — after the copy that preserves it, before the drive's
-  #     exit code can end the script. Scoped to the real run so this fixture's
-  #     own needles cannot satisfy it.
+  # --- (G4) STRUCTURAL: the real run passes the preserved log AND the shared
+  #     transcript through the gate — after the copy that preserves it, before
+  #     the drive's exit code can end the script — and never echoes either.
+  #     Scoped to the real run so this fixture's own needles cannot satisfy it.
   body="$(sed -n '/^# Real run$/,$p' "${BASH_SOURCE[0]}" \
             | grep -v '^[[:space:]]*#')"
   rc=0
   [[ -n "${body}" ]] || rc=1
-  grep -qF '[[ -f "${SECRET_SCAN}" ]]' <<<"${body}" || rc=1
+  ! grep -qE '^(cat|head|tail) .*(BG_LOG|SHARED_LOG)' <<<"${body}" || rc=1
   local cp_line gate_line exit_line
   cp_line="$(grep -nF 'cp "${SHARED_LOG}" "${BG_LOG}"' <<<"${body}" | cut -d: -f1 | head -n 1)"
   gate_line="$(grep -nF 'bgp_scan_or_contain "${BG_LOG}" "${SHARED_LOG}"' <<<"${body}" | cut -d: -f1 | head -n 1)"
@@ -1605,6 +1615,47 @@ Usage: simctl location <device> <action> [<arguments>]
     (( cp_line < gate_line && gate_line < exit_line )) || rc=1
   fi
   _check "G4 the real run gates the preserved log between the copy and the drive's exit" \
+    0 "${rc}"
+
+  # --- (G5) THE FLAG-ON CALL SITE. logscan-gate.sh's own --self-test proves
+  #     what the gate does with its arguments; only this file can prove which
+  #     it is handed: the job's profile, the fixed sidecar directory, both
+  #     copies as ONE drive sink, and the report beside (never among) the
+  #     uploaded files; the verdict comes back unchanged.
+  local gate_argv="${tmp}/gate-argv" real_gate
+  real_gate="$(declare -f logscan_gate)"
+  logscan_gate() { printf '%s\n' "$@" > "${gate_argv}"; return "${FAKE_GATE_RC}"; }
+  rc=0
+  HAVEN_LOGSCAN=true HAVEN_LOGSCAN_PROFILE=host FAKE_GATE_RC=4 \
+    bgp_scan_or_contain "${gate_a}" "${gate_b}" || rc=$?
+  _check "G5 the flag-on arm hands the sourced gate the profile, both copies and the report" \
+    "4 host /tmp/haven-soak/needles -- --sink drive=${gate_a},${gate_b} --report /tmp/ios-logscan/bg-publish.ndjson" \
+    "${rc} $(tr '\n' ' ' < "${gate_argv}" | sed 's/ $//')"
+  # --- (G7) THE PROFILE IS INFERRED, NEVER DEFAULTED. With the profile unset
+  #     the gate is handed `proxy` under either recorder export alone and
+  #     `host` under neither; every variable the inference reads is pinned on
+  #     each call, so a lane's exported values cannot pick the answer.
+  local spec label sentinel upstream want
+  for spec in 'HAVEN_WIRE_SENTINEL alone|HAVEN_WIRE_SENTINEL:cafe||proxy' 'WIRE_UPSTREAM alone||ws://127.0.0.1:7777|proxy' 'neither export|||host'; do
+    IFS='|' read -r label sentinel upstream want <<<"${spec}"
+    rc=0
+    HAVEN_LOGSCAN=true HAVEN_LOGSCAN_PROFILE= HAVEN_WIRE_SENTINEL="${sentinel}" WIRE_UPSTREAM="${upstream}" \
+      FAKE_GATE_RC=0 bgp_scan_or_contain "${gate_a}" "${gate_b}" || rc=$?
+    _check "G7 with no stated profile, ${label} infers ${want}" \
+      "0 ${want}" "${rc} $(head -n 1 "${gate_argv}")"
+  done
+  eval "${real_gate}"
+
+  # --- (G6) FAIL-CLOSED SHAPES: no soft `if [[ -x` scanner gate, no bare
+  #     key-material floor call (the floor runs inside the wrapper), and the
+  #     identifier arm is reachable — the sourced gate reads HAVEN_LOGSCAN.
+  local floor='scan-logs-for-'
+  floor+='secrets.sh'
+  rc=0
+  ! grep -qE 'if[[:space:]]+\[\[[[:space:]]+-x[[:space:]]' "${BASH_SOURCE[0]}" || rc=1
+  ! grep -qF "${floor}" "${BASH_SOURCE[0]}" || rc=1
+  declare -f logscan_gate | grep -q 'HAVEN_LOGSCAN' || rc=1
+  _check "G6 no soft scanner gate, no bare floor call, and the HAVEN_LOGSCAN arm exists" \
     0 "${rc}"
 
   if (( checked != SELF_TEST_FIXTURES )); then
@@ -1638,9 +1689,11 @@ Usage: simctl location <device> <action> [<arguments>]
        "grant, the uninstall" \
        "skip, the tier threaded to the delegate, the single validated tier" \
        "input, the per-leg DISABLE deadline and the moving location drip are" \
-       "structurally pinned; and the secret-leak gate removes what it flags" \
-       "and nothing else, and sits between the log's preservation and the" \
-       "drive's exit)."
+       "structurally pinned; and the log-privacy gate is the floor alone when" \
+       "HAVEN_LOGSCAN is unset, removing what it flags and nothing else, sits" \
+       "between the log's preservation and the drive's exit with no echo of" \
+       "either copy, hands the sourced gate the job's profile, both copies and" \
+       "the report when the flag is on, and has no soft or bare arm)."
   return 0
 }
 
@@ -1713,14 +1766,13 @@ readonly EXPECT_TIER
 readonly REPO_ROOT="${SCRIPT_DIR}/../../.."
 readonly HAVEN_DIR="${REPO_ROOT}/haven"
 readonly SIM_RUNNER="${SCRIPT_DIR}/run-ios-sim-scenario.sh"
-readonly SECRET_SCAN="${SCRIPT_DIR}/scan-logs-for-secrets.sh"
 
 [[ -f "${HAVEN_DIR}/${SCENARIO_FILE}" ]] \
   || { echo "ERROR: drive target not found: ${HAVEN_DIR}/${SCENARIO_FILE}" >&2; exit 2; }
 [[ -f "${SIM_RUNNER}" ]] \
   || { echo "ERROR: shared runner not found: ${SIM_RUNNER}" >&2; exit 2; }
-[[ -f "${SECRET_SCAN}" ]] \
-  || { echo "ERROR: secret-leak guard missing at ${SECRET_SCAN}" >&2; exit 2; }
+# The scanner's findings reports go beside the uploaded files, never among them.
+mkdir -p /tmp/ios-logscan
 
 echo "iOS bg-publish lane — udid=${SIM_UDID} relay=${RELAY_URL}" \
      "live_sync=${LIVE_SYNC} tier=${AUTH_TIER} (grant=${PRIVACY_SERVICE}," \
@@ -1951,7 +2003,7 @@ echo "bg-publish — simulated-location drip every ${DRIP_SECS}s (two fixes ~5m"
 
 # --- Drive (backgrounded so this script can run the handshake). --------------
 # Delegated so the first-test watchdog, the narrowed retry gate (A6) and the
-# secret-leak scan are inherited rather than reimplemented.
+# log-privacy gate are inherited rather than reimplemented.
 # HAVEN_E2E_IOS_SKIP_UNINSTALL=1 stops the shared runner's own uninstall from
 # erasing the grant made above.
 HAVEN_LIVE_SYNC="${LIVE_SYNC}" \

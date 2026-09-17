@@ -93,6 +93,7 @@ class IdentityNotifier extends AsyncNotifier<Identity?> {
     // a new identity over possibly-decryptable old MLS state (the shared-path
     // circles.db + its fixed keyring key would otherwise bleed into it).
     if (!await _reconcilePendingMlsWipe()) {
+      // log-scan-ok: fixed literal message; StackTrace.current has no data.
       state = AsyncError(
         const IdentityServiceException(
           'Could not prepare secure storage for a new identity. '
@@ -131,6 +132,7 @@ class IdentityNotifier extends AsyncNotifier<Identity?> {
     // circle state (see [createIdentity] for the rationale). Fail closed if the
     // wipe could not be completed.
     if (!await _reconcilePendingMlsWipe()) {
+      // log-scan-ok: fixed literal message; StackTrace.current has no data.
       state = AsyncError(
         const IdentityServiceException(
           'Could not prepare secure storage for a new identity. '

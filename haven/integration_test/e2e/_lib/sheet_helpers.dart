@@ -117,6 +117,7 @@ Future<void> expandCirclesSheetToMax(
         'route or removed from the tree.',
   );
 
+  // harness-log-ok: a sheet extent fraction (0.0-1.0), not an exact count.
   debugPrint(
     '[expandCirclesSheetToMax] controller attached, size=${controller.size}',
   );
@@ -125,6 +126,7 @@ Future<void> expandCirclesSheetToMax(
   // unreliable in IntegrationTestWidgetsFlutterBinding.
   controller.jumpTo(kCirclesBottomSheetMaxSizeForTesting);
 
+  // harness-log-ok: a sheet extent fraction (0.0-1.0), not an exact count.
   debugPrint(
     '[expandCirclesSheetToMax] jumpTo dispatched, size=${controller.size}',
   );
@@ -170,11 +172,11 @@ Future<void> expandCirclesSheetToMax(
   final matches = targetFinder.evaluate();
   if (matches.isEmpty) {
     throw StateError(
-      'expandCirclesSheetToMax: target $targetFinder did not appear '
-      'in the widget tree after the sheet expanded. Either the sheet '
-      'is showing a different content branch than the test expects '
-      '(e.g., a non-empty state when the empty-state CTA was the '
-      'target) or the widget key was renamed.',
+      'expandCirclesSheetToMax: target ${targetFinder.runtimeType} did '
+      'not appear in the widget tree after the sheet expanded. Either '
+      'the sheet is showing a different content branch than the test '
+      'expects (e.g., a non-empty state when the empty-state CTA was '
+      'the target) or the widget key was renamed.',
     );
   }
   final targetRect = tester.getRect(targetFinder.first);
@@ -184,10 +186,14 @@ Future<void> expandCirclesSheetToMax(
   final fitsVertically =
       targetRect.top >= 0 && targetRect.bottom < screenSize.height;
   if (!fitsHorizontally || !fitsVertically) {
+    // Never the raw geometry (Security Rule 15) — the two fit verdicts are
+    // the whole diagnostic; the exact rect/screen dimensions add nothing a
+    // local repro under the same emulator profile does not already have.
     throw StateError(
-      'expandCirclesSheetToMax: target $targetFinder was found but '
-      'lies outside the viewport. targetRect=$targetRect, '
-      'screenSize=$screenSize. The sheet expanded as requested, so '
+      'expandCirclesSheetToMax: target ${targetFinder.runtimeType} was '
+      'found but lies outside the viewport '
+      '(fitsHorizontally=$fitsHorizontally, '
+      'fitsVertically=$fitsVertically). The sheet expanded as requested, so '
       'this is a layout regression in the sheet content — not a '
       'gesture-recognition issue.',
     );

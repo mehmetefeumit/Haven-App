@@ -198,6 +198,11 @@ source "${SCRIPT_DIR}/drive-log-lib.sh"
 # The shared fresh-install step: install_fresh and its broadcast barrier.
 # shellcheck source=tooling/e2e/ci/app-install-lib.sh
 source "${SCRIPT_DIR}/app-install-lib.sh"
+# The log-privacy gate — the key-material floor AND the identifier scanner,
+# one call, one verdict — over the captures after the drive and over the whole
+# evidence directory at exit.
+# shellcheck source=tooling/e2e/ci/logscan-gate.sh
+source "${SCRIPT_DIR}/logscan-gate.sh"
 
 # Shared `detect_strfry_bin`. The candidate path list is a property of the
 # pinned relay IMAGE, not of this lane, and B5 probes the same one — sourced
@@ -1020,17 +1025,30 @@ prescan=0 postscan=1}"
   local prunedir="${tmp}/prune"
   mkdir -p "${prunedir}"
   printf 'logcat content\n' > "${prunedir}/logcat.b9.log"
-  printf '{"id":"aa"}\n' > "${prunedir}/backlog-event.b9.log"
+  printf '{"id":"aa"}\n' > "${prunedir}/relay-backlog-event.b9.log"
   : > "${prunedir}/backlog-export-stderr.b9.log"   # a SUCCESSFUL export
   b9_prune_empty_export_stderr "${prunedir}/backlog-export-stderr.b9.log"
   # (19c) The empty capture is gone…
   _eq_case "an empty export stderr is dropped, not asserted" "0" \
     "$(find "${prunedir}" -name 'backlog-export-stderr.b9.log' \
        | grep -ac . || true)"
-  # (19d) …so the scan a PASSING lane runs comes back clean.
-  _case "…so a PASSING lane's log dir still scans clean" 0 \
-    "$(bash "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/scan-logs-for-secrets.sh" \
-       "${prunedir}" >/dev/null 2>&1; echo $?)"
+  # (19d) …so the gate over a PASSING lane's log dir names the two captures
+  #      and nothing empty. A fake scanner records the argv; the exported
+  #      event is a RELAY sink by its `relay-` prefix, since a raw kind-445
+  #      holds the 64-hex ids the structural rules would otherwise flag.
+  local fake_dir="${tmp}/fake" fake_bin="${tmp}/fake/logscan"
+  mkdir -p "${fake_dir}"
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'case "${1:-}" in scan) printf "%s\n" "$@" > "${FAKE_SCAN_ARGV}" ;; esac' 'exit 0' > "${fake_bin}"
+  chmod +x "${fake_bin}"
+  FAKE_SCAN_ARGV="${fake_dir}/scan-argv" GITHUB_RUN_ID= GITHUB_RUN_ATTEMPT= WIRE_UPSTREAM= RELAY_URL= \
+    HAVEN_LOGSCAN=true HAVEN_LOGSCAN_BIN="${fake_bin}" \
+    logscan_gate_dir host "${fake_dir}/needles" "${prunedir}" "${fake_dir}/r.ndjson" >/dev/null 2>&1 || true
+  _eq_case "…so a PASSING lane's log dir gates its captures alone, the event as relay" \
+    "$(printf '%s\n' scan --manifest "${fake_dir}/needles/local-local.needles.json" \
+         --sink "logcat=${prunedir}/logcat.b9.log" --sink "relay=${prunedir}/relay-backlog-event.b9.log" \
+         --report "${fake_dir}/r.ndjson")" \
+    "$(cat "${fake_dir}/scan-argv" 2>/dev/null || true)"
   # (19e) A NON-empty one is the diagnosis for a refused `run-as` and is KEPT —
   #      pruning by name rather than by emptiness would delete the evidence.
   printf 'run-as: package not debuggable\n' \
@@ -1344,6 +1362,46 @@ prescan=0 postscan=1}"
   rc=0; b9_run_oracle "${tmp}/bonline.log" "${tmp}/host.log" >/dev/null || rc=1
   _case "staging while still online fails the lane" 1 "${rc}"
 
+
+  # --- log-privacy gate wiring ---------------------------------------------
+  # Source pins in the shape of run-single-avd-scenario.sh's (9b): the gate
+  # is what stands between a captured log and the job log, so its position is
+  # read from this file's own lines, never trusted. Continuation lines are
+  # joined and comments dropped, so a call that spans lines is one line here;
+  # literals are counted at column 0 (`index == 1`) or inside the function
+  # that holds them, where the real call sits and a fixture's own text does
+  # not.
+  local self="${BASH_SOURCE[0]}" joined gate_at cat_at
+  joined="$(sed -e ':a' -e '/\\$/N; s/\\\n//; ta' "${self}" | grep -vE '^[[:space:]]*#')"
+  gate_at="$(grep -nE '^logscan_gate host /tmp/haven-soak/needles' <<<"${joined}" \
+    | cut -d: -f1 | head -n 1 || true)"
+  cat_at="$(grep -nE '^[[:space:]]*cat "\$\{(DRIVE_LOG|LOGCAT_FILE)\}"' <<<"${joined}" | cut -d: -f1 | head -n 1 || true)"
+  rc=0
+  [[ -n "${gate_at}" && -n "${cat_at}" ]] && (( gate_at < cat_at )) || rc=1
+  _case "the drive log is echoed only after the log-privacy gate" 0 "${rc}"
+  _eq_case "…and exactly once" "1" "$(grep -cE '^[[:space:]]*cat "\$\{(DRIVE_LOG|LOGCAT_FILE)\}"' <<<"${joined}" || true)"
+  local gate_lit='logscan_gate host /tmp/haven-soak/needles --   --sink "logcat=${LOGCAT_FILE}" --sink "drive=${DRIVE_LOG}"   --report "${LOGSCAN_REPORTS}/gate.ndjson" || LOGSCAN_GATE_RC=$?'
+  _eq_case "the gate names the logcat, the drive log" "1" \
+    "$(awk -v lit="${gate_lit}" \
+         'index($0, lit) == 1 { n++ } END { print n + 0 }' <<<"${joined}")"
+  local trap_body dump_at scan_at exit_at
+  trap_body="$(sed -n '/^cleanup() {/,/^}/p' <<<"${joined}")"
+  dump_at="$(grep -nF 'docker logs "${STRFRY_CONTAINER}" > "${LOG_DIR}/strfry.final.log"' <<<"${trap_body}" | cut -d: -f1 | head -n 1 || true)"
+  scan_at="$(grep -nF 'logscan_gate_dir host /tmp/haven-soak/needles "${LOG_DIR}" "${LOGSCAN_REPORTS}/exit.ndjson"     || scan_rc=$?' <<<"${trap_body}" \
+    | cut -d: -f1 | head -n 1 || true)"
+  exit_at="$(grep -nF 'exit "${rc}"' <<<"${trap_body}" | cut -d: -f1 | head -n 1 || true)"
+  rc=0
+  [[ -n "${dump_at}" && -n "${scan_at}" && -n "${exit_at}" ]] \
+    && (( dump_at < scan_at && scan_at < exit_at )) || rc=1
+  _case "the EXIT trap gates the whole log directory after the relay dump" 0 "${rc}"
+  local floor='scan-logs-for-'
+  floor+='secrets.sh'
+  _eq_case "no soft scanner gate" "0" \
+    "$(grep -cE 'if[[:space:]]+\[\[[[:space:]]+-x[[:space:]]' <<<"${joined}" || true)"
+  _eq_case "no bare key-material floor call" "0" "$(grep -cF "${floor}" <<<"${joined}" || true)"
+  rc=0; declare -f logscan_gate | grep -q 'HAVEN_LOGSCAN' || rc=1
+  _case "the HAVEN_LOGSCAN arm exists in the sourced gate" 0 "${rc}"
+
   if (( fails )); then
     echo "run-b9-network-reconnect.sh --self-test: FAILURES" >&2
     return 1
@@ -1424,7 +1482,6 @@ readonly REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 readonly HAVEN_DIR="${REPO_ROOT}/haven"
 readonly START_STRFRY="${SCRIPT_DIR}/start-strfry.sh"
 readonly STOP_STRFRY="${SCRIPT_DIR}/stop-strfry.sh"
-readonly SECRET_SCAN="${SCRIPT_DIR}/scan-logs-for-secrets.sh"
 
 LOGCAT_PID=""
 DRIVE_PID=""
@@ -1442,10 +1499,18 @@ readonly NET_LOG="${LOG_DIR}/network-toggles.b9.log"
 # no pattern can fire on it — being scanned anyway is the correct default,
 # not an exception to argue for.
 readonly HOST_LOG="${LOG_DIR}/backlog-import.b9.log"
-readonly BACKLOG_FILE="${LOG_DIR}/backlog-event.b9.log"
+readonly BACKLOG_FILE="${LOG_DIR}/relay-backlog-event.b9.log"
 # `.b9.log`, not `.log.err` — the scanner's walk globs `*.log`, and a suffix
 # it does not match is an artifact this lane would upload unscanned.
 readonly BACKLOG_ERR="${LOG_DIR}/backlog-export-stderr.b9.log"
+
+# The post-drive gate's verdict, folded into the EXIT trap's: a leak the gate
+# contained has deleted its sinks, so the trap's rescan alone would read clean.
+LOGSCAN_GATE_RC=0
+# The scanner's findings reports (sink:line, class, rule — never a value) live
+# BESIDE the uploaded directory, not in it: the workflow uploads LOG_DIR whole.
+readonly LOGSCAN_REPORTS="/tmp/b9-logscan"
+mkdir -p "${LOGSCAN_REPORTS}"
 
 # ---------------------------------------------------------------------------
 # Layer L2 — host-side REJECT of the relay port.
@@ -1522,18 +1587,18 @@ cleanup() {
   # See b9_prune_empty_export_stderr: a SUCCESSFUL export leaves this file at
   # 0 bytes, and a 0-byte `*.log` is fatal to the scan below.
   b9_prune_empty_export_stderr "${BACKLOG_ERR}"
-  echo "== Secret-leak scan over ${LOG_DIR} (Security Rule 6) =="
-  bash "${SECRET_SCAN}" "${LOG_DIR}" || scan_rc=$?
-  if (( scan_rc == 1 )); then
-    find "${LOG_DIR}" -type f -name '*.log' -delete 2>/dev/null || true
+  echo "== Log-privacy scan over ${LOG_DIR} (Security Rules 6 and 15) =="
+  logscan_gate_dir host /tmp/haven-soak/needles "${LOG_DIR}" "${LOGSCAN_REPORTS}/exit.ndjson" \
+    || scan_rc=$?
+  if (( scan_rc == 1 || LOGSCAN_GATE_RC == 1 )); then
     {
-      echo "Logs withheld: the secret-leak guard tripped (Security Rule 6)."
+      echo "Logs withheld: the log-privacy gate tripped (Security Rules 6 and 15)."
       echo "See the LEAK line(s) in the step log for file/label/line numbers."
     } > "${LOG_DIR}/LEAK_DETECTED.txt"
-    echo "ERROR: secret-leak guard tripped on B9 logs — logs deleted," \
+    echo "ERROR: log-privacy gate tripped on B9 logs — logs deleted," \
          "not uploaded." >&2
     rc=1
-  elif (( scan_rc != 0 )); then
+  elif (( scan_rc != 0 || LOGSCAN_GATE_RC != 0 )); then
     # An unscannable log is only NEWS on a lane that otherwise succeeded. When
     # the lane has already failed, the abort is WHY the capture is short or
     # missing, and re-reporting it as a second, differently-worded ERROR buries
@@ -1545,18 +1610,18 @@ cleanup() {
     # PASSING lane is still fatal. Only the reporting changes, and only in the
     # direction of not overwriting a more specific rc with a less specific one.
     if (( rc == 0 )); then
-      echo "ERROR: secret-leak guard could not scan the B9 logs" \
-           "(rc=${scan_rc}) — see the UNUSABLE line(s) above. The lane" \
-           "otherwise PASSED, so this is a real capture failure: an expected" \
-           "log was never written and the privacy scan therefore proved" \
-           "nothing. Logs kept for triage." >&2
+      echo "ERROR: the log-privacy gate could not certify the B9 logs" \
+           "(rc=${scan_rc}, post-drive rc=${LOGSCAN_GATE_RC}) — see the lines" \
+           "above. The lane otherwise PASSED, so this is a real capture" \
+           "failure: an expected log was never written and the privacy scan" \
+           "therefore proved nothing. Logs kept for triage." >&2
       rc=1
     else
-      echo "NOTE: the secret-leak guard could not scan every B9 log" \
-           "(rc=${scan_rc}) because the lane aborted before those captures" \
-           "were written — see the UNUSABLE line(s) above and the" \
-           "B9-LANE-FAIL line for the actual failure. Preserving the original" \
-           "exit code ${rc}. Logs kept for triage." >&2
+      echo "NOTE: the log-privacy gate could not certify every B9 log" \
+           "(rc=${scan_rc}, post-drive rc=${LOGSCAN_GATE_RC}) because the lane" \
+           "aborted before those captures were written — see the lines above" \
+           "and the B9-LANE-FAIL line for the actual failure. Preserving the" \
+           "original exit code ${rc}. Logs kept for triage." >&2
     fi
   fi
   bash "${STOP_STRFRY}" >/dev/null 2>&1 || true
@@ -1967,13 +2032,17 @@ DRIVE_PID=""
 
 # Scan BEFORE echoing. The EXIT trap's scan runs far too late to protect the
 # STEP log, which has no retention control and cannot be redacted after the
-# fact — a wider, more permanent sink than the artifact upload.
-drive_log_clean=1
-if bash "${SECRET_SCAN}" "${DRIVE_LOG}"; then
+# fact — a wider, more permanent sink than the artifact upload. The gate is
+# the key-material floor AND the identifier scanner, sealed from the host
+# needles; a leak deletes both captures.
+logscan_gate host /tmp/haven-soak/needles -- \
+  --sink "logcat=${LOGCAT_FILE}" --sink "drive=${DRIVE_LOG}" \
+  --report "${LOGSCAN_REPORTS}/gate.ndjson" || LOGSCAN_GATE_RC=$?
+drive_log_clean=$(( LOGSCAN_GATE_RC == 0 ))
+if (( drive_log_clean == 1 )); then
   cat "${DRIVE_LOG}" || true
 else
-  drive_log_clean=0
-  echo "drive log withheld from the step log — secret-leak guard tripped." >&2
+  echo "drive log withheld from the step log — log-privacy gate rc ${LOGSCAN_GATE_RC}." >&2
 fi
 
 # Record the drive's verdict WITHOUT exiting on it yet: the oracle below reads

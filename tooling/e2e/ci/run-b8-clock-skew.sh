@@ -123,6 +123,11 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/drive-log-lib.sh"
 # The shared fresh-install step: install_fresh and its broadcast barrier.
 # shellcheck source=tooling/e2e/ci/app-install-lib.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/app-install-lib.sh"
+# The log-privacy gate — the key-material floor AND the identifier scanner,
+# one call, one verdict — over the captures after the drive and over the whole
+# evidence directory at exit.
+# shellcheck source=tooling/e2e/ci/logscan-gate.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/logscan-gate.sh"
 
 # ---------------------------------------------------------------------------
 # VERBATIM markers (haven/integration_test/b8_clock_skew_test.dart).
@@ -301,7 +306,7 @@ run_self_test() {
   # Pinned by EQUALITY, never printed as prose: this used to end with a
   # hard-coded "all 18 fixture groups passed" while 17 ran. Each numbered
   # group counts itself.
-  local -r SELF_TEST_GROUPS=18
+  local -r SELF_TEST_GROUPS=19
   local tmp fail=0 got checked=0
   _group() { checked=$(( checked + 1 )); }
   tmp="$(mktemp -d)"
@@ -810,6 +815,59 @@ run_self_test() {
     fail=1
   fi
 
+
+  # --- (19) log-privacy gate wiring ---------------------------------------
+  # Source pins in the shape of run-single-avd-scenario.sh's (9b): the gate
+  # is what stands between a captured log and the job log, so its position is
+  # read from this file's own lines, never trusted. Continuation lines are
+  # joined and comments dropped, so a call that spans lines is one line here;
+  # literals are counted at column 0 (`index == 1`), where the real call
+  # sits and this fixture's own text does not.
+  _group
+  local self="${BASH_SOURCE[0]}" joined gate_at cat_at trap_body dump_at scan_at exit_at
+  joined="$(sed -e ':a' -e '/\\$/N; s/\\\n//; ta' "${self}" | grep -vE '^[[:space:]]*#')"
+  gate_at="$(grep -nE '^logscan_gate host /tmp/haven-soak/needles' <<<"${joined}" \
+    | cut -d: -f1 | head -n 1 || true)"
+  cat_at="$(grep -nE '^[[:space:]]*cat "\$\{(DRIVE_LOG|LOGCAT_FILE)\}"' <<<"${joined}" | cut -d: -f1 | head -n 1 || true)"
+  if [[ -z "${gate_at}" || -z "${cat_at}" ]] || (( cat_at < gate_at )) \
+     || [[ "$(grep -cE '^[[:space:]]*cat "\$\{(DRIVE_LOG|LOGCAT_FILE)\}"' <<<"${joined}" || true)" != "1" ]]; then
+    echo "SELF-TEST FAIL (19): the drive log must be echoed exactly once, after the" \
+         "log-privacy gate (gate='${gate_at}', cat='${cat_at}')" >&2
+    fail=1
+  fi
+  local gate_lit='logscan_gate host /tmp/haven-soak/needles --   --sink "logcat=${LOGCAT_FILE}" --sink "drive=${DRIVE_LOG}"   --report "${LOGSCAN_REPORTS}/gate.ndjson" || LOGSCAN_GATE_RC=$?'
+  got="$(awk -v lit="${gate_lit}" \
+         'index($0, lit) == 1 { n++ } END { print n + 0 }' <<<"${joined}")"
+  if [[ "${got}" != "1" ]]; then
+    echo "SELF-TEST FAIL (19b): the gate no longer names the logcat and the drive" \
+         "log with the report beside the uploaded directory (found ${got})" >&2
+    fail=1
+  fi
+  trap_body="$(sed -n '/^cleanup() {/,/^}/p' <<<"${joined}")"
+  dump_at="$(grep -nF 'docker logs strfry > "${LOG_DIR}/strfry.final.log"' <<<"${trap_body}" | cut -d: -f1 | head -n 1 || true)"
+  scan_at="$(grep -nF 'logscan_gate_dir host /tmp/haven-soak/needles "${LOG_DIR}" "${LOGSCAN_REPORTS}/exit.ndjson"     || scan_rc=$?' <<<"${trap_body}" \
+    | cut -d: -f1 | head -n 1 || true)"
+  exit_at="$(grep -nF 'exit "${rc}"' <<<"${trap_body}" | cut -d: -f1 | head -n 1 || true)"
+  if [[ -z "${dump_at}" || -z "${scan_at}" || -z "${exit_at}" ]] \
+     || (( dump_at > scan_at || scan_at > exit_at )); then
+    echo "SELF-TEST FAIL (19c): the EXIT trap must gate the whole log directory" \
+         "after the relay dump and before the exit (dump='${dump_at}'," \
+         "scan='${scan_at}', exit='${exit_at}')" >&2
+    fail=1
+  fi
+  local floor='scan-logs-for-'
+  floor+='secrets.sh'
+  if grep -qE 'if[[:space:]]+\[\[[[:space:]]+-x[[:space:]]' <<<"${joined}" \
+     || grep -qF "${floor}" <<<"${joined}"; then
+    echo "SELF-TEST FAIL (19d): a soft scanner gate (an -x test on the binary) or" \
+         "a bare key-material floor call is back — the floor runs inside the wrapper" >&2
+    fail=1
+  fi
+  if ! declare -f logscan_gate | grep -q 'HAVEN_LOGSCAN'; then
+    echo "SELF-TEST FAIL (19e): the sourced gate has no HAVEN_LOGSCAN arm" >&2
+    fail=1
+  fi
+
   if (( checked != SELF_TEST_GROUPS )); then
     echo "SELF-TEST FAIL: ran ${checked} fixture group(s), expected ${SELF_TEST_GROUPS}" >&2
     fail=1
@@ -859,7 +917,6 @@ readonly REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 readonly HAVEN_DIR="${REPO_ROOT}/haven"
 readonly START_STRFRY="${SCRIPT_DIR}/start-strfry.sh"
 readonly STOP_STRFRY="${SCRIPT_DIR}/stop-strfry.sh"
-readonly SECRET_SCAN="${SCRIPT_DIR}/scan-logs-for-secrets.sh"
 
 LOGCAT_PID=""
 SERVO_PID=""
@@ -870,6 +927,14 @@ readonly DRIVE_LOG="${LOG_DIR}/flutter-drive.log"
 # `.log` (not `.txt`) so the EXIT trap's directory walk scans it too.
 readonly JUMP_LOG="${LOG_DIR}/clock-jumps.log"
 readonly SERVO_STOP="${LOG_DIR}/.servo-stop"
+
+# The post-drive gate's verdict, folded into the EXIT trap's: a leak the gate
+# contained has deleted its sinks, so the trap's rescan alone would read clean.
+LOGSCAN_GATE_RC=0
+# The scanner's findings reports (sink:line, class, rule — never a value) live
+# BESIDE the uploaded directory, not in it: the workflow uploads LOG_DIR whole.
+readonly LOGSCAN_REPORTS="/tmp/b8-logscan"
+mkdir -p "${LOGSCAN_REPORTS}"
 
 # ---------------------------------------------------------------------------
 # Clock control
@@ -1007,29 +1072,30 @@ cleanup() {
   fi
   docker logs strfry > "${LOG_DIR}/strfry.final.log" 2>&1 || true
   rm -f "${SERVO_STOP}" 2>/dev/null || true
-  echo "== Secret-leak scan over ${LOG_DIR} (Security Rule 6) =="
-  bash "${SECRET_SCAN}" "${LOG_DIR}" || scan_rc=$?
-  if (( scan_rc == 1 )); then
+  echo "== Log-privacy scan over ${LOG_DIR} (Security Rules 6 and 15) =="
+  logscan_gate_dir host /tmp/haven-soak/needles "${LOG_DIR}" "${LOGSCAN_REPORTS}/exit.ndjson" \
+    || scan_rc=$?
+  if (( scan_rc == 1 || LOGSCAN_GATE_RC == 1 )); then
     # CONTAINMENT, not just detection. The workflow uploads ${LOG_DIR} with
     # `if: always()` and a 14-day retention, so merely going red here would
-    # publish the leaking log for a fortnight. Destroy the logs and leave a
-    # marker; the scanner has already printed file + label + line numbers
-    # (never the matched content), which is all triage needs.
-    find "${LOG_DIR}" -type f -name '*.log' -delete 2>/dev/null || true
+    # publish the leaking log for a fortnight. The wrapper has destroyed the
+    # sinks; leave a marker — the scanner has already printed file + label +
+    # line numbers (never the matched content), which is all triage needs.
     {
-      echo "Logs withheld: the secret-leak guard tripped (Security Rule 6)."
+      echo "Logs withheld: the log-privacy gate tripped (Security Rules 6 and 15)."
       echo "See the LEAK line(s) in the step log for file/label/line numbers."
     } > "${LOG_DIR}/LEAK_DETECTED.txt"
-    echo "ERROR: secret-leak guard tripped on B8 logs — logs deleted, not uploaded." >&2
+    echo "ERROR: log-privacy gate tripped on B8 logs — logs deleted, not uploaded." >&2
     rc=1
-  elif (( scan_rc != 0 )); then
+  elif (( scan_rc != 0 || LOGSCAN_GATE_RC != 0 )); then
     # rc 3 = a log was absent / unreadable / EMPTY, i.e. this lane died before
     # it finished writing its evidence. Go red — a run that scanned nothing
     # has proved nothing — but do NOT take the containment branch: deletion
     # exists to stop a LEAK being published, and there is no leak here, only
     # the truncated crash artefacts triage needs most.
-    echo "ERROR: secret-leak guard could not scan the B8 logs (rc=${scan_rc}) —" \
-         "see the UNUSABLE line(s) above. Logs kept for triage." >&2
+    echo "ERROR: the log-privacy gate could not certify the B8 logs" \
+         "(rc=${scan_rc}, post-drive rc=${LOGSCAN_GATE_RC}) — see the lines" \
+         "above. Logs kept for triage." >&2
     rc=1
   fi
   bash "${STOP_STRFRY}" >/dev/null 2>&1 || true
@@ -1140,16 +1206,19 @@ drc=0
 
 touch "${SERVO_STOP}"
 
-# Scan BEFORE echoing. The EXIT trap's scan runs far too late to protect this:
-# GitHub Actions step logs have no retention control and cannot be redacted
-# after the fact, so an unscanned `cat` of the drive log is a wider and more
-# permanent sink than the artifact upload the trap does guard.
-drive_log_clean=1
-if bash "${SECRET_SCAN}" "${DRIVE_LOG}"; then
+# Scan BEFORE echoing. The EXIT trap's scan runs far too late to protect the
+# STEP log, which has no retention control and cannot be redacted after the
+# fact — a wider, more permanent sink than the artifact upload. The gate is
+# the key-material floor AND the identifier scanner, sealed from the host
+# needles; a leak deletes both captures.
+logscan_gate host /tmp/haven-soak/needles -- \
+  --sink "logcat=${LOGCAT_FILE}" --sink "drive=${DRIVE_LOG}" \
+  --report "${LOGSCAN_REPORTS}/gate.ndjson" || LOGSCAN_GATE_RC=$?
+drive_log_clean=$(( LOGSCAN_GATE_RC == 0 ))
+if (( drive_log_clean == 1 )); then
   cat "${DRIVE_LOG}" || true
 else
-  drive_log_clean=0
-  echo "drive log withheld from the step log — secret-leak guard tripped." >&2
+  echo "drive log withheld from the step log — log-privacy gate rc ${LOGSCAN_GATE_RC}." >&2
 fi
 
 # Record the drive's verdict WITHOUT exiting on it yet: the oracle's logcat

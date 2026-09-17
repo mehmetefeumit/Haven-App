@@ -50,17 +50,16 @@ abstract final class NpubValidator {
     }
 
     if (npub.length != npubLength) {
-      throw NpubValidationException(
-        'Invalid length. Expected $npubLength characters, got ${npub.length}',
-      );
+      throw const NpubValidationException('Invalid length');
     }
 
     // Validate bech32 characters (after prefix)
     final data = npub.substring(npubPrefix.length);
     for (var i = 0; i < data.length; i++) {
       if (!_bech32Chars.contains(data[i])) {
+        // log-scan-ok: npubPrefix.length is the fixed constant 5; loop counter.
         throw NpubValidationException(
-          'Invalid character "${data[i]}" at position ${npubPrefix.length + i}',
+          'Invalid character at position ${npubPrefix.length + i}',
         );
       }
     }

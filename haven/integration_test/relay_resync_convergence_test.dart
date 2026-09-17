@@ -49,6 +49,8 @@ import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/nostr_circle_service.dart';
 import 'package:haven/src/services/nostr_relay_service.dart';
+import 'package:haven/src/utils/log_alias.dart'
+    show LogAliasClass, logAliasHandle, magnitudeBucket;
 import 'package:integration_test/integration_test.dart';
 
 import 'e2e/_lib/synthetic_user.dart';
@@ -120,10 +122,11 @@ void main() {
       defaultRelays(),
       isNot(contains(secondStrfryUrl)),
       reason:
-          'R2 ($secondStrfryUrl) must NOT be in the process-global default '
-          'relay list at startup. If it is, the convergence proofs cannot '
-          'distinguish "events landed because the update propagated" from '
-          '"events landed because R2 was already a default".',
+          'R2 (${logAliasHandle(LogAliasClass.relay, secondStrfryUrl)}) must '
+          'NOT be in the process-global default relay list at startup. If '
+          'it is, the convergence proofs cannot distinguish "events landed '
+          'because the update propagated" from "events landed because R2 '
+          'was already a default".',
     );
   });
 
@@ -295,7 +298,7 @@ void main() {
               final commitOnR1 = await r1CommitFuture;
               debugPrint(
                 '[CONV-1] relay-update commit on R1: '
-                'id=${commitOnR1.id.substring(0, 8)}',
+                'id=${logAliasHandle(LogAliasClass.event, commitOnR1.id)}',
               );
 
               // ORACLE: the commit must also have been sent to R2 (the new
@@ -304,7 +307,7 @@ void main() {
               final commitOnR2 = await r2CommitFuture;
               debugPrint(
                 '[CONV-1] relay-update commit on R2: '
-                'id=${commitOnR2.id.substring(0, 8)}',
+                'id=${logAliasHandle(LogAliasClass.event, commitOnR2.id)}',
               );
 
               // -----------------------------------------------------------
@@ -352,8 +355,8 @@ void main() {
               );
               debugPrint(
                 '[CONV-1] Bob drain after relay-update: '
-                'groupUpdates=${bobAfterUpdate.groupUpdatesProcessed} '
-                'locations=${bobAfterUpdate.locationsProcessed}',
+                'groupUpdates=${magnitudeBucket(bobAfterUpdate.groupUpdatesProcessed)} '
+                'locations=${magnitudeBucket(bobAfterUpdate.locationsProcessed)}',
               );
 
               // Bob must have processed at least one group-state change
@@ -413,9 +416,10 @@ void main() {
                 isTrue,
                 reason:
                     'Alice and Bob must converge to the same relay set '
-                    'after the relay-update commit is processed. '
-                    'Alice=${aliceRelaysAfter.toSet()}, '
-                    'Bob=${bobRelaysAfter.toSet()}',
+                    'after the relay-update commit is processed. Relay sets '
+                    'are never logged; counts were Alice='
+                    '${magnitudeBucket(aliceRelaysAfter.length)}, Bob='
+                    '${magnitudeBucket(bobRelaysAfter.length)}',
               );
 
               // -----------------------------------------------------------
@@ -454,7 +458,7 @@ void main() {
               final postUpdateOnR2 = await r2PostUpdateFuture;
               debugPrint(
                 '[CONV-1] post-update 445 on R2: '
-                'id=${postUpdateOnR2.id.substring(0, 8)}',
+                'id=${logAliasHandle(LogAliasClass.event, postUpdateOnR2.id)}',
               );
 
               // ORACLE: the 445 must have reached R2, proving routing now
@@ -487,9 +491,8 @@ void main() {
 
               debugPrint(
                 '[CONV-1] PASS: relay-update commit on R1+R2; '
-                'Alice converged to ${aliceRelaysAfter.toSet()}; '
-                'Bob converged to ${bobRelaysAfter.toSet()}; '
-                'post-update 445 reached R2 and Bob decrypted it.',
+                'Alice and Bob converged to the same relay set (never '
+                'logged); post-update 445 reached R2 and Bob decrypted it.',
               );
             } finally {
               // Nothing peer-specific to scrub at this level any more —
@@ -705,7 +708,7 @@ void main() {
                 '[CONV-2] PASS: non-admin attempt threw; '
                 'no 445 commit on R1 or R2 '
                 '(nostrGroupIdHex='
-                '${nostrGroupIdHex.substring(0, 8)}...)',
+                '${logAliasHandle(LogAliasClass.circle, nostrGroupIdHex)})',
               );
             } finally {
               // Nothing peer-specific to scrub at this level any more —
@@ -888,7 +891,7 @@ void main() {
               final commitOnR1 = await r1CommitFuture;
               debugPrint(
                 '[CONV-3] rotation commit on R1 (dropped relay): '
-                'id=${commitOnR1.id.substring(0, 8)}',
+                'id=${logAliasHandle(LogAliasClass.event, commitOnR1.id)}',
               );
               expect(
                 commitOnR1,
@@ -915,8 +918,8 @@ void main() {
               );
               debugPrint(
                 '[CONV-3] Bob drain from R1 after removal: '
-                'groupUpdates=${bobAfterUpdate.groupUpdatesProcessed} '
-                'locations=${bobAfterUpdate.locationsProcessed}',
+                'groupUpdates=${magnitudeBucket(bobAfterUpdate.groupUpdatesProcessed)} '
+                'locations=${magnitudeBucket(bobAfterUpdate.locationsProcessed)}',
               );
               expect(
                 bobAfterUpdate.groupUpdatesProcessed,
@@ -977,8 +980,9 @@ void main() {
                 isTrue,
                 reason:
                     'Alice and Bob must agree on the relay set after the '
-                    'removal. Alice=${aliceRelaysAfter.toSet()}, '
-                    'Bob=${bobRelaysAfter.toSet()}',
+                    'removal. Relay sets are never logged; counts were '
+                    'Alice=${magnitudeBucket(aliceRelaysAfter.length)}, '
+                    'Bob=${magnitudeBucket(bobRelaysAfter.length)}',
               );
 
               // -----------------------------------------------------------
@@ -1024,7 +1028,7 @@ void main() {
               final locationOnR2 = await r2LocationFuture;
               debugPrint(
                 '[CONV-3] post-removal 445 on R2: '
-                'id=${locationOnR2.id.substring(0, 8)}',
+                'id=${logAliasHandle(LogAliasClass.event, locationOnR2.id)}',
               );
               expect(
                 locationOnR2,
@@ -1064,7 +1068,7 @@ void main() {
               );
               debugPrint(
                 '[CONV-3] R1 negative-control passed: no new 445 on '
-                'R1 after removal (since=$beforeLocationPublishTs)',
+                'R1 after removal',
               );
 
               // -----------------------------------------------------------
@@ -1087,10 +1091,9 @@ void main() {
 
               debugPrint(
                 '[CONV-3] PASS: rotation commit on R1 (dropped relay); '
-                'Alice converged to ${aliceRelaysAfter.toSet()}; '
-                'Bob converged to ${bobRelaysAfter.toSet()}; '
-                'post-removal 445 reached R2 only; '
-                'Bob decrypted it from R2.',
+                'Alice and Bob converged to the same relay set (never '
+                'logged); post-removal 445 reached R2 only; Bob decrypted '
+                'it from R2.',
               );
             } finally {
               // Nothing peer-specific to scrub at this level any more —

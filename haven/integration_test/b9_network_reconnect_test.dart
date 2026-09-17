@@ -217,6 +217,7 @@ import 'package:haven/src/rust/api.dart'
 import 'package:haven/src/services/fresh_secret.dart' show withFreshSecret;
 import 'package:haven/src/services/nostr_circle_service.dart'
     show NostrCircleService;
+import 'package:haven/src/utils/log_alias.dart' show magnitudeBucket;
 import 'package:integration_test/integration_test.dart';
 import 'package:path_provider/path_provider.dart'
     show getApplicationDocumentsDirectory;
@@ -363,6 +364,17 @@ const String kPublishAfterIdleDeadMarker = '[b9] PUBLISH_AFTER_IDLE_DEAD';
 /// Closes the capture. Printed unconditionally, before the final assertion,
 /// so the shell's oracle always reads a complete window.
 const String kSequenceCompleteMarker = '[b9] SEQUENCE_COMPLETE';
+
+/// Buckets a duration into `<1s|1-9s|10-59s|60s+` for diagnostic printouts
+/// in this file that the shell does NOT numerically parse — never the
+/// millisecond magnitude itself (Log anonymity pillar).
+String _b9DurationBucket(Duration d) {
+  final s = d.inSeconds;
+  if (s < 1) return '<1s';
+  if (s < 10) return '1-9s';
+  if (s < 60) return '10-59s';
+  return '60s+';
+}
 
 /// CAROL's POST-RESTORE coordinates — the liveness signal that says when
 /// live receive came back.
@@ -678,14 +690,15 @@ void main() {
       final CircleCreationResultFfi creation;
       try {
         final peerKps = <MemberKeyPackageFfi>[];
-        for (final peer in <SyntheticUser>[bob, carol]) {
+        for (final invitee in <SyntheticUser>[bob, carol]) {
           final kp = await relayManager.fetchMemberKeypackage(
-            pubkey: peer.pubkeyHex,
+            pubkey: invitee.pubkeyHex,
           );
           if (kp == null) {
             throw StateError(
-              '[b9] fetchMemberKeypackage returned null for ${peer.label} — '
-              'their KeyPackage was not found on the relay.',
+              '[b9] fetchMemberKeypackage returned null for '
+              '${invitee.role} — their KeyPackage was not found on the '
+              'relay.',
             );
           }
           peerKps.add(kp);
@@ -710,7 +723,7 @@ void main() {
             // Synthetic peers advertise no inbox relays, so the admin's own
             // relay is the Welcome-delivery fallback (production admin flow).
             creatorFallbackRelays: <String>[defaultStrfryUrl],
-            label: 'b9',
+            scenario: 'b9',
           ),
         );
       } finally {
@@ -803,6 +816,7 @@ void main() {
       if (bobBaselineOk && carolBaselineOk) {
         debugPrint(
           '$kBaselineReceivedMarker '
+          // harness-log-ok: parsed by b9_marker_number
           'ms=${DateTime.now().difference(baselineStart).inMilliseconds}',
         );
       } else {
@@ -857,6 +871,7 @@ void main() {
       if (outageObserved) {
         debugPrint(
           '$kOutageObservedMarker '
+          // harness-log-ok: parsed by b9_marker_number
           'ms=${DateTime.now().difference(downStart).inMilliseconds}',
         );
       } else {
@@ -949,9 +964,11 @@ void main() {
         probeSpacing: const Duration(seconds: 3),
       );
       if (restored) {
+        // Not parsed by the shell (only b9_has_marker checks this marker
+        // for presence) — bucket it.
         debugPrint(
           '$kNetworkRestoredMarker '
-          'ms=${DateTime.now().difference(upStart).inMilliseconds}',
+          'elapsed=${_b9DurationBucket(DateTime.now().difference(upStart))}',
         );
       } else {
         debugPrint(kNetworkNotRestoredMarker);
@@ -987,6 +1004,7 @@ void main() {
           if (backlogId != null) {
             backlogOnRelay = await _relayHolds(freshRelay, backlogId);
             if (backlogOnRelay) backlogLastPresent = DateTime.now();
+            // harness-log-ok: boolean relay-serving verdict, no identifier
             debugPrint('$kBacklogOnRelayMarker served=$backlogOnRelay');
             if (!backlogOnRelay) {
               failures.add(
@@ -1007,8 +1025,10 @@ void main() {
             relay: freshRelay,
           );
           published = true;
+          // harness-log-ok: runner-grepped marker constant
           debugPrint(kPeerPublishedMarker);
         } on Object catch (e) {
+          // harness-log-ok: runner-grepped marker constant
           debugPrint('$kPeerPublishFailedMarker reason=${e.runtimeType}');
           failures.add(
             'the peer could not publish a location after connectivity '
@@ -1100,11 +1120,16 @@ void main() {
           if (recovered != null) {
             debugPrint(
               '$kReceiveResumedMarker '
+              // harness-log-ok: parsed by b9_marker_number
               'ms=${recovered.difference(recoveryStart).inMilliseconds} '
               'republishes=$republishes',
             );
           } else {
-            debugPrint('$kReceiveDeadMarker republishes=$republishes');
+            // Not parsed (only MARK_RESUMED's `republishes=` is) — bucket.
+            debugPrint(
+              '$kReceiveDeadMarker '
+              'republishes=${magnitudeBucket(republishes)}',
+            );
             failures.add(
               'live location receive did NOT recover within '
               '${_recoveryBudget.inSeconds}s of connectivity returning. The '
@@ -1130,6 +1155,7 @@ void main() {
           } else if (seen != null) {
             debugPrint(
               '$kBacklogReplayedMarker '
+              // harness-log-ok: parsed by b9_marker_number
               'ms=${seen.difference(recoveryStart).inMilliseconds}',
             );
           } else if (recovered == null) {
@@ -1205,8 +1231,10 @@ void main() {
                 'network blip',
               );
             } else {
+              // harness-log-ok: accepted= parsed by b9_marker_number.
               debugPrint(
-                '$kPublishAfterIdleMarker accepted=${result.acceptedBy.length}',
+                '$kPublishAfterIdleMarker '
+                'accepted=${result.acceptedBy.length}',
               );
             }
           }
@@ -1236,6 +1264,7 @@ void main() {
         }
       }
 
+      // harness-log-ok: runner-grepped marker constant
       debugPrint(kSequenceCompleteMarker);
 
       // Single terminal assertion. Everything above is already in logcat, so

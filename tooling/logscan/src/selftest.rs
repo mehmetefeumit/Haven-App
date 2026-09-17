@@ -29,12 +29,12 @@ use crate::ledger::reconcile;
 use crate::manifest::{parse_decl, read_manifest, Declarations, Manifest, NEEDLE_DIR};
 use crate::policy::Policy;
 use crate::rules::{validate_allowlist, AllowEntry, RuleSet};
-use crate::scan::{scan_sinks, FindingKind, Outcome, SinkArg};
+use crate::scan::{scan_sinks, FindingKind, Outcome, ScanMode, SinkArg};
 use crate::{RC_CLEAN, RC_GUARD, RC_LEAK, RC_META, RC_UNUSABLE};
 
 /// Number of cases [`run`] must execute. A case that stops running is a case that
 /// stops proving anything, and silence is how that goes unnoticed.
-const DECLARED_CASES: usize = 14;
+const DECLARED_CASES: usize = 16;
 
 const DECL: &str = include_str!("../fixtures/selftest.needles.decl");
 const CLEAN_DRIVE: &str = include_str!("../fixtures/clean.drive.log");
@@ -42,6 +42,9 @@ const CLEAN_LOGCAT: &str = include_str!("../fixtures/clean.logcat.log");
 const DIRTY_LOGCAT: &str = include_str!("../fixtures/dirty.logcat.log");
 const FURNITURE_DRIVE: &str = include_str!("../fixtures/furniture.drive.log");
 const FURNITURE_LOGCAT: &str = include_str!("../fixtures/furniture.logcat.log");
+const FURNITURE_RUST_TEST: &str = include_str!("../fixtures/furniture.rust-test.log");
+const FURNITURE_FLUTTER: &str = include_str!("../fixtures/furniture.flutter-test.log");
+const IOS_FORMAT: &str = include_str!("../fixtures/format.ios.log");
 const REASSEMBLY: &str = include_str!("../fixtures/reassembly.logcat.log");
 const ALLOW_EXPIRED: &str = include_str!("../fixtures/allowlist.expired.json");
 const ALLOW_DANGLING: &str = include_str!("../fixtures/allowlist.dangling.json");
@@ -66,6 +69,18 @@ const DIRTY_CLEAN_LINES: usize = 2;
 /// lines cannot report the same clean verdict over less evidence.
 const FURNITURE_DRIVE_LINES: u64 = 98;
 const FURNITURE_LOGCAT_LINES: u64 = 87;
+/// The unit-test transcripts' corpora, scanned as the `--rules-only` lanes scan
+/// them: a `cargo test` log and a `flutter test` log, the second carrying the
+/// reporter's carriage returns.
+const FURNITURE_RUST_TEST_LINES: u64 = 101;
+const FURNITURE_FLUTTER_LINES: u64 = 83;
+/// Lines of `format.ios.log` whose OWNED variant must reach the rules: five of
+/// the columnar rendering, three of the `--style syslog` one the lanes capture.
+const IOS_OWNED_RULE_LINES: [u64; 8] = [15, 16, 17, 18, 23, 25, 26, 27];
+/// The one line holding a declared value, deliberately UN-owned.
+const IOS_NEEDLE_LINE: u64 = 33;
+/// Lines of it, pinned so a fixture that lost a variant cannot pass quietly.
+const IOS_FORMAT_LINES: u64 = 33;
 /// Structural rules, all of which the dirty fixture must exercise.
 const RULE_COUNT: usize = 12;
 /// Bytes the CLI's throughput probe generates.
@@ -126,6 +141,11 @@ pub(crate) fn run_with(
             case_throughput(&rig, out, probe_bytes, mutation),
         ),
         ("N real furniture is clean", case_furniture(&rig, mutation)),
+        (
+            "O rules-only certifies the rules ran",
+            case_rules_only(&rig),
+        ),
+        ("P ios column framing", case_ios_framing(&rig, mutation)),
     ] {
         executed += 1;
         match result {
@@ -199,6 +219,8 @@ impl Rig {
                 "logcat=1",
                 "--floor",
                 "drive=1",
+                "--floor",
+                "ios=1",
                 "--exempt-endpoint",
                 "ws://10.0.2.2:7777",
                 "--out",
@@ -260,6 +282,25 @@ fn expect_rc(want: i32, args: &[&str]) -> Result<(), String> {
     ))
 }
 
+/// Runs a full CLI invocation in-process and returns its code and its output.
+///
+/// The transcript is stdout and stderr joined, because a case that asserts what
+/// the tool SAYS must not care which handle it said it on.
+fn invoke(args: &[&str]) -> (i32, String) {
+    let owned: Vec<String> = args.iter().map(|a| (*a).to_owned()).collect();
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let rc = crate::cli::run(&owned, &mut out, &mut err);
+    (
+        rc,
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out),
+            String::from_utf8_lossy(&err)
+        ),
+    )
+}
+
 /// Builds the rule engine a case scans with.
 ///
 /// The `mutation` argument can only do anything in a test build: that is what
@@ -299,6 +340,7 @@ fn scan(manifest: &Manifest, sinks: &[SinkArg], rules: &RuleSet) -> Outcome {
         &BTreeMap::new(),
         rules,
         false,
+        ScanMode::Full,
     )
 }
 
@@ -673,6 +715,7 @@ fn case_plants_missed(rig: &Rig, mutation: Option<&'static str>) -> Case {
         &plants_in,
         &rules,
         false,
+        ScanMode::Full,
     );
     require(
         outcome.rc() == RC_CLEAN,
@@ -728,6 +771,7 @@ fn case_segments(rig: &Rig, mutation: Option<&'static str>) -> Case {
         &BTreeMap::new(),
         &rules,
         false,
+        ScanMode::Full,
     );
     require(
         outcome.rc() == RC_UNUSABLE,
@@ -741,6 +785,7 @@ fn case_segments(rig: &Rig, mutation: Option<&'static str>) -> Case {
         &BTreeMap::new(),
         &rules,
         false,
+        ScanMode::Full,
     );
     require(
         outcome.rc() == RC_CLEAN,
@@ -955,6 +1000,161 @@ fn case_furniture(rig: &Rig, mutation: Option<&'static str>) -> Case {
             "the furniture corpus is {:?}/{:?} line(s), not the pinned {FURNITURE_DRIVE_LINES}/{FURNITURE_LOGCAT_LINES}",
             outcome.lines.get("drive"),
             outcome.lines.get("logcat")
+        ),
+    )?;
+
+    // The unit-test transcripts are a SECOND scan, with their own classes and
+    // their own pinned counts: `cargo test` and `flutter test` output is not
+    // the shape a `flutter drive` transcript has, and every false positive
+    // these two carry was found on the real thing.
+    let rust_test = rig.write("furniture.rust-test.log", FURNITURE_RUST_TEST)?;
+    let flutter = rig.write("furniture.flutter-test.log", FURNITURE_FLUTTER)?;
+    let outcome = scan(
+        &manifest,
+        &[sink("rust-test", &[&rust_test]), sink("drive", &[&flutter])],
+        &rules,
+    );
+    let hits: Vec<String> = outcome
+        .findings
+        .iter()
+        .map(|f| {
+            format!(
+                "{}:{}",
+                f.rule
+                    .clone()
+                    .or_else(|| f.encoding.clone())
+                    .unwrap_or_default(),
+                f.line
+            )
+        })
+        .collect();
+    require(
+        hits.is_empty(),
+        &format!("the unit-test furniture produced {hits:?}"),
+    )?;
+    require(
+        outcome.lines.get("rust-test") == Some(&FURNITURE_RUST_TEST_LINES)
+            && outcome.lines.get("drive") == Some(&FURNITURE_FLUTTER_LINES),
+        &format!(
+            "the unit-test corpus is {:?}/{:?} line(s), not the pinned {FURNITURE_RUST_TEST_LINES}/{FURNITURE_FLUTTER_LINES}",
+            outcome.lines.get("rust-test"),
+            outcome.lines.get("drive")
+        ),
+    )
+}
+
+/// A scan with no manifest: the rules and the floors, and nothing claimed
+/// beyond them.
+///
+/// The unit-test lanes (`rust-check.yml`, `coverage.yml`) declare nothing —
+/// a `cargo test` run mints no circle and no identity to declare — so the only
+/// honest verdict over their transcripts is "the structural rules ran". This
+/// case pins the three answers that verdict has to give: clean is REACHABLE
+/// (a floor nobody can meet would make the whole mode decoration), a dirty
+/// transcript still reddens, and asking for both modes at once is refused
+/// rather than silently resolved.
+fn case_rules_only(rig: &Rig) -> Case {
+    let clean = rig.write("rules-only.rust-test.log", FURNITURE_RUST_TEST)?;
+    let (rc, transcript) = invoke(&[
+        "scan",
+        "--rules-only",
+        "--sink",
+        &format!("rust-test={}", clean.display()),
+    ]);
+    require(
+        rc == RC_CLEAN,
+        &format!("a rules-only scan of clean furniture reads as rc {rc}: {transcript}"),
+    )?;
+    require(
+        transcript.contains("rules-only"),
+        &format!("the summary must say what it did NOT prove: {transcript}"),
+    )?;
+    require(
+        !transcript.contains("plants"),
+        &format!("`plants 0/0` would read as controls that passed: {transcript}"),
+    )?;
+
+    let dirty = rig.write("rules-only-dirty.rust-test.log", DIRTY_LOGCAT)?;
+    let (rc, _) = invoke(&[
+        "scan",
+        "--rules-only",
+        "--sink",
+        &format!("rust-test={}", dirty.display()),
+    ]);
+    require(
+        rc == RC_LEAK,
+        &format!("a rules-only scan of a dirty transcript reads as rc {rc}"),
+    )?;
+
+    let (rc, _) = invoke(&[
+        "scan",
+        "--rules-only",
+        "--manifest",
+        &rig.manifest.display().to_string(),
+        "--sink",
+        &format!("rust-test={}", clean.display()),
+    ]);
+    require(
+        rc == RC_GUARD,
+        &format!("--rules-only next to --manifest reads as rc {rc}, not a broken invocation"),
+    )
+}
+
+/// `log show` framing, both renderings: the owned variants reach the rules
+/// and nothing else does, while the needle search still covers every line.
+fn case_ios_framing(rig: &Rig, mutation: Option<&'static str>) -> Case {
+    let manifest = rig.manifest()?;
+    let rules = rules_for(&manifest, Vec::new(), mutation)?;
+    let path = rig.write("format.ios.log", IOS_FORMAT)?;
+    let outcome = scan(&manifest, &[sink("ios", &[&path])], &rules);
+
+    let rule_lines: Vec<u64> = outcome
+        .findings
+        .iter()
+        .filter(|f| f.kind == FindingKind::Rule)
+        .map(|f| f.line)
+        .collect();
+    require(
+        rule_lines == IOS_OWNED_RULE_LINES,
+        &format!(
+            "the structural rules ran on lines {rule_lines:?}, not on the owned variants of the two renderings {IOS_OWNED_RULE_LINES:?}"
+        ),
+    )?;
+    let needle_lines: Vec<u64> = outcome
+        .findings
+        .iter()
+        .filter(|f| f.kind == FindingKind::Needle)
+        .map(|f| f.line)
+        .collect();
+    require(
+        !needle_lines.is_empty() && needle_lines.iter().all(|line| *line == IOS_NEEDLE_LINE),
+        &format!(
+            "a declared value in a VENDOR line is still a disclosure; found on {needle_lines:?}"
+        ),
+    )?;
+    // `declared_plants_expected = false` for `ios`: nothing has shown that a
+    // Flutter `debugPrint` reaches a `log show` export, so demanding the Dart
+    // token here would make every iOS lane rc 3 for a reason that is not a
+    // privacy fact. The shape plants are in the fixture and are still required.
+    require(
+        !outcome
+            .problems
+            .iter()
+            .any(|p| p.message.contains("`dart`")),
+        &format!(
+            "an ios sink must not demand the declared Dart plant: {:?}",
+            outcome
+                .problems
+                .iter()
+                .map(|p| &p.message)
+                .collect::<Vec<_>>()
+        ),
+    )?;
+    require(
+        outcome.lines.get("ios") == Some(&IOS_FORMAT_LINES),
+        &format!(
+            "the column-variant fixture is {:?} line(s), not the pinned {IOS_FORMAT_LINES}",
+            outcome.lines.get("ios")
         ),
     )
 }

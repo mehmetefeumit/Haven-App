@@ -397,6 +397,7 @@ where
                 if let Some(complaint) =
                     clock_skew::classify_publish_outcome(accepted, &result.rejected_by)
                 {
+                    // log-scan-ok: rejected_by only feeds publish_retry_is_hopeless, a bool.
                     log::warn!(
                         "[RelayManager] publish rejected on timestamp grounds \
                          (device clock {}); not retrying={}",

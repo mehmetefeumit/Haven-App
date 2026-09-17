@@ -12,7 +12,8 @@
 
 use std::io::Write;
 
-use crate::scan::{Finding, FindingKind, Outcome};
+use crate::plants::DeclaredPlants;
+use crate::scan::{Finding, FindingKind, Outcome, ScanMode};
 
 /// One human-readable line per finding.
 ///
@@ -111,13 +112,29 @@ pub fn write_report(
         .filter(|f| f.kind == FindingKind::Needle)
         .count();
     let rules = outcome.findings.len() - needles;
+    // The middle clause is the scan's own claim about what it proved. A
+    // rules-only scan says so in the summary rather than reporting `plants 0/0`,
+    // which reads like a run whose controls all passed.
+    let proof = match outcome.mode {
+        // A run with no declaration channel has nothing to reconcile, so its
+        // `0/0` says so rather than reading as controls that all passed.
+        ScanMode::Full if outcome.declared_plants == DeclaredPlants::None => format!(
+            "plants {}/{} (declared plants: none (host profile); shape plants still required)",
+            outcome.plants_caught, outcome.plants_required
+        ),
+        ScanMode::Full => format!(
+            "plants {}/{}",
+            outcome.plants_caught, outcome.plants_required
+        ),
+        ScanMode::RulesOnly => {
+            "rules-only (no manifest: no needle searched, no plant reconciled)".to_owned()
+        }
+    };
     writeln!(
         out,
-        "haven-logscan: {} needle hit(s), {rules} structural hit(s), {} problem(s); plants {}/{}; {} line(s), {} byte(s) read",
+        "haven-logscan: {} needle hit(s), {rules} structural hit(s), {} problem(s); {proof}; {} line(s), {} byte(s) read",
         needles,
         outcome.problems.len(),
-        outcome.plants_caught,
-        outcome.plants_required,
         outcome.lines.values().sum::<u64>(),
         outcome.bytes_read
     )
@@ -142,7 +159,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{human_line, ndjson_line};
-    use crate::scan::{Finding, FindingKind};
+    use crate::scan::{Finding, FindingKind, Outcome, ScanMode};
 
     fn needle(matched: Option<String>) -> Finding {
         Finding {
@@ -197,6 +214,39 @@ mod tests {
         }
         assert_eq!(json["kind"], "needle");
         assert_eq!(json["rule"], serde_json::Value::Null);
+    }
+
+    /// The summary states which question the scan answered.
+    #[test]
+    fn the_summary_says_rules_only_instead_of_a_plant_tally() {
+        let mut outcome = Outcome {
+            mode: ScanMode::RulesOnly,
+            ..Outcome::default()
+        };
+        outcome.lines.insert("rust-test".to_owned(), 42);
+        let summary = summary_of(&outcome);
+        assert!(summary.contains("rules-only"), "{summary}");
+        assert!(
+            !summary.contains("plants"),
+            "a rules-only scan reconciles no plant, so `plants 0/0` would read as controls that passed: {summary}"
+        );
+
+        let full = Outcome {
+            mode: ScanMode::Full,
+            plants_caught: 4,
+            plants_required: 4,
+            ..Outcome::default()
+        };
+        let summary = summary_of(&full);
+        assert!(summary.contains("plants 4/4"), "{summary}");
+        assert!(!summary.contains("rules-only"), "{summary}");
+    }
+
+    fn summary_of(outcome: &Outcome) -> String {
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        super::write_report(outcome, &mut out, &mut err).expect("report");
+        String::from_utf8_lossy(&out).into_owned()
     }
 
     #[test]

@@ -7,6 +7,10 @@
 #   - tooling/logscan: the runtime log-privacy scanner the E2E lanes run over
 #     every captured log (harness-only; never part of a shipped build)
 #
+# Every job also builds that scanner and runs it, rules-only, over its own
+# tee'd `cargo test` transcript before anything else reads the file
+# (Security Rule 15; the `Scan the test transcript` steps).
+#
 # Both must pass clippy individually. Until 2026-05-24, rust_builder
 # was not clippy-checked, which masked a `too_many_arguments` issue
 # on `CircleManagerFfi::create_circle` surfaced during the E2E Phase
@@ -37,7 +41,9 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: haven-core
+          workspaces: |
+            haven-core
+            tooling/logscan
 
       - name: Check formatting
         run: cargo fmt --check
@@ -55,12 +61,40 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
+      # The scan step after the tests treats an absent scanner as a broken
+      # guard (rc 2), never as a skipped scan, so the binary is built before
+      # the transcript exists; the cache above includes tooling/logscan. `id`
+      # because this step immediately precedes the tests: "it succeeded" is
+      # the one standard-shaped `if:` predicate equal to "the tests started".
+      - name: Build the runtime log scanner
+        id: build-scanner
+        working-directory: ${{ github.workspace }}
+        run: cargo build --release --manifest-path tooling/logscan/Cargo.toml
+
       # `set -o pipefail` so `tee` cannot mask a failing cargo exit code —
       # GitHub's default shell is `bash -e {0}`, which does NOT set it.
       - name: Run tests
         run: |
           set -o pipefail
           cargo test 2>&1 | tee "${RUNNER_TEMP}/haven-core-cargo-test.log"
+
+      # Security Rule 15 over the transcript, before anything else reads it.
+      # `--rules-only`: a unit-test run mints no declarable value, so there is
+      # no manifest — the structural rules and the line floor run, and the
+      # verdict certifies that they ran, not that any declared value is absent.
+      # Containment here is detection only: `cargo test` already streamed
+      # every line into the JOB LOG, which nothing can retract, and the file
+      # is never uploaded — the wrapper still deletes it on a leak, but the
+      # red job IS the containment. Keyed on the build, not on the tests, so a
+      # failing test's captured output — exactly where an identifier would
+      # surface — is scanned too.
+      # `--exempt-endpoint 127.0.0.1` is explicit because no manifest exists to
+      # carry a sealed exemption: the loopback literal cargo prints from an
+      # `#[ignore = "…"]` reason would otherwise be an S12 hit on furniture.
+      - name: Scan the test transcript for identifiers
+        if: ${{ !cancelled() && steps.build-scanner.outcome == 'success' }}
+        working-directory: ${{ github.workspace }}
+        run: bash tooling/e2e/ci/scan-logs.sh --rules-only --exempt-endpoint 127.0.0.1 --sink rust-test="${RUNNER_TEMP}/haven-core-cargo-test.log"
 
       # `cargo test` prints "21 ignored" and exits 0. Nothing asserted that
       # number, and the reporter never names the tests, so a keyring- or
@@ -100,7 +134,9 @@ jobs:
         with:
           # Distinct cache key so this job and haven-core don't fight
           # over a shared snapshot.
-          workspaces: haven/rust_builder
+          workspaces: |
+            haven/rust_builder
+            tooling/logscan
           key: rust-builder
 
       - name: Check formatting
@@ -112,6 +148,13 @@ jobs:
       # even compile would still have gone green.
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
+
+      # As in haven-core: built before the transcript exists, `id` for the
+      # scan step's `if:`.
+      - name: Build the runtime log scanner
+        id: build-scanner
+        working-directory: ${{ github.workspace }}
+        run: cargo build --release --manifest-path tooling/logscan/Cargo.toml
 
       # The FFI boundary's own tests. Nothing in CI executed them before, which
       # left the Rule 4/6/8 `Debug`-redaction oracles
@@ -125,6 +168,13 @@ jobs:
         run: |
           set -o pipefail
           cargo test 2>&1 | tee "${RUNNER_TEMP}/rust-builder-cargo-test.log"
+
+      # Security Rule 15 over the transcript, rules-only, before anything else
+      # reads it; the haven-core job's step says why the job log is the sink.
+      - name: Scan the test transcript for identifiers
+        if: ${{ !cancelled() && steps.build-scanner.outcome == 'success' }}
+        working-directory: ${{ github.workspace }}
+        run: bash tooling/e2e/ci/scan-logs.sh --rules-only --exempt-endpoint 127.0.0.1 --sink rust-test="${RUNNER_TEMP}/rust-builder-cargo-test.log"
 
       # All five of this crate's `#[ignore]`d tests are the real-OS-keyring
       # twins of FFI tests that run in-memory. If one of the in-memory ones ever
@@ -168,7 +218,9 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: tooling/e2e/local-relay
+          workspaces: |
+            tooling/e2e/local-relay
+            tooling/logscan
           key: e2e-tooling
 
       - name: Check formatting
@@ -180,10 +232,24 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
+      # As in haven-core: built before the transcript exists, `id` for the
+      # scan step's `if:`.
+      - name: Build the runtime log scanner
+        id: build-scanner
+        working-directory: ${{ github.workspace }}
+        run: cargo build --release --manifest-path tooling/logscan/Cargo.toml
+
       - name: Run tests
         run: |
           set -o pipefail
           cargo test 2>&1 | tee "${RUNNER_TEMP}/e2e-tooling-cargo-test.log"
+
+      # Security Rule 15 over the transcript, rules-only, before anything else
+      # reads it; the haven-core job's step says why the job log is the sink.
+      - name: Scan the test transcript for identifiers
+        if: ${{ !cancelled() && steps.build-scanner.outcome == 'success' }}
+        working-directory: ${{ github.workspace }}
+        run: bash tooling/e2e/ci/scan-logs.sh --rules-only --exempt-endpoint 127.0.0.1 --sink rust-test="${RUNNER_TEMP}/e2e-tooling-cargo-test.log"
 
       - name: No undeclared test skips
         run: bash ../../../scripts/ci/check_no_undeclared_skips.sh cargo e2e_tooling "${RUNNER_TEMP}/e2e-tooling-cargo-test.log"
@@ -235,10 +301,23 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
+      # As in haven-core, and one release build serves the scan step below,
+      # the self-test and the mutation check: `cargo run --release` reuses it.
+      - name: Build the runtime log scanner
+        id: build-scanner
+        run: cargo build --release
+
       - name: Run tests
         run: |
           set -o pipefail
           cargo test 2>&1 | tee "${RUNNER_TEMP}/logscan-tooling-cargo-test.log"
+
+      # Security Rule 15 over the transcript, rules-only, before anything else
+      # reads it; the haven-core job's step says why the job log is the sink.
+      - name: Scan the test transcript for identifiers
+        if: ${{ !cancelled() && steps.build-scanner.outcome == 'success' }}
+        working-directory: ${{ github.workspace }}
+        run: bash tooling/e2e/ci/scan-logs.sh --rules-only --exempt-endpoint 127.0.0.1 --sink rust-test="${RUNNER_TEMP}/logscan-tooling-cargo-test.log"
 
       - name: No undeclared test skips
         run: bash ../../scripts/ci/check_no_undeclared_skips.sh cargo logscan "${RUNNER_TEMP}/logscan-tooling-cargo-test.log"

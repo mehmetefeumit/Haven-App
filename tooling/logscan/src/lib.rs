@@ -44,6 +44,7 @@ pub mod policy;
 pub mod report;
 pub mod rules;
 pub mod scan;
+pub mod seed;
 pub mod selftest;
 
 /// Every named sink was present, regular, readable, above its line floor, the
