@@ -88,14 +88,26 @@ jobs:
       # exactly that.
       HAVEN_LIVE_SYNC: "false"
 
-      # The injected point — Christ the Redeemer, Rio de Janeiro. A public
-      # landmark, chosen precisely BECAUSE it is obviously not a real user's
-      # position, and chosen in the SOUTHERN + WESTERN hemispheres on purpose:
-      # `adb emu geo fix` serialises through NMEA, where the hemisphere is a
-      # letter rather than a sign, so a sign-dropping defect anywhere in the
-      # chain fails loudly here instead of passing on a positive-quadrant
+      # The injected point — Rothera Research Station, Adelaide Island. A
+      # public landmark, chosen precisely BECAUSE it is obviously not a real
+      # user's position, and chosen in the SOUTHERN + WESTERN hemispheres on
+      # purpose: `adb emu geo fix` serialises through NMEA, where the hemisphere
+      # is a letter rather than a sign, so a sign-dropping defect anywhere in
+      # the chain fails loudly here instead of passing on a positive-quadrant
       # point. Also nowhere near B1's Dam Square or the FakeLocationService
       # sentinels, so a stray value is unmistakable.
+      #
+      # The digits are chosen too, and `host-needles.sh` (HN_COORD_B3, tied to
+      # these two lines by tooling/logscan/tests/host_needles_tie.rs) asserts
+      # both rules: no 4-digit ascending or descending run and no repeated
+      # 3-digit group, because the log scanner searches each axis at four and
+      # five decimals and at that length a ladder collides with the numbers a
+      # device log already carries; and an integer part outside 00-59 on both
+      # axes, which is the shape of a log timestamp's seconds field. CI run
+      # 35311161479 matched the role sentinel `12.345678` inside Apple's push
+      # daemon on four iOS lanes; this lane's previous points were
+      # -22.951916,-43.210487 (a descending run across the decimal point) and
+      # -27.125595,-109.276627 (a latitude inside the band).
       #
       # ONE source of truth: the build step bakes these as --dart-defines and
       # the drive step injects the same pair with `adb emu geo fix`. Changing
@@ -105,8 +117,8 @@ jobs:
       # coordinate into the drive log, which is uploaded as an artifact. That
       # is fine for a hardcoded landmark and NOT fine for anything derived
       # from a real device or person.
-      HAVEN_B3_GEO_LAT: "-22.951916"
-      HAVEN_B3_GEO_LON: "-43.210487"
+      HAVEN_B3_GEO_LAT: "-67.573047"
+      HAVEN_B3_GEO_LON: "-68.069783"
 
       FLUTTER_SUPPRESS_ANALYTICS: "true"
 

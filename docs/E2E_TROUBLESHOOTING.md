@@ -763,6 +763,21 @@ the iOS lanes, the runner's own choice elsewhere):
   permission assertion fails, read the extract, not a dump that no longer
   exists; if the blossom summary says `lines: 0`, the server saw no request at
   all.
+
+  One NEEDLE exemption applies to the three iOS lanes that INJECT a fix (b4,
+  the auth-tier lane, the background-publish lane): on an `ios` capture the
+  `coordinate` class is not searched on records whose process is `locationd`
+  AND whose emitter is `com.apple.locationd.Position` (`policy.toml`'s
+  `emitter_scoped_out`). `simctl location set` hands the location daemon the
+  very number the lane then declares, so that program's own records are the
+  SOURCE of the value rather than a place it leaked to — CI run 35311161479's
+  `e2e-ios-real-gps` was rc 1 on nothing else. Everything around it is
+  unchanged: every other class is still searched on those records, the same
+  coordinate under any other program (Haven's own, `apsd`,
+  `CoreSimulatorBridge`, or that same subsystem inside Haven's own process) is
+  still a leak, the structural rules never read that emitter's lines anyway,
+  and no other sink is affected. A coordinate hit on an iOS capture is still a
+  real one.
 * **`rules-only`** — `rust-check.yml`'s four tee'd `cargo test` transcripts
   and `coverage.yml`'s two tee'd `flutter test` transcripts: no manifest,
   because a unit-test run mints nothing declarable. The structural rules and

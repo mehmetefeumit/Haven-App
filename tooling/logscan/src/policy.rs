@@ -94,6 +94,36 @@ pub struct ClassSpec {
     pub scoped_out: Vec<String>,
 }
 
+/// One PROGRAM whose own records are the source of a needle class.
+///
+/// The sink's `owned_emitters` say whose lines the structural rules read; this
+/// says whose lines a needle CLASS is not searched on, for a program that
+/// necessarily holds the value. An owned emitter can never be one: there the
+/// value would be the leak itself.
+///
+/// It names BOTH columns, because neither identifies a program on its own. The
+/// subsystem does not: an Apple framework linked into Haven's app logs under
+/// its own subsystem from INSIDE the app's process (`fixtures/format.ios.log`
+/// carries a `Runner[…]` record under `com.apple.locationd.Core`), so scoping
+/// on the subsystem alone would forgive the class exactly where a leak would
+/// be. The process does not either: one daemon carries many subsystems.
+///
+/// `process` is required rather than optional: every framed record names one,
+/// so an absent one could only mean "any process" — a wider mode reachable by
+/// omission, which is the shape a guard must not have.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct EmitterScope {
+    /// The record's process, matched EXACTLY.
+    pub process: String,
+    /// The record's emitter, matched EXACTLY as ownership is — its `os_log`
+    /// subsystem, else its library, else its process.
+    pub emitter: String,
+    /// The needle classes not searched on that program's own records. Every
+    /// other class still is, and the structural rules are untouched.
+    pub classes: Vec<String>,
+}
+
 /// One sink class.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -132,6 +162,17 @@ pub struct SinkSpec {
     /// a deleted capture on a green run. Matched exactly, never as a substring.
     #[serde(default)]
     pub owned_emitters: Vec<String>,
+    /// Emitters whose own records legitimately CARRY a needle class, where a
+    /// needle of it is therefore not searched.
+    ///
+    /// The `ios` twin of a class's `scoped_out`, one rung finer: a device-wide
+    /// `log show` holds the OS's own daemons, and the daemon that delivers a
+    /// simulated fix has to know the position to deliver it. Applied to needle
+    /// matching alone, on records whose emitter matches exactly; the structural
+    /// rules are unaffected (such an emitter is un-owned anyway) and every other
+    /// class is still searched on those records.
+    #[serde(default)]
+    pub emitter_scoped_out: Vec<EmitterScope>,
     /// Whether the DECLARED (Dart) plant tokens must appear in this sink class.
     ///
     /// There is no default: a sink class added without an answer would inherit
@@ -147,6 +188,22 @@ pub struct SinkSpec {
     /// otherwise.
     #[serde(default)]
     pub required_shape_plants: Vec<String>,
+}
+
+impl SinkSpec {
+    /// The needle classes not searched on the records of the program named by
+    /// `(process, emitter)`.
+    ///
+    /// BOTH halves must match: see [`EmitterScope`] for why neither identifies
+    /// a program on its own. Empty for every sink but the one that declares a
+    /// scope, and for every program but the ones it names.
+    #[must_use]
+    pub fn emitter_scope(&self, process: &str, emitter: &str) -> &[String] {
+        self.emitter_scoped_out
+            .iter()
+            .find(|scope| scope.process == process && scope.emitter == emitter)
+            .map_or(&[][..], |scope| &scope.classes)
+    }
 }
 
 /// The hand-declared coverage claim for one class.
@@ -235,6 +292,44 @@ impl Policy {
             .ok_or_else(|| format!("undeclared sink class `{sink}`"))
     }
 
+    /// The needle exemptions of one sink: the only allowance in this policy that
+    /// stops a DECLARED value being searched for, so each bound is checked.
+    fn validate_emitter_scopes(&self, name: &str, sink: &SinkSpec) -> Result<(), String> {
+        for scope in &sink.emitter_scoped_out {
+            // Ownership is only computed for a `log show` export; under every
+            // other framing "the emitter" is not something a record names, so
+            // the scope would silently apply to nothing.
+            if sink.entry_format != EntryFormat::Ios {
+                return Err(format!(
+                    "sink `{name}` scopes a class out of an emitter, but only an ios-framed sink names one per record"
+                ));
+            }
+            if scope.process.is_empty() || scope.emitter.is_empty() {
+                return Err(format!(
+                    "sink `{name}` declares an emitter scope with an empty process or emitter, which would match whatever a record happens to carry"
+                ));
+            }
+            if sink.owned_emitters.contains(&scope.emitter) {
+                return Err(format!(
+                    "sink `{name}` scopes a class out of an emitter it also OWNS; on Haven's own emitter the value would be the leak itself"
+                ));
+            }
+            if scope.classes.is_empty() {
+                return Err(format!(
+                    "sink `{name}` scopes an emitter out of no class at all, which searches exactly what it did before and reads as an exemption"
+                ));
+            }
+            for class in &scope.classes {
+                if !self.classes.contains_key(class) {
+                    return Err(format!(
+                        "sink `{name}` scopes an emitter out of `{class}`, which is not a needle class"
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn validate(&self) -> Result<(), String> {
         if self.schema != SCHEMA {
             return Err(format!(
@@ -278,6 +373,7 @@ impl Policy {
                 }
                 _ => {}
             }
+            self.validate_emitter_scopes(name, sink)?;
             // A sink cannot require a control the declaration channel has no way
             // to mint: without the `plant` class the harness cannot declare a
             // token, and the requirement would be permanently unsatisfiable. The
@@ -486,6 +582,118 @@ mod tests {
             policy.sinks["ios"].required_shape_plants,
             vec!["rust".to_owned(), "swift".to_owned()]
         );
+    }
+
+    /// Which emitter's own records are searched for one class less, pinned in
+    /// both directions.
+    ///
+    /// This is the only NEEDLE exemption in the policy — every other one belongs
+    /// to a structural rule — so what it covers is written down here rather than
+    /// read off whatever the file currently says, and a second emitter, a second
+    /// class or a second sink acquiring one fails this test first.
+    #[test]
+    fn the_emitter_needle_scope_is_pinned() {
+        let policy = Policy::load().expect("policy");
+        let scoped: Vec<(&str, &str, &str, &[String])> = policy
+            .sinks
+            .iter()
+            .flat_map(|(sink, spec)| {
+                spec.emitter_scoped_out.iter().map(move |scope| {
+                    (
+                        sink.as_str(),
+                        scope.process.as_str(),
+                        scope.emitter.as_str(),
+                        &scope.classes[..],
+                    )
+                })
+            })
+            .collect();
+        assert_eq!(
+            scoped,
+            vec![(
+                "ios",
+                "locationd",
+                "com.apple.locationd.Position",
+                &["coordinate".to_owned()][..]
+            )],
+            "the location daemon, its Position subsystem, the coordinate class, the ios sink — and nothing else"
+        );
+        // …and the lookup answers per PROGRAM, so no near miss is forgiven:
+        // the same subsystem inside Haven's own process (which is where a leak
+        // would be), the daemon's other subsystems, the daemon's process under
+        // another subsystem, and Haven's own emitters are all searched for
+        // every class exactly as before.
+        let ios = &policy.sinks["ios"];
+        assert_eq!(
+            ios.emitter_scope("locationd", "com.apple.locationd.Position"),
+            ["coordinate"]
+        );
+        for (process, emitter) in [
+            ("Runner", "com.apple.locationd.Position"),
+            ("locationd", "com.apple.locationd.Core"),
+            ("locationd", "locationd"),
+            ("Runner", "frb_user"),
+            ("Runner", "haven_ios"),
+            ("apsd", "com.apple.network"),
+        ] {
+            assert!(
+                ios.emitter_scope(process, emitter).is_empty(),
+                "`{process}/{emitter}`"
+            );
+        }
+    }
+
+    #[test]
+    fn an_emitter_scope_on_a_sink_that_names_no_emitter_is_rejected() {
+        let text = r#"
+schema = 1
+base64_entropy_bits = 4.2
+min_term_len = 6
+furniture = []
+[classes]
+coordinate = { kind = "coordinate" }
+[sinks]
+drive = { term_floor = 6, declared_plants_expected = false, structural_rules = true, reassemble = false, min_lines = 1, entry_format = "plain", emitter_scoped_out = [{ process = "locationd", emitter = "locationd", classes = ["coordinate"] }] }
+[ledger.coordinate]
+"#;
+        let err = Policy::parse(text).expect_err("a plain sink names no emitter per record");
+        assert!(err.contains("only an ios-framed sink"), "{err}");
+    }
+
+    /// Scoping a class out of an emitter Haven OWNS would forgive the leak
+    /// itself, which is the one thing this knob must never be able to do.
+    #[test]
+    fn an_emitter_scope_on_an_owned_emitter_is_rejected() {
+        let text = r#"
+schema = 1
+base64_entropy_bits = 4.2
+min_term_len = 6
+furniture = []
+[classes]
+coordinate = { kind = "coordinate" }
+[sinks]
+ios = { term_floor = 8, declared_plants_expected = false, structural_rules = true, reassemble = false, min_lines = 1, entry_format = "ios", owned_emitters = ["frb_user"], emitter_scoped_out = [{ process = "Runner", emitter = "frb_user", classes = ["coordinate"] }] }
+[ledger.coordinate]
+"#;
+        let err = Policy::parse(text).expect_err("Haven's own emitter must never be scoped out");
+        assert!(err.contains("it also OWNS"), "{err}");
+    }
+
+    #[test]
+    fn an_emitter_scoped_out_of_an_undeclared_class_is_rejected() {
+        let text = r#"
+schema = 1
+base64_entropy_bits = 4.2
+min_term_len = 6
+furniture = []
+[classes]
+coordinate = { kind = "coordinate" }
+[sinks]
+ios = { term_floor = 8, declared_plants_expected = false, structural_rules = true, reassemble = false, min_lines = 1, entry_format = "ios", owned_emitters = ["frb_user"], emitter_scoped_out = [{ process = "locationd", emitter = "locationd", classes = ["coordinates"] }] }
+[ledger.coordinate]
+"#;
+        let err = Policy::parse(text).expect_err("a misspelt class scopes out nothing");
+        assert!(err.contains("not a needle class"), "{err}");
     }
 
     /// Every sink's LINE FLOOR, pinned with the capture each was sized to.

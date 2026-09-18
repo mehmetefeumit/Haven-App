@@ -321,16 +321,23 @@ fn check_meta_floors(
         );
     }
     for (class, min) in expect {
+        // DISTINCT values, by commitment: the floor exists to catch a runner
+        // that dropped a declaration, and counting lines would let the same
+        // value declared twice — a sidecar the proxy appended to twice, a
+        // lane passing a `--host-decl` the library already emits — stand in
+        // for the missing one.
         let have = declarations
             .values
             .iter()
             .filter(|(_, entry)| &entry.class == class)
-            .count();
+            .map(|(_, entry)| entry.commitment.as_str())
+            .collect::<std::collections::BTreeSet<&str>>()
+            .len();
         if have < *min {
             verdict.note(
                 RC_META,
                 format!(
-                    "declaration floor unmet: class `{class}` was declared {have} time(s), below the {min} this scenario's shape requires; a manifest that names fewer values than the run minted cannot read as complete"
+                    "declaration floor unmet: class `{class}` names {have} distinct value(s), below the {min} this scenario's shape requires; a manifest that names fewer values than the run minted cannot read as complete"
                 ),
             );
         }
@@ -1012,6 +1019,40 @@ mod tests {
             );
             assert!(!rig.manifest.exists(), "{order:?}");
         }
+    }
+
+    /// The floor counts DISTINCT values, so a value declared twice cannot stand
+    /// in for the one that was dropped.
+    ///
+    /// The duplicate is a real shape rather than a contrived one: a proxy
+    /// sidecar is appended to across a lane's retries, and a lane may pass a
+    /// `--host-decl` for a value `host-needles.sh` already emits. Counting
+    /// lines would let either satisfy a floor the run does not actually meet —
+    /// the one thing the floor exists to catch.
+    #[test]
+    fn the_declaration_floor_counts_distinct_values_not_lines() {
+        let rig = Rig::new("floordup");
+        let decl = rig.write(
+            "alice.needles.decl",
+            &format!(
+                "{{\"class\":\"pubkey\",\"value\":\"{NEEDLE}\"}}\n\
+                 {{\"class\":\"pubkey\",\"value\":\"{NEEDLE}\"}}\n"
+            ),
+        );
+        let (rc, out, _) = invoke(&[
+            "seal",
+            "--run-id",
+            "x",
+            "--decl",
+            decl.to_str().expect("utf8"),
+            "--expect",
+            "pubkey=2",
+            "--out",
+            rig.manifest.to_str().expect("utf8"),
+        ]);
+        assert_eq!(rc, RC_META, "{out}");
+        assert!(out.contains("names 1 distinct value(s)"), "{out}");
+        assert!(!rig.manifest.exists());
     }
 
     #[test]

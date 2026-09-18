@@ -382,12 +382,22 @@ String _b9DurationBucket(Duration d) {
 /// Deliberately distinct from [bobFakeLatitude] / [bobFakeLongitude]: the
 /// pre-outage entry is still in `memberLocationsProvider`, so a presence
 /// check would be satisfied by stale state on an app whose receive path
-/// never came back. Same obviously-synthetic shape as the sentinels in
-/// `fake_location_service.dart`.
-const double _postLatitude = 15.678901;
+/// never came back. Same ocean and same digit discipline as the sentinels in
+/// `fake_location_service.dart` — no 4-digit ascending or descending run, no
+/// repeated 3-digit group, and an integer part outside 00-59 on both axes, so
+/// the 4- and 5-decimal spellings the log scanner searches cannot collide
+/// with the numbers a device log already carries.
+///
+/// This lane's runner declares this point and the backlog one to its
+/// log-privacy seal (`HN_COORD_B9_POST` / `HN_COORD_B9_BACKLOG` in
+/// `tooling/e2e/ci/host-needles.sh`, tied to these four literals by
+/// `tooling/logscan/tests/host_needles_tie.rs`). A coordinate this lane mints
+/// and nobody declares is a coordinate no needle searches for, so change one
+/// side and the tie test fails until the other moves.
+const double _postLatitude = 78.411925;
 
 /// Longitude twin of [_postLatitude].
-const double _postLongitude = 93.210987;
+const double _postLongitude = 133.846732;
 
 /// BOB's BACKLOG coordinates — carried by exactly one event in the whole
 /// run: the kind-445 encrypted during the blackout and imported into strfry
@@ -396,11 +406,12 @@ const double _postLongitude = 93.210987;
 /// Nothing on the device ever publishes these, so surfacing them can only
 /// mean the imported event was delivered and decrypted. Distinct from BOTH
 /// Bob's baseline and Carol's post-restore sentinels, since all three are
-/// live in `memberLocationsProvider` at once.
-const double _backlogLatitude = 27.135791;
+/// live in `memberLocationsProvider` at once; same digit discipline and the
+/// same declaration as [_postLatitude].
+const double _backlogLatitude = 78.750293;
 
 /// Longitude twin of [_backlogLatitude].
-const double _backlogLongitude = 61.472583;
+const double _backlogLongitude = 169.553468;
 
 /// Where the staged backlog event is written for the shell to `adb exec-out
 /// run-as … cat`.

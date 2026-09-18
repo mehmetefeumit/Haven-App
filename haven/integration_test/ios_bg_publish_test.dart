@@ -657,9 +657,13 @@ const Duration _storeBaselineWindow = Duration(seconds: 15);
 /// `bobFakeLatitude`/`bobFakeLongitude`) because this target must import
 /// nothing from the fake-location library: it runs the PRODUCTION location
 /// service, and `check_ios_background_publish.sh` check 12 exists to keep it
-/// that way. Far from any populated area, hermetic relay only.
-const double _peerLatitude = 13.456789;
-const double _peerLongitude = 89.876543;
+/// that way. Open Arctic Ocean, hermetic relay only.
+///
+/// The two copies move together: this lane's log-privacy seal declares Bob's
+/// pair (`tooling/e2e/ci/host-needles.sh`), so a number only this file used
+/// would be a coordinate no needle searches for.
+const double _peerLatitude = 79.343842;
+const double _peerLongitude = 117.194008;
 
 /// How long P3 waits after the disable before re-fetching the relay's
 /// event-id set.

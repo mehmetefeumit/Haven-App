@@ -44,9 +44,21 @@
 #       README explains the knob and names each exempt sink. It is the one
 #       exemption that belongs to a sink class rather than to a rule, so a
 #       second sink acquiring it silently is a widening nothing else reports.
+#   P7  NEEDLE EXEMPTION PINNED. `emitter_scoped_out` — the classes NOT searched
+#       on one named emitter's own records — appears on exactly the sinks in
+#       EMITTER_SCOPED_OUT, spelled exactly as pinned there, and the README
+#       names the emitter. It is the only exemption in this tree that touches
+#       the NEEDLE search (a value the run actually minted), so widening it by
+#       an emitter, a class or a sink must not be a one-line diff nobody reads.
 #
 # Floors on the number of sinks and classes parsed keep a policy the parser
-# has stopped reading from passing as compliant.
+# has stopped reading from passing as compliant. What the floors CANNOT see is a
+# sink written as a block table (`[sinks.ios]`) rather than as the inline table
+# every entry uses today: `section_entries` reads inline tables only, so a sink
+# rewritten that way would be parsed by nothing here and would collapse the
+# floor instead of passing quietly. The crate's own
+# `the_emitter_needle_scope_is_pinned` covers that shape, because it reads the
+# PARSED policy rather than its text.
 #
 # ## What is deliberately NOT here
 #
@@ -93,6 +105,17 @@ declare -A STRUCTURAL_RULES_OFF=(
 declare -A CARGO_STATUS_EXEMPT=(
   ['rust-test']='the only class that holds a cargo transcript; cargo prints the public pinned git revision of every git dependency and every crate name before a test runs'
 )
+# The policy's ONE needle exemption, pinned verbatim: the emitter whose own
+# records are the SOURCE of a class rather than a place it leaked to. Every
+# other exemption in this tree belongs to a structural rule, so a second one
+# appearing — or this one widening to another emitter, another class or another
+# sink — is a change to what "clean" means that nothing else reports from the
+# text. The README must name the emitter.
+declare -A EMITTER_SCOPED_OUT=(
+  ['ios']='emitter_scoped_out = [{ process = "locationd", emitter = "com.apple.locationd.Position", classes = ["coordinate"] }]'
+)
+readonly EMITTER_SCOPE_KEY='emitter_scoped_out'
+readonly EMITTER_SCOPE_DOC='com.apple.locationd.Position'
 # Sinks whose DECLARED Dart plant tokens are not demanded, with the reason;
 # the README's positive-controls bullet must name each one.
 declare -A DECLARED_PLANTS_OFF=(
@@ -163,6 +186,15 @@ check_policy() { # check_policy <policy> <readme>
     elif [[ -n "${v}" && "${v}" != "scanned" ]]; then
       violation "${rel}: sink \`${name}\` has cargo_status = ${v}. Only a class that holds a CARGO transcript may skip cargo's crate-build line (S2 and S6 on it); on any other capture that shape is app output. List the sink with its reason here and in the README, or delete the key."
     fi
+    # P7: the per-emitter NEEDLE exemption, pinned as a literal. A needle is a
+    # value this run minted, so not searching for it somewhere is the widest
+    # allowance the policy can make.
+    if [[ -n "${EMITTER_SCOPED_OUT[${name}]+x}" ]]; then
+      grep -qF -- "${EMITTER_SCOPED_OUT[${name}]}" <<<"${body}" \
+        || violation "${rel}: sink \`${name}\` no longer carries the pinned needle exemption \`${EMITTER_SCOPED_OUT[${name}]}\`. Widening it (a second emitter, a second class) or dropping it are both decisions; make the same change here, with the reason, and in the README."
+    elif grep -qF -- "${EMITTER_SCOPE_KEY}" <<<"${body}"; then
+      violation "${rel}: sink \`${name}\` scopes a needle class out of an emitter and is not pinned here. A needle is a value the run minted; declining to search for it on some emitter's lines is the one allowance with no allowlist path, so it is listed here verbatim and explained in the README, or it does not exist."
+    fi
   done <<<"${entries}"
   if (( n_sinks < MIN_SINKS )); then
     broken "${rel}: parsed ${n_sinks} sink(s) under [sinks], expected at least ${MIN_SINKS}. The section parser has stopped matching, so every verdict above is vacuous."
@@ -190,6 +222,12 @@ check_policy() { # check_policy <policy> <readme>
     for s in "${!CARGO_STATUS_EXEMPT[@]}"; do
       grep -qF -- "\`${s}\`" "${readme}" || violation "${README_REL}: the README does not name \`${s}\`, which the policy exempts from S2 and S6 on cargo's crate-build line. Say why, there."
     done
+  fi
+
+  # …and the same cross-check for the needle exemption: the emitter whose
+  # records are searched for one class less is named where the next reader looks.
+  if (( ${#EMITTER_SCOPED_OUT[@]} > 0 )) && ! grep -qF -- "${EMITTER_SCOPE_DOC}" "${readme}"; then
+    violation "${README_REL}: the README does not name \`${EMITTER_SCOPE_DOC}\`, the emitter the policy scopes a needle class out of. It is the only needle exemption in the tree; say there which class, why that emitter holds the value by construction, and what still catches a real leak of it."
   fi
 
   local classes ledgers kind n_classes=0
@@ -276,7 +314,7 @@ check_all() { # check_all <policy> <allowlist> <readme> <proof-root>
 # scratch. Every rule has a fixture in both directions; the count is pinned.
 # ---------------------------------------------------------------------------
 self_test() {
-  local -r SELF_TEST_CASES=36
+  local -r SELF_TEST_CASES=41
   local tmp cases=0 failures=0
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
@@ -389,6 +427,17 @@ self_test() {
   _expect "(P6) a README that never explains the knob fails" "${d}" 1 "nothing explains"
   _expect "(P6) rust-test exempt passes (base)" "${b}" 0
 
+  # P7
+  d="${tmp}/p7a"; mut "${d}" policy.toml 's|classes = \["coordinate"\]|classes = ["coordinate", "pubkey"]|'
+  _expect "(P7) widening the needle exemption to a second class fails" "${d}" 1 "no longer carries the pinned needle exemption"
+  d="${tmp}/p7b"; mut "${d}" policy.toml 's|emitter_scoped_out|emitter_scoped_gone|'
+  _expect "(P7) a pinned sink that dropped the exemption is a stale list entry" "${d}" 1 "no longer carries the pinned needle exemption"
+  d="${tmp}/p7c"; mut "${d}" policy.toml '/^drive = /s|entry_format = "plain"|entry_format = "plain", emitter_scoped_out = [{ process = "locationd", emitter = "locationd", classes = ["coordinate"] }]|'
+  _expect "(P7) a second sink acquiring a needle exemption fails" "${d}" 1 "sink \`drive\` scopes a needle class out of an emitter"
+  d="${tmp}/p7d"; mut "${d}" README.md 's|com\.apple\.locationd\.Position|com.apple.locationd.Elsewhere|g'
+  _expect "(P7) a README that never names the scoped emitter fails" "${d}" 1 "does not name \`com.apple.locationd.Position\`"
+  _expect "(P7) the shipped exemption passes (base)" "${b}" 0
+
   # floors
   d="${tmp}/v1"; mut "${d}" policy.toml 's|^\[sinks\]|[sinks_renamed]|'
   _expect "floor: a [sinks] section the parser cannot find is BROKEN" "${d}" 2 "parsed 0 sink(s)"
@@ -430,7 +479,7 @@ main() {
     echo "and CLAUDE.md (Log anonymity, Security Rule 15)." >&2
     exit 1
   fi
-  log "OK — no deferral vocabulary, structural rules on except relay, the cargo exemption on rust-test alone and explained, plant expectations pinned and explained, allowlist entries shaped and live, every class ledgered."
+  log "OK — no deferral vocabulary, structural rules on except relay, the cargo exemption on rust-test alone and explained, the needle exemption pinned to one emitter and one class and explained, plant expectations pinned and explained, allowlist entries shaped and live, every class ledgered."
 }
 
 main "$@"

@@ -66,3 +66,14 @@
 2026-09-12 10:00:00.000006+0000 0xdeadbeef Error       0xfeedface           4321   5    RunnerHelper: fix -12.345678,98.765432
 # --- B. written: a declared value on an UN-OWNED line is still searched ---
 2026-09-12 10:00:00.000018+0000 localhost locationd[77] <Notice>: cached identity 0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9
+# --- B. written: the EMITTER NEEDLE SCOPE, in all three of its cases. The same
+# DECLARED coordinate under the location daemon's `Position` subsystem, which a
+# lane hands the fix with `simctl location set` and which is therefore scoped
+# out of that one class; under Haven's own `haven_ios`, where the same number is
+# a leak; and under THAT SAME SUBSYSTEM inside Haven's own process, which is
+# where a leak would be and which the scope's process half is what excludes.
+# The declared value rather than the synthetic one above: a scope no needle
+# exercises proves nothing. ---
+2026-09-12 10:00:00.000019+0000  localhost locationd[77]: (CoreLocation) [com.apple.locationd.Position:Client] fix -33.865143,151.209901
+2026-09-12 10:00:00.000020+0000  localhost Runner[17463]: (Runner) [haven_ios:slc] fix -33.865143,151.209901
+2026-09-12 10:00:00.000021+0000  localhost Runner[17463]: (CoreLocation) [com.apple.locationd.Position:Client] fix -33.865143,151.209901

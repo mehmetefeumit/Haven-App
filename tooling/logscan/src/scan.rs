@@ -273,6 +273,9 @@ struct FileReport {
     /// it. Bounded by the FINDINGS rather than by the owned lines: a soak-tier
     /// logcat has millions of the latter and a handful of the former.
     tags: BTreeMap<u64, String>,
+    /// Needle classes the line's own EMITTER is the source of, for the lines
+    /// that produced a needle finding. Bounded the same way.
+    emitter_scoped: BTreeMap<u64, Vec<String>>,
 }
 
 /// The accumulator that re-joins a chunked logcat record.
@@ -484,6 +487,18 @@ fn scan_one(file: &SinkFile<'_>, tally: &mut PlantTally<'_>, outcome: &mut Outco
 
     for ((index, line, reassembled), (count, sample)) in report.needles {
         let term = file.needles.terms[index];
+        // The record's own emitter is the SOURCE of this class, not a place the
+        // value leaked to: the location daemon has to know the position the
+        // lane injected in order to deliver it. Only the classes that emitter
+        // declares, only on its own records, and only here — the same value
+        // under a Haven emitter is still a finding.
+        if report
+            .emitter_scoped
+            .get(&line)
+            .is_some_and(|classes| classes.contains(&term.class))
+        {
+            continue;
+        }
         outcome.findings.push(Finding {
             sink: file.path.to_path_buf(),
             line,
@@ -942,6 +957,11 @@ fn handle_line(
         if let Some(tag) = framed.tag.clone() {
             report.tags.insert(line_no, tag);
         }
+        if !framed.scoped_classes.is_empty() {
+            report
+                .emitter_scoped
+                .insert(line_no, framed.scoped_classes.to_vec());
+        }
     }
     for found in ctx.plant_shape.find_iter(framed.body) {
         *report.plants.entry(found.as_str().to_owned()).or_default() += 1;
@@ -1109,10 +1129,15 @@ struct Framed<'a> {
     pid: Option<String>,
     tid: Option<String>,
     owned: bool,
+    /// Needle classes this record's own emitter is the SOURCE of, so they are
+    /// not searched on it (`SinkSpec::emitter_scoped_out`). Empty everywhere
+    /// else, a line that does not parse included: an unattributable line is
+    /// scoped out of nothing.
+    scoped_classes: &'a [String],
 }
 
 /// Splits a line according to its sink's framing.
-fn frame<'a>(spec: &SinkSpec, text: &'a str) -> Framed<'a> {
+fn frame<'a>(spec: &'a SinkSpec, text: &'a str) -> Framed<'a> {
     match spec.entry_format {
         EntryFormat::Plain => Framed {
             body: text,
@@ -1121,6 +1146,7 @@ fn frame<'a>(spec: &SinkSpec, text: &'a str) -> Framed<'a> {
             pid: None,
             tid: None,
             owned: true,
+            scoped_classes: &[],
         },
         EntryFormat::Logcat => parse_logcat(spec, text),
         EntryFormat::Ios => parse_ios(spec, text),
@@ -1153,7 +1179,7 @@ fn frame<'a>(spec: &SinkSpec, text: &'a str) -> Framed<'a> {
 /// additionally own `RunnerHelper` and any vendor line whose MESSAGE contains
 /// the word `Runner`. A line that does not parse is treated as NOT owned, so
 /// the rules skip it; needles are still searched in every byte of it.
-fn parse_ios<'a>(spec: &SinkSpec, text: &'a str) -> Framed<'a> {
+fn parse_ios<'a>(spec: &'a SinkSpec, text: &'a str) -> Framed<'a> {
     parse_ios_syslog(spec, text)
         .or_else(|| parse_ios_columnar(spec, text))
         .unwrap_or(Framed {
@@ -1163,13 +1189,14 @@ fn parse_ios<'a>(spec: &SinkSpec, text: &'a str) -> Framed<'a> {
             pid: None,
             tid: None,
             owned: false,
+            scoped_classes: &[],
         })
 }
 
 /// `<date> <time+tz>  <host> <process>[<pid>[:<tid>]]: (<library>) [<sub>:<cat>] <message>`,
 /// the library, the subsystem/category pair and the `<<Type>>` column all
 /// optional.
-fn parse_ios_syslog<'a>(spec: &SinkSpec, text: &'a str) -> Option<Framed<'a>> {
+fn parse_ios_syslog<'a>(spec: &'a SinkSpec, text: &'a str) -> Option<Framed<'a>> {
     let ([date, time, _host, token], cursor) = split_fields::<4>(text)?;
     if !is_iso_date(date) || !is_clock(time) {
         return None;
@@ -1200,7 +1227,7 @@ fn parse_ios_syslog<'a>(spec: &SinkSpec, text: &'a str) -> Option<Framed<'a>> {
 }
 
 /// `<date> <time+tz> <thread> <type> <activity> <pid> <ttl> <process>: <message>`.
-fn parse_ios_columnar<'a>(spec: &SinkSpec, text: &'a str) -> Option<Framed<'a>> {
+fn parse_ios_columnar<'a>(spec: &'a SinkSpec, text: &'a str) -> Option<Framed<'a>> {
     let ([_date, _time, thread, _type, activity, pid, ttl], cursor) = split_fields::<7>(text)?;
     if !thread.starts_with("0x")
         || !activity.starts_with("0x")
@@ -1284,7 +1311,7 @@ fn split_ios_subsystem(rest: &str) -> (Option<&str>, &str) {
 /// off the message, decide ownership by the record's emitter, and hand the
 /// rules the message alone.
 fn framed_ios<'a>(
-    spec: &SinkSpec,
+    spec: &'a SinkSpec,
     process: &str,
     library: Option<&str>,
     pid: &str,
@@ -1320,6 +1347,11 @@ fn framed_ios<'a>(
         pid: Some(pid.to_owned()),
         tid: None,
         owned,
+        // The same exact match as ownership, one question further on: whose
+        // records legitimately CARRY a class. Keyed on the PAIR, because an
+        // Apple framework logs under its own subsystem from inside Haven's own
+        // process — `name` is what tells that record from the daemon's.
+        scoped_classes: spec.emitter_scope(name, emitter),
     })
 }
 
@@ -1376,7 +1408,7 @@ fn split_fields<const N: usize>(text: &str) -> Option<([&str; N], usize)> {
 /// A line that does not parse is treated as NOT Haven-owned, so the structural
 /// rules skip it. That is the right default for a device-wide capture full of
 /// vendor framing; needles are still searched in every byte of it.
-fn parse_logcat<'a>(spec: &SinkSpec, text: &'a str) -> Framed<'a> {
+fn parse_logcat<'a>(spec: &'a SinkSpec, text: &'a str) -> Framed<'a> {
     let unparseable = Framed {
         body: text,
         tag: None,
@@ -1384,6 +1416,7 @@ fn parse_logcat<'a>(spec: &SinkSpec, text: &'a str) -> Framed<'a> {
         pid: None,
         tid: None,
         owned: false,
+        scoped_classes: &[],
     };
     let bytes = text.as_bytes();
     let mut cursor = 0usize;
@@ -1436,6 +1469,9 @@ fn parse_logcat<'a>(spec: &SinkSpec, text: &'a str) -> Framed<'a> {
         pid: Some(pid.to_owned()),
         tid: Some(tid.to_owned()),
         owned,
+        // A logcat tag is free text an emitter composes per call, so there is
+        // no build-time name here to scope a class out of.
+        scoped_classes: &[],
     }
 }
 
@@ -1967,6 +2003,78 @@ mod tests {
         );
     }
 
+    /// The simulator's location daemon is the SOURCE of the fix a lane injects,
+    /// not a place it leaked to.
+    ///
+    /// `simctl location set` hands `locationd` the coordinate the lane then
+    /// declares, so its `Position` subsystem logging that number is the OS
+    /// delivering what the harness asked for: CI run 35311161479's
+    /// `e2e-ios-real-gps` was rc 1 on the b4 seed in several encodings, every
+    /// hit under that one program. The scope is that PROGRAM alone — the same
+    /// text under Haven's own subsystem, under Apple's push daemon, under the
+    /// simulator bridge, or under the very same `Position` subsystem emitted
+    /// from inside Haven's own process is still a finding, which is what makes
+    /// this a statement about the daemon rather than about the value.
+    #[test]
+    fn the_location_daemons_own_fix_is_scoped_out_and_nobody_elses_is() {
+        let dir = Dir::new("iosposition");
+        let manifest = manifest(&[("coordinate", "-33.865143,151.209901")]);
+        let path = dir.write(
+            "ios.log",
+            "2026-09-17 22:45:47.709585+0000  localhost locationd[9676]: (CoreLocation) [com.apple.locationd.Position:Client] fix -33.865143,151.209901\n\
+             2026-09-17 22:45:47.709586+0000  localhost Runner[17463]: (Runner) [haven_ios:slc] fix -33.865143,151.209901\n\
+             2026-09-17 22:45:47.709587+0000  localhost apsd[9648]: (libnetwork.dylib) [com.apple.network:connection] fix -33.865143,151.209901\n\
+             2026-09-17 22:45:47.709588+0000  localhost CoreSimulatorBridge[9640]: fix -33.865143,151.209901\n\
+             2026-09-17 22:45:47.709589+0000  localhost Runner[17463]: (CoreLocation) [com.apple.locationd.Position:Client] fix -33.865143,151.209901\n",
+        );
+        let outcome = run(&manifest, "ios", &[path]);
+        let mut needle_lines: Vec<u64> = outcome
+            .findings
+            .iter()
+            .filter(|f| f.kind == FindingKind::Needle)
+            .map(|f| f.line)
+            .collect();
+        needle_lines.sort_unstable();
+        needle_lines.dedup();
+        assert_eq!(
+            needle_lines,
+            vec![2, 3, 4, 5],
+            "only the daemon's own record is forgiven — line 5 is the SAME subsystem inside Haven's own process, which is where a leak would be: {:?}",
+            outcome.findings
+        );
+        assert!(
+            outcome.findings.iter().all(|f| f.line != 1),
+            "and it is forgiven whole, rules included: {:?}",
+            outcome.findings
+        );
+    }
+
+    /// The scope is per CLASS, not per record: the daemon has to know the
+    /// position, and nothing else.
+    #[test]
+    fn only_the_coordinate_is_scoped_out_of_the_location_daemon() {
+        let dir = Dir::new("iospositionclass");
+        let manifest = manifest(&[("coordinate", "-33.865143,151.209901"), ("pubkey", PUBKEY)]);
+        let path = dir.write(
+            "ios.log",
+            &format!(
+                "2026-09-17 22:45:47.709585+0000  localhost locationd[9676]: (CoreLocation) [com.apple.locationd.Position:Client] client {PUBKEY} at -33.865143,151.209901\n"
+            ),
+        );
+        let outcome = run(&manifest, "ios", &[path]);
+        let classes: Vec<&str> = outcome
+            .findings
+            .iter()
+            .filter(|f| f.kind == FindingKind::Needle)
+            .filter_map(|f| f.class.as_deref())
+            .collect();
+        assert!(
+            !classes.is_empty() && classes.iter().all(|class| *class == "pubkey"),
+            "a pubkey on the daemon's record is still a leak: {:?}",
+            outcome.findings
+        );
+    }
+
     /// The regression CI run 35280144455 would have produced next: with the
     /// process as the ownership test, Apple's own lines INSIDE the app's process
     /// reach the rules — 31 structural hits per lane in that run's captures,
@@ -2110,7 +2218,7 @@ mod tests {
             .collect();
         assert_eq!(
             rule_lines,
-            vec![45, 46, 47, 48, 49, 56, 57, 58, 61, 62, 63],
+            vec![45, 46, 47, 48, 49, 56, 57, 58, 61, 62, 63, 78],
             "only the owned variants of the three renderings may reach the rules"
         );
         // The handle names the process AND the record's own inner column, so a
@@ -2135,6 +2243,12 @@ mod tests {
                 Some("Runner"),
                 Some("Runner/rust_lib_haven"),
                 Some("Runner/frb_user"),
+                // The owned member of the emitter-scope trio: the scope is a
+                // NEEDLE scope, so the daemon's own record (77) is not reported
+                // while the rules read this line as they always did.
+                // `selftest.rs`'s IOS_NEEDLE_LINES is what pins that absence,
+                // and the presence of the other two.
+                Some("Runner/haven_ios"),
             ],
         );
         // A needle in a VENDOR line is still a disclosure in an uploaded

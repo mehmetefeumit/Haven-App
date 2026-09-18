@@ -18,6 +18,7 @@ import 'dart:math';
 
 import 'package:haven/src/utils/log_alias.dart'
     show LogAliasClass, logAliasHandle, magnitudeBucket;
+import 'package:meta/meta.dart' show visibleForTesting;
 import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
@@ -323,12 +324,13 @@ class TestRelay {
   /// both the journal sentinel and a publish's OK sit out their full budget and
   /// then blame the recording proxy for frames that never left the device.
   ///
-  /// The value sits between two bounds. Twice it, plus a reconnect, has to fit
-  /// inside the shortest budget that depends on detection — the sentinel's 15 s
-  /// — or the marker still fails on a socket nothing has noticed is dead. And
-  /// it has to exceed the longest plausible pause of the Dart event loop (an
+  /// It has to exceed the longest plausible pause of the Dart event loop (an
   /// emulator taking an MLS commit through the FFI boundary), or a healthy
-  /// socket gets closed for being slow.
+  /// socket gets closed for being slow. Nothing caps it from above any more:
+  /// [_answerBudget] derives every wait's floor FROM this value instead of
+  /// assuming the waits already outlast detection, which is the assumption that
+  /// broke (see there). Raising it now costs latency on the paths that end in
+  /// silence, and nothing else.
   ///
   /// Ping and Pong are forwarded but never journalled by the recording proxy
   /// (`tooling/e2e/local-relay/src/proxy.rs`), so this adds no lines to the
@@ -431,6 +433,40 @@ class TestRelay {
     }
     return total;
   }
+
+  /// How long an exchange waits in silence before that silence may be read as
+  /// "the frame was delivered and went unanswered".
+  ///
+  /// [budget] is what the CALLER gives the relay or the recorder to ANSWER a
+  /// frame it already holds. It cannot also decide whether the frame was ever
+  /// delivered — that verdict belongs to the transport, and on an orphaned
+  /// socket it takes up to twice [_pingInterval] to arrive (dart:io re-arms the
+  /// ping schedule on every pong, pings one interval later, and closes outright
+  /// when that ping's pong is still missing one interval after that). Until it
+  /// arrives as [_SocketDied], `_reissuingAcrossReconnect` has nothing to
+  /// re-issue on, and a shorter budget simply blames the relay for a frame that
+  /// never left the device: CI run 35311161479 lost a peer's SelfRemove leave
+  /// proposal that way, giving up 5 s into a 10 s verdict while the emulator
+  /// was rebuilding the network its socket had been bound to.
+  ///
+  /// So the wait is the LONGER of the two, never the caller's alone. The extra
+  /// second is the slack [_reconnectBudget] takes, for the same reason: two
+  /// timers due at the same instant fire in an order nothing here controls.
+  /// This never turns into a retry — a live socket that stays silent still
+  /// fails, just once the verdict is in.
+  ///
+  /// Pure and static so a test can assert the rule itself — raised under the
+  /// window, returned untouched over it — as arithmetic. Reading it off a wall
+  /// clock instead would make a loaded runner, not the rule, decide the
+  /// verdict.
+  @visibleForTesting
+  static Duration answerBudget(Duration budget, Duration pingInterval) {
+    final verdict = pingInterval * 2 + const Duration(seconds: 1);
+    return budget < verdict ? verdict : budget;
+  }
+
+  Duration _answerBudget(Duration budget) =>
+      answerBudget(budget, _pingInterval);
 
   void _listen() {
     _channel.stream.listen(
@@ -730,8 +766,12 @@ class TestRelay {
   /// went away. A timeout is never re-run: a timeout means the frame WAS
   /// delivered and went unanswered, which is exactly what an absent recorder
   /// looks like, and retrying it would turn a fail-closed oracle into a slow
-  /// one. Each caller's budget is likewise untouched — a re-issue buys a fresh
-  /// socket, never a longer wait for an answer.
+  /// one. That reading is only sound because [_answerBudget] holds every wait
+  /// open until the transport has had its chance to say otherwise — give up
+  /// sooner and a timeout stops meaning "delivered", this method never sees a
+  /// [_SocketDied], and an orphaned socket is reported as a silent relay. Each
+  /// caller's budget is otherwise untouched — a re-issue buys a fresh socket,
+  /// never a longer wait for an answer.
   ///
   /// Bounded at one re-issue per reconnect the transport is allowed to make: a
   /// socket that dies again on every fresh connection is a broken environment,
@@ -816,7 +856,12 @@ class TestRelay {
   /// have been seen and re-emitting is explicitly safe. A marker that is
   /// delivered and goes unanswered is not retried and still fails at
   /// [timeout] — that silence is the recorder's absence, and waiting longer
-  /// for it would only make a fail-closed oracle slow.
+  /// for it would only make a fail-closed oracle slow. (Never BEFORE the
+  /// transport could have reported a vanished peer, though: [_answerBudget]
+  /// floors every wait in this class, and this 15 s default is the larger of
+  /// the two at the shipped [socketPingInterval], so it governs here. The
+  /// other three declaration frames below share the default and the reasoning
+  /// verbatim.)
   ///
   /// Throws [StateError] if the marker could not be written, or if no ack
   /// arrives within [timeout] — which is also what happens when the lane
@@ -851,11 +896,12 @@ class TestRelay {
     final completer = Completer<WireJournalSentinel>();
     _pendingSentinels.add(_PendingSentinel(token, completer));
     _channel.sink.add(jsonEncode(<dynamic>[_sentinelVerb, token]));
+    final budget = _answerBudget(timeout);
     try {
-      return await completer.future.timeout(timeout);
+      return await completer.future.timeout(budget);
     } on TimeoutException {
       throw StateError(
-        'no wire-journal sentinel ack within ${timeout.inSeconds}s. Either '
+        'no wire-journal sentinel ack within ${budget.inSeconds}s. Either '
         'this connection does not run through the recording proxy, or the '
         'proxy is not recording.',
       );
@@ -1025,11 +1071,12 @@ class TestRelay {
     final pending = _PendingMlsGroupId(hex, Completer<void>());
     _pendingMlsGroupIds.add(pending);
     _channel.sink.add(jsonEncode(<dynamic>[_mlsGroupIdVerb, hex]));
+    final budget = _answerBudget(timeout);
     try {
-      await pending.completer.future.timeout(timeout);
+      await pending.completer.future.timeout(budget);
     } on TimeoutException {
       throw StateError(
-        'no MLS-group-id ack within ${timeout.inSeconds}s. Either this '
+        'no MLS-group-id ack within ${budget.inSeconds}s. Either this '
         'connection does not run through the recording proxy, or the proxy '
         'is not recording the ids it is handed.',
       );
@@ -1063,6 +1110,18 @@ class TestRelay {
   /// within [timeout] on a lane that DID declare a recorder: that silence
   /// means the declaration was lost, and the scanner would then assert an
   /// absence it was never given the ground truth for.
+  ///
+  /// RESIDUAL, unlike [announceCanaryManifest] and [announceMlsGroupId]: the
+  /// proxy's needle sink APPENDS every declaration it accepts, with no dedupe
+  /// (the manifest sink skips a byte-identical repeat, the id sink keeps a
+  /// set). So the one re-issue case where the frame was in fact delivered and
+  /// only its ACK died with the socket leaves two identical sidecar lines.
+  /// The scanner reads them as two declarations of the same value, which
+  /// cannot change a presence/absence verdict, but they do both count toward
+  /// its per-class declaration floor — so a duplicate can make a class's floor
+  /// read as met while one distinct value of that class is missing. Losing the
+  /// declaration outright is the worse failure of the two, which is why the
+  /// re-issue stands.
   Future<void> declareNeedle(
     Map<String, Object?> payload, {
     Duration timeout = const Duration(seconds: 15),
@@ -1089,11 +1148,12 @@ class TestRelay {
     final pending = Completer<void>();
     _pendingNeedleDecls.add(pending);
     _channel.sink.add(jsonEncode(<dynamic>[_needleDeclVerb, payload]));
+    final budget = _answerBudget(timeout);
     try {
-      await pending.future.timeout(timeout);
+      await pending.future.timeout(budget);
     } on TimeoutException {
       throw StateError(
-        'no needle-declaration ack within ${timeout.inSeconds}s. Either this '
+        'no needle-declaration ack within ${budget.inSeconds}s. Either this '
         'connection does not run through the recording proxy, or the proxy '
         'refused the declaration (an unparseable or oversized payload is '
         'refused rather than acked).',
@@ -1156,11 +1216,12 @@ class TestRelay {
     final pending = Completer<void>();
     _pendingCanaryManifests.add(pending);
     _channel.sink.add(jsonEncode(<dynamic>[_canaryManifestVerb, manifest]));
+    final budget = _answerBudget(timeout);
     try {
-      await pending.future.timeout(timeout);
+      await pending.future.timeout(budget);
     } on TimeoutException {
       throw StateError(
-        'no wire-canary-manifest ack within ${timeout.inSeconds}s. This '
+        'no wire-canary-manifest ack within ${budget.inSeconds}s. This '
         'connection likely does not run through the recording proxy.',
       );
     } finally {
@@ -1212,6 +1273,11 @@ class TestRelay {
   /// other acceptance. A plain timeout is NOT re-published: nothing there says
   /// the frame was lost, so a retry would be guesswork.
   ///
+  /// [timeout] is what the RELAY is given to answer; the wait itself never ends
+  /// before the transport could have reported a vanished peer ([_answerBudget]
+  /// — at the shipped [socketPingInterval] that floor is 11 s, so this default
+  /// does not govern on the silent path).
+  ///
   /// Throws on timeout or if the relay returns NOTICE/CLOSED before the
   /// OK for this event id.
   Future<(bool accepted, String message)> publishAndAwaitOk(
@@ -1247,6 +1313,7 @@ class TestRelay {
     final pending = _PendingOk(eventId: eventId, completer: completer);
     _pendingOks.add(pending);
     _channel.sink.add(jsonEncode(<dynamic>['EVENT', decoded]));
+    final budget = _answerBudget(timeout);
     // `timeout` on the awaited future, never a Timer that completes the
     // completer: the old shape derived a second future from the completer to
     // cancel that Timer, and nothing awaited THAT one. Every failure therefore
@@ -1254,10 +1321,10 @@ class TestRelay {
     // error "thrown after the test had completed" — and a re-issue that
     // afterwards succeeded would still have reddened the run.
     try {
-      return await completer.future.timeout(timeout);
+      return await completer.future.timeout(budget);
     } on TimeoutException {
       throw TimeoutException(
-        'TestRelay.publishAndAwaitOk timed out after ${timeout.inSeconds}s '
+        'TestRelay.publishAndAwaitOk timed out after ${budget.inSeconds}s '
         'for event ${logAliasHandle(LogAliasClass.event, eventId)}',
       );
     } finally {

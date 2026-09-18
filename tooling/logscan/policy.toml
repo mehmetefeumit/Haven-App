@@ -83,6 +83,25 @@ plant = { kind = "plant" }
 # captures hold is clean once the lane's loopback is exempt. `rust_lib_haven`
 # and `Runner` are Haven's own images — the latter a fallback for a record with
 # no subsystem and no library, a shape no capture has yet produced.
+# `emitter_scoped_out` is a class's `scoped_out` one rung finer: the classes NOT
+# searched on one named PROGRAM's own records. `locationd` under
+# `com.apple.locationd.Position` is the location daemon, and a lane that injects
+# a fix (`simctl location set` — b4, the auth-tier lane, the background-publish
+# lane) hands that daemon the coordinate itself, so the daemon logging it is the
+# SOURCE of the value rather than a place it leaked to: CI run 35311161479's
+# `e2e-ios-real-gps` was rc 1 on the b4 seed in several encodings, every hit
+# under that one program. BOTH columns of the `locationd/com.apple.locationd.Position`
+# the finding named are matched, because neither is a program by itself: an
+# Apple framework logs under its own `com.apple.locationd.*` subsystem from
+# INSIDE Haven's process (the `Runner[…]` record under `com.apple.locationd.Core`
+# in fixtures/format.ios.log), so a subsystem-only scope would forgive the class
+# exactly where a leak would be, while a process-only one would forgive every
+# other subsystem that daemon carries. It touches needle matching only: the same
+# value under any other program — Haven's own, `apsd`, the simulator bridge — is
+# still rc 1, every other class is still searched on the daemon's records, and
+# the structural rules are unaffected (the emitter is un-owned, so they never
+# ran there). A Haven record's CONTINUATION line names no emitter, so it is
+# scoped out of nothing — the safe direction.
 # `required_shape_plants` name the UNDECLARED plants (there is no native harness
 # channel to declare through), each proving that emitter's log backend reached
 # this capture.
@@ -114,7 +133,7 @@ plant = { kind = "plant" }
 # search reads all of them: a declared value cannot hide behind a cargo verb.
 [sinks]
 logcat = { term_floor = 8, declared_plants_expected = true, structural_rules = true, reassemble = true, min_lines = 2000, entry_format = "logcat", required_shape_plants = ["rust", "kotlin"], owned_tags = ["flutter", "haven_core", "rust_lib_haven", "RustStdoutStderr", "frb_user", "HavenApplication", "MainActivity", "PublishWakeLock"] }
-ios = { term_floor = 8, declared_plants_expected = false, structural_rules = true, reassemble = false, min_lines = 2000, entry_format = "ios", required_shape_plants = ["rust", "swift"], owned_emitters = ["frb_user", "haven_ios", "rust_lib_haven", "Flutter", "Runner"] }
+ios = { term_floor = 8, declared_plants_expected = false, structural_rules = true, reassemble = false, min_lines = 2000, entry_format = "ios", required_shape_plants = ["rust", "swift"], owned_emitters = ["frb_user", "haven_ios", "rust_lib_haven", "Flutter", "Runner"], emitter_scoped_out = [{ process = "locationd", emitter = "com.apple.locationd.Position", classes = ["coordinate"] }] }
 drive = { term_floor = 6, declared_plants_expected = true, structural_rules = true, reassemble = false, min_lines = 100, entry_format = "plain" }
 rust-test = { term_floor = 6, declared_plants_expected = false, structural_rules = true, reassemble = false, min_lines = 20, entry_format = "plain", cargo_status = "exempt" }
 proxy = { term_floor = 6, declared_plants_expected = false, structural_rules = true, reassemble = false, min_lines = 5, entry_format = "plain" }

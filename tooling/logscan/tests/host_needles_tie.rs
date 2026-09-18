@@ -117,6 +117,25 @@ fn dart_double(source: &str, name: &str) -> String {
     between(source, &format!("const double {name} = "), ";").to_owned()
 }
 
+/// The single-quoted entries of a `const List<String> <name> = [ … ];`.
+fn dart_string_list(source: &str, name: &str) -> Vec<String> {
+    let head = format!("const List<String> {name} = [");
+    let start = source
+        .find(&head)
+        .unwrap_or_else(|| panic!("no list {name}"))
+        + head.len();
+    let body = &source[start..];
+    let end = body
+        .find("];")
+        .unwrap_or_else(|| panic!("unterminated list {name}"));
+    body[..end]
+        .split('\'')
+        .skip(1)
+        .step_by(2)
+        .map(str::to_owned)
+        .collect()
+}
+
 #[test]
 fn every_seed_is_the_harness_seed() {
     let constants = library_constants();
@@ -196,6 +215,20 @@ fn every_lane_coordinate_is_the_lane_s_own_value() {
             between(&b4, "HAVEN_B4_GEO_LON: \"", "\"")
         )
     );
+    // …and the RUNNER's own fallback, which is a second source of truth: the
+    // workflow's value wins in CI, but the script's default is what a local
+    // run and the runner's own --self-test use, and it is what the delegate
+    // declares to the log-privacy seal. B1's tie reads its script the same way.
+    let b4_script = read("tooling/e2e/ci/run-b4-ios-real-gps.sh");
+    assert_eq!(
+        constants["COORD_B4"],
+        format!(
+            "{},{}",
+            between(&b4_script, "GEO_LAT=\"${HAVEN_B4_GEO_LAT:-", "}\""),
+            between(&b4_script, "GEO_LON=\"${HAVEN_B4_GEO_LON:-", "}\"")
+        ),
+        "run-b4-ios-real-gps.sh's default must be the workflow's value"
+    );
     let b1 = read("tooling/e2e/ci/run-b1-fgs-publish.sh");
     assert_eq!(
         constants["COORD_B1"],
@@ -207,6 +240,35 @@ fn every_lane_coordinate_is_the_lane_s_own_value() {
     );
 }
 
+/// B9's two points are the DRIVE TARGET's own literals.
+///
+/// Unlike B1/B3/B4, the host does not inject this lane's coordinates: they are
+/// compiled into `b9_network_reconnect_test.dart` (Carol's post-restore fix and
+/// Bob's backlog fix), and that APK comes off the shared integration builder,
+/// which bakes no per-lane `--dart-define`. So the Dart file is the source of
+/// truth and the library transcribes it — which is only safe while this test
+/// holds the two together, because an undeclared coordinate is one the lane's
+/// own logcat is never searched for.
+#[test]
+fn the_b9_points_are_the_drive_target_s_own_literals() {
+    let constants = library_constants();
+    let dart = read("haven/integration_test/b9_network_reconnect_test.dart");
+    for (name, lat, lon) in [
+        ("COORD_B9_POST", "_postLatitude", "_postLongitude"),
+        ("COORD_B9_BACKLOG", "_backlogLatitude", "_backlogLongitude"),
+    ] {
+        assert_eq!(
+            constants[name],
+            format!("{},{}", dart_double(&dart, lat), dart_double(&dart, lon)),
+            "HN_{name}"
+        );
+    }
+    // …and they are two DISTINCT points: the lane's own oracle reads the
+    // backlog fix as proof that the imported event was decrypted, which a
+    // value equal to the post-restore one could not carry.
+    assert_ne!(constants["COORD_B9_POST"], constants["COORD_B9_BACKLOG"]);
+}
+
 #[test]
 fn the_library_defines_exactly_the_tied_constants() {
     let lines = library_lines();
@@ -214,11 +276,14 @@ fn the_library_defines_exactly_the_tied_constants() {
     assert_eq!(
         names,
         [
+            "BAND_EXEMPT",
             "CIRCLE_NAME_STEM",
             "COORD_ALICE",
             "COORD_B1",
             "COORD_B3",
             "COORD_B4",
+            "COORD_B9_BACKLOG",
+            "COORD_B9_POST",
             "COORD_BOB",
             "COORD_CANARY",
             "COORD_CAROL",
@@ -241,6 +306,115 @@ fn the_library_defines_exactly_the_tied_constants() {
         .map(|(name, _)| name.as_str())
         .collect();
     assert_eq!(derived, ["SEED_BOB_OFFSET1", "SEED_BOB_OFFSET2"]);
+}
+
+/// Every literal copy of a role pair is that role's pair.
+///
+/// Two targets cannot import `fake_location_service.dart` and so spell the
+/// numbers out: `encryption_pipeline_test.dart` (its forbidden-substring
+/// ladders have to be compile-time literals) and `ios_bg_publish_test.dart`
+/// (`check_ios_background_publish.sh` check 12 forbids it importing the
+/// fake-location library at all, because that target runs the PRODUCTION
+/// location service). Both lanes seal the host needles, so a copy that drifted
+/// would be a coordinate the run mints and no needle searches for — the same
+/// failure an undeclared value is, arrived at by transcription.
+///
+/// The ladders are checked as ladders: every rung a PREFIX of the value, the
+/// first rung the value itself, and each one shorter than the last. A rung
+/// that stopped being a prefix would assert the absence of a string the app
+/// never renders.
+#[test]
+fn every_literal_copy_of_a_role_pair_is_that_pair() {
+    let constants = library_constants();
+    let pipeline = read("haven/integration_test/encryption_pipeline_test.dart");
+    for (name, lat, lon) in [
+        ("COORD_ALICE", "_sentinelLat", "_sentinelLon"),
+        ("COORD_BOB", "_sentinelLat2", "_sentinelLon2"),
+    ] {
+        assert_eq!(
+            constants[name],
+            format!(
+                "{},{}",
+                dart_double(&pipeline, lat),
+                dart_double(&pipeline, lon)
+            ),
+            "encryption_pipeline_test.dart's {lat}/{lon} must be HN_{name}"
+        );
+    }
+    for (list, axis) in [
+        (
+            "_forbiddenLatSubstrings",
+            dart_double(&pipeline, "_sentinelLat"),
+        ),
+        (
+            "_forbiddenLonSubstrings",
+            dart_double(&pipeline, "_sentinelLon"),
+        ),
+        (
+            "_forbiddenLatSubstrings2",
+            dart_double(&pipeline, "_sentinelLat2"),
+        ),
+        (
+            "_forbiddenLonSubstrings2",
+            dart_double(&pipeline, "_sentinelLon2"),
+        ),
+    ] {
+        let rungs = dart_string_list(&pipeline, list);
+        assert!(
+            rungs.len() > 1,
+            "{list} is a precision ladder, not a single string"
+        );
+        assert_eq!(rungs[0], axis, "{list}'s first rung is the whole value");
+        for pair in rungs.windows(2) {
+            assert!(
+                axis.starts_with(&pair[0]) && pair[0].len() > pair[1].len(),
+                "{list}: `{}` then `{}` is not a shortening prefix ladder of `{axis}`",
+                pair[0],
+                pair[1]
+            );
+        }
+        let last = rungs.last().expect("a rung");
+        assert!(axis.starts_with(last), "{list}'s last rung `{last}`");
+    }
+    let bg = read("haven/integration_test/ios_bg_publish_test.dart");
+    assert_eq!(
+        constants["COORD_BOB"],
+        format!(
+            "{},{}",
+            dart_double(&bg, "_peerLatitude"),
+            dart_double(&bg, "_peerLongitude")
+        ),
+        "ios_bg_publish_test.dart's peer pair must be HN_COORD_BOB"
+    );
+}
+
+/// The band exemption names constants that exist, and only the one this tree
+/// has a reason for.
+///
+/// `HN_BAND_EXEMPT` is the one HN_ constant that is not a transcribed needle:
+/// it lists the coordinates the "integer part outside 00-59" rule does not
+/// bind, and the library's self-test band-checks everything else. That makes it
+/// the one place where dropping a rule is a one-word edit, so what it may
+/// contain is pinned here — a stale name (a constant that no longer exists)
+/// would silently exempt nothing, and a NEW name is a decision that belongs in
+/// a reviewed diff rather than in whatever made a lane red.
+#[test]
+fn the_band_exemption_is_pinned_and_names_live_constants() {
+    let constants = library_constants();
+    let exempt = constants["BAND_EXEMPT"].clone();
+    assert_eq!(
+        exempt, "HN_COORD_B1",
+        "only B1's shared Android landmark is exempt from the timestamp-band rule"
+    );
+    for name in exempt.split_whitespace() {
+        let bare = name
+            .strip_prefix("HN_")
+            .unwrap_or_else(|| panic!("{name} is not an HN_ constant"));
+        assert!(
+            constants.contains_key(bare),
+            "HN_BAND_EXEMPT names `{name}`, which the library does not define"
+        );
+    }
 }
 
 /// The offset seeds follow the harness's own offset rule, for exactly the

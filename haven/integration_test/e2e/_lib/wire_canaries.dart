@@ -159,28 +159,38 @@ import 'dart:typed_data';
 const String kCanaryStem = 'Qzvx';
 
 /// Canary latitude. See [kCanaryLongitude] for the selection rationale.
-const double kCanaryLatitude = -47.209318;
+const double kCanaryLatitude = -65.463158;
 
 /// Canary longitude.
 ///
-/// `(-47.209318, -127.478205)` is open ocean in the South Pacific gyre, ~2000
-/// km west of Chile — the same "unmistakable in a log, nowhere near a person"
-/// property the existing role sentinels in `fake_location_service.dart` aim
-/// for, but with digits chosen so that **every derived search term survives
-/// [CanaryTermSet]'s hygiene gate**:
+/// `(-65.463158, -148.295312)` is open Southern Ocean in the Amundsen Sea
+/// sector — sea ice and water, no settlement, no shipping lane — the same
+/// "unmistakable in a log, nowhere near a person" property the role sentinels
+/// in `fake_location_service.dart` aim for, but with digits chosen so that
+/// **every derived search term survives [CanaryTermSet]'s hygiene gate**:
 ///
 /// * the decimal forms all contain `.`, which cannot occur inside a base64 or
 ///   hex blob, so they are collision-free at any length;
-/// * the geohash is `1pt77jv1y92b` — its 5-char prefix `1pt77` contains `p`
-///   and `t`, neither of which is a hex digit, so it can never appear inside
-///   an event id, pubkey or signature.
+/// * the geohash is `0sqe96y9kybg` — its 5-char prefix `0sqe9` contains `s`
+///   and `q`, and its 3-char prefix `0sq` contains both, neither being a hex
+///   digit, so neither can appear inside an event id, pubkey or signature.
 ///
 /// The second property is not decorative. A coordinate whose geohash prefix
 /// happened to be all-hex (e.g. `30943`, which `(-41.783206, -133.529471)`
 /// produces) would be undetectable inside the hex furniture that dominates a
 /// Nostr journal, and the geohash arm of the coordinate canary would silently
 /// degrade to nothing. `canaryGeohashPrefixesSurviveHygiene` pins this.
-const double kCanaryLongitude = -127.478205;
+///
+/// Two more properties, added after CI run 35311161479 matched a sentinel's
+/// 5-decimal spelling inside a vendor daemon's own log: the digits carry no
+/// 4-digit ascending or descending run and no repeated 3-digit group, and the
+/// integer part of BOTH axes is outside 00-59, so no spelling of either can
+/// equal the `SS.ffffff` seconds field an iOS `log show` timestamp puts on
+/// every line. This value is declared as a needle on EVERY lane
+/// (`tooling/e2e/ci/host-needles.sh`'s `HN_COORD_CANARY`, tied to these two
+/// constants by the Rust tie test), so a collision here would redden the whole
+/// fleet rather than one lane.
+const double kCanaryLongitude = -148.295312;
 
 /// The canary ids, used as map keys in the manifest and as report labels.
 abstract final class CanaryId {
@@ -224,7 +234,8 @@ const Map<String, Set<int>> kCanaryCarrierKinds = <String, Set<int>>{
 ///
 /// 1e-4 degrees is ~11 m. Loose enough to survive a decrypt and a JSON round
 /// trip, and tight enough that only the canary itself can satisfy it: the
-/// nearest land to `(-47.209318, -127.478205)` is roughly 2000 km away.
+/// nearest land to `(-65.463158, -148.295312)` is Antarctica, several hundred
+/// kilometres south.
 const double kCoordinateProofTolerance = 1e-4;
 
 /// Token alphabet for the per-run suffix.
@@ -727,7 +738,7 @@ enum TermMatch {
   /// occur inside a base64 or hex blob, so a token match cannot be produced by
   /// ciphertext coincidence. It is also the exact shape the live-but-
   /// unreachable geohash builder in `haven-core/src/nostr/event.rs` would
-  /// produce — `["g","1pt77"]`.
+  /// produce — `["g","0sqe9"]`.
   jsonToken,
 
   /// Anywhere, provided the characters immediately either side are not
@@ -1311,8 +1322,8 @@ abstract final class CanaryEncodingLedger {
 /// * geohash prefixes from length 1 to 12: as JSON tokens from length 3, and
 ///   as bare substrings from length 6 up.
 ///
-/// Sign is deliberately dropped from the decimal terms so that `-47.2093`,
-/// `47.2093` and a Unicode-minus `−47.2093` all match the same term.
+/// Sign is deliberately dropped from the decimal terms so that `-65.4631`,
+/// `65.4631` and a Unicode-minus `−65.4631` all match the same term.
 ///
 /// ## Encodings NOT covered — stated, not implied
 ///
@@ -1616,7 +1627,7 @@ class CanaryTermSet {
       ('lat', lat),
       ('lon', lon),
     ]) {
-      // Sign-free, so `-47.2093`, `47.2093` and a Unicode-minus form all hit
+      // Sign-free, so `-65.4631`, `65.4631` and a Unicode-minus form all hit
       // the same term. The `.` is what makes these collision-free.
       final magnitude = value.abs();
       out.add(t('$name/decimal-full', magnitude.toString()));

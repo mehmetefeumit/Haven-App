@@ -618,12 +618,13 @@ mod tests {
 
     /// A manifest cannot relax the policy, only record it.
     ///
-    /// The sink specs decide where the rules run and which of them a cargo-shaped
-    /// line may skip, so a manifest that claimed `logcat` exempts cargo status
-    /// lines — or that S4's entropy floor is unreachable — would be a caller
-    /// turning the instrument down through its input file. Both are overwritten
-    /// on read, while everything the RUN chose (its floors, its endpoints)
-    /// survives.
+    /// The sink specs decide where the rules run, which of them a cargo-shaped
+    /// line may skip and which emitter's records are searched for one class
+    /// less, so a manifest that claimed `logcat` exempts cargo status lines,
+    /// that S4's entropy floor is unreachable, or that some daemon is scoped
+    /// out of every class would be a caller turning the instrument down through
+    /// its input file. All are overwritten on read, while everything the RUN
+    /// chose (its floors, its endpoints) survives.
     #[test]
     fn the_policy_halves_of_a_manifest_are_re_read_and_never_honoured() {
         let path = SealedPath::new("policyauthority");
@@ -633,6 +634,22 @@ mod tests {
         for spec in tampered.sinks.values_mut() {
             spec.cargo_status = crate::policy::CargoStatus::Exempt;
             spec.structural_rules = false;
+            // The needle exemption is the most valuable one to forge, in both
+            // shapes: a program the policy names nothing about, and — the
+            // subtler one — the program it DOES name, carrying an extra class.
+            // Either would stop the search for a value the run really minted.
+            spec.emitter_scoped_out = vec![
+                crate::policy::EmitterScope {
+                    process: "locationd".to_owned(),
+                    emitter: "locationd".to_owned(),
+                    classes: vec!["coordinate".to_owned(), "pubkey".to_owned()],
+                },
+                crate::policy::EmitterScope {
+                    process: "locationd".to_owned(),
+                    emitter: "com.apple.locationd.Position".to_owned(),
+                    classes: vec!["coordinate".to_owned(), "pubkey".to_owned()],
+                },
+            ];
         }
         tampered.base64_entropy_bits = 9.0;
         tampered
@@ -649,6 +666,20 @@ mod tests {
             "only `rust-test` exempts cargo status lines, and only the policy says so"
         );
         assert!(read.sinks["logcat"].structural_rules);
+        assert!(
+            read.sinks
+                .values()
+                .all(|spec| spec.emitter_scope("locationd", "locationd").is_empty()),
+            "a forged emitter scope is not honoured; only the policy names one"
+        );
+        // …and the one scope the policy DOES declare comes back as the policy
+        // wrote it, not as the file widened it: a manifest that added `pubkey`
+        // to it would stop a pubkey being searched on the daemon's records.
+        assert_eq!(
+            read.sinks["ios"].emitter_scope("locationd", "com.apple.locationd.Position"),
+            ["coordinate"],
+            "a widened scope on the real emitter is not honoured either"
+        );
         assert!((read.base64_entropy_bits - policy.base64_entropy_bits).abs() < f64::EPSILON);
         assert!(
             !read.scoped_out["mls_group_id"].contains(&"logcat".to_owned()),

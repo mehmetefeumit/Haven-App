@@ -46,7 +46,7 @@ void main() {
       expect(geohashEncode(12.345678, 87.654321, 8), 'tfnq4x7y');
       expect(
         geohashEncode(kCanaryLatitude, kCanaryLongitude, 12),
-        '1pt77jv1y92b',
+        '0sqe96y9kybg',
       );
     });
 
@@ -632,7 +632,7 @@ void main() {
         '$_endpoint,"frame":["EVENT",{"id":"${'6' * 64}","kind":445,'
         '"pubkey":"${'8' * 64}","created_at":1785886151,'
         '"tags":[["h","${'e' * 64}"]],'
-        r'"content":"{\"lat\":-47.209318,\"lon\":-127.478205}",'
+        r'"content":"{\"lat\":-65.463158,\"lon\":-148.295312}",'
         '"sig":"${'f' * 128}"}],"raw_len":420}',
       );
       expect(report.verdict, CanaryVerdict.leak);
@@ -650,7 +650,7 @@ void main() {
         '"dir":"c2r",'
         '$_endpoint,"frame":["EVENT",{"id":"${'5' * 64}","kind":445,'
         '"pubkey":"${'8' * 64}","created_at":1785886152,'
-        '"tags":[["h","${'e' * 64}"],["approx","-47.2093,-127.4782"]],'
+        '"tags":[["h","${'e' * 64}"],["approx","-65.4632,-148.2953"]],'
         '"content":"","sig":"${'f' * 128}"}],"raw_len":420}',
       );
       expect(report.verdict, CanaryVerdict.leak);
@@ -691,7 +691,7 @@ void main() {
         '"dir":"c2r",'
         '$_endpoint,"frame":["EVENT",{"id":"${'4' * 64}","kind":445,'
         '"pubkey":"${'8' * 64}","created_at":1785886153,'
-        '"tags":[["h","${'e' * 64}"],["latE7","-472093180"]],'
+        '"tags":[["h","${'e' * 64}"],["latE7","-654631580"]],'
         '"content":"","sig":"${'f' * 128}"}],"raw_len":420}',
       );
       expect(report.verdict, CanaryVerdict.leak);
@@ -884,7 +884,7 @@ void main() {
 
     test('coarseDecimalCoordinateIsCaught', () {
       // The ladder used to start at 4 dp, and the ledger's stated reason for
-      // the omission was false: `47.209` is 6 mixed characters against a
+      // the omission was false: `65.463` is 6 mixed characters against a
       // 5-character floor and was never rejected by anything — it was simply
       // never generated. 3 dp is ~110 m, i.e. which house.
       final lat = kCanaryLatitude.abs().toStringAsFixed(3);

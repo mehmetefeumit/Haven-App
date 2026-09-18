@@ -1380,14 +1380,23 @@ prescan=0 postscan=1}"
   [[ -n "${gate_at}" && -n "${cat_at}" ]] && (( gate_at < cat_at )) || rc=1
   _case "the drive log is echoed only after the log-privacy gate" 0 "${rc}"
   _eq_case "…and exactly once" "1" "$(grep -cE '^[[:space:]]*cat "\$\{(DRIVE_LOG|LOGCAT_FILE)\}"' <<<"${joined}" || true)"
-  local gate_lit='logscan_gate host /tmp/haven-soak/needles --   --sink "logcat=${LOGCAT_FILE}" --sink "drive=${DRIVE_LOG}"   --report "${LOGSCAN_REPORTS}/gate.ndjson" || LOGSCAN_GATE_RC=$?'
-  _eq_case "the gate names the logcat, the drive log" "1" \
+  local decls='--host-decl "coordinate=${HN_COORD_B9_POST}"   --host-decl "coordinate=${HN_COORD_B9_BACKLOG}"'
+  local gate_lit="logscan_gate host /tmp/haven-soak/needles   ${decls} --   --sink \"logcat=\${LOGCAT_FILE}\" --sink \"drive=\${DRIVE_LOG}\"   --report \"\${LOGSCAN_REPORTS}/gate.ndjson\" || LOGSCAN_GATE_RC=\$?"
+  _eq_case "the gate names the logcat, the drive log and this lane's own two coordinates" "1" \
     "$(awk -v lit="${gate_lit}" \
          'index($0, lit) == 1 { n++ } END { print n + 0 }' <<<"${joined}")"
+  # THE MUTATION. The pin above is only worth having if dropping a declaration
+  # breaks it: this lane mints both points ON THE DEVICE, so an undeclared one
+  # is a coordinate the scan never searches its own logcat for — the failure
+  # this wiring exists to prevent, and one that looks exactly like a clean run.
+  _eq_case "…and a gate that dropped a declaration would not satisfy that pin" "0" \
+    "$(awk -v lit="${gate_lit}" 'index($0, lit) == 1 { n++ } END { print n + 0 }' \
+         <<<"$(sed 's/  --host-decl "coordinate=${HN_COORD_B9_BACKLOG}"//' <<<"${joined}")")"
   local trap_body dump_at scan_at exit_at
   trap_body="$(sed -n '/^cleanup() {/,/^}/p' <<<"${joined}")"
   dump_at="$(grep -nF 'docker logs "${STRFRY_CONTAINER}" > "${LOG_DIR}/strfry.final.log"' <<<"${trap_body}" | cut -d: -f1 | head -n 1 || true)"
-  scan_at="$(grep -nF 'logscan_gate_dir host /tmp/haven-soak/needles "${LOG_DIR}" "${LOGSCAN_REPORTS}/exit.ndjson"     || scan_rc=$?' <<<"${trap_body}" \
+  local dir_lit='logscan_gate_dir host /tmp/haven-soak/needles "${LOG_DIR}" "${LOGSCAN_REPORTS}/exit.ndjson"     --host-decl "coordinate=${HN_COORD_B9_POST}"     --host-decl "coordinate=${HN_COORD_B9_BACKLOG}"     || scan_rc=$?'
+  scan_at="$(grep -nF "${dir_lit}" <<<"${trap_body}" \
     | cut -d: -f1 | head -n 1 || true)"
   exit_at="$(grep -nF 'exit "${rc}"' <<<"${trap_body}" | cut -d: -f1 | head -n 1 || true)"
   rc=0
@@ -1589,6 +1598,8 @@ cleanup() {
   b9_prune_empty_export_stderr "${BACKLOG_ERR}"
   echo "== Log-privacy scan over ${LOG_DIR} (Security Rules 6 and 15) =="
   logscan_gate_dir host /tmp/haven-soak/needles "${LOG_DIR}" "${LOGSCAN_REPORTS}/exit.ndjson" \
+    --host-decl "coordinate=${HN_COORD_B9_POST}" \
+    --host-decl "coordinate=${HN_COORD_B9_BACKLOG}" \
     || scan_rc=$?
   if (( scan_rc == 1 || LOGSCAN_GATE_RC == 1 )); then
     {
@@ -2034,8 +2045,13 @@ DRIVE_PID=""
 # STEP log, which has no retention control and cannot be redacted after the
 # fact — a wider, more permanent sink than the artifact upload. The gate is
 # the key-material floor AND the identifier scanner, sealed from the host
-# needles; a leak deletes both captures.
-logscan_gate host /tmp/haven-soak/needles -- \
+# needles PLUS this lane's own two points — Carol's post-restore fix and Bob's
+# backlog fix are minted on the device and appear in no other lane, so nothing
+# but this declaration searches the capture for them. A leak deletes both
+# captures.
+logscan_gate host /tmp/haven-soak/needles \
+  --host-decl "coordinate=${HN_COORD_B9_POST}" \
+  --host-decl "coordinate=${HN_COORD_B9_BACKLOG}" -- \
   --sink "logcat=${LOGCAT_FILE}" --sink "drive=${DRIVE_LOG}" \
   --report "${LOGSCAN_REPORTS}/gate.ndjson" || LOGSCAN_GATE_RC=$?
 drive_log_clean=$(( LOGSCAN_GATE_RC == 0 ))

@@ -73,12 +73,23 @@ jobs:
       HAVEN_LIVE_SYNC: "false"
       # The coordinates seeded into the simulator AND asserted against, declared
       # once here so the workflow, the seed and the assertion cannot disagree.
-      # South Pacific, both negative: far from anything, and the opposite
-      # hemisphere from every other sentinel in this repo (FakeLocationService's
+      # Open Southern Ocean, both negative: far from anything, and the opposite
+      # quadrant from every other sentinel in this repo (FakeLocationService's
       # are all positive), so a sign-dropping regression in the encode path
       # cannot hide behind them.
-      HAVEN_B4_GEO_LAT: "-41.234567"
-      HAVEN_B4_GEO_LON: "-134.567890"
+      #
+      # The digits carry a second requirement: no 4-digit ascending or
+      # descending run and no repeated 3-digit group, because this lane's seal
+      # declares the pair as a needle and the scanner searches each axis at four
+      # and five decimals — and at that length a ladder collides with the
+      # numbers a device-wide `log show` already carries. In CI run
+      # 35311161479 the role sentinel `12.345678` was matched, at five
+      # decimals, inside Apple's push daemon on four iOS lanes; the previous
+      # seed here, -41.234567,-134.567890, was the same shape on both axes.
+      # `tooling/e2e/ci/host-needles.sh` carries the same pair as HN_COORD_B4
+      # and asserts the rule; the tie test fails if the two drift.
+      HAVEN_B4_GEO_LAT: "-63.076429"
+      HAVEN_B4_GEO_LON: "-141.927821"
       # ~1.1 m, matching B3. Not a rounding risk: `simctl location set` hands
       # CoreLocation the exact double it was given (the simulator runs no GNSS
       # solver and adds no noise), so the only way to miss this window is a

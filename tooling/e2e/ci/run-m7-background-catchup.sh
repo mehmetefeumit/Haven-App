@@ -344,7 +344,7 @@ run_self_test() {
   trap_line="$(grep -n -m1 '^trap cleanup EXIT$' "${BASH_SOURCE[0]}")"
   trap_line="${trap_line%%:*}"
   if [[ -z "${seal_line}" || -z "${trap_line}" ]] || (( seal_line > trap_line )) \
-     || ! grep -qE '^readonly -a SEAL_EXTRA=\(--floor drive=35 --floor relay=7\)$' "${BASH_SOURCE[0]}"; then
+     || ! grep -qE '^readonly -a SEAL_EXTRA=\(--floor drive=20 --floor relay=7\)$' "${BASH_SOURCE[0]}"; then
     echo "SELF-TEST FAIL (wiring): the lane's manifest must be sealed once, with its drive and relay floors, before the EXIT trap is armed (seal='${seal_line:-none}', trap='${trap_line:-none}')" >&2
     fail=1
   fi
@@ -392,10 +392,14 @@ cleanup() {
 # each is calibrated to the smallest COMPLETE capture this lane produces and
 # never to what would make it pass.
 #
-# drive=35. The policy's 100 lines is sized for the Android core flow's
-# 394-line transcript; this lane drives ONE target and its complete transcript
-# is 70 lines (drive.a.log, run 35280144455). 35 is half of that and still far
-# above the ~17 lines `flutter drive` prints before the first test result.
+# drive=20. The policy's 100 lines is sized for the Android core flow's
+# 394-line transcript; this lane drives THREE targets, each gated on its own
+# transcript, and the smallest complete one is the pending-wipe target's 22
+# lines (drive.c1.log, run 35311161479; the setup target's is 70-78). 35, set
+# from the setup transcript alone, reddened the wipe target's complete 22-line
+# capture as "too little" (rc 4). 20 clears the ~17 lines `flutter drive`
+# prints before the first test result, so a transcript below it is one in
+# which no test ran, which is the only thing this floor exists to catch.
 #
 # relay=7. The policy's 1 is sized for the hermetic host relay, which prints a
 # single listen line; this lane's relay is strfry, whose `docker logs` dump is
@@ -407,7 +411,7 @@ cleanup() {
 # Sealed ONCE, before the first gate: every later gate reuses the manifest at
 # the out path, so without this the first echo_log_tail or drive_target would
 # seal the lane's manifest with the policy defaults instead.
-readonly -a SEAL_EXTRA=(--floor drive=35 --floor relay=7)
+readonly -a SEAL_EXTRA=(--floor drive=20 --floor relay=7)
 seal_rc=0
 logscan_seal host "${NEEDLE_DIR}" "${SEAL_EXTRA[@]}" || seal_rc=$?
 if (( seal_rc != 0 )); then

@@ -61,19 +61,29 @@ class FakeLocationService implements LocationService {
 
 /// Sentinel coordinates used by the Alice role.
 ///
-/// Far from any populated area so the values are unmistakable in logs.
-/// Same numerical pattern as the encryption-pipeline test sentinels.
-const double aliceFakeLatitude = 12.345678;
-const double aliceFakeLongitude = 87.654321;
+/// Open Arctic Ocean, north of the Siberian shelf: far from any populated area,
+/// hermetic relay only, so the value is unmistakable in a log.
+///
+/// The DIGITS matter as much as the place, because the log scanner searches
+/// each axis at four and five decimals too
+/// (`tooling/e2e/ci/host-needles.sh`, which declares these three pairs and
+/// pins the rule): no 4-digit ascending or descending run, no repeated 3-digit
+/// group, and an integer part outside 00-59 on both axes so no spelling can
+/// equal the seconds field of an iOS log timestamp. The ladder these used to be
+/// (`12.345678` and friends) collided with Apple's push daemon in CI run
+/// 35311161479. Change one here and change it there, or the lane searches its
+/// logs for a value the app never used.
+const double aliceFakeLatitude = 78.641977;
+const double aliceFakeLongitude = 121.094612;
 
 /// Sentinel coordinates used by the Bob role.
-const double bobFakeLatitude = 13.456789;
-const double bobFakeLongitude = 89.876543;
+const double bobFakeLatitude = 79.343842;
+const double bobFakeLongitude = 117.194008;
 
 /// Sentinel coordinates used by the Carol role.
 ///
-/// Same recognizable pattern as Alice + Bob, chosen so a hex dump of a
-/// decoded `kind 25442` content can be matched against a single role at a
-/// glance. Far from any populated area; hermetic relay only.
-const double carolFakeLatitude = 14.567890;
-const double carolFakeLongitude = 91.098765;
+/// Same ocean as Alice + Bob and the same digit discipline, far enough apart
+/// that a decoded `kind 25442` content can be matched against a single role at
+/// a glance.
+const double carolFakeLatitude = 79.586509;
+const double carolFakeLongitude = 125.149447;

@@ -411,6 +411,28 @@ allowed to read.
   `Foundation` is the library on 36 673 lines of one real capture — every
   vendor plugin's `NSLog` included.
 
+  One PROGRAM is searched for one class LESS, and it is the policy's
+  `emitter_scoped_out`: `locationd` under `com.apple.locationd.Position`, the
+  location daemon, is not searched for a `coordinate`. A lane that injects a fix
+  (`simctl location set` — b4, the auth-tier lane, the background-publish lane)
+  hands that daemon the very number it then declares, so the daemon logging it
+  is the OS delivering what the harness asked for rather than Haven disclosing
+  anything; CI run 35311161479's `e2e-ios-real-gps` was rc 1 on the b4 seed in
+  several encodings, every hit under that one program. BOTH columns of the
+  `locationd/com.apple.locationd.Position` the finding named are matched,
+  because neither is a program by itself: an Apple framework logs under its own
+  `com.apple.locationd.*` subsystem from INSIDE Haven's process (the `Runner[…]`
+  record under `com.apple.locationd.Core` in `fixtures/format.ios.log`), so a
+  subsystem-only scope would forgive the class exactly where a leak would be,
+  while a process-only one would forgive every other subsystem that daemon
+  carries. It touches NEEDLE matching only: the structural rules never ran there
+  (the emitter is un-owned), every other class is still searched on those
+  records, the same coordinate under any other program — Haven's own, `apsd`,
+  `CoreSimulatorBridge`, or that same `Position` subsystem inside Haven's own
+  process — is still a finding, and a Haven record's continuation line, which
+  names no emitter, is scoped out of nothing. It is the only needle exemption in
+  the policy; every other one belongs to a structural rule.
+
   A finding on an `ios` line reports `tag=<process>/<subsystem-or-library>`
   whether or not Haven owns it — unlike a logcat tag, those columns are
   build-time names of a program rather than free text an emitter composes per
@@ -499,21 +521,24 @@ delimiters and the digit are what keep the rule off `haven_core::relay::manager`
 and `Option::Some`, which the first CI run of this scanner read as addresses
 hundreds of times per transcript.
 
-Four things narrow what the rules catch — two rule qualifiers, one sink-class
-exemption and one property of the escape stripper — so all four are written down
-as **declared residuals**, the same discipline the ledger's `not_gaps` follow: a
-boundary stated in one sentence beats a boundary discovered by an adversarial
-reader later.
+Five things narrow what the scanner catches — two rule qualifiers, one
+sink-class rule exemption, one per-emitter NEEDLE scope and one property of the
+escape stripper — so all five are written down as **declared residuals**, the
+same discipline the ledger's `not_gaps` follow: a boundary stated in one
+sentence beats a boundary discovered by an adversarial reader later.
 
 | residual | what is no longer caught | what carries it instead |
 |---|---|---|
 | **S4** | a base64 run of 32 or more characters with no `=` padding whose digits are absent or all in ONE contiguous run (roughly one random 44-character blob in a hundred and sixty) | S1/S2 for the hex spellings, S8 when a key word is within 24 characters, the needle search for every value the run declared, and `scan-logs-for-secrets.sh`'s keyword-anchored patterns |
 | **S6** | a geohash cell immediately followed by `_`, `(` or `::` | the needle search for a declared coordinate's `geohash` renderings; an undeclared cell in that position is a code path in every capture this tree has produced |
 | **cargo's crate-build line** (`rust-test` only) | **S2 and S6 only**, and only on a `Compiling\|Checking\|Downloaded <name> v<semver> [(<source>)]` line: a 32–63-hex run or a geohash-shaped token in the crate-name or source-URL slot. Every other rule still fires on that line, and cargo's other status lines are not exempt at all | the needle search, which reads those lines byte for byte like any other; S1 for a 64-hex run; and the shape itself, which has to be produced deliberately |
+| **`locationd` / `com.apple.locationd.Position`** (`ios` only) | the `coordinate` NEEDLE, on records whose process AND emitter are exactly those: a lane injects the fix into that daemon, so it holds the value by construction | every other program (Haven's own included, and that same subsystem inside Haven's process), every other class on the same records, every structural rule, and the other sinks — the same coordinate in a logcat, a drive transcript or a relay log is reported as before |
 | **escaped value** | a value the app printed immediately after a LITERAL `ESC [` it emitted itself: the CSI consumer eats the parameter bytes (digits, `;`, `:`, `<=>?`) up to the first `@`–`~`, so the head of such a value is removed before matching | `tooling/e2e/ci/scan-logs-for-secrets.sh`, which runs FIRST and over raw bytes; and the fact that nothing in this tree emits a bare `ESC [` — the app's own log backends do not colour |
 
 The first three were each paid for by a real transcript and are in
-`furniture.rust-test.log` / `furniture.flutter-test.log` now; the fourth is a
+`furniture.rust-test.log` / `furniture.flutter-test.log` now; the fourth was
+paid for by CI run 35311161479 and its control is the owned/un-owned pair at the
+foot of `format.ios.log`, which case P pins in both directions; the fifth is a
 property of the stripper rather than a line anyone has captured, and its control
 is the unit test that plants an escape inside a hex run. S4's entropy floor
 cannot separate `kBackgroundSessionReclaimAtMsKey` (4.33 bits) from a 32-byte

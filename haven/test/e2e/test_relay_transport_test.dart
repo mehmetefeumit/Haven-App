@@ -17,20 +17,38 @@
 /// The wire journal for that run proves it: the run's sentinel token appears
 /// nowhere in it, and the socket's last recorded frame is far earlier.
 ///
+/// CI run 35311161479 hit the same `networkDestroy` two seconds before a
+/// synthetic peer published its SelfRemove leave proposal, and showed that
+/// surviving the outage needs more than the liveness ping: the OK wait gave up
+/// 5 s in, five seconds before the ping schedule could rule the socket dead, so
+/// the re-issue that the earlier fix built was never reached and the failure
+/// named the relay. The journal for that run holds no `c2r` frame carrying the
+/// proposal on any connection, and the relay's own byte counters for that
+/// socket agree. Hence the pair of tests below whose answer budget is shorter
+/// than detection: recovery must not depend on the caller having asked for a
+/// wait longer than the transport needs.
+///
 /// ## What is asserted here, and what is deliberately not
 ///
 /// The orphaned socket is reproduced exactly — a TCP splice that stops moving
 /// bytes in both directions without closing either end — so these tests fail
-/// if the liveness ping is removed, if it is slowed past the point where the
-/// sentinel budget can absorb a reconnect, or if a control frame stops being
-/// re-issued on the fresh socket.
+/// if the liveness ping is removed, if an answer wait stops being held open
+/// until that ping can render its verdict, or if a frame stops being re-issued
+/// on the fresh socket.
 ///
 /// The opposite direction matters just as much and is pinned too: a frame that
-/// IS delivered and goes unanswered must still fail at its stated budget.
-/// That silence is what an absent recorder looks like, and the wire oracles
-/// fail closed on it. Retrying it, or waiting longer for it, would turn a
-/// fail-closed oracle into a slow one — so both waits below assert that the
-/// failure arrives on time and only once.
+/// IS delivered and goes unanswered must still fail, promptly and once. That
+/// silence is what an absent recorder looks like, and the wire oracles fail
+/// closed on it; retrying it, or waiting past the point where it is decidable,
+/// would turn a fail-closed oracle into a slow one. So the waits below assert
+/// both edges of the bound — silence under the verdict window is raised to it,
+/// silence over it is not stretched further.
+///
+/// Only the publish and the journal-sentinel waits are reachable from here.
+/// The MLS-group-id, needle-declaration and canary-manifest waits sit behind
+/// `wireRecorderDeclared`, a COMPILE-time gate that a plain `flutter test`
+/// leaves false (`log_needles_test.dart`'s doc records the same limit and what
+/// covers it instead). They take the same floor from the same helper.
 ///
 /// Runs under plain `flutter test`: no Rust bridge, no relay, no device.
 library;
@@ -49,6 +67,26 @@ const Duration _fastPing = Duration(milliseconds: 200);
 
 /// Comfortably past detection (2 x [_fastPing]) plus one reconnect backoff.
 const Duration _recoveryBudget = Duration(seconds: 8);
+
+/// An answer budget deliberately SHORTER than the time it takes to notice an
+/// orphaned socket (2 x [_fastPing]).
+///
+/// Reproduces the ORDERING the shipped constants have: `publishAndAwaitOk`
+/// gives the relay 5 s to answer, while [TestRelay.socketPingInterval] puts
+/// the transport's verdict up to 10 s out. Silence below the verdict is
+/// evidence of nothing, whatever the absolute numbers are.
+const Duration _budgetBelowDetection = Duration(milliseconds: 50);
+
+/// The floor `TestRelay` puts under every answer wait, at [_fastPing].
+///
+/// Two ping intervals is the worst case for the transport to report a peer
+/// that vanished without a FIN; the extra second is the slack that keeps two
+/// timers due at the same instant from deciding the outcome between them.
+/// Written out here as an INDEPENDENT expected value, never read back off
+/// `TestRelay`: a test that took the number from the same expression it is
+/// checking would agree with any value that expression ever produces,
+/// including a wrong one.
+final Duration _verdictWindow = _fastPing * 2 + const Duration(seconds: 1);
 
 void main() {
   late _FakeRecorder recorder;
@@ -108,17 +146,74 @@ void main() {
       );
     });
 
-    test('detection plus a reconnect fits inside the sentinel budget', () {
-      // The default sentinel budget in `emitWireJournalSentinel`. Twice the
-      // ping interval is the worst-case time to notice an orphaned socket
-      // (dart:io pings every interval and closes when the pong misses the
-      // next one); the first reconnect backoff is 1 s. Raising the interval
-      // past this point would leave the marker failing on a socket nothing
-      // has yet noticed is dead — the exact CI failure, just slower.
-      const sentinelBudget = Duration(seconds: 15);
+    test('a live wait really is held open to the verdict window', () async {
+      // The arithmetic is pinned below, without a clock. What THIS adds is
+      // that the rule is actually applied to a real wait rather than merely
+      // computed: the socket is live and the recorder simply never answers,
+      // so nothing dies and nothing is re-issued, and the failure still
+      // cannot arrive before the window.
+      //
+      // The bound is one-sided on purpose. A `.timeout(d)` cannot fire before
+      // `d`, so this holds by construction on any runner; an upper bound here
+      // would let a loaded machine decide the verdict instead of the code.
+      recorder.answerSentinels = false;
+      await connect();
+
+      final started = DateTime.now();
+      await expectLater(
+        relay.emitWireJournalSentinel(
+          token: 'under',
+          timeout: _budgetBelowDetection,
+        ),
+        throwsA(isA<StateError>()),
+      );
       expect(
-        TestRelay.socketPingInterval * 2 + const Duration(seconds: 1),
-        lessThan(sentinelBudget),
+        DateTime.now().difference(started),
+        greaterThanOrEqualTo(_verdictWindow),
+        reason: 'failing at the caller budget would call an undelivered '
+            'frame unanswered and leave the re-issue unreached',
+      );
+    });
+  });
+
+  group('the answer floor is arithmetic, not a wall clock', () {
+    // Which of two different quantities bounds an answer wait. The caller's
+    // budget says how long the RELAY or the recorder may take to answer a
+    // frame it holds; the transport needs up to two ping intervals to report
+    // a peer that vanished, and silence shorter than that is evidence of
+    // neither outcome. So the wait is the longer of the two: raising the
+    // shorter budget is what makes an orphan detectable at all, and NOT
+    // raising the longer one is what keeps a fail-closed oracle as prompt as
+    // it says it is.
+
+    test('a budget under the transport verdict is raised to it', () {
+      expect(
+        TestRelay.answerBudget(_budgetBelowDetection, _fastPing),
+        _verdictWindow,
+      );
+    });
+
+    test('a budget over it is returned untouched', () {
+      final over = _verdictWindow * 2;
+      expect(
+        TestRelay.answerBudget(over, _fastPing),
+        over,
+        reason: 'a floor that stacked on top of a budget already clearing '
+            'the verdict would make every unanswered frame in this class '
+            'slower than its documented budget',
+      );
+    });
+
+    test('the shipped constants put the publish default under the floor', () {
+      // The production case, in production numbers: a 5 s budget against a
+      // 10 s verdict. That ordering is the CI failure — and the reason the
+      // floor cannot be left to the caller's default.
+      expect(
+        TestRelay.answerBudget(
+          const Duration(seconds: 5),
+          TestRelay.socketPingInterval,
+        ),
+        const Duration(seconds: 11),
       );
     });
   });
@@ -173,6 +268,67 @@ void main() {
             'never happened',
       );
     });
+
+    test('a publish whose budget expires before detection is re-published, '
+        'not blamed on the relay', () async {
+      await connect();
+      splice.orphanOpenConnections();
+
+      final (accepted, _) = await relay
+          .publishAndAwaitOk(_event('a2'), timeout: _budgetBelowDetection)
+          .timeout(_recoveryBudget);
+
+      expect(accepted, isTrue);
+      expect(
+        recorder.publishedEventIds.where((id) => id == 'a2').length,
+        1,
+        reason: 'silence shorter than the transport verdict is evidence of '
+            'nothing. Reading it as "the relay ignored the frame" leaves the '
+            'orphan undetected and the re-issue unreached — CI run '
+            "35311161479 lost a peer's SelfRemove leave proposal exactly "
+            'there, giving up 5 s into a verdict that takes up to 10 s',
+      );
+      expect(
+        recorder.connectionCount,
+        greaterThan(1),
+        reason: 'the retry has to land on a NEW connection; re-writing the '
+            'orphaned one would look identical from here and deliver nothing',
+      );
+    });
+
+    test('the journal sentinel is re-emitted when its budget expires before '
+        'detection too', () async {
+      // The floor is one shared helper, but it is applied per wait, and the
+      // sentinel is the second of the two waits a plain `flutter test` can
+      // reach (the MLS-group-id, needle and canary waits are behind the
+      // compile-time recorder gate — see `log_needles_test.dart`'s doc). The
+      // consequence here is sharper than a lost publish: a marker that never
+      // reaches the recorder makes the host oracle report "this run was not
+      // proxied", which is a true-looking verdict about the wrong subject.
+      await connect();
+      splice.orphanOpenConnections();
+
+      final recovered = await relay
+          .emitWireJournalSentinel(
+            token: 'short-budget',
+            timeout: _budgetBelowDetection,
+          )
+          .timeout(_recoveryBudget);
+
+      expect(recovered.token, 'short-budget');
+      expect(
+        recorder.sentinelTokens.where((t) => t == 'short-budget').length,
+        1,
+        reason: 'the marker has to reach the recorder exactly once — the '
+            'orphaned socket delivered nothing, so a second copy here would '
+            'mean the fresh socket was written to twice',
+      );
+      expect(
+        recorder.connectionCount,
+        greaterThan(1),
+        reason: 'recovery must come from a NEW connection',
+      );
+    });
   });
 
   group('a delivered frame that goes unanswered still fails on time', () {
@@ -200,8 +356,10 @@ void main() {
       expect(
         elapsed,
         lessThan(const Duration(seconds: 3)),
-        reason: 'the budget bounds a LIVE socket holding a frame unanswered; '
-            'nothing may stretch it',
+        reason: 'a live socket that simply does not answer fails promptly: '
+            'the wait is the larger of this budget and the transport verdict '
+            'window, and nothing beyond either. A re-emission or a wait for a '
+            'fresh socket would show up here as a multiple of them',
       );
     });
 
@@ -231,6 +389,28 @@ void main() {
         1,
         reason: 'an unanswered publish proves nothing about delivery, so it '
             'must not be re-published',
+      );
+    });
+
+    test('a budget shorter than detection still fails on a live socket',
+        () async {
+      recorder.answerPublishes = false;
+      await connect();
+
+      await expectLater(
+        relay.publishAndAwaitOk(
+          _event('b2'),
+          timeout: _budgetBelowDetection,
+        ),
+        throwsA(isA<TimeoutException>()),
+      );
+
+      expect(
+        recorder.publishedEventIds.where((id) => id == 'b2').length,
+        1,
+        reason: 'waiting out the transport verdict must never become a '
+            'retry: a socket that is demonstrably alive and simply does not '
+            'answer still fails, and the frame goes out exactly once',
       );
     });
   });

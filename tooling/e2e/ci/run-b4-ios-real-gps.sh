@@ -279,7 +279,7 @@ Usage: simctl privacy <device> <action> <service> [<bundle identifier>]
   # --- (C1) The sentinel this lane ships with must validate, including its
   #     negative signs (both hemispheres — a sign-dropping regression in the
   #     encode path is precisely what a same-hemisphere sentinel cannot see).
-  rc=0; b4_coordinates_usable -41.234567 -134.567890 || rc=$?
+  rc=0; b4_coordinates_usable -63.076429 -141.927821 || rc=$?
   _check "C1 the shipped negative-hemisphere sentinel is usable" 0 "${rc}"
 
   # --- (C2) Out-of-range values are rejected, per axis (a latitude limit
@@ -395,11 +395,16 @@ fi
 readonly LIVE_SYNC="${HAVEN_LIVE_SYNC}"
 
 # The coordinates to seed AND to assert against — one value, one source, so the
-# two can never disagree. South Pacific, both negative: far from anything, and
-# the opposite hemisphere from every other sentinel in this repo, so a
-# sign-dropping regression in the encode path cannot hide behind it.
-GEO_LAT="${HAVEN_B4_GEO_LAT:--41.234567}"
-GEO_LON="${HAVEN_B4_GEO_LON:--134.567890}"
+# two can never disagree. Open Southern Ocean, both negative: far from anything,
+# and the opposite quadrant from every other sentinel in this repo, so a
+# sign-dropping regression in the encode path cannot hide behind it. The digits
+# carry no 4-digit run and no repeated 3-digit group, which is what keeps the
+# 4- and 5-decimal spellings this lane declares as needles from matching the
+# numbers a device-wide `log show` already holds (host-needles.sh's
+# HN_COORD_B4, and e2e-ios-real-gps.yml, which is where the lane's value really
+# comes from).
+GEO_LAT="${HAVEN_B4_GEO_LAT:--63.076429}"
+GEO_LON="${HAVEN_B4_GEO_LON:--141.927821}"
 GEO_TOLERANCE="${HAVEN_B4_GEO_TOLERANCE_DEG:-1e-5}"
 readonly GEO_LAT GEO_LON GEO_TOLERANCE
 

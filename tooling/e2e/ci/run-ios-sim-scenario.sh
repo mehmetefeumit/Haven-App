@@ -823,13 +823,13 @@ run_self_test() {
          "${rc} with '$(tr '\n' ' ' < "${gate_argv}")'" >&2
     fail=1
   fi
-  want_argv=(host /tmp/haven-soak/needles --host-decl 'coordinate=-41.234567,-134.567890' --
+  want_argv=(host /tmp/haven-soak/needles --host-decl 'coordinate=-63.076429,-141.927821' --
     --sink "drive=${gate_drive}" --report /tmp/ios-logscan/sim.ndjson)
   rc=0
   rm -f "${tmp}"/gate.*.log
   SCENARIO_FILE=integration_test/e2e/e2e_combined.dart \
     HAVEN_LOGSCAN=true HAVEN_LOGSCAN_PROFILE=host \
-    HAVEN_LOGSCAN_HOST_COORDINATE='-41.234567,-134.567890' \
+    HAVEN_LOGSCAN_HOST_COORDINATE='-63.076429,-141.927821' \
     HAVEN_LOGSCAN_DRIVE_FLOOR= HAVEN_E2E_PROFILE_RELAYS= HAVEN_E2E_BLOSSOM_URL= \
     FAKE_GATE_RC=0 scan_log_or_contain "${gate_log}" || rc=$?
   if (( rc != 0 )) || [[ "$(cat "${gate_argv}")" != "$(printf '%s\n' "${want_argv[@]}")" ]]; then

@@ -76,12 +76,17 @@ const FURNITURE_RUST_TEST_LINES: u64 = 141;
 const FURNITURE_FLUTTER_LINES: u64 = 117;
 /// Lines of `format.ios.log` whose OWNED variant must reach the rules: five of
 /// the rendering the lanes capture, three of the `<<Type>>` one, three of the
-/// columnar one.
-const IOS_OWNED_RULE_LINES: [u64; 11] = [45, 46, 47, 48, 49, 56, 57, 58, 61, 62, 63];
-/// The one line holding a declared value, deliberately UN-owned.
-const IOS_NEEDLE_LINE: u64 = 68;
+/// columnar one, and the owned member of the emitter-scope trio (the other two
+/// are un-owned, so no rule reads them).
+const IOS_OWNED_RULE_LINES: [u64; 12] = [45, 46, 47, 48, 49, 56, 57, 58, 61, 62, 63, 78];
+/// The lines holding a declared value that must be REPORTED: an un-owned vendor
+/// line, the OWNED half of the emitter-scope trio, and the same `Position`
+/// subsystem emitted from inside Haven's own process. The scoped record (77) is
+/// the location daemon's own record, and its absence here is the scope's proof
+/// — as is the presence of the other two.
+const IOS_NEEDLE_LINES: [u64; 3] = [68, 78, 79];
 /// Lines of it, pinned so a fixture that lost a variant cannot pass quietly.
-const IOS_FORMAT_LINES: u64 = 68;
+const IOS_FORMAT_LINES: u64 = 79;
 /// Structural rules, all of which the dirty fixture must exercise.
 const RULE_COUNT: usize = 12;
 /// Bytes the CLI's throughput probe generates.
@@ -1105,8 +1110,10 @@ fn case_rules_only(rig: &Rig) -> Case {
     )
 }
 
-/// `log show` framing, both renderings: the owned variants reach the rules
-/// and nothing else does, while the needle search still covers every line.
+/// `log show` framing, both renderings: the owned variants reach the rules and
+/// nothing else does, the needle search still covers every line, and the one
+/// emitter whose own records ARE the fix — the location daemon's `Position`
+/// subsystem — is searched for every class but that one.
 fn case_ios_framing(rig: &Rig, mutation: Option<&'static str>) -> Case {
     let manifest = rig.manifest()?;
     let rules = rules_for(&manifest, Vec::new(), mutation)?;
@@ -1125,16 +1132,18 @@ fn case_ios_framing(rig: &Rig, mutation: Option<&'static str>) -> Case {
             "the structural rules ran on lines {rule_lines:?}, not on the owned variants of the three renderings {IOS_OWNED_RULE_LINES:?}"
         ),
     )?;
-    let needle_lines: Vec<u64> = outcome
+    let mut needle_lines: Vec<u64> = outcome
         .findings
         .iter()
         .filter(|f| f.kind == FindingKind::Needle)
         .map(|f| f.line)
         .collect();
+    needle_lines.sort_unstable();
+    needle_lines.dedup();
     require(
-        !needle_lines.is_empty() && needle_lines.iter().all(|line| *line == IOS_NEEDLE_LINE),
+        needle_lines == IOS_NEEDLE_LINES,
         &format!(
-            "a declared value in a VENDOR line is still a disclosure; found on {needle_lines:?}"
+            "a declared value in a VENDOR line is still a disclosure, and the location daemon's own Position record is not; found on {needle_lines:?}, expected {IOS_NEEDLE_LINES:?}"
         ),
     )?;
     // `declared_plants_expected = false` for `ios`: nothing has shown that a

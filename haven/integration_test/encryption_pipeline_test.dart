@@ -79,14 +79,21 @@ const String _testRelayUrl = String.fromEnvironment(
 );
 
 /// Sentinel latitude that would be unmistakable in any plaintext leak.
-const double _sentinelLat = 12.345678;
+///
+/// Alice's pair from `e2e/_lib/fake_location_service.dart`, spelled out here
+/// rather than imported because the forbidden-substring ladders below have to
+/// be literals. They move together: `tooling/e2e/ci/host-needles.sh` declares
+/// that pair as this lane's coordinate needle, so a value only this file used
+/// would be searched for by nothing.
+const double _sentinelLat = 78.641977;
 
 /// Sentinel longitude that would be unmistakable in any plaintext leak.
-const double _sentinelLon = 87.654321;
+const double _sentinelLon = 121.094612;
 
 /// Second sentinel coordinates for the ephemeral-key-uniqueness assertion.
-const double _sentinelLat2 = 13.456789;
-const double _sentinelLon2 = 89.876543;
+/// Bob's pair, from the same place and for the same reason.
+const double _sentinelLat2 = 79.343842;
+const double _sentinelLon2 = 117.194008;
 
 /// Prefixes of the sentinel values to catch precision-stripped variants.
 ///
@@ -94,42 +101,42 @@ const double _sentinelLon2 = 89.876543;
 /// serialiser could round/truncate the double before embedding it.
 /// The 1-decimal and integer-prefix forms catch lossy rounding regressions.
 const List<String> _forbiddenLatSubstrings = [
-  '12.345678',
-  '12.34567',
-  '12.3456',
-  '12.345',
-  '12.34',
-  '12.3',
-  '12.',
+  '78.641977',
+  '78.64197',
+  '78.6419',
+  '78.641',
+  '78.64',
+  '78.6',
+  '78.',
 ];
 const List<String> _forbiddenLonSubstrings = [
-  '87.654321',
-  '87.65432',
-  '87.6543',
-  '87.654',
-  '87.65',
-  '87.6',
-  '87.',
+  '121.094612',
+  '121.09461',
+  '121.0946',
+  '121.094',
+  '121.09',
+  '121.0',
+  '121.',
 ];
 
 /// Forbidden substrings for the second sentinel coordinates.
 const List<String> _forbiddenLatSubstrings2 = [
-  '13.456789',
-  '13.45678',
-  '13.4567',
-  '13.456',
-  '13.45',
-  '13.4',
-  '13.',
+  '79.343842',
+  '79.34384',
+  '79.3438',
+  '79.343',
+  '79.34',
+  '79.3',
+  '79.',
 ];
 const List<String> _forbiddenLonSubstrings2 = [
-  '89.876543',
-  '89.87654',
-  '89.8765',
-  '89.876',
-  '89.87',
-  '89.8',
-  '89.',
+  '117.194008',
+  '117.19400',
+  '117.1940',
+  '117.194',
+  '117.19',
+  '117.1',
+  '117.',
 ];
 
 /// Converts a [Uint8List] to a lowercase hex string.

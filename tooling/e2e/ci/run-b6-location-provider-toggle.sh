@@ -863,7 +863,7 @@ readonly GEO_REISSUE_SECS="${B6_GEO_REISSUE_SECS:-5}"
 
 # The injected point: Uluru, Australia — a public landmark, chosen precisely
 # BECAUSE it is obviously not a real user's position, and distinct from B1's
-# Dam Square and B3's Christ the Redeemer so a stray fix is unmistakable.
+# Dam Square and B3's Rothera Station so a stray fix is unmistakable.
 # This lane never ASSERTS the value (that is B3's job), so no --dart-define
 # pairing is needed; it only needs a fix to exist.
 #
