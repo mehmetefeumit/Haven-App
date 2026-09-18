@@ -122,9 +122,9 @@ KeyPackageMaintenanceOutcome classifyKeyPackageMaintenance(
     case KpMaintenanceActionFfi.republishedFreshD:
     // A lifetime rotation is a publish like any other, so it reads the same
     // way: the action names the branch that ran, `relaysHealed` says whether a
-    // relay acked it. `mintedFreshSlot` stays false below — a rotation re-mints
-    // the MATERIAL into the SAME `d` (the transport binding forbids a fresh
-    // slot for a routine replacement), so it is not a new slot.
+    // relay acked it. `isFreshSlotMinted` stays false below — a rotation
+    // re-mints the MATERIAL into the SAME `d` (the transport binding forbids a
+    // fresh slot for a routine replacement), so it is not a new slot.
     case KpMaintenanceActionFfi.rotatedExpiringMaterial:
     case KpMaintenanceActionFfi.rotatedUnreadableLifetime:
       // "Sent" is not "acked" (Security Rule 13's principle, applied to the
@@ -143,11 +143,11 @@ KeyPackageMaintenanceOutcome classifyKeyPackageMaintenance(
       }
       return KeyPackageMaintenancePublished(
         relaysAcked: r.relaysHealed,
-        mintedFreshSlot: r.action == KpMaintenanceActionFfi.republishedFreshD,
+        isFreshSlotMinted: r.action == KpMaintenanceActionFfi.republishedFreshD,
         respondersProbed: r.respondersProbed,
         relayErrors: r.relayErrors,
         expiredInitKeyPurged: r.expiredInitKeyPurged,
-        retiredMalformedSlot: r.retiredMalformedSlot,
+        isMalformedSlotRetired: r.retiredMalformedSlot,
       );
     case KpMaintenanceActionFfi.alreadyHealthy:
     case KpMaintenanceActionFfi.seededD:
@@ -188,9 +188,9 @@ KeyPackageMaintenanceOutcome classifyKeyPackageMaintenance(
       return KeyPackageMaintenanceHealthy(
         canonicalOnRelays: r.canonicalOnRelays,
         respondersProbed: r.respondersProbed,
-        seededStableSlot: r.action == KpMaintenanceActionFfi.seededD,
+        isStableSlotSeeded: r.action == KpMaintenanceActionFfi.seededD,
         relayErrors: r.relayErrors,
-        retiredMalformedSlot: r.retiredMalformedSlot,
+        isMalformedSlotRetired: r.retiredMalformedSlot,
       );
   }
 }

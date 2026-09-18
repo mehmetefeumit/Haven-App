@@ -1111,17 +1111,11 @@ class TestRelay {
   /// means the declaration was lost, and the scanner would then assert an
   /// absence it was never given the ground truth for.
   ///
-  /// RESIDUAL, unlike [announceCanaryManifest] and [announceMlsGroupId]: the
-  /// proxy's needle sink APPENDS every declaration it accepts, with no dedupe
-  /// (the manifest sink skips a byte-identical repeat, the id sink keeps a
-  /// set). So the one re-issue case where the frame was in fact delivered and
-  /// only its ACK died with the socket leaves two identical sidecar lines.
-  /// The scanner reads them as two declarations of the same value, which
-  /// cannot change a presence/absence verdict, but they do both count toward
-  /// its per-class declaration floor — so a duplicate can make a class's floor
-  /// read as met while one distinct value of that class is missing. Losing the
-  /// declaration outright is the worse failure of the two, which is why the
-  /// re-issue stands.
+  /// Re-issuing is free of residue, as it is for [announceCanaryManifest] and
+  /// [announceMlsGroupId]: the proxy's needle sink is IDEMPOTENT on a
+  /// byte-identical repeat, so the one re-issue case where the frame was in
+  /// fact delivered and only its ACK died with the socket adds no second
+  /// sidecar line and is acked with the original line's number.
   Future<void> declareNeedle(
     Map<String, Object?> payload, {
     Duration timeout = const Duration(seconds: 15),
@@ -1582,6 +1576,8 @@ class _SocketDied implements Exception {
   final String message;
 
   @override
+  // Every construction site in this file passes a fixed phrase.
+  // harness-log-ok: `message` is composed above from a compiled-in literal.
   String toString() => message;
 }
 

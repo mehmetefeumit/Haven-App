@@ -135,7 +135,8 @@ class ClockSkewStatus {
   @override
   String toString() =>
       'ClockSkewStatus(signal: $signal, complaint: $complaint, '
-      'offsetSecs: $offsetSecs, sources: $corroboratingSources)';
+      'offsetSecs: $offsetSecs, '
+      'sources: ${magnitudeBucket(corroboratingSources)})';
 }
 
 /// One MLS-authenticated member's most recent clock reading.

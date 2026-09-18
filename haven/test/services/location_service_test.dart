@@ -60,19 +60,24 @@ void main() {
         expect(position.heading, isNull);
       });
 
-      test('toString does not expose coordinates', () {
+      test('toString exposes neither coordinates nor a wall-clock fix time',
+          () {
         final position = Position(
           latitude: 37.7749,
           longitude: -122.4194,
-          timestamp: DateTime(2024),
+          timestamp: DateTime.utc(2024, 3, 5, 6, 7, 8),
         );
 
         final str = position.toString();
         expect(str, contains('Position'));
-        expect(str, contains('timestamp'));
         // Coordinates must NOT appear in toString (privacy)
         expect(str, isNot(contains('37.7749')));
         expect(str, isNot(contains('-122.4194')));
+        // Rule 15: no absolute instant on the location plane — the fix age
+        // is rendered as an offset from now instead.
+        expect(str, isNot(contains('2024')));
+        expect(str, isNot(contains(position.timestamp.toIso8601String())));
+        expect(str, matches(RegExp(r'Position\(age: t[+-]\d+s\)')));
       });
     });
 

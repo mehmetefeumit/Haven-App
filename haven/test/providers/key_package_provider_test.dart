@@ -34,6 +34,7 @@ import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/maintenance_service.dart';
 import 'package:haven/src/services/relay_service.dart';
 
+import '../helpers/log_capture.dart';
 import '../mocks/mock_relay_service.dart';
 
 /// A fake circle-manager FFI handle (never invoked by [_RecordingRelay]).
@@ -52,7 +53,7 @@ class _RecordingRelay extends MockRelayService {
   KeyPackageMaintenanceOutcome kpResult =
       const KeyPackageMaintenancePublished(
         relaysAcked: 2,
-        mintedFreshSlot: true,
+        isFreshSlotMinted: true,
         respondersProbed: 2,
       );
 
@@ -196,7 +197,7 @@ void main() {
       final relay = _RecordingRelay()
         ..kpResult = const KeyPackageMaintenancePublished(
           relaysAcked: 1,
-          mintedFreshSlot: true,
+          isFreshSlotMinted: true,
         );
       final container = ProviderContainer(
         overrides: [
@@ -329,5 +330,49 @@ void main() {
         expect(relay.kpCalls, 2);
       },
     );
+
+    test('the tick line states magnitudes, never an exact relay tally',
+        () async {
+      // This `debugPrint` is the ONLY report the provider makes of a tick,
+      // and it interpolates the outcome whole — so the outcome's own
+      // `toString()` is a log line, and Rule 15 forbids an exact count of
+      // the account's relays reaching it.
+      final logs = LogCapture.install();
+      final relay = _RecordingRelay()
+        ..kpResult = const KeyPackageMaintenancePublished(
+          relaysAcked: 7,
+          isFreshSlotMinted: true,
+          respondersProbed: 7,
+          relayErrors: 7,
+        );
+      final container = ProviderContainer(
+        overrides: [
+          identityServiceProvider.overrideWithValue(
+            _MockIdentityService(identityExists: true),
+          ),
+          maintenanceServiceProvider.overrideWithValue(
+            MaintenanceService(
+              relayService: relay,
+              circleManagerFactory: () async => _FakeCircleManager(),
+              identitySecretBytes: () async => List.generate(32, (i) => i),
+            ),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await container.read(keyPackagePublisherProvider.future);
+
+      logs
+        ..assertContains('[KeyPackage] maintain tick: ')
+        ..assertContains('acked: 5+')
+        ..assertContains('responders: 5+')
+        ..assertContains('relayErrors: 5+');
+      expect(
+        logs.joined,
+        isNot(contains('7')),
+        reason: 'seven acking relays must reach the log as a magnitude only',
+      );
+    });
   });
 }

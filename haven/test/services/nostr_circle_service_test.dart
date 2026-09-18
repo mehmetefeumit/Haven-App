@@ -380,7 +380,7 @@ void main() {
         expect(member1, equals(member2));
       });
 
-      test('toString includes truncated pubkey', () {
+      test('toString carries no pubkey, not even a prefix', () {
         const member = CircleMember(
           pubkey:
               'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
@@ -390,17 +390,11 @@ void main() {
         );
 
         final str = member.toString();
-        // Pubkey must be truncated (first 8 chars + ellipsis).
-        expect(str, contains('aaaaaaaa...'));
-        // Full pubkey must NOT appear.
-        expect(
-          str,
-          isNot(
-            contains(
-              'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-            ),
-          ),
-        );
+        // Rule 15: "redacted" means ABSENT — a truncated pubkey still tells
+        // one peer apart from another, so a salted handle takes its place.
+        expect(str, isNot(contains('aaaaaaaa')));
+        expect(str, isNot(contains('npub1')));
+        expect(str, startsWith('CircleMember(peer#'));
       });
     });
 

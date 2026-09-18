@@ -46,6 +46,7 @@ import 'package:haven/src/services/location_service.dart';
 import 'package:haven/src/services/publish_stagger.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../helpers/log_capture.dart';
 import '../mocks/background_task_fakes.dart';
 
 /// The retention a receiver reads off a kind-445 location: the widest publish
@@ -934,6 +935,26 @@ void main() {
         reason: 'a deferred prune is owed, not forgotten',
       );
       expect(harness.manager.pruneProcessedGiftWrapsCalls, 1);
+    });
+
+    test('the prune line states a magnitude, never how many rows went',
+        () async {
+      // The depth of the cached peer-location table is a property of who the
+      // user shares with and how often (Rule 15), so only a bucket is logged.
+      final logs = LogCapture.install();
+      final circle = circleFixture(seed: 1);
+      final harness = await BackgroundTaskHarness.start(circles: [circle]);
+      harness.manager.pruneExpiredLastKnownRows = 7;
+      final base = DateTime.now();
+
+      for (var i = 0; i < 30; i++) {
+        await harness.tick(base.add(Duration(seconds: 130 * i)));
+      }
+
+      expect(harness.manager.pruneExpiredLastKnownCalls, 1);
+      logs
+        ..assertContains('[BackgroundTask] Pruned 5+ expired row(s).')
+        ..assertNoNeedles(['Pruned 7']);
     });
   });
 

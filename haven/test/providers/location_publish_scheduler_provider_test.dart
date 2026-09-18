@@ -35,6 +35,7 @@ import 'package:haven/src/services/location_sharing_service.dart';
 import 'package:haven/src/services/publish_stagger.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../helpers/log_capture.dart';
 import '../mocks/mock_circle_service.dart';
 import '../mocks/mock_relay_service.dart';
 
@@ -1184,6 +1185,35 @@ void main() {
         reason: 'a deferral is not a publish verdict — recording one would '
             'mis-attribute the outage to the relay plane',
       );
+    });
+
+    test('the deferral line states a magnitude, never how many inputs gate '
+        'the circle', () async {
+      // An exact count of MLS inputs still gating a circle tells circles
+      // apart (Rule 15) — the same reason the service-layer twin in
+      // `location_sharing_service.dart` buckets it.
+      final logs = LogCapture.install();
+      final a = TestCircleFactory.createCircle(
+        mlsGroupId: const [1],
+        nostrGroupId: const [10],
+        members: [TestCircleFactory.createMember(pubkey: _selfPubkey)],
+      );
+      final env = build([a]);
+      final notifier = await ready(env.container);
+      env.mock.deferNextEncrypt = const LocationSendDeferred(
+        unresolvedInputs: 7,
+        discardedIntents: 0,
+        repaired: false,
+        commits: [],
+        proposals: [],
+      );
+
+      await notifier.triggerTickForTest();
+
+      logs
+        ..assertContains('[LocationPublishScheduler] send deferred')
+        ..assertContains('gating=5+')
+        ..assertNoNeedles(['gating=7']);
     });
 
     test('a SENT publish still routes to the publish verdict', () async {

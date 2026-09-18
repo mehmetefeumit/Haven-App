@@ -10,6 +10,7 @@ import 'package:flutter/foundation.dart';
 
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/circle_service.dart';
+import 'package:haven/src/utils/log_alias.dart';
 import 'package:meta/meta.dart' show useResult;
 
 /// Presence-only result of an M7 receive-only catch-up sweep (plain counters,
@@ -154,7 +155,7 @@ sealed class KeyPackageMaintenanceOutcome {
   const KeyPackageMaintenanceOutcome({
     required this.relayErrors,
     required this.expiredInitKeyPurged,
-    this.retiredMalformedSlot = false,
+    this.isMalformedSlotRetired = false,
   });
 
   /// Relay probes/publishes/record-writes that errored (tallied, never fatal).
@@ -184,7 +185,7 @@ sealed class KeyPackageMaintenanceOutcome {
   /// was acknowledged. Like [expiredInitKeyPurged] it is orthogonal to the
   /// three-way verdict and lives on the base class so no variant can drop it.
   /// An install created after the width fix never sets it.
-  final bool retiredMalformedSlot;
+  final bool isMalformedSlotRetired;
 }
 
 /// Nothing needed doing: the probe reached at least one of the user's own
@@ -197,9 +198,9 @@ final class KeyPackageMaintenanceHealthy extends KeyPackageMaintenanceOutcome {
   const KeyPackageMaintenanceHealthy({
     required this.canonicalOnRelays,
     required this.respondersProbed,
-    this.seededStableSlot = false,
+    this.isStableSlotSeeded = false,
     super.relayErrors = 0,
-    super.retiredMalformedSlot = false,
+    super.isMalformedSlotRetired = false,
   }) : assert(
          respondersProbed > 0,
          'health requires a relay to have answered — an unprobed tick is a '
@@ -227,13 +228,16 @@ final class KeyPackageMaintenanceHealthy extends KeyPackageMaintenanceOutcome {
   /// parameter: a tick that deleted the tracked package's private `init_key`
   /// without replacing it is not health, and is classified as
   /// [KeyPackageFailureKind.initKeyPurgedUnreplaced] instead of arriving here.
-  final bool seededStableSlot;
+  final bool isStableSlotSeeded;
 
   @override
   String toString() =>
-      'KeyPackageMaintenanceHealthy(canonical: $canonicalOnRelays, '
-      'responders: $respondersProbed, seeded: $seededStableSlot, '
-      'relayErrors: $relayErrors, slotRetired: $retiredMalformedSlot)';
+      'KeyPackageMaintenanceHealthy('
+      'canonical: ${magnitudeBucket(canonicalOnRelays)}, '
+      'responders: ${magnitudeBucket(respondersProbed)}, '
+      'seeded: $isStableSlotSeeded, '
+      'relayErrors: ${magnitudeBucket(relayErrors)}, '
+      'slotRetired: $isMalformedSlotRetired)';
 }
 
 /// Work was done: a `KeyPackage` was (re)published and **acknowledged** by at
@@ -249,11 +253,11 @@ final class KeyPackageMaintenancePublished
   /// merely sent", applied to the reachability plane).
   const KeyPackageMaintenancePublished({
     required this.relaysAcked,
-    required this.mintedFreshSlot,
+    required this.isFreshSlotMinted,
     this.respondersProbed = 0,
     super.relayErrors = 0,
     super.expiredInitKeyPurged = false,
-    super.retiredMalformedSlot = false,
+    super.isMalformedSlotRetired = false,
   }) : assert(
          relaysAcked > 0,
          'a publish no relay acked is a failure, not a publish',
@@ -264,17 +268,20 @@ final class KeyPackageMaintenancePublished
 
   /// Whether the material went into a freshly-minted `d` slot (first publish
   /// or a rotation) rather than the tracked stable one.
-  final bool mintedFreshSlot;
+  final bool isFreshSlotMinted;
 
   /// Responding own relays the probe reached this tick.
   final int respondersProbed;
 
   @override
   String toString() =>
-      'KeyPackageMaintenancePublished(acked: $relaysAcked, '
-      'freshSlot: $mintedFreshSlot, responders: $respondersProbed, '
-      'relayErrors: $relayErrors, initKeyPurged: $expiredInitKeyPurged, '
-      'slotRetired: $retiredMalformedSlot)';
+      'KeyPackageMaintenancePublished('
+      'acked: ${magnitudeBucket(relaysAcked)}, '
+      'freshSlot: $isFreshSlotMinted, '
+      'responders: ${magnitudeBucket(respondersProbed)}, '
+      'relayErrors: ${magnitudeBucket(relayErrors)}, '
+      'initKeyPurged: $expiredInitKeyPurged, '
+      'slotRetired: $isMalformedSlotRetired)';
 }
 
 /// Work was needed and did not land: after this tick the account may not be
@@ -314,7 +321,8 @@ final class KeyPackageMaintenanceFailed extends KeyPackageMaintenanceOutcome {
   @override
   String toString() =>
       'KeyPackageMaintenanceFailed(${kind.name}, ${disposition.name}, '
-      'relayErrors: $relayErrors, initKeyPurged: $expiredInitKeyPurged)';
+      'relayErrors: ${magnitudeBucket(relayErrors)}, '
+      'initKeyPurged: $expiredInitKeyPurged)';
 }
 
 /// What an M8 relay-list maintenance tick did for one category (mirrors the
@@ -560,8 +568,9 @@ class PublishResult {
 
   @override
   String toString() =>
-      'PublishResult(accepted: ${acceptedBy.length}, '
-      'rejected: ${rejectedBy.length}, failed: ${failed.length})';
+      'PublishResult(accepted: ${magnitudeBucket(acceptedBy.length)}, '
+      'rejected: ${magnitudeBucket(rejectedBy.length)}, '
+      'failed: ${magnitudeBucket(failed.length)})';
 }
 
 /// Represents a relay rejection with reason.

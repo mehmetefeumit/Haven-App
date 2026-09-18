@@ -87,6 +87,10 @@ class FakeCircleManager implements CircleManagerFfi {
   final List<BigInt> confirmedTokens = [];
   final List<BigInt> rolledBackTokens = [];
   int pruneExpiredLastKnownCalls = 0;
+
+  /// Rows the next prune reports having deleted — the number the FGS renders
+  /// into its prune log line.
+  int pruneExpiredLastKnownRows = 0;
   int pruneProcessedGiftWrapsCalls = 0;
   bool disposed = false;
 
@@ -162,7 +166,7 @@ class FakeCircleManager implements CircleManagerFfi {
   @override
   Future<int> pruneExpiredLastKnown({required int nowUnixSecs}) async {
     pruneExpiredLastKnownCalls++;
-    return 0;
+    return pruneExpiredLastKnownRows;
   }
 
   @override

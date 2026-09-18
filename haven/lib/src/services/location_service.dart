@@ -10,6 +10,8 @@
 /// - GeolocatorLocationService - Production implementation using geolocator
 library;
 
+import 'package:haven/src/utils/log_alias.dart';
+
 /// Exception thrown when location operations fail.
 class LocationServiceException implements Exception {
   /// Creates a [LocationServiceException] with the given message.
@@ -68,7 +70,8 @@ class Position {
   final double? heading;
 
   @override
-  String toString() => 'Position(timestamp: $timestamp)';
+  String toString() =>
+      'Position(age: ${relativeSecs(LogOrigin.now(), timestamp)})';
 }
 
 /// Abstract interface for location services.

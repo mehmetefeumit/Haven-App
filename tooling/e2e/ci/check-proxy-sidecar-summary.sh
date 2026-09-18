@@ -7,7 +7,7 @@
 # runtime log scanner (tooling/e2e/local-relay/src/bin/wire_proxy.rs,
 # `report_needle_channel`):
 #
-#   [haven-wire-proxy] needle sidecar: N declaration(s) recorded, N refused, N lost[ — STALE (…)]
+#   [haven-wire-proxy] needle sidecar: N declaration(s) recorded, N repeat(s), N refused, N lost[ — STALE (…)]
 #   [haven-wire-proxy] canary sidecar: N manifest(s) recorded, N repeat(s), N refused, N lost[ — STALE (…)]
 #
 # A REFUSED or LOST declaration is a needle the scanner never searched for, so
@@ -41,7 +41,7 @@ readonly RC_UNUSABLE=3
 SELF_PATH="${BASH_SOURCE[0]}"
 readonly SELF_PATH
 
-readonly NEEDLE_RE='^\[haven-wire-proxy\] needle sidecar: ([0-9]+) declaration\(s\) recorded, ([0-9]+) refused, ([0-9]+) lost(.*)$'
+readonly NEEDLE_RE='^\[haven-wire-proxy\] needle sidecar: ([0-9]+) declaration\(s\) recorded, ([0-9]+) repeat\(s\), ([0-9]+) refused, ([0-9]+) lost(.*)$'
 readonly CANARY_RE='^\[haven-wire-proxy\] canary sidecar: ([0-9]+) manifest\(s\) recorded, ([0-9]+) repeat\(s\), ([0-9]+) refused, ([0-9]+) lost(.*)$'
 
 # judge <label> <refused> <lost> <tail> — one FAIL line per finding, rc 1 if any.
@@ -71,8 +71,8 @@ check_summary() { # check_summary <proxy-log>
   while IFS= read -r line; do
     if [[ "${line}" =~ ${NEEDLE_RE} ]]; then
       needle_n=$(( needle_n + 1 ))
-      echo "proxy declaration channel: needle sidecar ${BASH_REMATCH[1]} recorded, ${BASH_REMATCH[2]} refused, ${BASH_REMATCH[3]} lost"
-      judge "needle sidecar" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}" "${BASH_REMATCH[4]}" || rc=1
+      echo "proxy declaration channel: needle sidecar ${BASH_REMATCH[1]} recorded, ${BASH_REMATCH[2]} repeat(s), ${BASH_REMATCH[3]} refused, ${BASH_REMATCH[4]} lost"
+      judge "needle sidecar" "${BASH_REMATCH[3]}" "${BASH_REMATCH[4]}" "${BASH_REMATCH[5]}" || rc=1
     elif [[ "${line}" =~ ${CANARY_RE} ]]; then
       canary_n=$(( canary_n + 1 ))
       echo "proxy declaration channel: canary sidecar ${BASH_REMATCH[1]} recorded, ${BASH_REMATCH[2]} repeat(s), ${BASH_REMATCH[3]} refused, ${BASH_REMATCH[4]} lost"
@@ -90,7 +90,7 @@ check_summary() { # check_summary <proxy-log>
   return "${rc}"
 }
 
-readonly SELF_TEST_FIXTURES=16
+readonly SELF_TEST_FIXTURES=17
 
 run_self_test() {
   local tmp fail=0 ran=0
@@ -98,7 +98,7 @@ run_self_test() {
   # shellcheck disable=SC2064
   trap "rm -rf '${tmp}'" RETURN
 
-  local healthy_needle='[haven-wire-proxy] needle sidecar: 12 declaration(s) recorded, 0 refused, 0 lost'
+  local healthy_needle='[haven-wire-proxy] needle sidecar: 12 declaration(s) recorded, 0 repeat(s), 0 refused, 0 lost'
   local healthy_canary='[haven-wire-proxy] canary sidecar: 1 manifest(s) recorded, 0 repeat(s), 0 refused, 0 lost'
   local stale=' — STALE (a previous run'"'"'s file was appended to)'
 
@@ -118,8 +118,8 @@ run_self_test() {
 
   local noise='[haven-wire-proxy] shutting down: 3 connection(s), 40 record(s) observed, 40 line(s) written'
   expect "healthy"                         0 "${noise}" "${healthy_needle}" "${healthy_canary}"
-  expect "needle refused"                  1 "${noise}" '[haven-wire-proxy] needle sidecar: 12 declaration(s) recorded, 1 refused, 0 lost' "${healthy_canary}"
-  expect "needle lost"                     1 "${noise}" '[haven-wire-proxy] needle sidecar: 12 declaration(s) recorded, 0 refused, 2 lost' "${healthy_canary}"
+  expect "needle refused"                  1 "${noise}" '[haven-wire-proxy] needle sidecar: 12 declaration(s) recorded, 0 repeat(s), 1 refused, 0 lost' "${healthy_canary}"
+  expect "needle lost"                     1 "${noise}" '[haven-wire-proxy] needle sidecar: 12 declaration(s) recorded, 0 repeat(s), 0 refused, 2 lost' "${healthy_canary}"
   expect "canary refused"                  1 "${noise}" "${healthy_needle}" '[haven-wire-proxy] canary sidecar: 1 manifest(s) recorded, 0 repeat(s), 1 refused, 0 lost'
   expect "canary lost"                     1 "${noise}" "${healthy_needle}" '[haven-wire-proxy] canary sidecar: 0 manifest(s) recorded, 0 repeat(s), 0 refused, 1 lost'
   expect "needle STALE"                    1 "${noise}" "${healthy_needle}${stale}" "${healthy_canary}"
@@ -129,10 +129,13 @@ run_self_test() {
   expect "a mis-shaped line is absent"     1 "${noise}" '[haven-wire-proxy] needle sidecar: some declarations recorded' "${healthy_canary}"
   # A restarted recorder appends a second summary; the first is not excused.
   expect "an earlier unhealthy summary is not masked by a later healthy one" 1 \
-    "${noise}" '[haven-wire-proxy] needle sidecar: 3 declaration(s) recorded, 0 refused, 1 lost' "${healthy_canary}" \
+    "${noise}" '[haven-wire-proxy] needle sidecar: 3 declaration(s) recorded, 0 repeat(s), 0 refused, 1 lost' "${healthy_canary}" \
     "${noise}" "${healthy_needle}" "${healthy_canary}"
-  # A repeat is not a fault (the proxy de-duplicates an identical manifest).
+  # A repeat is not a fault on either sidecar: the proxy de-duplicates an
+  # identical manifest and an identical declaration, and a harness re-issuing
+  # after a reconnect is the ordinary way one arrives.
   expect "canary repeats are not a fault"  0 "${noise}" "${healthy_needle}" '[haven-wire-proxy] canary sidecar: 1 manifest(s) recorded, 2 repeat(s), 0 refused, 0 lost'
+  expect "needle repeats are not a fault"  0 "${noise}" '[haven-wire-proxy] needle sidecar: 12 declaration(s) recorded, 3 repeat(s), 0 refused, 0 lost' "${healthy_canary}"
 
   # Nothing to read is rc 3, never a pass.
   local rc=0
@@ -159,7 +162,7 @@ run_self_test() {
   bash "${SELF_PATH}" "${tmp}/proxy.log" > "${tmp}/out" 2>&1 || rc=$?
   local want_out
   want_out="$(printf '%s\n%s' \
-    'proxy declaration channel: needle sidecar 12 recorded, 0 refused, 0 lost' \
+    'proxy declaration channel: needle sidecar 12 recorded, 0 repeat(s), 0 refused, 0 lost' \
     'proxy declaration channel: canary sidecar 1 recorded, 0 repeat(s), 0 refused, 0 lost')"
   if (( rc != 0 )) || [[ "$(<"${tmp}/out")" != "${want_out}" ]]; then
     echo "SELF-TEST FAIL (counts only): the healthy read-back printed something other than the two count lines" >&2

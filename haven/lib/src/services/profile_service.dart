@@ -21,6 +21,7 @@ library;
 
 import 'package:flutter/foundation.dart';
 import 'package:haven/src/constants/profile_refresh_tiers.dart';
+import 'package:haven/src/utils/log_alias.dart';
 
 /// Exception thrown when profile operations fail.
 class ProfileServiceException implements Exception {
@@ -138,7 +139,7 @@ class Profile {
 
   @override
   String toString() =>
-      'Profile(pubkeyHex: ${pubkeyHex.substring(0, 8)}..., '
+      'Profile(${logAliasHandle(LogAliasClass.peer, pubkeyHex)}, '
       'hasPicture: ${pictureBytes != null})';
 }
 

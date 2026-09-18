@@ -142,6 +142,7 @@ import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/jittered_scheduler.dart';
 import 'package:haven/src/services/location_sharing_service.dart';
 import 'package:haven/src/services/publish_stagger.dart';
+import 'package:haven/src/utils/log_alias.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// Circles eligible for outbound location publishing: accepted, not a
@@ -610,7 +611,8 @@ class LocationPublishSchedulerNotifier extends Notifier<void>
         case LocationPublishDeferred(:final unresolvedInputs, :final repaired):
           debugPrint(
             '[LocationPublishScheduler] send deferred by the MLS engine — '
-            'gating=$unresolvedInputs, repaired=$repaired',
+            'gating=${magnitudeBucket(unresolvedInputs)}, '
+            'repaired=$repaired',
           );
           _recordDeferredSend(circle);
       }

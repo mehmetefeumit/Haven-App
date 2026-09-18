@@ -305,8 +305,10 @@ async fn serve(args: &[String]) -> ExitCode {
 fn report_needle_channel(needles: &NeedleSink, canaries: &CanarySink) {
     let needle_stats = needles.stats();
     eprintln!(
-        "[haven-wire-proxy] needle sidecar: {} declaration(s) recorded, {} refused, {} lost{}",
+        "[haven-wire-proxy] needle sidecar: {} declaration(s) recorded, {} repeat(s), {} refused, \
+         {} lost{}",
         needle_stats.recorded,
+        needle_stats.repeats,
         needle_stats.refused,
         needle_stats.lost,
         if needle_stats.stale {

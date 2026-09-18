@@ -19,6 +19,7 @@ library;
 import 'package:flutter/foundation.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/profile_service.dart';
+import 'package:haven/src/utils/log_alias.dart';
 import 'package:haven/src/utils/member_display.dart';
 import 'package:haven/src/utils/search_fold.dart';
 
@@ -152,15 +153,9 @@ class MemberCandidate {
 
   @override
   String toString() =>
-      'MemberCandidate(${_shortKey(pubkeyHex)}, tier: $tier, named: '
-      '${displayName != null})';
+      'MemberCandidate(${logAliasHandle(LogAliasClass.peer, pubkeyHex)}, '
+      'tier: $tier, named: ${displayName != null})';
 }
-
-/// The leading 8 hex characters of [pubkeyHex] — or all of it when it is
-/// shorter, because a `toString` that can raise turns one diagnostic into
-/// two failures on the very path that reached for it.
-String _shortKey(String pubkeyHex) =>
-    pubkeyHex.length > 8 ? '${pubkeyHex.substring(0, 8)}...' : pubkeyHex;
 
 /// The ordered, deduplicated directory one picker opening renders from.
 @immutable
@@ -205,7 +200,8 @@ class MemberDirectory {
 
   @override
   String toString() =>
-      'MemberDirectory(${entries.length}${degraded ? ', degraded' : ''})';
+      'MemberDirectory(${magnitudeBucket(entries.length)}'
+      '${degraded ? ', degraded' : ''})';
 }
 
 /// Reads the local directory of people the user shares, or recently shared,

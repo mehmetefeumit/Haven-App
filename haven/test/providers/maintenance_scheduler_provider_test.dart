@@ -17,6 +17,7 @@ import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/maintenance_service.dart';
 import 'package:haven/src/services/relay_service.dart';
 
+import '../helpers/log_capture.dart';
 import '../mocks/mock_circle_service.dart';
 import '../mocks/mock_profile_service.dart';
 import '../mocks/mock_relay_service.dart';
@@ -264,6 +265,39 @@ void main() {
 
         container.dispose();
       });
+    });
+
+    test('the tick line states magnitudes, never an exact relay tally', () {
+      // The scheduler's only report of a tick interpolates the outcome
+      // whole, so the outcome's `toString()` is a log line — Rule 15 forbids
+      // an exact count of the account's own relays reaching it.
+      final logs = LogCapture.install();
+      fakeAsync((async) {
+        final fake = _FakeMaintenanceService()
+          ..kpOutcome = const KeyPackageMaintenanceHealthy(
+            canonicalOnRelays: 7,
+            respondersProbed: 7,
+            relayErrors: 7,
+          );
+        final container = _containerWith(fake)
+          ..read(maintenanceSchedulerProvider.notifier);
+
+        async.elapse(const Duration(minutes: 4));
+        expect(fake.kpCalls, 1);
+
+        container.dispose();
+      });
+
+      logs
+        ..assertContains('[Maintenance] KeyPackage tick: ')
+        ..assertContains('canonical: 5+')
+        ..assertContains('responders: 5+')
+        ..assertContains('relayErrors: 5+');
+      expect(
+        logs.joined,
+        isNot(contains('7')),
+        reason: 'seven responding relays must reach the log as a magnitude',
+      );
     });
   });
 
@@ -1105,7 +1139,7 @@ void main() {
 
         fake.kpOutcome = const KeyPackageMaintenancePublished(
           relaysAcked: 1,
-          mintedFreshSlot: true,
+          isFreshSlotMinted: true,
         );
         _timeToNextKpTick(async, fake); // the tick that lands the publish
 

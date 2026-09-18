@@ -156,8 +156,8 @@ const String kCatchupWorkerNoIdentityMarker =
 const String kCatchupWorkerBootstrapOkMarker = '[CatchupWorker] bootstrap ok';
 
 /// Prefix of the sweep-completion line; the full line appends the
-/// `CatchupResult` counters (`circles= locations= commits= staged= cursors=
-/// deadline= relayErrors=`) — counters only, never content.
+/// `CatchupResult` counters (`circles= locations= deferred= cursors=
+/// deadline= relayErrors=`) — bucketed counters only, never content.
 const String kCatchupWorkerSweepCompletePrefix =
     '[CatchupWorker] sweep complete:';
 

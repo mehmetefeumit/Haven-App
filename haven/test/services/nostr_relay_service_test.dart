@@ -92,23 +92,40 @@ void main() {
         expect(result.isSuccess, false);
       });
 
-      test('toString includes counts', () {
+      test('toString buckets its counts and never states an exact one', () {
         const result = PublishResult(
           eventId: 'abc123',
-          acceptedBy: ['wss://relay1.com', 'wss://relay2.com'],
-          rejectedBy: [
-            RelayRejection(relay: 'wss://relay3.com', reason: 'Rate limited'),
+          acceptedBy: [
+            'wss://relay1.com',
+            'wss://relay2.com',
+            'wss://relay3.com',
+            'wss://relay4.com',
+            'wss://relay5.com',
+            'wss://relay6.com',
+            'wss://relay7.com',
           ],
-          failed: ['wss://relay4.com'],
+          rejectedBy: [
+            RelayRejection(relay: 'wss://relay8.com', reason: 'Rate limited'),
+            RelayRejection(relay: 'wss://relay9.com', reason: 'Duplicate'),
+          ],
+          failed: [],
         );
 
         final str = result.toString();
         // eventId is intentionally excluded from toString to prevent
         // event ID leakage in logs (security audit F6).
         expect(str, isNot(contains('abc123')));
-        expect(str, contains('accepted: 2'));
-        expect(str, contains('rejected: 1'));
-        expect(str, contains('failed: 1'));
+        // Seven accepted, two rejected, none failed: an exact tally of the
+        // account's relay set is itself an identifier (Rule 15), so the
+        // rendering states magnitudes only.
+        expect(str, contains('accepted: 5+'));
+        expect(str, contains('rejected: 2-4'));
+        expect(str, contains('failed: 0'));
+        expect(
+          str,
+          isNot(contains('7')),
+          reason: 'the exact accepted count must not survive bucketing',
+        );
       });
 
       test('handles empty result lists', () {

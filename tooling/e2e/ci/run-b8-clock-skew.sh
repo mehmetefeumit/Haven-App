@@ -340,7 +340,7 @@ run_self_test() {
     '08-03 04:44:03.001  1234  1300 I flutter : [b8] REQ_CLOCK 4 0' \
     '08-03 04:44:33.001  1234  1300 I flutter : [b8] CLOCK_OBSERVED 4 21600' \
     '08-03 04:44:50.001  1234  1300 I flutter : [b8] OK surface-distinct' \
-    '08-03 04:45:00.001  1234  1300 I flutter : [b8] ALL_PHASES_COMPLETE findings=0 evidence=3' \
+    '08-03 04:45:00.001  1234  1300 I flutter : [b8] ALL_PHASES_COMPLETE findings=0 evidence=2-4' \
     > "${tmp}/green.log"
 
   # (1) All four requests are seen, in order, exactly once.
@@ -402,7 +402,7 @@ run_self_test() {
     '08-03 04:41:33.001  1234  1300 I flutter : [b8] CLOCK_OBSERVED 1 21600' \
     '08-03 04:41:40.001  1234  1300 I flutter : [b8] FINDING forward-skew-publish: the relay refused it' \
     '08-03 04:43:40.001  1234  1300 I flutter : [b8] FINDING backward-skew-catchup: window skipped backlog' \
-    '08-03 04:45:00.001  1234  1300 I flutter : [b8] ALL_PHASES_COMPLETE findings=2' \
+    '08-03 04:45:00.001  1234  1300 I flutter : [b8] ALL_PHASES_COMPLETE findings=2-4' \
     > "${tmp}/red.log"
 
   # (5) Both findings are extracted, and the logcat prefix is stripped so the
@@ -663,7 +663,7 @@ run_self_test() {
     '08-03 04:43:35.001  1234  1300 I flutter : [b8] OK peer-corroborated' \
     '08-03 04:43:36.001  1234  1300 I flutter : [b8] OK surface-behind' \
     '08-03 04:44:50.001  1234  1300 I flutter : [b8] OK surface-distinct' \
-    '08-03 04:45:00.001  1234  1300 I flutter : [b8] ALL_PHASES_COMPLETE findings=3 evidence=1' \
+    '08-03 04:45:00.001  1234  1300 I flutter : [b8] ALL_PHASES_COMPLETE findings=2-4 evidence=1' \
     > "${tmp}/reverted-classification.log"
   got="$(missing_ok_markers "${tmp}/reverted-classification.log" | tr '\n' ',')"
   if [[ "${got}" != "rejection-classified,rejection-verdict,surface-rejected," ]]; then
@@ -691,7 +691,7 @@ run_self_test() {
     '08-03 04:43:35.001  1234  1300 I flutter : [b8] OK peer-corroborated' \
     '08-03 04:43:36.001  1234  1300 I flutter : [b8] OK surface-behind' \
     '08-03 04:44:50.001  1234  1300 I flutter : [b8] OK surface-distinct' \
-    '08-03 04:45:00.001  1234  1300 I flutter : [b8] ALL_PHASES_COMPLETE findings=1 evidence=2' \
+    '08-03 04:45:00.001  1234  1300 I flutter : [b8] ALL_PHASES_COMPLETE findings=1 evidence=2-4' \
     > "${tmp}/reverted-corroboration.log"
   got="$(missing_ok_markers "${tmp}/reverted-corroboration.log" | tr '\n' ',')"
   if [[ "${got}" != "peer-sole-source-raised," ]]; then
@@ -713,7 +713,7 @@ run_self_test() {
     '08-03 04:43:35.001  1234  1300 I flutter : [b8] OK peer-corroborated' \
     '08-03 04:43:36.001  1234  1300 I flutter : [b8] OK surface-behind' \
     '08-03 04:44:50.001  1234  1300 I flutter : [b8] FINDING clock-fault-copy: both faults render the SAME body' \
-    '08-03 04:45:00.001  1234  1300 I flutter : [b8] ALL_PHASES_COMPLETE findings=1 evidence=2' \
+    '08-03 04:45:00.001  1234  1300 I flutter : [b8] ALL_PHASES_COMPLETE findings=1 evidence=2-4' \
     > "${tmp}/reverted-copy.log"
   got="$(missing_ok_markers "${tmp}/reverted-copy.log" | tr '\n' ',')"
   if [[ "${got}" != "surface-distinct," ]]; then
@@ -755,7 +755,7 @@ run_self_test() {
     '08-03 04:43:35.001  1234  1300 I flutter : [b8] OK peer-corroborated' \
     '08-03 04:43:36.001  1234  1300 I flutter : [b8] OK surface-behind' \
     '08-03 04:44:50.001  1234  1300 I flutter : [b8] OK surface-distinct' \
-    '08-03 04:45:00.001  1234  1300 I flutter : [b8] ALL_PHASES_COMPLETE findings=1 evidence=2' \
+    '08-03 04:45:00.001  1234  1300 I flutter : [b8] ALL_PHASES_COMPLETE findings=1 evidence=2-4' \
     > "${tmp}/reverted-sole-source-copy.log"
   got="$(missing_ok_markers "${tmp}/reverted-sole-source-copy.log" | tr '\n' ',')"
   if [[ "${got}" != "peer-sole-source-hedged," ]]; then

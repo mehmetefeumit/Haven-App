@@ -10,6 +10,7 @@
 library;
 
 import 'package:flutter/foundation.dart';
+import 'package:haven/src/utils/log_alias.dart';
 
 /// Exception thrown when identity operations fail.
 class IdentityServiceException implements Exception {
@@ -51,7 +52,7 @@ class Identity {
 
   @override
   String toString() =>
-      'Identity(npub: ${npub.length > 20 ? '${npub.substring(0, 20)}...' : npub})';
+      'Identity(${logAliasHandle(LogAliasClass.peer, npub)})';
 
   @override
   bool operator ==(Object other) =>

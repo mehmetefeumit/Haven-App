@@ -407,10 +407,19 @@ readonly BARRIER_FILE='files/b1_broadcast_barrier'
 # cycle can legitimately report 0 (nothing due yet on its independent per-circle
 # jittered schedule — see `PerCircleDueTracker`). Taking the last line would
 # make a genuine success flap on cycle timing.
+# The app renders both fields through `magnitudeBucket` (Security Rule 15: an
+# exact count of a user's circles is an identifier), so the vocabulary is
+# `0 | 1 | 2-4 | 5+`, never a bare integer above 1. The parser keeps the
+# bucket's LEADING number (0, 1, 2, 5): that preserves the only boundary this
+# lane asserts, zero versus non-zero, and orders the buckets correctly. A regex
+# anchored on `[0-9]+/` would match `2-4/` and `5+/` as NOTHING, and an empty
+# parse takes the "no publish cycle reported" branch — a false product
+# regression with a misleading cause list.
 max_published_count() {
   local logfile="$1"
-  { grep -aoE 'Published to [0-9]+/[0-9]+ due circle' "${logfile}" 2>/dev/null \
-      | grep -aoE '[0-9]+/' | tr -d '/' | sort -n | tail -1; } || true
+  { grep -aoE 'Published to [0-9]+(-[0-9]+|\+)?/[0-9]+(-[0-9]+|\+)? due circle' \
+      "${logfile}" 2>/dev/null \
+      | grep -aoE 'to [0-9]+' | tr -d 'to ' | sort -n | tail -1; } || true
 }
 
 # Print every line from the FIRST occurrence of <start> up to, but NOT
@@ -1858,13 +1867,13 @@ run_self_test() {
   #     schedule) must NOT mask an earlier real publish. Guards the "last line
   #     wins" bug that would make a passing lane flap on cycle timing.
   printf '%s\n' \
-    '08-02 04:42:14.552  1234  1300 I flutter : [BackgroundTask] Published to 2/2 due circle(s) (2 eligible), fetched 2/2 circle(s).' \
-    '08-02 04:43:26.552  1234  1300 I flutter : [BackgroundTask] Published to 0/0 due circle(s) (2 eligible), fetched 0/2 circle(s).' \
+    '08-02 04:42:14.552  1234  1300 I flutter : [BackgroundTask] Published to 2-4/2-4 due circle(s) (2-4 eligible), fetched 2-4/2-4 circle(s).' \
+    '08-02 04:43:26.552  1234  1300 I flutter : [BackgroundTask] Published to 0/0 due circle(s) (2-4 eligible), fetched 0/2-4 circle(s).' \
     > "${tmp}/multi.log"
   _case
   got="$(max_published_count "${tmp}/multi.log")"
   if [[ "${got}" != "2" ]]; then
-    echo "SELF-TEST FAIL (3): expected 2 across cycles, got '${got}'" >&2
+    echo "SELF-TEST FAIL (3): expected 2 (the 2-4 bucket's leading number) across cycles, got '${got}'" >&2
     fail=1
   fi
 
@@ -1880,16 +1889,19 @@ run_self_test() {
     fail=1
   fi
 
-  # (5) DOUBLE-DIGIT — the parser must not truncate or mis-sort N >= 10
-  #     (a plain lexical sort ranks '9' above '12').
+  # (5) BUCKETS — the app never prints a bare integer above 1: the fields are
+  #     `magnitudeBucket` output (`2-4`, `5+`). The parser must read both
+  #     shapes and rank `5+` above `2-4` above `1` (run 35376588206's recon
+  #     found the previous `[0-9]+/` regex read `2-4/` and `5+/` as NOTHING,
+  #     which the caller reports as "no publish cycle" — a false regression).
   printf '%s\n' \
-    '08-02 04:42:14.552  1234  1300 I flutter : [BackgroundTask] Published to 9/12 due circle(s) (12 eligible), fetched 9/12 circle(s).' \
-    '08-02 04:43:26.552  1234  1300 I flutter : [BackgroundTask] Published to 12/12 due circle(s) (12 eligible), fetched 12/12 circle(s).' \
+    '08-02 04:42:14.552  1234  1300 I flutter : [BackgroundTask] Published to 2-4/5+ due circle(s) (5+ eligible), fetched 2-4/5+ circle(s).' \
+    '08-02 04:43:26.552  1234  1300 I flutter : [BackgroundTask] Published to 5+/5+ due circle(s) (5+ eligible), fetched 5+/5+ circle(s).' \
     > "${tmp}/wide.log"
   _case
   got="$(max_published_count "${tmp}/wide.log")"
-  if [[ "${got}" != "12" ]]; then
-    echo "SELF-TEST FAIL (5): expected 12, got '${got}'" >&2
+  if [[ "${got}" != "5" ]]; then
+    echo "SELF-TEST FAIL (5): expected 5 (the 5+ bucket's leading number), got '${got}'" >&2
     fail=1
   fi
 
@@ -1898,13 +1910,13 @@ run_self_test() {
   # and same-process proof), so they get fixtures of their own rather than being
   # trusted because they look obvious.
   printf '%s\n' \
-    '08-02 04:40:00.000  1111  1120 I flutter : [BackgroundTask] Published to 9/9 due circle(s) (9 eligible), fetched 9/9 circle(s).' \
+    '08-02 04:40:00.000  1111  1120 I flutter : [BackgroundTask] Published to 5+/5+ due circle(s) (5+ eligible), fetched 5+/5+ circle(s).' \
     '08-02 04:41:00.000  1111  1130 I flutter : [b1] HANDOFF_CONFIRMED' \
     '08-02 04:42:14.552  1111  1140 I flutter : [BackgroundTask] Published to 1/1 due circle(s) (1 eligible), fetched 1/1 circle(s).' \
     > "${tmp}/window.log"
 
   # (6) A publish from BEFORE the handoff must not count. Without the window
-  #     the parser would return 9 and the lane would pass on a foreground
+  #     the parser would return 5 and the lane would pass on a foreground
   #     publish — which is a Rule-14 single-writer violation, not a success.
   _case
   got="$(window_between_markers "${tmp}/window.log" '[b1] HANDOFF_CONFIRMED' \
@@ -4110,9 +4122,9 @@ background_location_task.dart)."
 fi
 if (( published < 1 )); then
   fail "the FGS ran a publish cycle after the handoff but published to ZERO circles \
-(highest count observed: ${published}). The isolate is alive but delivering nothing."
+(highest bucket observed: ${published}). The isolate is alive but delivering nothing."
 fi
-echo "  [3/8] FGS published to ${published} circle(s) after the handoff."
+echo "  [3/8] FGS published to a non-zero bucket of circles after the handoff (bucket leading number ${published})."
 
 # (4) THE ANTI-VACUITY CHECK. Same OS process ⇒ same Rust `LIVE_SESSIONS`
 #     registry ⇒ the Rule-14 contention was real.

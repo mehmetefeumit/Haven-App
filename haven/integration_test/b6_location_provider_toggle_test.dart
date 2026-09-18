@@ -470,33 +470,33 @@ void main() {
       // --- Detection: does the app KNOW? Two independent sources; either is
       // proof it is not blind, and both are recorded.
       if (observedDisabled) {
-        final sources = <String>[];
+        final detections = <String>[];
         try {
           await locationService.getCurrentLocationFresh();
         } on LocationServiceException {
-          sources.add('service-layer-throw');
+          detections.add('service-layer-throw');
         } on Object catch (e) {
           // Any other failure type still means the fresh read did not
           // silently succeed; record what it was (type only, Rule 8).
-          sources.add('fresh-read-${e.runtimeType}');
+          detections.add('fresh-read-${e.runtimeType}');
         }
         try {
           await waitUntilAsync(
             () async => container.read(locationStreamProvider).hasError,
             description: 'locationStreamProvider carried the plugin error',
           );
-          sources.add('stream-error');
+          detections.add('stream-error');
         } on Object catch (_) {
           // Recorded by omission — the service-layer throw above is the
           // deterministic source; the stream error is timing-dependent.
         }
-        if (sources.isEmpty) {
+        if (detections.isEmpty) {
           failures.add(
             'the app never detected the disabled provider: a fresh location '
             'read SUCCEEDED and the position stream reported no error',
           );
         } else {
-          debugPrint('$kDetectedMarker via=${sources.join('+')}');
+          debugPrint('$kDetectedMarker via=${detections.join('+')}');
         }
       }
 

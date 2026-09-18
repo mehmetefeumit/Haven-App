@@ -83,8 +83,17 @@ import 'package:flutter_test/flutter_test.dart';
 /// unscanned; `findHarnessLogFindings`'s own self-test pins
 /// `ArgumentError.value(` as unmatched so a regression is a tested
 /// property.
+///
+/// `note`/`record` are `b8_clock_skew_test.dart`'s own diagnostic sinks:
+/// each composes `'<marker> $phase: $detail'` into a LOCAL and prints that,
+/// so the sink's own `debugPrint` has no interpolation left for any scanner
+/// to read. Naming the sinks here is what puts their arguments — written at
+/// the call sites, where the values actually come from — back under this
+/// lint.
 const Set<String> _scannedCallNames = {
   'debugPrint',
+  'note',
+  'record',
   'print',
   'fail',
   'StateError',
@@ -134,6 +143,7 @@ const Set<String> _safeNameReceiverWords = {
   'state',
   'outcome',
   'decision',
+  'disposition',
   'category',
   'phase',
   'tier',
@@ -396,6 +406,14 @@ void main() {
       r"void f() { debugPrint('peer=$alicePubkeyHex'); }",
     );
     expectFlagged(
+      'a note( sink argument is scanned like a debugPrint argument',
+      r"void f() { note('phase', 'gid=$nostrGroupIdHex'); }",
+    );
+    expectFlagged(
+      'a record( sink argument is scanned like a debugPrint argument',
+      r"void f() { record('phase', 'peer=$alicePubkeyHex'); }",
+    );
+    expectFlagged(
       'bare npub field in reason:',
       r"void f() { expect(1, 1, reason: 'npub=${alice.npub}'); }",
     );
@@ -651,12 +669,14 @@ void f() {
         reason: 'Only scanned $filesScanned files — the integration_test/ '
             'glob looks broken.',
       );
-      // Re-measured 2026-09-17 (H6 security-review pass): 841 sites;
-      // floor(841 × 0.8) = 672, so a regression that stops scanning the
-      // constructors does not go undetected.
+      // Re-measured 2026-09-18, when `note`/`record` joined
+      // [_scannedCallNames] (b8's diagnostic sinks, whose own `debugPrint`
+      // interpolates nothing a scanner can read): 850 sites; floor(850 ×
+      // 0.8) = 680, so a regression that stops scanning the constructors —
+      // or the sinks — does not go undetected.
       expect(
         sitesScanned,
-        greaterThanOrEqualTo(672),
+        greaterThanOrEqualTo(680),
         reason: 'Only found $sitesScanned debugPrint/print/fail/reason: '
             'sites — far fewer than expected. Has the call shape changed, '
             'or has the detector gone blind?',

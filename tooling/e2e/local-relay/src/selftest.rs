@@ -1002,6 +1002,16 @@ async fn case_needles() -> Case {
         0,
     )
     .await?;
+    // A BYTE-IDENTICAL re-declaration — a harness re-issuing after a dead-socket
+    // reconnect — adds no line and is acked with the ORIGINAL line's number, so
+    // the re-issue is indistinguishable from the first ack.
+    declare_awaiting_ack(
+        &mut client,
+        &format!(r#"["{NEEDLE_DECL_VERB}",{DECL}]"#),
+        NEEDLE_DECL_ACK_VERB,
+        0,
+    )
+    .await?;
     declare_awaiting_ack(
         &mut client,
         &format!(r#"["{CANARY_MANIFEST_VERB}",{MANIFEST}]"#),
@@ -1064,20 +1074,7 @@ async fn case_needles() -> Case {
         DECL_VALUE,
         &[MANIFEST, MANIFEST_AGAIN],
     )?;
-    let stats = needles.stats();
-    if stats.recorded != 1 || stats.refused != 0 || stats.lost != 0 || stats.stale {
-        return Err(format!(
-            "needle sidecar stats are wrong: {} recorded, {} refused, {} lost, stale={}",
-            stats.recorded, stats.refused, stats.lost, stats.stale
-        ));
-    }
-    let canary_stats = canaries.stats();
-    if canary_stats.recorded != 2 || canary_stats.repeats != 0 || canary_stats.stale {
-        return Err(format!(
-            "canary sidecar stats are wrong: {} recorded, {} repeat(s), stale={}",
-            canary_stats.recorded, canary_stats.repeats, canary_stats.stale
-        ));
-    }
+    check_needle_stats(&needles, &canaries)?;
 
     close(client).await;
     echo.abort();
@@ -1123,6 +1120,33 @@ async fn needle_proxy(
     )
     .await
     .map_err(|e| format!("proxy start: {:?}", e.kind()))
+}
+
+/// The counts the shutdown summary is built from: one distinct declaration with
+/// its byte-identical repeat skipped, two distinct manifests, and nothing
+/// refused, lost or stale on either sidecar.
+fn check_needle_stats(needles: &NeedleSink, canaries: &CanarySink) -> Case {
+    let stats = needles.stats();
+    if stats.recorded != 1
+        || stats.repeats != 1
+        || stats.refused != 0
+        || stats.lost != 0
+        || stats.stale
+    {
+        return Err(format!(
+            "needle sidecar stats are wrong: {} recorded, {} repeat(s), {} refused, {} lost, \
+             stale={}",
+            stats.recorded, stats.repeats, stats.refused, stats.lost, stats.stale
+        ));
+    }
+    let canary_stats = canaries.stats();
+    if canary_stats.recorded != 2 || canary_stats.repeats != 0 || canary_stats.stale {
+        return Err(format!(
+            "canary sidecar stats are wrong: {} recorded, {} repeat(s), stale={}",
+            canary_stats.recorded, canary_stats.repeats, canary_stats.stale
+        ));
+    }
+    Ok(())
 }
 
 /// The two sidecar FILE FORMATS, which `haven-logscan seal` and

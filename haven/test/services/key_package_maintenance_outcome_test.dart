@@ -103,7 +103,7 @@ void main() {
       final healthy = outcome as KeyPackageMaintenanceHealthy;
       expect(healthy.canonicalOnRelays, 3);
       expect(healthy.respondersProbed, 2);
-      expect(healthy.seededStableSlot, isFalse);
+      expect(healthy.isStableSlotSeeded, isFalse);
     });
 
     test('an acked republish is published, and says how many acked', () {
@@ -121,7 +121,7 @@ void main() {
       final published = outcome as KeyPackageMaintenancePublished;
       expect(published.relaysAcked, 2);
       expect(
-        published.mintedFreshSlot,
+        published.isFreshSlotMinted,
         isFalse,
         reason: 'a stable-slot republish reuses the tracked d',
       );
@@ -140,7 +140,7 @@ void main() {
 
       expect(outcome, isA<KeyPackageMaintenancePublished>());
       expect(
-        (outcome as KeyPackageMaintenancePublished).mintedFreshSlot,
+        (outcome as KeyPackageMaintenancePublished).isFreshSlotMinted,
         isTrue,
       );
     });
@@ -160,7 +160,7 @@ void main() {
 
       expect(outcome, isA<KeyPackageMaintenanceHealthy>());
       expect(
-        (outcome as KeyPackageMaintenanceHealthy).seededStableSlot,
+        (outcome as KeyPackageMaintenanceHealthy).isStableSlotSeeded,
         isTrue,
       );
     });
@@ -487,7 +487,7 @@ void main() {
       expect(outcome, isA<KeyPackageMaintenancePublished>());
       expect(outcome.expiredInitKeyPurged, isTrue);
       expect(
-        (outcome as KeyPackageMaintenancePublished).mintedFreshSlot,
+        (outcome as KeyPackageMaintenancePublished).isFreshSlotMinted,
         isFalse,
         reason: 'a rotation re-mints material into the SAME stable slot',
       );
@@ -573,7 +573,7 @@ void main() {
       );
 
       expect(outcome, isA<KeyPackageMaintenancePublished>());
-      expect(outcome.retiredMalformedSlot, isTrue);
+      expect(outcome.isMalformedSlotRetired, isTrue);
     });
 
     test('a completed retraction-only tick survives as health', () {
@@ -591,7 +591,7 @@ void main() {
       );
 
       expect(outcome, isA<KeyPackageMaintenanceHealthy>());
-      expect(outcome.retiredMalformedSlot, isTrue);
+      expect(outcome.isMalformedSlotRetired, isTrue);
     });
 
     test('an unacked re-point is a failure that claims no retirement', () {
@@ -609,7 +609,7 @@ void main() {
       );
 
       expect(outcome, isA<KeyPackageMaintenanceFailed>());
-      expect(outcome.retiredMalformedSlot, isFalse);
+      expect(outcome.isMalformedSlotRetired, isFalse);
     });
 
     test('an ordinary tick never invents a retirement', () {
@@ -624,7 +624,7 @@ void main() {
           ),
         );
         expect(
-          outcome.retiredMalformedSlot,
+          outcome.isMalformedSlotRetired,
           isFalse,
           reason: '$action reported no retirement, so none may be claimed',
         );
@@ -637,8 +637,8 @@ void main() {
       expect(
         const KeyPackageMaintenancePublished(
           relaysAcked: 1,
-          mintedFreshSlot: true,
-          retiredMalformedSlot: true,
+          isFreshSlotMinted: true,
+          isMalformedSlotRetired: true,
         ).toString(),
         contains('slotRetired: true'),
       );
@@ -646,7 +646,7 @@ void main() {
         const KeyPackageMaintenanceHealthy(
           canonicalOnRelays: 1,
           respondersProbed: 1,
-          retiredMalformedSlot: true,
+          isMalformedSlotRetired: true,
         ).toString(),
         contains('slotRetired: true'),
       );
@@ -733,7 +733,7 @@ void main() {
       expect(
         () => KeyPackageMaintenancePublished(
           relaysAcked: 0,
-          mintedFreshSlot: true,
+          isFreshSlotMinted: true,
         ),
         throwsA(isA<AssertionError>()),
         reason: 'the "acked means acked" invariant lives in the type, so a '
@@ -761,6 +761,40 @@ void main() {
       );
     });
 
+    test('every rendered count is a magnitude, never an exact tally', () {
+      // These renderings are the whole report two `debugPrint`s make of a
+      // tick (`key_package_provider.dart`, `maintenance_scheduler_
+      // provider.dart`). An exact "7 of my relays answered" tells this
+      // account apart from every other one (Rule 15).
+      final healthy = const KeyPackageMaintenanceHealthy(
+        canonicalOnRelays: 7,
+        respondersProbed: 7,
+        relayErrors: 7,
+      ).toString();
+      expect(healthy, contains('canonical: 5+'));
+      expect(healthy, contains('responders: 5+'));
+      expect(healthy, contains('relayErrors: 5+'));
+      expect(healthy, isNot(contains('7')));
+
+      final published = const KeyPackageMaintenancePublished(
+        relaysAcked: 7,
+        isFreshSlotMinted: false,
+        respondersProbed: 2,
+        relayErrors: 1,
+      ).toString();
+      expect(published, contains('acked: 5+'));
+      expect(published, contains('responders: 2-4'));
+      expect(published, contains('relayErrors: 1'));
+      expect(published, isNot(contains('7')));
+
+      final failed = const KeyPackageMaintenanceFailed(
+        KeyPackageFailureKind.publishNotAcked,
+        relayErrors: 7,
+      ).toString();
+      expect(failed, contains('relayErrors: 5+'));
+      expect(failed, isNot(contains('7')));
+    });
+
     test('outcomes carry no relay-identifying text (Rule 4/6/8)', () {
       // Every outcome ends up in a `debugPrint`; none of them may carry a url,
       // a `d`, or hex. Only counters and closed tokens cross this boundary, so
@@ -772,7 +806,7 @@ void main() {
         ).toString(),
         const KeyPackageMaintenancePublished(
           relaysAcked: 1,
-          mintedFreshSlot: false,
+          isFreshSlotMinted: false,
         ).toString(),
         const KeyPackageMaintenanceFailed(
           KeyPackageFailureKind.publishNotAcked,

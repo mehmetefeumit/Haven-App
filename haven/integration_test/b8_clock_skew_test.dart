@@ -252,9 +252,10 @@ void main() {
       /// Records a defect in the behaviour this lane GATES.
       void record(String phase, String detail) {
         final line = '$kFindingMarker $phase: $detail';
-        // phase/detail are this file's own compiled-in diagnostic literals
-        // (see the call sites below), never remote- or user-authored text.
-        // harness-log-ok: see above
+        // Both scanners read the arguments at each record( call site:
+        // `record` is in check_no_identifier_logging.sh's Dart CALL
+        // vocabulary and in the harness lint's _scannedCallNames.
+        // harness-log-ok: `line` is a local this closure just composed.
         debugPrint(line);
         findings.add('$phase: $detail');
       }
@@ -263,9 +264,10 @@ void main() {
       /// imposes. Never gating.
       void note(String phase, String detail) {
         final line = '$kEvidenceMarker $phase: $detail';
-        // phase/detail are this file's own compiled-in diagnostic literals
-        // (see the call sites below), never remote- or user-authored text.
-        // harness-log-ok: see above
+        // Both scanners read the arguments at each note( call site:
+        // `note` is in check_no_identifier_logging.sh's Dart CALL
+        // vocabulary and in the harness lint's _scannedCallNames.
+        // harness-log-ok: `line` is a local this closure just composed.
         debugPrint(line);
         evidence.add('$phase: $detail');
       }
@@ -460,6 +462,7 @@ void main() {
           'forward-skew-publish',
           'a device whose clock is +${_skew.inHours}h cannot publish at all: '
           'the correctly-clocked relay refuses the kind-445 '
+          // harness-log-ok: _rejectionClass allowlist-classifies this.
           '("${_rejectionClass(fast.rejection)}"). Every event this '
           'device signs carries a '
           'future `created_at` (peeler event.rs:180) and a spec-conformant '
@@ -736,6 +739,7 @@ void main() {
             'the event is born already expired (NIP-40 expiration = created_at '
             '+ ${_expectedRetentionSecs}s, both from the skewed clock) and the '
             'relay refuses it at ingest '
+            // harness-log-ok: _rejectionClass allowlist-classifies this.
             '("${_rejectionClass(slow.rejection)}"). NOT GATED: the '
             'expiration is derived inside the engine from the '
             'message-retention component, so the only local lever is clock '
@@ -747,6 +751,7 @@ void main() {
             'the relay refused a kind-445 from a device whose clock is '
             '-${_skew.inHours}h for a reason that is NOT the expected '
             'born-expired one '
+            // harness-log-ok: _rejectionClass allowlist-classifies this.
             '("${_rejectionClass(slow.rejection)}"). The born-expired '
             'refusal '
             "is this lane's declared delivery cost; anything else is a real, "
@@ -836,8 +841,9 @@ void main() {
             note(
               'backward-skew-catchup',
               'catch-up skipped backlog the relay still holds: the natural '
-              'cursor window reached ${natural.eventsApplied} event(s), a '
-              'widened window reached ${widened.eventsApplied}. The cursor '
+              'cursor window reached ${magnitudeBucket(natural.eventsApplied)} '
+              'event(s), a widened window reached '
+              '${magnitudeBucket(widened.eventsApplied)}. The cursor '
               "advances to the SENDER's created_at "
               '(catchup.rs::cursor_advance_ms) and the next REQ floor is only '
               'GROUP_RESUBSCRIBE_BUFFER_SECS = 60 s below it (cursor.rs), so '

@@ -527,4 +527,24 @@ void main() {
       expect(body, contains('syncMyProfile('));
     });
   });
+
+  group('Profile — rendering', () {
+    test('toString carries no pubkey, not even a prefix', () {
+      const pubkeyHex =
+          'a11ce0000000000000000000000000000000000000000000000000000000cafe';
+      final rendered = Profile(
+        pubkeyHex: pubkeyHex,
+        displayName: 'Alice',
+        pictureBytes: Uint8List.fromList(const [1, 2, 3]),
+      ).toString();
+
+      // Rule 15: "redacted" means ABSENT — a truncated pubkey still tells
+      // two peers apart. The picture is reported as presence only.
+      expect(rendered, isNot(contains(pubkeyHex)));
+      expect(rendered, isNot(contains(pubkeyHex.substring(0, 8))));
+      expect(rendered, isNot(contains('Alice')));
+      expect(rendered, startsWith('Profile(peer#'));
+      expect(rendered, contains('hasPicture: true'));
+    });
+  });
 }

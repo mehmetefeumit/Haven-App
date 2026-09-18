@@ -10,6 +10,7 @@ library;
 
 import 'package:flutter/foundation.dart';
 import 'package:haven/src/rust/api.dart' show SkipReasonFfi;
+import 'package:haven/src/utils/log_alias.dart';
 
 /// Exception thrown when circle operations fail.
 class CircleServiceException implements Exception {
@@ -117,7 +118,7 @@ class Circle {
   int get hashCode => Object.hashAll(mlsGroupId);
 
   @override
-  String toString() => 'Circle(members: ${members.length})';
+  String toString() => 'Circle(members: ${magnitudeBucket(members.length)})';
 }
 
 /// Dark Matter cutover helpers (DM-4c).
@@ -176,7 +177,8 @@ class CircleMember {
   int get hashCode => pubkey.hashCode;
 
   @override
-  String toString() => 'CircleMember(pubkey: ${pubkey.substring(0, 8)}...)';
+  String toString() =>
+      'CircleMember(${logAliasHandle(LogAliasClass.peer, pubkey)})';
 }
 
 /// Which section of the member picker a directory row belongs to (plan
@@ -243,14 +245,10 @@ class DirectoryEntry {
   int get hashCode => Object.hash(pubkeyHex, npub, tier);
 
   @override
-  String toString() => 'DirectoryEntry(${_shortKey(pubkeyHex)}, tier: $tier)';
+  String toString() =>
+      'DirectoryEntry(${logAliasHandle(LogAliasClass.peer, pubkeyHex)}, '
+      'tier: $tier)';
 }
-
-/// The leading 8 hex characters of [pubkeyHex] — or all of it when it is
-/// shorter, because a `toString` that can raise turns one diagnostic into
-/// two failures on the very path that reached for it.
-String _shortKey(String pubkeyHex) =>
-    pubkeyHex.length > 8 ? '${pubkeyHex.substring(0, 8)}...' : pubkeyHex;
 
 /// Result of creating a circle.
 ///

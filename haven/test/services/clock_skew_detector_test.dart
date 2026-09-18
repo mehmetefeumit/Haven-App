@@ -731,5 +731,25 @@ void main() {
         ClockSkewSignal.none,
       ]);
     });
+
+    test('the rendered verdict buckets its corroborating peers', () {
+      // `ClockSkewStatus` is interpolated into the verdict `debugPrint`, and
+      // "7 distinct members corroborated" is an exact count of the user's
+      // co-members (Rule 15). The offset is a DELTA, so it stays exact.
+      const status = ClockSkewStatus(
+        signal: ClockSkewSignal.peersAheadOfDevice,
+        offsetSecs: 42,
+        corroboratingSources: 7,
+      );
+
+      final rendered = status.toString();
+      expect(rendered, contains('sources: 5+'));
+      expect(rendered, contains('offsetSecs: 42'));
+      expect(
+        rendered,
+        isNot(contains('7')),
+        reason: 'the exact number of corroborating peers must not survive',
+      );
+    });
   });
 }

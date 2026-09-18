@@ -295,6 +295,13 @@ pub fn validate_declaration(payload: &Value) -> Result<&Map<String, Value>, Payl
 pub enum Declared {
     /// Appended to the sidecar as line `seq`.
     Recorded(u64),
+    /// Byte-identical to a declaration the sidecar already holds, so nothing
+    /// was written. Carries THAT line's `seq`.
+    ///
+    /// The harness re-declares on reconnect exactly as it re-announces a
+    /// manifest, and a repeat that says the same thing adds no searchable value
+    /// — only a second line for every consumer of the sidecar to reconcile.
+    Unchanged(u64),
     /// Refused by [`validate_payload`]; nothing was written.
     Refused(PayloadRejection),
     /// No sidecar path is configured, so it went nowhere.
@@ -309,9 +316,11 @@ pub struct Declaration {
     /// What happened to the payload.
     pub outcome: Declared,
     /// The line number to ack with, present exactly when the line is in the
-    /// sidecar. A refused or lost declaration is NOT acked: an ack has to mean
-    /// the host holds the needle, or a lane would scan for a value the scanner
-    /// was never given and report clean.
+    /// sidecar — the line's own `seq`, whether this declaration wrote it or
+    /// found it already there, so a re-issued declaration is indistinguishable
+    /// from a first-time ack. A refused or lost declaration is NOT acked: an
+    /// ack has to mean the host holds the needle, or a lane would scan for a
+    /// value the scanner was never given and report clean.
     pub ack: Option<u64>,
 }
 
@@ -320,6 +329,8 @@ pub struct Declaration {
 pub struct NeedleStats {
     /// Lines this process appended.
     pub recorded: u64,
+    /// Byte-identical re-declarations, acked against the line already held.
+    pub repeats: u64,
     /// Declarations refused by [`validate_payload`].
     pub refused: u64,
     /// Declarations the host will never see (unwritable or unconfigured).
@@ -336,9 +347,11 @@ pub struct NeedleStats {
 
 /// Append-only JSON-lines sink for the needles a device declares.
 ///
-/// One line per declaration: the payload's members, plus `role` and `seq`, and
-/// NO timestamp — an instant is an identifier (Security Rule 15), and the
-/// sequence number carries the ordering a consumer actually needs.
+/// One line per DISTINCT declaration: the payload's members, plus `role` and
+/// `seq`, and NO timestamp — an instant is an identifier (Security Rule 15),
+/// and the sequence number carries the ordering a consumer actually needs. A
+/// byte-identical repeat is acked against the line already held, never appended
+/// ([`Declared::Unchanged`]).
 pub struct NeedleSink {
     inner: Mutex<NeedleInner>,
 }
@@ -379,7 +392,8 @@ impl NeedleSink {
         }
     }
 
-    /// Validates and appends one declaration.
+    /// Validates and records one declaration, appending it unless the sidecar
+    /// already holds it.
     ///
     /// Reports every outcome on stderr by LABEL and LENGTH — never the payload,
     /// which is the material the scanner asserts is absent from every log.
@@ -387,8 +401,8 @@ impl NeedleSink {
         let declared_len = payload.to_string().len();
         let mut inner = self.lock();
 
-        let line = match validate_declaration(payload) {
-            Ok(object) => sidecar_line(object, &inner.role, inner.next_seq),
+        let members = match validate_declaration(payload) {
+            Ok(object) => declared_members(object, &inner.role),
             Err(reason) => {
                 inner.stats.refused = inner.stats.refused.wrapping_add(1);
                 drop(inner);
@@ -408,18 +422,32 @@ impl NeedleSink {
         };
 
         let first_write = !inner.opened;
-        let outcome = match append_line(&path, &line, first_write) {
-            Ok(existed) => {
-                inner.opened = true;
-                inner.next_seq = seq.wrapping_add(1);
-                inner.stats.recorded = inner.stats.recorded.wrapping_add(1);
-                inner.stats.stale |= first_write && existed;
-                Declared::Recorded(seq)
+        // The FILE is the ground truth, never an in-memory mirror: an external
+        // rotation must make a re-declaration write again rather than be acked
+        // against a line that is no longer there (the reasoning [`CanarySink`]
+        // records for the manifest).
+        let outcome = match held_seq(&path, &members) {
+            Some(held) => {
+                inner.stats.repeats = inner.stats.repeats.wrapping_add(1);
+                // A line this process did not write, matched before it wrote
+                // anything, can only come from a file it did not create — the
+                // same contamination the append path below reports.
+                inner.stats.stale |= first_write;
+                Declared::Unchanged(held)
             }
-            Err(err) => {
-                inner.stats.lost = inner.stats.lost.wrapping_add(1);
-                Declared::Unwritable(err.kind())
-            }
+            None => match append_line(&path, &sidecar_line(&members, seq), first_write) {
+                Ok(existed) => {
+                    inner.opened = true;
+                    inner.next_seq = seq.wrapping_add(1);
+                    inner.stats.recorded = inner.stats.recorded.wrapping_add(1);
+                    inner.stats.stale |= first_write && existed;
+                    Declared::Recorded(seq)
+                }
+                Err(err) => {
+                    inner.stats.lost = inner.stats.lost.wrapping_add(1);
+                    Declared::Unwritable(err.kind())
+                }
+            },
         };
         let stale = inner.stats.stale;
         drop(inner);
@@ -435,7 +463,7 @@ impl NeedleSink {
         }
         Declaration {
             ack: match outcome {
-                Declared::Recorded(seq) => Some(seq),
+                Declared::Recorded(seq) | Declared::Unchanged(seq) => Some(seq),
                 _ => None,
             },
             outcome,
@@ -649,16 +677,40 @@ impl Default for CanarySink {
     }
 }
 
-/// The sidecar line for one declaration: the payload's members plus `role` and
-/// `seq`, on one line, with no timestamp.
+/// Everything one declaration's line carries besides `seq`: the payload's
+/// members plus `role`. This is what two declarations are compared on.
+fn declared_members(object: &Map<String, Value>, role: &str) -> Map<String, Value> {
+    let mut members = object.clone();
+    members.insert("role".to_owned(), Value::String(role.to_owned()));
+    members
+}
+
+/// The sidecar line for one declaration: [`declared_members`] plus `seq`, on one
+/// line, with no timestamp.
 ///
 /// `serde_json::Map` is a `BTreeMap` here (the `preserve_order` feature is off),
 /// so the rendering is deterministic whatever order the members arrived in.
-fn sidecar_line(object: &Map<String, Value>, role: &str, seq: u64) -> String {
-    let mut line = object.clone();
-    line.insert("role".to_owned(), Value::String(role.to_owned()));
+fn sidecar_line(members: &Map<String, Value>, seq: u64) -> String {
+    let mut line = members.clone();
     line.insert("seq".to_owned(), Value::from(seq));
     format!("{}\n", Value::Object(line))
+}
+
+/// The `seq` of the line the sidecar already holds for `members`, if any.
+///
+/// Compared on the MEMBERS, not on the rendered line: `seq` is the sidecar's
+/// own, so comparing whole lines would find no repeat ever. A line whose `seq`
+/// is absent or not a number is no match — it cannot back an ack, and the
+/// declaration is better appended than acked against it.
+fn held_seq(path: &Path, members: &Map<String, Value>) -> Option<u64> {
+    std::fs::read_to_string(path)
+        .ok()?
+        .lines()
+        .find_map(|line| {
+            let mut held: Map<String, Value> = serde_json::from_str(line).ok()?;
+            let seq = held.remove("seq")?.as_u64()?;
+            (held == *members).then_some(seq)
+        })
 }
 
 /// Appends one line, creating the directory and the file if needed.
@@ -753,6 +805,10 @@ fn declaration_notice(conn_id: &str, declared_len: usize, outcome: Declared) -> 
     match outcome {
         Declared::Recorded(seq) => format!(
             "[haven-wire-proxy] {conn_id}: needle declared ({declared_len} bytes) as line {seq}."
+        ),
+        Declared::Unchanged(seq) => format!(
+            "[haven-wire-proxy] {conn_id}: needle re-declared unchanged ({declared_len} bytes); \
+             nothing was appended, line {seq} already holds it."
         ),
         Declared::Refused(reason) => format!(
             "[haven-wire-proxy] {conn_id}: REFUSED a needle declaration ({}, {declared_len} \
@@ -857,13 +913,16 @@ mod tests {
     }
 
     #[test]
-    fn each_declaration_takes_the_next_seq_and_one_line() {
+    fn each_distinct_declaration_takes_the_next_seq_and_one_line() {
         let dir = scratch("seq");
         let path = dir.join("alice.needles.decl");
         let sink = NeedleSink::new("alice".to_owned(), path.clone());
 
         for expected in 0..3_u64 {
-            let declaration = sink.declare("c0", &payload(r#"{"class":"event_id","value":"ab"}"#));
+            let declaration = sink.declare(
+                "c0",
+                &payload(&format!(r#"{{"class":"event_id","value":"ab{expected}"}}"#)),
+            );
             assert_eq!(declaration.ack, Some(expected));
         }
 
@@ -875,10 +934,100 @@ mod tests {
             .collect();
         assert_eq!(seqs, vec![Value::from(0), Value::from(1), Value::from(2)]);
         assert_eq!(sink.stats().recorded, 3);
-        // A repeated value is NOT de-duplicated: unlike an MLS group id, two
-        // declarations of one value can be two different needles (two circles
-        // may share a display name), and dropping one would narrow the scan.
+        assert_eq!(sink.stats().repeats, 0);
         assert_eq!(lines(&path).len(), 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // A reconnecting harness re-declares (the ack, not the frame, is what a dead
+    // socket usually loses), and a repeat that says the same thing adds nothing:
+    // the value is already the scanner's ground truth. It is still ACKED, with
+    // the original line's seq, so a re-issue is indistinguishable from a
+    // first-time ack and a harness waiting on one cannot hang.
+    #[test]
+    fn a_byte_identical_re_declaration_is_idempotent_and_acks_the_original_seq() {
+        let dir = scratch("decl-repeat");
+        let path = dir.join("alice.needles.decl");
+        let sink = NeedleSink::new("alice".to_owned(), path.clone());
+        let needle = payload(r#"{"class":"pubkey","value":"abcd"}"#);
+
+        assert_eq!(sink.declare("c0", &needle).outcome, Declared::Recorded(0));
+        let declaration = sink.declare("c1", &needle);
+
+        assert_eq!(declaration.outcome, Declared::Unchanged(0));
+        assert_eq!(
+            declaration.ack,
+            Some(0),
+            "a repeat must still be acked, or a re-issuing harness would hang"
+        );
+        assert_eq!(
+            lines(&path),
+            vec![r#"{"class":"pubkey","role":"alice","seq":0,"value":"abcd"}"#],
+            "a repeat must not add a second line"
+        );
+        let stats = sink.stats();
+        assert_eq!(stats.recorded, 1);
+        assert_eq!(stats.repeats, 1, "and must be counted as the repeat it is");
+        assert!(!stats.stale);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Only a BYTE-IDENTICAL repeat is idempotent: a declaration differing in any
+    // byte is a second needle, and the interleaved case is the one that would
+    // break a naive "same as the last line" rule — the re-issue arrives after a
+    // further declaration, and must still ack the FIRST line's seq.
+    #[test]
+    fn a_declaration_differing_in_any_byte_is_appended_and_a_later_repeat_acks_its_own_line() {
+        let dir = scratch("decl-distinct");
+        let path = dir.join("alice.needles.decl");
+        let sink = NeedleSink::new("alice".to_owned(), path.clone());
+        let first = payload(r#"{"class":"pubkey","value":"abcd"}"#);
+        let second = payload(r#"{"class":"pubkey","value":"abce"}"#);
+
+        assert_eq!(sink.declare("c0", &first).outcome, Declared::Recorded(0));
+        assert_eq!(sink.declare("c0", &second).outcome, Declared::Recorded(1));
+        let repeat = sink.declare("c1", &first);
+
+        assert_eq!(repeat.outcome, Declared::Unchanged(0));
+        assert_eq!(repeat.ack, Some(0), "the FIRST line's seq, not the last's");
+        assert_eq!(
+            lines(&path),
+            vec![
+                r#"{"class":"pubkey","role":"alice","seq":0,"value":"abcd"}"#,
+                r#"{"class":"pubkey","role":"alice","seq":1,"value":"abce"}"#,
+            ],
+            "two distinct needles are two lines, and the repeat added none"
+        );
+        let stats = sink.stats();
+        assert_eq!(stats.recorded, 2);
+        assert_eq!(stats.repeats, 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // An external rotation must not leave an ack unbacked: the FILE is the
+    // ground truth, so a re-declaration after one writes again rather than being
+    // waved through as already held — the same rule the manifest sink follows.
+    #[test]
+    fn a_declaration_rotated_out_of_the_sidecar_is_re_recorded() {
+        let dir = scratch("decl-rotated");
+        let path = dir.join("alice.needles.decl");
+        let sink = NeedleSink::new("alice".to_owned(), path.clone());
+        let needle = payload(r#"{"class":"pubkey","value":"abcd"}"#);
+        assert_eq!(sink.declare("c0", &needle).outcome, Declared::Recorded(0));
+
+        std::fs::remove_file(&path).expect("rotate");
+        let declaration = sink.declare("c1", &needle);
+
+        assert_eq!(declaration.outcome, Declared::Recorded(1));
+        assert_eq!(
+            declaration.ack,
+            Some(1),
+            "an ack must mean the host holds it"
+        );
+        assert_eq!(
+            lines(&path),
+            vec![r#"{"class":"pubkey","role":"alice","seq":1,"value":"abcd"}"#]
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -955,13 +1104,13 @@ mod tests {
         let path = dir.join("alice.needles.decl");
         std::fs::write(
             &path,
-            "{\"class\":\"pubkey\",\"role\":\"alice\",\"seq\":0}\n",
+            "{\"class\":\"pubkey\",\"role\":\"alice\",\"seq\":0,\"value\":\"beef\"}\n",
         )
         .expect("seed a previous run's file");
         let sink = NeedleSink::new("alice".to_owned(), path.clone());
 
         assert!(sink
-            .declare("c0", &payload(r#"{"class":"pubkey"}"#))
+            .declare("c0", &payload(r#"{"class":"pubkey","value":"abcd"}"#))
             .ack
             .is_some());
 
@@ -970,6 +1119,36 @@ mod tests {
             sink.stats().stale,
             "a sidecar this process did not create must be reported, or a previous run's values \
              become this run's ground truth in silence"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The repeat rule must not swallow that report: when a leftover file happens
+    // to hold the very line this run would have written, nothing is appended —
+    // and the contamination would go unsaid unless the repeat path says it too.
+    #[test]
+    fn a_pre_existing_sidecar_that_already_holds_the_line_is_still_reported_as_stale() {
+        let dir = scratch("stale-repeat");
+        create_dir(&dir).expect("fixture dir");
+        let path = dir.join("alice.needles.decl");
+        std::fs::write(
+            &path,
+            "{\"class\":\"pubkey\",\"role\":\"alice\",\"seq\":0,\"value\":\"abcd\"}\n",
+        )
+        .expect("seed a previous run's file");
+        let sink = NeedleSink::new("alice".to_owned(), path.clone());
+
+        let declaration = sink.declare("c0", &payload(r#"{"class":"pubkey","value":"abcd"}"#));
+
+        assert_eq!(declaration.outcome, Declared::Unchanged(0));
+        assert_eq!(
+            lines(&path).len(),
+            1,
+            "the host already holds this needle; a second line would say nothing new"
+        );
+        assert!(
+            sink.stats().stale,
+            "a sidecar this process did not create must be reported however its lines got there"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1060,6 +1239,7 @@ mod tests {
         const VALUE: &str = "npub1exampleexampleexample";
         for outcome in [
             Declared::Recorded(3),
+            Declared::Unchanged(3),
             Declared::Refused(PayloadRejection::NotAnObject),
             Declared::Unconfigured,
             Declared::Unwritable(std::io::ErrorKind::PermissionDenied),

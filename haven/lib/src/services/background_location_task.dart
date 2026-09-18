@@ -2115,7 +2115,10 @@ class BackgroundLocationTaskHandler extends TaskHandler {
         _cyclesSinceLastPrune = 0;
         try {
           final removed = await _circleService!.pruneExpiredLastKnown();
-          debugPrint('[BackgroundTask] Pruned $removed expired row(s).');
+          debugPrint(
+            '[BackgroundTask] Pruned ${magnitudeBucket(removed)} '
+            'expired row(s).',
+          );
         } on Object catch (e) {
           debugPrint('[BackgroundTask] Prune failed: ${e.runtimeType}');
         }

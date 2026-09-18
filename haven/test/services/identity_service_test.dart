@@ -55,25 +55,23 @@ void main() {
         expect(identity1.hashCode, equals(identity2.hashCode));
       });
 
-      test('toString truncates npub for privacy', () {
+      test('toString carries no npub at all, not even a prefix', () {
+        const npub = 'npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq';
         final identity = Identity(
           pubkeyHex: 'a' * 64,
-          npub: 'npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq',
+          npub: npub,
           createdAt: DateTime(2024),
         );
 
         final str = identity.toString();
-        // Should contain truncated prefix.
-        expect(str, contains('npub1qqqqqqqqqqqqqqq'));
-        // Full npub must NOT appear.
-        expect(
-          str,
-          isNot(
-            contains('npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq'),
-          ),
-        );
-        // Should end with ellipsis.
-        expect(str, contains('...'));
+        // Rule 15: "redacted" means ABSENT, never a visible prefix — a
+        // truncated npub still tells two installs apart.
+        expect(str, isNot(contains(npub)));
+        expect(str, isNot(contains('npub1')));
+        expect(str, isNot(contains('...')));
+        // What it renders instead is a per-process salted handle, so two
+        // lines can still say "the same identity" without naming it.
+        expect(str, startsWith('Identity(peer#'));
       });
     });
 

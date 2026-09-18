@@ -791,4 +791,22 @@ void main() {
       expect(kSharingHealthTick, const Duration(seconds: 72));
     });
   });
+
+  group('rendering', () {
+    test('a verdict states how long ago the fault began, never when', () {
+      // The fault's start is an instant on the publish/receive plane, so it
+      // reaches a log as an offset only (Rule 15).
+      final since = DateTime.now().subtract(const Duration(seconds: 90));
+      final rendered = SharingHealth.publishFailing(since).toString();
+
+      expect(rendered, isNot(contains(since.toIso8601String())));
+      expect(rendered, isNot(contains(since.year.toString())));
+      expect(rendered, matches(RegExp(r'since: t-\d+s')));
+      expect(rendered, contains('publishFailing'));
+    });
+
+    test('a healthy verdict has no start to state', () {
+      expect(SharingHealth.healthy.toString(), contains('since: -'));
+    });
+  });
 }

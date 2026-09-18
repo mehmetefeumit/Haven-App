@@ -57,6 +57,8 @@
 /// platform interactions.
 library;
 
+import 'dart:io';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/services/background_catchup_worker.dart';
@@ -608,6 +610,37 @@ void main() {
       expect(
         kCatchupWorkerPendingWipePostBootstrapMarker,
         isNot(contains(kCatchupWorkerBootstrapOkMarker)),
+      );
+    });
+
+    test('the sweep-completion doc names the counters the line emits', () {
+      // The prefix constant's doc comment lists the keys appended after it,
+      // and the CI lane's `parse_counter` reads exactly those keys. The doc
+      // outlived a rename once (`commits=`/`staged=` folded into
+      // `deferred=` at the Dark Matter cutover) and nothing noticed, so the
+      // two halves are compared here instead of by eye.
+      final source = File(
+        'lib/src/services/background_catchup_worker.dart',
+      ).readAsStringSync();
+      final documented = RegExp(r'counters \(`(.+?)`\)', dotAll: true)
+          .firstMatch(source)
+          ?.group(1);
+      expect(
+        documented,
+        isNotNull,
+        reason: 'the prefix constant must keep documenting its counters',
+      );
+      final emitted = RegExp(
+        r"\$kCatchupWorkerSweepCompletePrefix '(.+?);",
+        dotAll: true,
+      ).firstMatch(source)?.group(1);
+      expect(emitted, isNotNull, reason: 'the sweep line must still exist');
+
+      final keyOf = RegExp('([A-Za-z]+)=');
+      expect(
+        keyOf.allMatches(documented!).map((m) => m.group(1)).toList(),
+        keyOf.allMatches(emitted!).map((m) => m.group(1)).toList(),
+        reason: 'the doc comment and the emitted line name different keys',
       );
     });
   });

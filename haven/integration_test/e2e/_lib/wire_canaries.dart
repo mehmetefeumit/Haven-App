@@ -780,6 +780,7 @@ class CanaryTerm {
   String get label => '$canaryId/$encoding';
 
   @override
+  // harness-log-ok: canaryId/encoding are harness-authored labels, not values
   String toString() => '$label (${match.name}${caseFold ? ', folded' : ''})';
 }
 
@@ -1943,6 +1944,7 @@ class FrameRef {
   final int? kind;
 
   @override
+  // harness-log-ok: this CI-local proxy journal's own coordinates, no content
   String toString() {
     final parts = <String>[
       if (wireSeq != null) 'wire_seq=$wireSeq' else 'line=$lineNumber',

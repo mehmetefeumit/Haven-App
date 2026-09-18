@@ -883,13 +883,16 @@ void main() {
       expect(printed, isNot(contains(_alice)));
       expect(printed, isNot(contains('Landlord')));
       expect(printed, isNot(contains('Alice')));
-      expect(printed, contains(_alice.substring(0, 8)));
+      // Rule 15: not even a PREFIX of the key survives — a salted per-process
+      // handle takes its place, so two lines can still be correlated inside
+      // one run and never across installs.
+      expect(printed, isNot(contains(_alice.substring(0, 8))));
+      expect(printed, startsWith('MemberCandidate(peer#'));
     });
 
     test('a candidate with a short key prints instead of throwing', () {
       // `toString` is what an error path reaches for. A value type whose
-      // debug output can raise turns one diagnostic into two failures, and
-      // the shortened key is the whole point of the output above.
+      // debug output can raise turns one diagnostic into two failures.
       const candidate = MemberCandidate(
         pubkeyHex: 'ab12',
         npub: 'npub1ab12',
@@ -898,14 +901,12 @@ void main() {
       );
 
       expect(candidate.toString, returnsNormally);
-      expect(candidate.toString(), contains('ab12'));
+      expect(candidate.toString(), isNot(contains('ab12')));
     });
 
     test('a directory entry with a short key prints instead of throwing',
         () {
-      // Sibling guard to the candidate one above — an unguarded
-      // `substring(0, 8)` here throws for anything shorter than 8 hex
-      // characters, turning one diagnostic into two failures.
+      // Sibling guard to the candidate one above.
       const entry = DirectoryEntry(
         pubkeyHex: 'ab12',
         npub: 'npub1ab12',
@@ -913,18 +914,25 @@ void main() {
       );
 
       expect(entry.toString, returnsNormally);
-      expect(entry.toString(), contains('ab12'));
+      expect(entry.toString(), isNot(contains('ab12')));
     });
 
-    test('a directory prints only how many people it holds', () {
+    test('a directory prints a magnitude, never how many people it holds', () {
       final printed = buildDirectory(
-        entries: [_entry(_alice), _entry(_bob)],
+        entries: [
+          for (var i = 0; i < 7; i++)
+            _entry('${i}0000000000000000000000000000000000'
+                '000000000000000000000000000000'),
+        ],
         profiles: const {
           _alice: Profile(pubkeyHex: _alice, displayName: 'Alice'),
         },
       ).toString();
 
-      expect(printed, equals('MemberDirectory(2)'));
+      // Seven people: an exact directory size fingerprints the account
+      // (Rule 15), so only the bucket is rendered.
+      expect(printed, equals('MemberDirectory(5+)'));
+      expect(printed, isNot(contains('7')));
     });
   });
 }

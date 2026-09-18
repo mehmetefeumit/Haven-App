@@ -47,6 +47,7 @@ import 'package:haven/src/providers/location_sharing_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_health_service.dart';
 import 'package:haven/src/services/circle_service.dart';
+import 'package:haven/src/utils/log_alias.dart';
 
 /// The NIP-40 window Haven stamps on every kind-445 location message.
 ///
@@ -177,9 +178,20 @@ class SharingHealth {
   @override
   int get hashCode => Object.hash(state, since, pausedReason);
 
+  /// [since] as an offset from now, never a wall-clock instant (Rule 15) —
+  /// `-` when there is no fault to date.
+  String get _sinceOffset {
+    final at = since;
+    return at == null ? '-' : relativeSecs(LogOrigin.now(), at);
+  }
+
   @override
+  // A marker blankets the whole rendering, so `since:` has no guard here —
+  // its backstop is the "states how long ago the fault began" test.
+  // log-scan-ok: pausedReason is a closed enum variant, never remote prose
   String toString() =>
-      'SharingHealth(${state.name}, since: $since, reason: $pausedReason)';
+      'SharingHealth(${state.name}, since: $_sinceOffset, '
+      'reason: $pausedReason)';
 }
 
 /// Injectable clock, so every transition is provable without waiting.

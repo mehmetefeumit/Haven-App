@@ -346,7 +346,7 @@ run_self_test() {
   # …and the array that call passes is this lane's whole seal claim: its
   # injected point and both line floors, pinned so a red lane cannot be turned
   # green by lowering one of them.
-  local extra_lit='readonly -a SEAL_EXTRA=(--host-decl "coordinate=${GEO_LAT},${GEO_LON}" --floor drive=20 --floor relay=7)'
+  local extra_lit='readonly -a SEAL_EXTRA=(--host-decl "coordinate=${GEO_LAT},${GEO_LON}" --floor drive=64 --floor relay=7)'
   _eq_case "the seal extras carry the injected point and both line floors" "1" \
     "$(awk -v lit="${extra_lit}" \
          'index($0, lit) == 1 { n++ } END { print n + 0 }' "${self}")"
@@ -480,15 +480,14 @@ mkdir -p "${LOGSCAN_REPORTS}"
 # nothing" into rc 4 instead of a green, so it is sized to the smallest
 # COMPLETE capture and never to what would make the lane pass.
 #
-# drive=20. The policy's 100 is sized for the Android core flow's 394-line
-# transcript; this lane drives ONE scenario. Its own transcript was DELETED by
-# containment in run 35280144455 — the gate went rc 1 on that run's dumpsys S4
-# hits, which outranks the rc 4 underneath, so the unmet 100-line floor never
-# printed — leaving the closest measured siblings as the basis: the b4 iOS twin
-# at 45 lines and the integration lane's single-scenario transcripts at 22-88.
-# 20 is under half of 45 and above the ~17 lines `flutter drive` prints before
-# the first test result, so a transcript that fails it is one in which no test
-# ran. RE-MEASURE from the next green run's artifact and re-pin this number.
+# drive=64. The policy's 100 is sized for the Android core flow's 394-line
+# transcript; this lane drives one scenario whose complete transcript is
+# 128 lines (flutter-drive.log) in run 35376588206, the first green run after the
+# gate's rollout. 64 is half of that and far above the ~17 lines `flutter
+# drive` prints before the first test result, so a transcript that fails it
+# is one in which no test ran. (The provisional 20 was set blind: run
+# 35280144455's rc 1 on the dumpsys hits outranked the rc 4 beneath it and
+# containment deleted the transcript before it could be measured.)
 #
 # relay=7. The policy's 1 is sized for the hermetic host relay, which prints a
 # single listen line; this lane's relay is strfry, whose `docker logs` dump is
@@ -496,7 +495,7 @@ mkdir -p "${LOGSCAN_REPORTS}"
 # 7 is half the smallest complete dump, so a dump below it is truncated or
 # absent — which is what a container torn down before the dump looks like: ONE
 # line of docker error text.
-readonly -a SEAL_EXTRA=(--host-decl "coordinate=${GEO_LAT},${GEO_LON}" --floor drive=20 --floor relay=7)
+readonly -a SEAL_EXTRA=(--host-decl "coordinate=${GEO_LAT},${GEO_LON}" --floor drive=64 --floor relay=7)
 
 # ---------------------------------------------------------------------------
 # Cleanup (EXIT trap): stop the background helpers, run the MANDATORY

@@ -98,6 +98,19 @@
 # `ArgumentError.value(` as unmatched so a future regression is a tested
 # property, not an assumption.
 #
+# A Dart `String toString()` override is a log line too, and the one nobody
+# writes deliberately: it renders the moment the object is interpolated into a
+# `debugPrint`, thrown, dumped by a Flutter error handler or printed as a
+# failing `expect`'s `Actual:` line — and `check_debug_impls_covered.sh`, the
+# guard that enumerates the same class in Rust, reads `impl Debug/Display` and
+# `thiserror` only. So the override's BODY is scanned as one invocation: the
+# `=>` form to its terminating `;`, the braced form to the brace that closes
+# it. Every verdict applies unchanged, with ONE exemption: the object's own
+# whole-token `message`/`msg` field, because `'FooException: $message'` is
+# Dart's exception idiom and the text was already classified where it was
+# CONSTRUCTED (`FooException(` is itself in this vocabulary). Any other prose
+# in a `toString()` — `$reason`, `${e.message}`, `$content` — still counts.
+#
 # `haven/integration_test` is scanned as its own root with its own floor: a
 # harness print lands in the drive transcript, which is uploaded on failure,
 # so the pillar applies; the harness's own `// harness-log-ok: <reason>` marker
@@ -127,28 +140,50 @@ readonly SCRIPT_NAME='check_no_identifier_logging'
 # key guard measured (Rust 92, Dart 479). A parser that stopped recognising
 # invocations collapses well past them.
 readonly MIN_RUST_SITES=70
-# Re-measured 2026-09-16 (H6): the Dart CALL vocabulary widened from a fixed
-# exception-name list to ANY (optionally `_`-prefixed) PascalCase identifier
-# ending in `Exception`/`Error` (plus the bare word `Exception`), which raised
-# the count from 479 to 776 invocations under haven/lib (constructor
-# DECLARATIONS forwarding `this.`/`super.` are not calls); floor(776 × 0.8).
-readonly MIN_DART_SITES=620
-# Re-measured 2026-09-16 (H6), same CALL widening as MIN_DART_SITES: 459 to
-# 481 invocations under haven/integration_test; floor(481 × 0.8).
-readonly MIN_ITEST_SITES=384
+# Re-measured 2026-09-18: the Dart CALL vocabulary gained the `String
+# toString()` override (its BODY is one invocation), which raised the count
+# from 776 to 802 invocations under haven/lib — the 26 overrides the tree has.
+# The 2026-09-16 (H6) pass before it had widened from a fixed exception-name
+# list to ANY (optionally `_`-prefixed) PascalCase identifier ending in
+# `Exception`/`Error` (plus the bare word `Exception`), 479 to 776
+# (constructor DECLARATIONS forwarding `this.`/`super.` are not calls).
+# floor(802 × 0.8).
+readonly MIN_DART_SITES=641
+# Re-measured 2026-09-18: the same `toString()` widening took
+# haven/integration_test from 481 to 485 (4 overrides), and adding `note(`/
+# `record(` — b8's own diagnostic sinks, whose arguments no scanner read
+# before — took it to 494 (9 call sites; the two DECLARATIONS are typed
+# parameter lists and are skipped). floor(494 × 0.8).
+readonly MIN_ITEST_SITES=395
+# Same contract for the wrapper-DEFINITION scan, whose population `scan()`'s
+# floors cannot see: measured 2 (Rust) and 7 (Dart, haven/lib + the harness)
+# on 2026-09-18. floor(2 × 0.8) = 1 and floor(7 × 0.8) = 5 — a lexer that
+# stopped recognising definitions collapses past them, and a definition that
+# is never read is a `relay_handle` nobody checked.
+readonly MIN_RUST_WRAPDEFS=1
+readonly MIN_DART_WRAPDEFS=5
 
 # The vocabulary. Whole decamelled identifiers and every `_`-part of them.
 # STRONG words identify on their own; WEAK words are magnitudes and instants,
 # which a delta/bucket/duration part may relativise.
 readonly STRONG_WORDS='nostr_group_id group_hex group_id gid group circle circle_id h_tag npub nsec pubkey pub_key public_key pk author sender recipient inviter event_id evt evt_id evt_tag evt_prefix d_tag slot sub_id subscription_id relay relays relay_url url urls host domain endpoint uri ip ssid display_name petname nickname circle_name name title label about notes blossom picture avatar sha256 digest hash hex bech32 hash_code lat latitude lon longitude geohash altitude speed heading accuracy device_id locale tz timezone id ids peer peers member members contact contacts owner admin admins index idx ordinal seq sequence serial'
-readonly WEAK_WORDS='epoch since until created_at timestamp at_ms instant count size total len'
+readonly WEAK_WORDS='epoch since until created_at timestamp at_ms instant count size total len responders canonical acked inputs sources'
+# The INSTANT subset of WEAK_WORDS. A unit part says how a magnitude is
+# measured, so `totalMs` is a span rather than a count — but it says nothing
+# about an origin, and `pauseSinceSecs` is still somebody's wall clock. Units
+# therefore relativise a magnitude and never an instant.
+readonly INSTANT_WORDS='epoch since until created_at timestamp at_ms instant'
+readonly UNIT_PARTS='secs seconds millis ms'
 readonly PROSE_WORDS='e err error exception ex cause stack_trace stack trace panic reason message msg notice detail details description text body content payload raw json response resp line summary result describe rejection'
 readonly BOOL_PREFIXES='is has was were are can could should needs did does will had have must may'
-readonly BOOL_SUFFIXES='ok enabled disabled present known ready changed stale fresh valid missing configured allowed dirty reachable healthy acked sent done empty matched verified exists supported granted denied needed required connected'
+# `acked` is deliberately NOT here: it is a WEAK magnitude word, and a name
+# cannot be both "a count" and "proof of boolean-ness" — `relaysAcked` is an
+# int. A genuine boolean takes a prefix (`wasAcked`, `isAcked`).
+readonly BOOL_SUFFIXES='ok enabled disabled present known ready changed stale fresh valid missing configured allowed dirty reachable healthy sent done empty matched verified exists supported granted denied needed required connected'
 # A name that says it is a classification, not a value.
 readonly CLASS_PARTS='alias handle kind code class variant tier policy mode status state phase outcome verdict decision action'
 # ...and, for magnitude/instant words only, one that says it is relative.
-readonly RELATIVE_PARTS='delta diff behind ahead gap lag offset elapsed relative bucket bucketed ago duration latency timeout interval delay backoff max min limit cap threshold budget quota retry retries attempt attempts'
+readonly RELATIVE_PARTS='delta diff behind ahead gap lag offset elapsed relative bucket bucketed ago duration latency timeout interval delay backoff max min limit cap threshold budget quota retry retries attempt attempts secs seconds millis ms'
 
 log()  { printf '\033[1;34m[%s]\033[0m %s\n' "${SCRIPT_NAME}" "$*"; }
 fail() { printf '\033[1;31m[%s] FAIL:\033[0m %s\n' "${SCRIPT_NAME}" "$*" >&2; }
@@ -179,7 +214,7 @@ SHAPES_DART="$(printf '%s\n' \
 readonly SHAPES_RUST SHAPES_DART
 # The scanner reads its vocabulary from the environment: nothing passes through
 # `awk -v` escape processing, and a readonly cannot be prefix-assigned anyway.
-export STRONG_WORDS WEAK_WORDS PROSE_WORDS BOOL_PREFIXES BOOL_SUFFIXES CLASS_PARTS RELATIVE_PARTS SHAPES_RUST SHAPES_DART
+export STRONG_WORDS WEAK_WORDS INSTANT_WORDS UNIT_PARTS PROSE_WORDS BOOL_PREFIXES BOOL_SUFFIXES CLASS_PARTS RELATIVE_PARTS SHAPES_RUST SHAPES_DART
 
 # ---------------------------------------------------------------------------
 # The scanner. One program for both languages; `lang` selects delimiters,
@@ -197,6 +232,8 @@ BEGIN {
   BOOLS  = words_re(ENVIRON["BOOL_SUFFIXES"])
   CLASSP = words_re(ENVIRON["CLASS_PARTS"])
   RELP   = words_re(ENVIRON["RELATIVE_PARTS"])
+  INSTP  = words_re(ENVIRON["INSTANT_WORDS"])
+  UNITP  = words_re(ENVIRON["UNIT_PARTS"])
   nshapes = split(ENVIRON[(lang == "rust") ? "SHAPES_RUST" : "SHAPES_DART"], SH, "\n")
   for (i = 1; i <= nshapes; i++) { split(SH[i], kv, "\t"); SLABEL[i] = kv[1]; SRE[i] = kv[2] }
   MARKER = "(" markers "):[ \t]*[^ \t]"
@@ -207,14 +244,16 @@ BEGIN {
     COUNT = "[A-Za-z_][A-Za-z0-9_.]*\\.(len|count)\\(\\)"
     UNKNOWN = "(^|[^A-Za-z0-9_])[A-Za-z0-9_]+::(trace|debug|info|warn|error|event)!"
   } else {
-    CALL  = "(^|[^A-Za-z0-9_.])(debugPrint|debugPrintThrottled|print|developer\\.log|dev\\.log|stderr\\.write|stderr\\.writeln|stdout\\.write|stdout\\.writeln|assert|fail|Exception|_?[A-Z][A-Za-z0-9_]*(Exception|Error))[ \t]*\\("
+    CALL  = "(^|[^A-Za-z0-9_.])(debugPrint|debugPrintThrottled|print|developer\\.log|dev\\.log|stderr\\.write|stderr\\.writeln|stdout\\.write|stdout\\.writeln|assert|fail|note|record|Exception|_?[A-Z][A-Za-z0-9_]*(Exception|Error))[ \t]*\\(|(^|[^A-Za-z0-9_])String[ \t]+toString\\(\\)[ \t]*(=>|\\{)"
     WRAP  = "(^|[^A-Za-z0-9_.])(logAliasHandle|logAlias|(_?[a-z][a-zA-Z0-9_]*)?(Handle|Alias)|magnitudeBucket|bucket|relativeSecs|relativeMs|sinceOrigin)[ \t]*\\("
     # `.name` on an enum is Dart's variant-name idiom (`outcome.name`,
     # `expectedTier.name`); on a circle it is user text. The receiver's last
     # segment decides, by its last decamelled part.
     # `details.library` is FlutterErrorDetails' library NAME ("widgets library").
     # `?.` is the null-aware spelling of the same accessor.
-    SAFE  = "[A-Za-z_][A-Za-z0-9_.]*\\??\\.(runtimeType|isEmpty|isNotEmpty|code|kind|library)|([A-Za-z_][A-Za-z0-9_.]*\\??\\.)?(kind|mode|status|state|outcome|decision|category|phase|tier|action|policy|verdict|class|variant|level)\\.name|[A-Za-z_][A-Za-z0-9_.]*(Kind|Mode|Status|State|Outcome|Decision|Category|Phase|Tier|Action|Policy|Verdict|Class|Variant|Level)\\.name"
+    # `x != null` / `x == null` renders `true`/`false` whatever `x` holds —
+    # the presence-flag idiom (`hasPicture: ${pictureBytes != null}`).
+    SAFE  = "[A-Za-z_][A-Za-z0-9_.]*\\??\\.(runtimeType|isEmpty|isNotEmpty|code|kind|library)|([A-Za-z_][A-Za-z0-9_.]*\\??\\.)?(kind|mode|status|state|outcome|decision|disposition|category|phase|tier|action|policy|verdict|class|variant|level)\\.name|[A-Za-z_][A-Za-z0-9_.]*(Kind|Mode|Status|State|Outcome|Decision|Disposition|Category|Phase|Tier|Action|Policy|Verdict|Class|Variant|Level)\\.name|[A-Za-z_][A-Za-z0-9_.]*[ \t]*[!=]=[ \t]*null"
     COUNT = "[A-Za-z_][A-Za-z0-9_.]*\\??\\.(length|size)"
     UNKNOWN = ""
   }
@@ -222,21 +261,53 @@ BEGIN {
 }
 
 # Splits a line into CODE (string literals and the trailing comment removed),
-# STRS (the concatenated literal contents) and COMMENT. INQ/QC/ESC are FILE
-# state, not line state: a literal may span newlines.
+# STRS (the concatenated literal contents, `${…}` expressions included) and
+# COMMENT. The nesting stack (NDEPTH/NKIND/NQ/NBRACE) and ESC are FILE state,
+# not line state: a literal may span newlines.
+#
+# Dart lets a `${…}` hold another literal — `'${ok ? 'a' : 'b'}'`,
+# `"${m['k']}"` — so inside an interpolation a quote OPENS a nested string
+# rather than closing the outer one. Reading it as a close desyncs the rest of
+# the line, and an `//` or an unbalanced paren from the inner literal then
+# reaches CODE: the invocation is dropped UNSCANNED (it never reaches emit(),
+# so it is not even counted), which reads exactly like a clean one.
 function split_line(s,   i, n, c) {
   CODE = ""; STRS = ""; COMMENT = ""
   n = length(s)
   for (i = 1; i <= n; i++) {
     c = substr(s, i, 1)
-    if (INQ) {
+    if (NDEPTH > 0 && NKIND[NDEPTH] == "S") {
       if (ESC) { ESC = 0; STRS = STRS c; continue }
       if (c == "\\") { ESC = 1; continue }
-      if (c == QC) { INQ = 0; STRS = STRS " "; continue }
+      if (c == NQ[NDEPTH]) { NDEPTH--; STRS = STRS " "; continue }
+      if (lang == "dart" && c == "$" && substr(s, i + 1, 1) == "{") {
+        NDEPTH++; NKIND[NDEPTH] = "I"; NBRACE[NDEPTH] = 1
+        STRS = STRS "${"; i++
+        continue
+      }
+      # A brace inside a literal NESTED in an interpolation is text, not a
+      # delimiter: leaving it in would end placeholders()' `${…}` span early
+      # and hide everything the expression says after it.
+      if (NDEPTH > 1 && NKIND[NDEPTH - 1] == "I" && (c == "{" || c == "}")) { STRS = STRS " "; continue }
       STRS = STRS c
       continue
     }
-    if (c == "\"" || (lang == "dart" && c == "'")) { INQ = 1; QC = c; continue }
+    if (NDEPTH > 0 && NKIND[NDEPTH] == "I") {
+      # A `${…}` holds an EXPRESSION. It stays in STRS so placeholders() still
+      # reads it as one placeholder; a quote in it opens a nested literal,
+      # whose own content is the map key / ternary branch being rendered.
+      if (c == "\"" || c == "'") { NDEPTH++; NKIND[NDEPTH] = "S"; NQ[NDEPTH] = c; continue }
+      if (c == "{") { NBRACE[NDEPTH]++; STRS = STRS c; continue }
+      if (c == "}") {
+        NBRACE[NDEPTH]--
+        if (NBRACE[NDEPTH] == 0) { NDEPTH--; STRS = STRS "}"; continue }
+        STRS = STRS c
+        continue
+      }
+      STRS = STRS c
+      continue
+    }
+    if (c == "\"" || (lang == "dart" && c == "'")) { NDEPTH++; NKIND[NDEPTH] = "S"; NQ[NDEPTH] = c; continue }
     # A Rust char literal is not a string opener: `'"'` would otherwise swallow
     # the rest of the file. Lifetimes (`'a` with no closing quote) fall through.
     if (lang == "rust" && c == "'") {
@@ -281,6 +352,29 @@ function consume(s,   i, n, c) {
     c = substr(s, i, 1)
     if (c == "(") DEPTH++
     else if (c == ")") {
+      DEPTH--
+      if (DEPTH == 0) { ARGS = ARGS " " substr(s, 1, i - 1); TAIL = substr(s, i + 1); return 1 }
+    }
+  }
+  ARGS = ARGS " " s
+  TAIL = ""
+  return 0
+}
+
+# consume()'s twin for a `toString()` body, which is delimited by neither end
+# of a paren pair: the `=>` form closes at its first top-level `;` (a literal
+# one never reaches here — CODE has the string contents removed), the braced
+# form at the brace matching the one the CALL match already consumed.
+function consume_body(s,   i, n, c) {
+  n = length(s)
+  for (i = 1; i <= n; i++) {
+    c = substr(s, i, 1)
+    if (CLOSER == ";") {
+      if (c != ";") continue
+      ARGS = ARGS " " substr(s, 1, i - 1); TAIL = substr(s, i + 1); return 1
+    }
+    if (c == "{") DEPTH++
+    else if (c == "}") {
       DEPTH--
       if (DEPTH == 0) { ARGS = ARGS " " substr(s, 1, i - 1); TAIL = substr(s, i + 1); return 1 }
     }
@@ -344,24 +438,46 @@ function add(list, item) { return (list == "" ? item : list ", " item) }
 
 # One token: identifier / prose / clean. Whole-token matches are decided
 # before any exemption — `hashCode` says "code" and is still an identifier.
-function verdict(tok,   n, i, parts, strong, weak, prose) {
+function verdict(tok,   n, i, parts, pair, strong, weak, instant, prose) {
   sub(/^_+/, "", tok)
   if (tok == "") return ""
+  # `'FooException: $message'` is Dart's exception-rendering idiom; the text
+  # was classified where the exception was CONSTRUCTED, so the pass-through
+  # is not a second dimension — only a marker on every exception class.
+  #
+  # That premise holds for EXACTLY the classes whose constructor this
+  # vocabulary scans, i.e. the ones whose name ends in `Exception`/`Error`.
+  # A type that merely `implements Exception` under another name
+  # (`class _SocketDied implements Exception`) is never scanned at
+  # construction, so its `toString()` is the only reading this guard gets.
+  if (KIND == "tostring" && CLASSNAME ~ /(Exception|Error)$/ && (tok == "message" || tok == "msg")) return ""
   if (tok ~ IDENT) return "identifier"
   if (tok ~ PROSE) return "prose"
   n = split(tok, parts, "_")
   if (n < 2) return ""
   if (parts[1] ~ BOOLP || parts[n] ~ BOOLS) return ""
-  strong = 0; weak = 0; prose = 0
+  strong = 0; weak = 0; instant = 0; prose = 0
   for (i = 1; i <= n; i++) {
     if (parts[i] ~ CLASSP) return ""
     if (parts[i] ~ STRONG) strong = 1
     if (parts[i] ~ WEAK) weak = 1
+    if (parts[i] ~ INSTP) instant = 1
     if (parts[i] ~ PROSE) prose = 1
+    # A multi-word entry (`created_at`, `at_ms`) can only ever match a WHOLE
+    # token, so `createdAtSecs`/`expiresAtMs` — three parts, none of them a
+    # word on its own — would name an absolute instant and read as clean.
+    # Testing adjacent PAIRS is what sees them, and it adds no vocabulary
+    # (so a boolean like `published` is still a boolean).
+    if (i < n) {
+      pair = parts[i] "_" parts[i + 1]
+      if (pair ~ STRONG) strong = 1
+      if (pair ~ WEAK) weak = 1
+      if (pair ~ INSTP) instant = 1
+    }
   }
   if (strong) return "identifier"
   if (weak) {
-    for (i = 1; i <= n; i++) if (parts[i] ~ RELP) return ""
+    for (i = 1; i <= n; i++) if (parts[i] ~ RELP && !(instant && parts[i] ~ UNITP)) return ""
     return "identifier"
   }
   if (prose) return "prose"
@@ -453,30 +569,56 @@ function skip_test_gated(code,   ind) {
   return 1
 }
 
-FNR == 1 { INMAC = 0; INQ = 0; ESC = 0; prev_supp = 0; CFGTEST = 0; SKIPPING = 0; SKIPIND = "" }
+# A file that ends mid-literal means the lexer lost the thread somewhere above,
+# and every verdict after that point was reached on a guess. Report it as a
+# violation instead of carrying the depth into the next file.
+function check_terminated(f, l) {
+  if (NDEPTH > 0) printf "%s:%d: lexer(file ends inside a string or ${…} — every verdict in it was reached on a guess) | <EOF>\n", f, l
+  NDEPTH = 0
+}
+FNR == 1 { if (PREVFILE != "") check_terminated(PREVFILE, PREVNR); PREVFILE = FILENAME
+           INMAC = 0; ESC = 0; prev_supp = 0; CFGTEST = 0; SKIPPING = 0; SKIPIND = ""; CLASSNAME = "" }
+{ PREVNR = FNR }
 {
   split_line($0)
   if (lang == "rust" && skip_test_gated(CODE)) next
   unknown_macros(CODE)
+  # The enclosing type, for the `toString()` rules. Dart has no nested types,
+  # so the last declaration seen above a line IS the one it sits in.
+  if (lang == "dart" && match(CODE, /(^|[^A-Za-z0-9_])(class|mixin|enum)[ \t]+_?[A-Za-z][A-Za-z0-9_]*/)) {
+    CLASSNAME = substr(CODE, RSTART, RLENGTH); sub(/^.*[ \t]/, "", CLASSNAME)
+  }
   supp_here = (COMMENT ~ MARKER)
   rest = CODE
   while (1) {
     if (INMAC) {
       if (supp_here) SUPP = 1
       PH = PH placeholders(STRS)
-      if (!consume(rest)) break
+      if (!((CLOSER == ")") ? consume(rest) : consume_body(rest))) break
       emit(); INMAC = 0; rest = TAIL
     } else {
       if (!match(rest, CALL)) break
+      m = substr(rest, RSTART, RLENGTH)
       # `const FooException(this.message)` / `({required super.message})` is a
-      # constructor DECLARATION sharing a call's shape; it renders nothing.
-      if (lang == "dart" && substr(rest, RSTART + RLENGTH) ~ /^[ \t]*[{[]?[ \t]*(required[ \t]+)?(this|super)\./) {
+      # constructor DECLARATION sharing a call's shape; it renders nothing. A
+      # `toString()` never is one, and `=> super.toString()` must not read as
+      # one either. `void record(String phase, String detail) {` is the same
+      # shape again: a parameter list opens with a TYPE (uppercase, by Dart's
+      # own naming convention), an argument list never does — `record(phase,
+      # failure)` and `note('p', x)` both start lowercase or with a literal.
+      if (lang == "dart" && m !~ /toString/ && substr(rest, RSTART + RLENGTH) ~ /^[ \t]*([{[]?[ \t]*(required[ \t]+)?(this|super)\.|(final[ \t]+|const[ \t]+)?[A-Z][A-Za-z0-9_<>?,]*[ \t]+[a-z_])/) {
         rest = substr(rest, RSTART + RLENGTH); continue
       }
       INMAC = 1; PH = ""; ARGS = ""; TAIL = ""; DBG = 0; HEXF = 0
-      m = substr(rest, RSTART, RLENGTH)
-      DEPTH = gsub(/\(/, "(", m)                # `.expect(&format!(` opens two
-      KIND = (m ~ /dbg!/) ? "dbg" : ((m ~ /(^|[^A-Za-z0-9_.])(debug_)?assert!?[ \t]*\(/) ? "assert" : "log")
+      if (m ~ /toString/) {
+        KIND = "tostring"
+        CLOSER = (m ~ /\{$/) ? "}" : ";"
+        DEPTH = (CLOSER == "}") ? 1 : 0
+      } else {
+        CLOSER = ")"
+        DEPTH = gsub(/\(/, "(", m)              # `.expect(&format!(` opens two
+        KIND = (m ~ /dbg!/) ? "dbg" : ((m ~ /(^|[^A-Za-z0-9_.])(debug_)?assert!?[ \t]*\(/) ? "assert" : "log")
+      }
       START = FNR; SRC = $0; sub(/^[ \t]*/, "", SRC)
       SUPP = (prev_supp || supp_here)
       rest = substr(rest, RSTART + RLENGTH)
@@ -484,7 +626,7 @@ FNR == 1 { INMAC = 0; INQ = 0; ESC = 0; prev_supp = 0; CFGTEST = 0; SKIPPING = 0
   }
   prev_supp = supp_here
 }
-END { printf "#sites %d\n", sites }
+END { check_terminated(PREVFILE, PREVNR); printf "#sites %d\n", sites }
 AWK
 readonly SCAN_AWK
 
@@ -493,6 +635,14 @@ readonly SCAN_AWK
 # body calls the canonical module and (Rust) it returns a handle. The canonical
 # modules themselves are exempt — their own unit tests are the proof.
 # ---------------------------------------------------------------------------
+# Its `code_of` keeps the simpler pre-nesting lexer. A nested-quote desync
+# there has three outcomes and only ONE of them is loud: a BODY cut short at a
+# fake `}` reds a legitimate wrapper (loud), but a `DEF` line hidden inside a
+# mis-opened literal drops the definition from the population entirely, and a
+# body EXTENDED past its real end can pick up a `logAliasHandle(` from the next
+# function and bless a wrapper that has none — both SILENT. The `#defs` floors
+# below are what make the first silent case visible; the second is why this
+# comment says "simpler", not "safe".
 read -r -d '' WRAPDEF_AWK <<'AWK' || true
 BEGIN {
   if (lang == "rust") {
@@ -585,13 +735,18 @@ readonly WRAPDEF_AWK
 
 run_wrapdef() { awk -v lang="$1" "${WRAPDEF_AWK}" "${@:2}"; }
 
-# wrappers <lang> <label> <file...>
+# wrappers <lang> <min-defs> <label> <file...>
 wrappers() {
-  local lang="$1" label="$2"; shift 2
+  local lang="$1" min="$2" label="$3"; shift 3
   local out defs hits
   out="$(run_wrapdef "${lang}" "$@")"
   defs="$(sed -n 's/^#defs //p' <<<"${out}")"
   hits="$(grep -v '^#defs ' <<<"${out}" || true)"
+  if [[ -z "${defs}" ]] || (( defs < min )); then
+    fail "${label}: found ${defs:-0} wrapper definition(s), expected >= ${min}."
+    echo "  The definition reader has stopped matching, so this check proves nothing." >&2
+    return 2
+  fi
   if [[ -n "${hits}" ]]; then
     fail "${label}: a definition carries a wrapper's NAME without a wrapper's body."
     printf '%s\n' "${hits}" | sed 's/^/    /' >&2
@@ -643,16 +798,18 @@ camelize() { awk -F_ '{ out = $1; for (i = 2; i <= NF; i++) out = out toupper(su
 # contact with the tree (an alias, a bucket, a relative offset, a boolean, a
 # delta, `runtimeType`, `.code`) and the marker rules.
 # ---------------------------------------------------------------------------
-# 2 languages x (86 STRONG + 11 WEAK + 30 PROSE) words + 109 hand-written
-# cases (shapes, format specs, markers, known-good, floors, and — Phase 0c —
-# the Dart exception-constructor/fail( CALL vocabulary). PROSE grew by 3
-# (`result`, `describe`, `rejection` — 2026-09-16, the H6 security-review
-# pass) over a `_pollUntil`/rejection-classifier leak the loop now catches
-# by construction, and the hand cases grew by 1 for the pinned
-# `ArgumentError.value(` gap fixture. An equality pin: a fixture added or
-# lost without this line changing is a self-test that no longer says what
-# it runs.
-readonly DECLARED_CASES=365
+# 2 languages x (86 STRONG + 16 WEAK + 30 PROSE) words + 144 hand-written
+# cases: shapes, format specs, markers, known-good, floors, the Dart
+# exception-constructor/`fail(` CALL vocabulary, and the 2026-09-18 pass —
+# `String toString()` bodies in both forms and the `$message` exemption's
+# class-name gate, the `note(`/`record(` sinks and the typed-parameter
+# DECLARATION they must not be read as, the `${…}` nesting lexer (nested
+# literals, braces inside them, and the unterminated-file report), the
+# unit-vs-instant and adjacent-pair rules, `disposition.name`, the `!= null`
+# pair and the `relaysAcked`/`wasAcked` pair. An equality pin: a fixture
+# added or lost without this line changing is a self-test that no longer
+# says what it runs.
+readonly DECLARED_CASES=408
 
 self_test() {
   local tmp fails=0 checked=0
@@ -727,6 +884,13 @@ self_test() {
   _case "Dart developer.log( FAILS" dart 1 dart "void f() { developer.log('\$npub'); }" 'identifier(npub)'
   _case "Dart StateError( with an identifier FAILS" dart 1 dart "void f() { throw StateError('leak: \$relayUrl'); }" 'identifier(relay_url)'
   _case "Dart fail( with a relay URL FAILS" dart 1 dart "void f() { fail('leak: \$relayUrl'); }" 'identifier(relay_url)'
+  _case "Dart note( sink argument is scanned like a debugPrint" dart 1 dart "void f() { note('p', 'n=\${rows.length}'); }" 'count('
+  _case "Dart record( sink argument is scanned like a debugPrint" dart 1 dart "void f() { record('p', '\$timestamp'); }" 'identifier(timestamp)'
+  _case "a note/record DECLARATION is a typed parameter list, not a call" dart 0 dart "void f() {
+  void record(String phase, String detail) { debugPrint('\$phase'); }
+  void note(String phase, String detail) { debugPrint('\$phase'); }
+}
+"
   _case "Dart ArgumentError( with an identifier FAILS" dart 1 dart "void f() { throw ArgumentError('bad \$npub'); }" 'identifier(npub)'
   _case "Dart FormatException( with an identifier FAILS" dart 1 dart "void f() { throw FormatException('bad \$relayUrl'); }" 'identifier(relay_url)'
   _case "Dart Exception( with an identifier FAILS" dart 1 dart "void f() { throw Exception('bad \$pubkey'); }" 'identifier(pubkey)'
@@ -836,13 +1000,24 @@ mod log_anonymity_tests {
   _case "Dart null-aware ?.runtimeType passes" dart 0 dart "void f() { debugPrint('threw=\${error?.runtimeType ?? '-'}'); }"
   _case "Dart enum variant name passes (outcome.name)" dart 0 dart "void f() { debugPrint('stop=\${outcome.name} (\${state.mode.name})'); }"
   _case "Dart enum variant name passes on a class-suffixed receiver (expectedTier.name)" dart 0 dart "void f() { debugPrint('tier=\${expectedTier.name} (\${observedTier.name})'); }"
+  _case "Dart enum variant name passes on a retry disposition (disposition.name)" dart 0 dart "void f() { debugPrint('why=\${disposition.name} (\${retryDisposition.name})'); }"
   _case "Dart user text does NOT pass as a variant name (circle.name)" dart 1 dart "void f() { debugPrint('joined \${circle.name}'); }" 'identifier(circle, name)'
   _case "Dart error.code passes" dart 0 dart "void f() { debugPrint('bg task error: \${error.code}'); }"
   _case "Rust e.kind() passes" rust 0 rs 'fn f() { log::warn!("io: {}", e.kind()); }'
   _case "a boolean prefix passes" dart 0 dart "void f() { debugPrint('relay ok: \$isRelayConnected'); }"
+  _case "a boolean prefix passes on an ack too (wasAcked)" dart 0 dart "void f() { debugPrint('acked=\$wasAcked'); }"
+  _case "a count named relaysAcked is not a boolean (FAILS)" dart 1 dart "void f() { debugPrint('n=\$relaysAcked'); }" 'identifier(relays_acked)'
   _case "a boolean suffix passes" rust 0 rs 'fn f() { log::info!("{relay_ok}"); }'
   _case "an epoch DELTA passes" rust 0 rs 'fn f() { log::info!("peer is {epoch_delta} behind"); }'
   _case "a retry count passes" dart 0 dart "void f() { debugPrint('attempt \$retryCount'); }"
+  _case "a unit makes a magnitude a duration (totalMs) passes" dart 0 dart "void f() { debugPrint('took \${totalMs}ms'); }"
+  _case "a unit does NOT relativise an instant (pauseSinceSecs) FAILS" dart 1 dart "void f() { debugPrint('since=\$pauseSinceSecs'); }" 'identifier(pause_since_secs)'
+  _case "an instant spelled across parts is seen as a pair (createdAtSecs) FAILS" dart 1 dart "void f() { debugPrint('at=\$createdAtSecs'); }" 'identifier(created_at_secs)'
+  _case "a pair-spelled instant with a unit still FAILS (expiresAtMs)" dart 1 dart "void f() { debugPrint('exp=\$expiresAtMs'); }" 'identifier(expires_at_ms)'
+  _case "a genuine delta on an instant still passes (epochDelta)" dart 0 dart "void f() { debugPrint('behind=\$epochDelta'); }"
+  _case "a bare past participle is not an instant (published) passes" dart 0 dart "void f() { debugPrint('state=\$published'); }"
+  _case "a null comparison renders a boolean (passes)" dart 0 dart "void f() { debugPrint('hasPicture: \${pictureBytes != null}'); }"
+  _case "the SAME value rendered whole is not a boolean (FAILS)" dart 1 dart "void f() { debugPrint('picture: \$pictureBytes'); }" 'identifier(picture_bytes)'
   _case "an alias variable passes" rust 0 rs 'fn f() { log::info!("{relay_alias} closed"); }'
   _case "a classification passes (relay_status)" rust 0 rs 'fn f() { log::info!("{}", relay_status); }'
   _case "vocabulary words in PROSE pass" rust 0 rs 'fn f() { log::warn!("relay url and pubkey rejected: {n}"); }'
@@ -942,6 +1117,77 @@ fn f() { log::info!("{}", relay_url); }
   _case "Dart .print( on a receiver is not a print call" dart 0 dart "void f() { buffer.print(relayUrl); }"
   _case "Dart ArgumentError.value( is the documented named-constructor gap (unmatched, not a pass)" dart 0 dart "void f() { throw ArgumentError.value(npub, 'npub', 'bad'); }"
 
+  log "self-test: Dart toString() overrides"
+  _case "a toString() interpolating .length is an exact count FAILS" dart 1 dart "class A {
+  @override
+  String toString() => 'A(n: \${rows.length})';
+}
+" 'count('
+  _case "a toString() interpolating a bucket passes" dart 0 dart "class A {
+  @override
+  String toString() => 'A(n: \${magnitudeBucket(rows.length)})';
+}
+"
+  _case "a toString() rendering a pubkey prefix FAILS" dart 1 dart "class A {
+  @override
+  String toString() => 'A(\${pubkey.substring(0, 8)}...)';
+}
+" 'shape(substring()'
+  _case "a toString() rendering an alias handle passes" dart 0 dart "class A {
+  @override
+  String toString() => 'A(\${logAliasHandle(LogAliasClass.peer, pubkey)})';
+}
+"
+  _case "a BRACED toString() body is scanned to its closing brace" dart 1 dart "class A {
+  @override
+  String toString() {
+    final parts = <String>[relayUrl];
+    return parts.join(' ');
+  }
+}
+" 'identifier(relay_url)'
+  _case "a toString() rendering its own \$message is the exception idiom" dart 0 dart "class FooException implements Exception {
+  @override
+  String toString() => 'FooException: \$message';
+}
+"
+  _case "the same \$message in a class NOT named *Exception/*Error FAILS" dart 1 dart "class SocketDied implements Exception {
+  @override
+  String toString() => 'SocketDied: \$message';
+}
+" 'prose(message)'
+  _case "a toString() rendering any OTHER prose still FAILS" dart 1 dart "class A {
+  @override
+  String toString() => 'A: \$reason';
+}
+" 'prose(reason)'
+  _case "a toString() forwarding to super is scanned, not read as a declaration" dart 1 dart "class A {
+  @override
+  String toString() => super.toString() + relayUrl;
+}
+" 'identifier(relay_url)'
+  _case "an absolute instant in a toString() FAILS" dart 1 dart "class A {
+  @override
+  String toString() => 'A(\$timestamp)';
+}
+" 'identifier(timestamp)'
+  _case "a relative offset in a toString() passes" dart 0 dart "class A {
+  @override
+  String toString() => 'A(\${relativeSecs(LogOrigin.now(), timestamp)})';
+}
+"
+
+  log "self-test: nested quotes inside a Dart \${…} interpolation"
+  _case "a ternary branch literal does not close the outer string (identifier FAILS)" dart 1 dart "void f() { debugPrint('x=\${flag ? pubkeyHex : '-'}'); }" 'identifier(pubkey_hex)'
+  _case "an identifier AFTER a nested literal is still scanned (FAILS)" dart 1 dart "void f() { debugPrint('r=\${ok ? 'wss://x' : relayUrl}'); }" 'identifier(relay_url)'
+  _case "a map key literal inside an interpolation FAILS" dart 1 dart "void f() { debugPrint(\"m=\${m['npub']}\"); }" 'identifier(npub)'
+  _case "a nested literal does not bless runtimeType's own call (passes)" dart 0 dart "void f() { debugPrint('threw=\${error?.runtimeType ?? '-'}'); }"
+  _case "a BRACE inside a nested literal is text, not the end of the placeholder (FAILS)" dart 1 dart "void f() { debugPrint('x=\${ok ? '}' : npub}'); }" 'identifier(npub)'
+  _case "a file ending inside an unterminated literal is reported, not guessed" dart 1 dart "void f() { debugPrint('oops); }
+" 'lexer(file ends inside'
+  _case "a file ending with every literal closed is silent" dart 0 dart "void f() { debugPrint('fine'); }
+"
+
   log "self-test: anti-vacuity floor"
   local out sites
   checked=$(( checked + 1 ))
@@ -952,6 +1198,21 @@ fn f() { log::info!("{}", relay_url); }
     printf '  \033[1;32mPASS\033[0m the scanner reports its invocation count\n'
   else
     printf '  \033[1;31mFAIL\033[0m expected #sites 2, got %s\n' "${sites:-<none>}" >&2
+    fails=1
+  fi
+  checked=$(( checked + 1 ))
+  # The swallow this guard's Dart lexer used to have: the `//` inside the
+  # nested literal reached CODE, ate the rest of the line as a comment, and
+  # left the invocation open — so BOTH calls went uncounted and unreported.
+  # `#sites` is the only thing that can see that, because a dropped
+  # invocation reads exactly like a clean one.
+  printf "void f() { debugPrint('r=\${ok ? 'wss://x' : relayUrl}'); }\nvoid g() { debugPrint('ok'); }\n" > "${tmp}/nested.dart"
+  out="$(run_awk dart "${tmp}/nested.dart")"
+  sites="$(sed -n 's/^#sites //p' <<<"${out}")"
+  if [[ "${sites}" == "2" ]]; then
+    printf '  \033[1;32mPASS\033[0m a nested-quote interpolation does not swallow its invocation\n'
+  else
+    printf '  \033[1;31mFAIL\033[0m nested-quote file reported #sites %s, expected 2\n' "${sites:-<none>}" >&2
     fails=1
   fi
   checked=$(( checked + 1 ))
@@ -1020,8 +1281,13 @@ main() {
   (( rc == 2 )) && exit 2
   (( rc == 0 )) || status=1
 
-  wrappers rust 'Rust wrapper definitions' "${rust_files[@]}" || status=1
-  wrappers dart 'Dart wrapper definitions' "${dart_files[@]}" "${itest_files[@]}" || status=1
+  rc=0; wrappers rust "${MIN_RUST_WRAPDEFS}" 'Rust wrapper definitions' "${rust_files[@]}" || rc=$?
+  (( rc == 2 )) && exit 2
+  (( rc == 0 )) || status=1
+
+  rc=0; wrappers dart "${MIN_DART_WRAPDEFS}" 'Dart wrapper definitions' "${dart_files[@]}" "${itest_files[@]}" || rc=$?
+  (( rc == 2 )) && exit 2
+  (( rc == 0 )) || status=1
 
   exit "${status}"
 }

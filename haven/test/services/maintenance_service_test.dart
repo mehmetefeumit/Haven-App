@@ -30,7 +30,7 @@ class _RecordingRelay extends MockRelayService {
   KeyPackageMaintenanceOutcome kpResult =
       const KeyPackageMaintenancePublished(
         relaysAcked: 2,
-        mintedFreshSlot: true,
+        isFreshSlotMinted: true,
         respondersProbed: 2,
         relayErrors: 1,
       );
@@ -109,7 +109,7 @@ void main() {
       expect(result, isA<KeyPackageMaintenancePublished>());
       final published = result as KeyPackageMaintenancePublished;
       expect(published.relaysAcked, 2);
-      expect(published.mintedFreshSlot, isTrue);
+      expect(published.isFreshSlotMinted, isTrue);
       expect(published.relayErrors, 1);
     });
 

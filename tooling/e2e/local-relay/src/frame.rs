@@ -124,7 +124,10 @@ pub const MLS_GROUP_ID_ACK_VERB: &str = "HAVEN_WIRE_MLS_GROUP_ID_ACK";
 ///
 /// The payload is OPAQUE to the proxy: it is validated as a JSON object
 /// ([`crate::needles::validate_payload`]) and written verbatim, so a new needle
-/// class needs no change here. Handled exactly like [`MLS_GROUP_ID_VERB`] —
+/// class needs no change here. A BYTE-IDENTICAL repeat — the harness re-issuing
+/// after a dead-socket reconnect — is idempotent: the sidecar gains no second
+/// line, and the ack carries the original line's number. Handled exactly like
+/// [`MLS_GROUP_ID_VERB`] —
 /// intercepted, never forwarded, journalled NOWHERE — and for the same reason:
 /// the declared value is what the runtime log scanner asserts is ABSENT from
 /// every sink, and the journal is one of the files it reads.
@@ -136,10 +139,12 @@ pub const NEEDLE_DECL_VERB: &str = "HAVEN_NEEDLE_DECL";
 /// ["HAVEN_NEEDLE_DECL_ACK",<sidecar line number>]
 /// ```
 ///
-/// Carries a COUNT and nothing else. Echoing the payload back — as the
-/// MLS-group-id ack echoes its normalized value — would put the declared value
-/// on the return path, where a harness that logged the ack would publish the
-/// needle into the very drive log the scanner then reads.
+/// Carries a COUNT and nothing else — the sidecar line the declaration is held
+/// on, which for a byte-identical repeat is the line the FIRST one wrote, so a
+/// re-issued declaration is indistinguishable from a first-time ack. Echoing the
+/// payload back — as the MLS-group-id ack echoes its normalized value — would
+/// put the declared value on the return path, where a harness that logged the
+/// ack would publish the needle into the very drive log the scanner then reads.
 pub const NEEDLE_DECL_ACK_VERB: &str = "HAVEN_NEEDLE_DECL_ACK";
 
 /// The verb a client announces its wire-canary manifest with.
@@ -470,7 +475,7 @@ pub fn mls_group_id_ack(normalized: &str) -> String {
 
 /// Builds the ack an ACCEPTED needle declaration is answered with.
 ///
-/// `seq` is the sidecar line the declaration landed on — a count, which is all
+/// `seq` is the sidecar line the declaration is held on — a count, which is all
 /// the harness needs to know the host holds it.
 #[must_use]
 pub fn needle_decl_ack(seq: u64) -> String {

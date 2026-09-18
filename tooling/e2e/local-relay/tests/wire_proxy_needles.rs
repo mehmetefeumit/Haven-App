@@ -30,8 +30,8 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use haven_local_relay::frame::{
-    ControlVerb, CANARY_MANIFEST_ACK_VERB, MLS_GROUP_ID_ACK_VERB, NEEDLE_DECL_ACK_VERB,
-    SENTINEL_ACK_VERB,
+    needle_decl_ack, ControlVerb, CANARY_MANIFEST_ACK_VERB, MLS_GROUP_ID_ACK_VERB,
+    NEEDLE_DECL_ACK_VERB, SENTINEL_ACK_VERB,
 };
 use haven_local_relay::needles;
 use serde_json::Value;
@@ -518,12 +518,32 @@ async fn every_proxy_binary_intercepts_every_control_verb() {
         // role and from nothing else.
         assert_sidecars(binary.source, &role);
 
+        // A BYTE-IDENTICAL re-declaration — what the harness sends when a dead
+        // socket took the ack rather than the frame — is acked all the same and
+        // leaves the sidecar as it was.
+        let (needle_frame, _) = frame_for(ControlVerb::NeedleDecl);
+        send(&mut client, &needle_frame).await;
+        let seen = recv_collecting(&mut client, "the ack for a re-declared needle", |v| {
+            v[0] == ack_verb_for(ControlVerb::NeedleDecl)
+        })
+        .await;
+        assert_eq!(
+            seen.last().map(String::as_str),
+            Some(needle_decl_ack(0).as_str()),
+            "{}: a repeat must be acked with the ORIGINAL line's number, or a re-issuing \
+             harness could tell it apart from a first-time ack",
+            binary.source
+        );
+        assert_sidecars(binary.source, &role);
+
         // ...and the shutdown summary reports the channel by COUNT, never by
         // value — it is tailed into the step log by stop-wire-proxy.sh.
         let log = proxy.stop();
         assert!(
-            log.contains("needle sidecar: 1 declaration(s) recorded, 0 refused, 0 lost"),
-            "{}: the shutdown summary must state the needle count:\n{log}",
+            log.contains(
+                "needle sidecar: 1 declaration(s) recorded, 1 repeat(s), 0 refused, 0 lost"
+            ),
+            "{}: the shutdown summary must state the needle count, repeats apart:\n{log}",
             binary.source
         );
         assert!(
