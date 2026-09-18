@@ -334,11 +334,25 @@ run_self_test() {
     echo "SELF-TEST FAIL (wiring): a soft \`if [[ -x …\` scanner gate is in the real run" >&2
     fail=1
   fi
+  # The lane's floors reach the manifest only if the pre-seal runs before any
+  # gate does: the host profile reuses whatever manifest is at the out path, so
+  # a pre-seal moved below the EXIT trap would leave the policy defaults sealed
+  # and the floors silently inoperative. Read from this file's own lines.
+  local seal_line trap_line
+  seal_line="$(grep -n -m1 '^logscan_seal host "${NEEDLE_DIR}" "${SEAL_EXTRA\[@\]}" || seal_rc=$?$' "${BASH_SOURCE[0]}")"
+  seal_line="${seal_line%%:*}"
+  trap_line="$(grep -n -m1 '^trap cleanup EXIT$' "${BASH_SOURCE[0]}")"
+  trap_line="${trap_line%%:*}"
+  if [[ -z "${seal_line}" || -z "${trap_line}" ]] || (( seal_line > trap_line )) \
+     || ! grep -qE '^readonly -a SEAL_EXTRA=\(--floor drive=35 --floor relay=7\)$' "${BASH_SOURCE[0]}"; then
+    echo "SELF-TEST FAIL (wiring): the lane's manifest must be sealed once, with its drive and relay floors, before the EXIT trap is armed (seal='${seal_line:-none}', trap='${trap_line:-none}')" >&2
+    fail=1
+  fi
   if (( fail )); then
     echo "run-m7-background-catchup.sh: SELF-TEST FAILED" >&2
     return 1
   fi
-  echo "run-m7-background-catchup.sh: self-test passed (the log-privacy gate removes exactly the *.log files it scanned on a leak and touches nothing on rc 3 or rc 0; echo_log_tail withholds a tail the gate refuses; the gate library is sourced, the EXIT trap gates LOG_DIR with the report outside the upload, every echo of a captured log goes through the gate first, no soft scanner gate)."
+  echo "run-m7-background-catchup.sh: self-test passed (the log-privacy gate removes exactly the *.log files it scanned on a leak and touches nothing on rc 3 or rc 0; echo_log_tail withholds a tail the gate refuses; the gate library is sourced, the EXIT trap gates LOG_DIR with the report outside the upload, every echo of a captured log goes through the gate first, no soft scanner gate, the manifest is sealed once with the lane's drive and relay floors before the trap is armed)."
   return 0
 }
 
@@ -372,6 +386,37 @@ cleanup() {
   bash "${STOP_STRFRY}" >/dev/null 2>&1 || true
   exit "${rc}"
 }
+
+# The line floors this lane seals with. A floor is what turns "the scan read an
+# empty or truncated file and found nothing" into rc 4 instead of a green, so
+# each is calibrated to the smallest COMPLETE capture this lane produces and
+# never to what would make it pass.
+#
+# drive=35. The policy's 100 lines is sized for the Android core flow's
+# 394-line transcript; this lane drives ONE target and its complete transcript
+# is 70 lines (drive.a.log, run 35280144455). 35 is half of that and still far
+# above the ~17 lines `flutter drive` prints before the first test result.
+#
+# relay=7. The policy's 1 is sized for the hermetic host relay, which prints a
+# single listen line; this lane's relay is strfry, whose `docker logs` dump is
+# 18 lines here and 14 at its smallest across the fleet (same run), of which
+# the first 9 are a fixed startup block. 7 is half the smallest complete dump,
+# so a dump below it is truncated or absent (a container already torn down
+# yields ONE line), never a quiet relay.
+#
+# Sealed ONCE, before the first gate: every later gate reuses the manifest at
+# the out path, so without this the first echo_log_tail or drive_target would
+# seal the lane's manifest with the policy defaults instead.
+readonly -a SEAL_EXTRA=(--floor drive=35 --floor relay=7)
+seal_rc=0
+logscan_seal host "${NEEDLE_DIR}" "${SEAL_EXTRA[@]}" || seal_rc=$?
+if (( seal_rc != 0 )); then
+  echo "ERROR: could not seal this lane's needle manifest (rc ${seal_rc}) — see the" \
+       "line(s) above; every gate would fail the same way, so nothing this run" \
+       "captures can be proven clean." >&2
+  exit 1
+fi
+
 trap cleanup EXIT
 
 fail() {

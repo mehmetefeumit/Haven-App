@@ -310,6 +310,13 @@ function bad_args(codetext,   inner, i, n, c, depth, arg, out) {
     else if (c ~ /[]})]/) depth--
     if (c == "," && depth == 0) {
       arg = trim(arg)
+      # A Swift argument LABEL is not the thing being logged: `log: X` is
+      # judged on X, by exactly the rules a bare X is judged by. Stripping it
+      # can admit nothing an unlabelled argument would not be admitted for,
+      # and Haven's iOS logs need it because `os_log`'s destination arrives as
+      # `log: <declared all-caps constant>` (see native_log_allowlist.txt).
+      # Only a leading `<identifier>:` comes off, so `a ? b : c` keeps its own.
+      if (arg ~ /^[A-Za-z_][A-Za-z0-9_]*:[[:space:]]/) sub(/^[A-Za-z_][A-Za-z0-9_]*:[[:space:]]+/, "", arg)
       if (arg != "" && arg !~ ARG_OK && !allowed_ident(arg)) out = out (out == "" ? "" : ", ") arg
       arg = ""
     } else arg = arg c
@@ -430,7 +437,7 @@ check_tree() {
 # ---------------------------------------------------------------------------
 # Self-test — hermetic fixture trees.
 # ---------------------------------------------------------------------------
-readonly DECLARED_CASES=24
+readonly DECLARED_CASES=27
 
 self_test() {
   local tmp fails=0 checked=0
@@ -677,6 +684,40 @@ fun tick() {
 }
 ' "${SW_OK}"
 
+  # A LABELLED argument is judged on its value, by the same rules. Haven's iOS
+  # logs need it (`os_log(…, log: HAVEN_SLC_LOG, message)`), and the label must
+  # not become a way in: the same call with an unlisted local behind the label
+  # still fails.
+  local SW_OSLOG='let HAVEN_TEST_LOG = OSLog(subsystem: "haven_ios", category: "t")
+
+class Handler {
+  func fire(error: Error) {
+    debugLog("fire failed: \(type(of: error))")
+  }
+
+  private func debugLog(_ message: String) {
+    #if DEBUG
+    os_log("%{public}@", log: HAVEN_TEST_LOG, message)
+    #endif
+  }
+}
+'
+  local ROW_SW_OSLOG='haven/ios/Runner/B.swift|os_log("%{public}@", log: HAVEN_TEST_LOG, message)|wrapper body, DEBUG only, declared constant destination|team'
+  _case "a labelled os_log destination that is a declared constant passes" 0 3 \
+"${ROW_KT}
+${ROW_SW_OSLOG}
+${ROW_SW_CALL}
+" "${KT_OK}" "${SW_OSLOG}"
+  _case "a label does not launder an undeclared identifier" 1 3 \
+"${ROW_KT}
+haven/ios/Runner/B.swift|os_log(\"%{public}@\", log: someLocalLog, message)|wrapper body, DEBUG only|team
+${ROW_SW_CALL}
+" "${KT_OK}" "$(printf '%s' "${SW_OSLOG}" | sed 's/log: HAVEN_TEST_LOG/log: someLocalLog/')"
+  _case "a labelled os_log outside #if DEBUG FAILS" 1 3 \
+"${ROW_KT}
+${ROW_SW_OSLOG}
+${ROW_SW_CALL}
+" "${KT_OK}" "$(printf '%s' "${SW_OSLOG}" | sed '/#if DEBUG/d; /#endif/d')"
   _case "no Kotlin sources is BROKEN" 2 3 "${ALLOW_OK}" "-" "${SW_OK}"
   _case "fewer calls than the floor is BROKEN" 2 9 "${ALLOW_OK}" "${KT_OK}" "${SW_OK}"
 

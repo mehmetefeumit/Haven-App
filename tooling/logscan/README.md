@@ -60,10 +60,13 @@ LEAK: /tmp/adb-logcat.log:4211 [nostr_group_id/hex-prefix8] tag=flutter ×3
 LEAK: /tmp/flutter-drive.log:88 [S5] tag=- ×1
 ```
 
-`tag=` carries the entry's own log tag for `logcat` and the process name for
-`ios`, both drawn from the sink's declared owned-tag list, and `-` elsewhere. It
-is deliberately **not** a prefix of the line: a line prefix can carry
-remote-authored text, which Rule 15 forbids printing.
+`tag=` carries the entry's own log tag for `logcat` — Haven's own only, since an
+Android tag is free text an emitter composes per call — and, for `ios`,
+`<process>/<subsystem-or-library>` whether or not Haven owns the line, because
+those are build-time names of a program and a hit in a device-wide export cannot
+be attributed without them. It is `-` elsewhere, and deliberately **not** a
+prefix of the line: a line prefix can carry remote-authored text, which Rule 15
+forbids printing.
 
 `--disclose-values` is the single exception. It prints the matched text, warns on
 stderr naming the file it writes into, and is banned from every workflow and
@@ -355,25 +358,64 @@ Haven-owned part of a line starts — which is what the structural rules are
 allowed to read.
 
 * **`logcat`** — `MM-DD HH:MM:SS.mmm  pid  tid P tag: message`, from
-  `adb logcat -v threadtime`. Owned when the tag matches one of the sink's
-  `owned_tags` as a prefix (`android_logger` truncates a module path to 23
-  characters).
-* **`ios`** — a `log show` export in EITHER rendering, because the capture is
-  one `--style` flag away from the other:
-  * `--style syslog`, which is what all five iOS lanes capture:
-    `<date> <time+tz> <host> <process>[<pid>[:<tid>]] <<Type>>: <message>`;
+  `adb logcat -v threadtime`. The tag ends at the first **colon-space**, not the
+  first colon, because `android_logger` tags a record with its module path
+  (`haven_core::relay::live_sync::session`), whose `::` carries no space; that
+  holds for all 50 501 framed lines of CI run 35280144455's three logcats,
+  multi-word vendor tags (`Google Maps Android API`) and the kernel's empty tag
+  included. Owned when the tag **equals** one of the sink's `owned_tags`, case
+  included, or is that entry followed by `::` — which covers the whole module
+  path and the 23-character truncation logcat's tag limit produces
+  (`haven_core::relay::man`) — and never as a bare prefix, which would own the
+  five `Flutter*` plugin tags those captures carry off the `flutter` entry, nor
+  case-folded, which would own any vendor tag differing from one of ours only in
+  case.
+* **`ios`** — a `log show` export in ANY of three renderings, because the capture
+  is one `--style` flag away from the next:
+  * what all five iOS lanes actually capture (`--style syslog` over an archive):
+    `<date> <time+tz>  <host> <process>[<pid>[:<tid>]]: (<library>) [<subsystem>:<category>] <message>`,
+    with the library and the subsystem/category pair both optional and no
+    `<<Type>>` column at all;
+  * the same with a `<<Type>>:` column in place of the colon after the process
+    token, which other `log` front-ends produce;
   * the default columnar style:
-    `<date> <time+tz> <thread> <type> <activity> <pid> <ttl> <process>: <message>`.
+    `<date> <time+tz> <thread> <type> <activity> <pid> <ttl> <process>: <message>`,
+    where the library rides in the process column as `Runner(Flutter)`.
 
-  In both, `<process>` may carry the emitting library in parentheses
-  (`Runner(Flutter)`), which is framing rather than identity and is stripped, and
-  the message may open with the record's `[subsystem:category]` or an `NSLog`
-  prefix, which stay in the body — on iOS the process is `Runner` for everything
-  Haven emits, so the subsystem is the only thing that says which layer wrote the
-  line. Ownership is an **exact** match of the process name against
-  `owned_processes` — never a substring, because a substring test owns
-  `RunnerHelper` and, worse, owns any vendor line whose message merely contains
-  the word `Runner`, putting remote-authored text under Haven's rules.
+  Ownership is an **exact** match, against `owned_emitters`, of the record's
+  EMITTER: its os_log **subsystem** if it has one, else the emitting
+  **library**, else the **process**. The process alone is not the answer on
+  iOS — inside the app's own process every Apple framework logs as `Runner`
+  too, so a process test hands libxpc, UIKitCore and CoreLocation's output to
+  Haven's structural rules (31 hits per lane in CI run 35280144455's captures,
+  which is rc 1 and a deleted capture on a green run).
+  It is not a substring test either, because a substring owns `RunnerHelper`
+  and, worse, any vendor line whose message merely contains the word `Runner`.
+  The framing columns come off the body; a bracket that is not one
+  `<subsystem>:<category>` pair (`[0x105faf4d0] …`, Haven's own `[RelayManager]
+  …`) is message and stays.
+
+  Haven's owned emitters are its two subsystems — `frb_user`, the Rust core's
+  oslog backend, and `haven_ios`, which every Haven Swift log call names — its
+  two images (`rust_lib_haven`, and `Runner` as the fallback for a record with
+  neither a subsystem nor a library), and `Flutter`, the engine's image.
+  `Flutter` is owned because the engine carries Dart's own `flutter: <msg>`
+  output: leaving it out would be fail-silent, stopping every rule the day the
+  engine routes Haven's Dart text there. It costs nothing — the three
+  `(Flutter)` shapes the real captures hold are the Impeller notice, a
+  plugin-deprecation notice with an `https` URL and an empty message, and the
+  loopback VM-service URL, which the endpoint exemption a lane already claims
+  for its own relay forgives. `Foundation` is deliberately NOT owned, which is
+  why Haven's Swift logs go through `os_log` under `haven_ios` instead of
+  `NSLog`: an `NSLog` record reaches `_os_log_impl` from inside Foundation, and
+  `Foundation` is the library on 36 673 lines of one real capture — every
+  vendor plugin's `NSLog` included.
+
+  A finding on an `ios` line reports `tag=<process>/<subsystem-or-library>`
+  whether or not Haven owns it — unlike a logcat tag, those columns are
+  build-time names of a program rather than free text an emitter composes per
+  record, and without them a hit in a device-wide export cannot be attributed
+  at all. Both halves are reduced to `[A-Za-z0-9._-]`, 48 characters, or `?`.
 * **`plain`** — every line is Haven's in full (drive transcripts, `cargo test`
   and `flutter test` logs, relay and diag files).
 
@@ -389,19 +431,48 @@ one failure mode that otherwise looks exactly like a clean run — a different
 `log show --style`, a logcat captured without `-v threadtime`, and the rules
 silently do not run over any of it.
 
-`fixtures/format.ios.log` holds one line per documented column variant of BOTH
-renderings (plain process, process with a library, a `[subsystem:category]`
-message, an `NSLog`-prefixed one, wide columns, `[pid:tid]`, a vendor process, a
-process whose NAME contains an owned one, a vendor line whose MESSAGE does, an
-unparseable continuation, the two shape plants, and a needle on an un-owned
-line), and case P of `--self-test` pins exactly which of them reach the rules.
-The file is **specification-derived**, and its header says so, because there is
-deliberately **no captured iOS furniture corpus yet**: no iOS lane has ever run the scanner, so the first run is
-the corpus source, and it will be mined from a failing run's upload exactly as
-the Android one was (run 34766632019). Until then the `ios` framing is proved
-against the documented format rather than against a capture, and the rc-3 above
-is what turns the difference between the two into a red lane instead of a quiet
-pass.
+## Line floors
+
+Each class also carries a **line floor** (`policy.toml`'s `min_lines`), the
+anti-vacuity check behind rc 4: it is what turns "the scan read an empty or
+truncated file and found nothing" into a failure rather than a clean verdict.
+A floor is therefore calibrated to the smallest COMPLETE capture of its class
+and **never** to whatever would make a lane pass. `relay` is 1, because the
+hermetic host relay (`tooling/e2e/local-relay`) prints its listen line and
+nothing else for a whole run; `diag` is 1 for the same reason. The
+device-wide and whole-scenario classes are far higher.
+
+A lane whose captures are legitimately smaller than the class default — a
+per-target logcat slice rather than a device-wide capture, a one-target drive
+rather than a full core flow — passes its own `seal --floor <class>=<n>`
+instead of lowering the default, with the measured basis and the run it was
+measured from stated beside it. Lowering a default to fit the smallest lane
+would take the floor off every other one.
+
+The floor of 7 that every strfry lane passes is the clearest case of what a
+floor is for: strfry's own `docker logs` dump is 14-23 lines for a full run,
+of which the first 9 are a fixed startup block, while the same command against
+a container that has already been torn down prints ONE line of error text and
+nothing else. Only the floor tells those two apart — the needle search finds
+nothing in either, and the structural rules are off for this class — so `relay`
+at 1 would certify a dead capture as clean, and 7 is what turns it into rc 4.
+
+`fixtures/format.ios.log` is in two halves, and its header says which is which.
+Section A is **captured**, mined byte for byte from CI run 35280144455's
+uploads — the first run that put this scanner in front of an iOS lane, and the
+run that proved the previous, specification-derived corpus wrong on the shape of
+every line: a boot daemon with a subsystem and no library, one with neither, one
+whose bracket is not a subsystem at all, and four lines of the app's own process
+covering an Apple library with and without a subsystem, the xpc connection line
+whose `name=` used to trip S10, Haven's own Rust records, and a wrapped record's
+continuation. Section B is **written**, because the ownership probes have to
+carry a structural shape to prove the rules ran on the right lines and a real
+line carrying one would be a leak rather than a fixture: the owned and un-owned
+variant of each rendering, a vendor process, a process whose NAME contains an
+owned one, a vendor line whose MESSAGE does, the two shape plants, and a needle
+on an un-owned line. Case P of `--self-test` pins exactly which of them reach
+the rules, and the rc-3 above is what turns a FOURTH rendering into a red lane
+instead of a quiet pass.
 
 ## Structural rules
 
@@ -649,6 +720,6 @@ real address that S12 is right to see and the lanes exempt it explicitly instead
 the app lines whose alias handles the sanitiser masked are not in the Flutter
 corpus, because a masked line is not verbatim.
 
-`format.ios.log` is documented under **Sink framing** above: one line per column
-variant, and the only fixture in the tree whose shape comes from a specification
-rather than from a capture.
+`format.ios.log` is documented under **Sink framing** above: captured furniture
+from CI run 35280144455 for the shapes, plus written probes for the ownership
+cases a real line cannot supply without carrying a value.

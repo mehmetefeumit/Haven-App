@@ -824,7 +824,7 @@ run_self_test() {
   # hard-coded "all 50 fixture groups passed" that no counter backed, so a
   # deleted assertion changed neither the message nor the exit code. Every
   # assertion helper below counts itself.
-  local -r SELF_TEST_ASSERTIONS=85
+  local -r SELF_TEST_ASSERTIONS=87
   local tmp fails=0 checked=0
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
@@ -1687,6 +1687,19 @@ run_self_test() {
   _eq_case "no bare key-material floor call" "0" "$(grep -cF "${floor}" <<<"${joined}" || true)"
   rc=0; declare -f logscan_gate | grep -q 'HAVEN_LOGSCAN' || rc=1
   _case "the HAVEN_LOGSCAN arm exists in the sourced gate" 0 "${rc}"
+  # The lane's floors reach the manifest only if the pre-seal runs before any
+  # gate does: the host profile reuses whatever manifest is at the out path, so
+  # a pre-seal moved below the EXIT trap would leave the policy defaults sealed
+  # and the floors silently inoperative.
+  local seal_at trap_at
+  seal_at="$(grep -n -m1 '^logscan_seal host /tmp/haven-soak/needles "${SEAL_EXTRA\[@\]}" || seal_rc=$?$' "${self}" \
+    | cut -d: -f1 || true)"
+  trap_at="$(grep -n -m1 '^trap cleanup EXIT$' "${self}" | cut -d: -f1 || true)"
+  rc=0
+  [[ -n "${seal_at}" && -n "${trap_at}" ]] && (( seal_at < trap_at )) || rc=1
+  _case "the manifest is sealed once before the EXIT trap is armed" 0 "${rc}"
+  _eq_case "…with this lane's drive and relay floors" "1" \
+    "$(grep -cE '^readonly -a SEAL_EXTRA=\(--floor drive=43 --floor relay=7\)$' "${self}" || true)"
 
   if (( checked != SELF_TEST_ASSERTIONS )); then
     printf '  \033[1;31mFAIL\033[0m ran %s assertion(s), expected exactly %s — an assertion was added or deleted without updating SELF_TEST_ASSERTIONS\n' \
@@ -1914,6 +1927,37 @@ cleanup() {
     bash "${STOP_STRFRY}" >/dev/null 2>&1 || true
   exit "${rc}"
 }
+
+# The line floors this lane seals with. A floor is what turns "the scan read an
+# empty or truncated file and found nothing" into rc 4 instead of a green, so
+# each is calibrated to the smallest COMPLETE capture this lane produces and
+# never to what would make it pass.
+#
+# drive=43. The policy's 100 lines is sized for the Android core flow's
+# 394-line transcript; this lane drives ONE target and its complete transcript
+# is 86 lines (flutter-drive.log, run 35280144455). 43 is half of that and
+# still far above the ~17 lines `flutter drive` prints before the first test result.
+#
+# relay=7. The policy's 1 is sized for the hermetic host relay, which prints a
+# single listen line; this lane's relays are strfry, whose `docker logs` dumps
+# are 23 and 14 lines here (same run), of which the first 9 are a fixed startup
+# block. 7 is half the smaller complete dump, so a dump below it is truncated
+# or absent (a container already torn down yields ONE line), never a quiet
+# relay — and it holds whether the EXIT trap captured one relay or both.
+#
+# Sealed ONCE, before the first gate: every later gate reuses the manifest at
+# the out path, so without this the post-drive gate would seal the lane's
+# manifest with the policy defaults instead.
+readonly -a SEAL_EXTRA=(--floor drive=43 --floor relay=7)
+seal_rc=0
+logscan_seal host /tmp/haven-soak/needles "${SEAL_EXTRA[@]}" || seal_rc=$?
+if (( seal_rc != 0 )); then
+  echo "ERROR: could not seal this lane's needle manifest (rc ${seal_rc}) — see the" \
+       "line(s) above; every gate would fail the same way, so nothing this run" \
+       "captures can be proven clean." >&2
+  exit 1
+fi
+
 trap cleanup EXIT
 
 fail() {

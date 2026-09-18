@@ -1,33 +1,68 @@
-# SPECIFICATION-DERIVED, not captured: no iOS lane has ever run this scanner, so
-# there is no `log show` corpus to mine yet and every line below is written from
-# the two renderings the tool documents. The first iOS lane's upload is the
-# corpus source, exactly as CI run 34766632019 was for Android, and until then
-# the rc-3 "no line parsed as `ios` framing" net is what turns a THIRD rendering
-# into a red lane instead of a quiet pass.
+# PROVENANCE. Section A is CAPTURED: every line is copied byte for byte out of
+# the `log show --archive … --style syslog` exports uploaded by CI run
+# 35280144455 (lanes e2e-ios-real-gps and e2e-ios-auth-tier), which is the run
+# that proved the previous, specification-derived corpus wrong — the real
+# rendering has two spaces before the host, a `(library)` column and an optional
+# `[subsystem:category]` column, and no `<<Type>>` column at all. Each was read
+# against the log-anonymity pillar before it was copied: they carry a boot
+# daemon's own state, an Apple framework's own state, or a Haven line that
+# names a migration and nothing else. No key, id, name, coordinate, URL, host,
+# path or remote-authored string is in any of them.
 #
-# One line per column variant of each rendering. The process is always `Runner`
-# on a Haven-owned line: `frb_user` is the os_log SUBSYSTEM and `HavenSLC` /
-# `HavenBGTask` are NSLog message prefixes, so both belong in the message, not in
-# the process column. The coordinate is synthetic and is not a declared needle;
-# the only declared value here is the pubkey on the last line, which sits on an
-# UN-OWNED line on purpose.
-# --- `log show` default columnar style ---
-2026-09-12 10:00:00.000001+0000 0x1e0f     Default     0x0                  431    0    Runner: fix -12.345678,98.765432
-2026-09-12 10:00:00.000002+0000 0x1e0f     Default     0x0                  431    0    Runner(libsystem_network.dylib): fix -12.345678,98.765432
-2026-09-12 10:00:00.000003+0000 0x1e10     Info        0x0                  431    0    Runner: [frb_user:default] fix -12.345678,98.765432
-2026-09-12 10:00:00.000004+0000 0x1e11     Debug       0x0                  431    0    Runner: [HavenSLC] fix -12.345678,98.765432
-2026-09-12 10:00:00.000005+0000 0x2f20     Default     0x0                  77     0    locationd: fix -12.345678,98.765432
-2026-09-12 10:00:00.000006+0000 0x2f21     Default     0x0                  512    0    RunnerHelper: fix -12.345678,98.765432
-2026-09-12 10:00:00.000007+0000 0x2f22     Default     0x0                  77     0    locationd: Runner requested fix -12.345678,98.765432
-        continuation of the previous record: fix -12.345678,98.765432
-2026-09-12 10:00:00.000009+0000 0xdeadbeef Error       0xfeedface           4321   5    Runner: fix -12.345678,98.765432
-# --- `log show --style syslog`, which is what every iOS lane captures ---
+# Section B is WRITTEN, because no capture can supply it: the ownership probes
+# have to CARRY a structural shape to prove the rules ran (and did not run) on
+# the right lines, and a real line carrying one would be a leak rather than a
+# fixture. Its coordinate and pubkey are synthetic, its plant tokens are
+# synthetic, and the `<<Type>>` and columnar renderings are the two the tool
+# accepts besides the captured one.
+#
+# Ownership is the record's EMITTER: its subsystem, else its library, else its
+# process. Haven's are `frb_user` (the Rust core's oslog subsystem), `haven_ios`
+# (the subsystem every Haven Swift log call names), `rust_lib_haven` and
+# `Runner` (Haven's own images) and `Flutter` (the engine's image, which carries
+# Dart's `flutter: <msg>` output). The captured `(Flutter)` lines below are the
+# three vendor shapes the real captures hold, and they are in Section A to prove
+# that owning `Flutter` reddens none of them once the lane's loopback endpoint
+# is exempt. The bare `Runner[pid]: <msg>` probe is the EMITTER FALLBACK and is
+# WRITTEN for that reason: no capture has ever produced a Runner record without
+# a library column, which is why the Swift plant's line below is the `(Runner)
+# [haven_ios:runner]` shape an `os_log` call produces and not a bare one.
+# --- A. captured, byte for byte ---
+2026-09-17 22:28:07.017901+0000  localhost UserEventAgent[9651]: [com.apple.UserEventAgent:Daemon] Successfully setrlimit(): Previous = 256, Current limit = 2560
+2026-09-17 22:28:08.745504+0000  localhost launchd_sim[9620]: Flushed 26 logs [limit: 20]
+2026-09-17 22:28:07.528050+0000  localhost launchd_sim[9620]: [pid/9667 [mobiletimerd]:] created
+2026-09-17 22:45:43.011745+0000  localhost Runner[17463]: (libMobileGestalt.dylib) No persisted cache on this platform.
+2026-09-17 22:45:43.030365+0000  localhost Runner[17463]: (UIKitCore) [com.apple.UIKit:BackgroundTask] Creating new assertion because there is no existing background assertion.
+2026-09-17 22:45:43.010431+0000  localhost Runner[17463]: (libxpc.dylib) [com.apple.xpc:connection] [0x105faf4d0] activating connection: mach=true listener=false peer=false name=com.apple.cfprefsd.daemon
+2026-09-17 22:45:51.209385+0000  localhost Runner[17463]: (rust_lib_haven) [frb_user:rust_lib_haven::api] circles.db key access-policy migration deferred
+2026-09-17 22:45:51.212350+0000  localhost Runner[17463]: (rust_lib_haven) [frb_user:haven_core::nostr::mls::storage] MLS session DB key access-policy migration deferred
+2026-09-17 22:45:53.406861+0000  localhost Runner[17463]: (CoreLocation) CLLocationManagerStateTracker
+{"trackRunInfoEnabled":false,"previousAuthorizationStatusValid":true,"paused":false}
+2026-09-17 22:45:44.025579+0000  localhost Runner[17463]: (Flutter) [IMPORTANT:flutter/shell/platform/darwin/graphics/FlutterDarwinContextMetalImpeller.mm(89)] Using the Impeller rendering backend (Metal).
+2026-09-17 22:45:44.930958+0000  localhost Runner[17463]: (Flutter) Plugin WorkmanagerPlugin uses deprecated application lifecycle events. Please contact plugin maintainers and request UIScene lifecycle support. This will be required in a future version of Flutter. See https://docs.flutter.dev/release/breaking-changes/uiscenedelegate#migration-guide-for-flutter-plugins
+2026-09-17 22:45:44.025580+0000  localhost Runner[17463]: (Flutter) 
+# --- B. written: ownership probes, captured rendering ---
+2026-09-17 22:45:47.709581+0000  localhost Runner[17463]: (rust_lib_haven) [frb_user:rust_lib_haven::api] fix -12.345678,98.765432
+2026-09-17 22:45:47.709582+0000  localhost Runner[17463]: (rust_lib_haven) fix -12.345678,98.765432
+2026-09-17 22:45:47.709590+0000  localhost Runner[17463]: (Runner) [haven_ios:slc] fix -12.345678,98.765432
+2026-09-17 22:45:47.709583+0000  localhost Runner[17463]: fix -12.345678,98.765432
+2026-09-17 22:45:47.709584+0000  localhost Runner[17463]: (Flutter) flutter: fix -12.345678,98.765432
+2026-09-17 22:45:47.709585+0000  localhost Runner[17463]: (CoreLocation) [com.apple.locationd.Core:Client] fix -12.345678,98.765432
+2026-09-17 22:45:47.709586+0000  localhost RunnerHelper[512]: fix -12.345678,98.765432
+2026-09-17 22:45:47.709587+0000  localhost locationd[9676]: Runner requested fix -12.345678,98.765432
+2026-09-17 22:45:47.709588+0000  localhost Runner[17463]: (rust_lib_haven) [frb_user:rust_lib_haven::api] logscan-plant-rust-open-MNPQRSTUVW
+2026-09-17 22:45:47.709589+0000  localhost Runner[17463]: (Runner) [haven_ios:runner] logscan-plant-swift-open-QRSTUVWXYZ
+# --- B. written: the `<<Type>>` rendering ---
 2026-09-12 10:00:00.000010+0000 localhost Runner[431] <Notice>: fix -12.345678,98.765432
 2026-09-12 10:00:00.000011+0000 localhost Runner(Flutter)[431] <Notice>: flutter: fix -12.345678,98.765432
 2026-09-12 10:00:00.000012+0000 localhost Runner[431:12345] <Debug>: [frb_user:default] fix -12.345678,98.765432
 2026-09-12 10:00:00.000013+0000 localhost locationd[77] <Notice>: fix -12.345678,98.765432
-2026-09-12 10:00:00.000014+0000 localhost RunnerHelper[512] <Notice>: fix -12.345678,98.765432
-2026-09-12 10:00:00.000015+0000 localhost locationd[77] <Notice>: Runner requested fix -12.345678,98.765432
-2026-09-12 10:00:00.000016+0000 localhost Runner[431] <Notice>: logscan-plant-rust-open-MNPQRSTUVW
-2026-09-12 10:00:00.000017+0000 localhost Runner[431] <Notice>: logscan-plant-swift-open-QRSTUVWXYZ
+# --- B. written: the default columnar rendering ---
+2026-09-12 10:00:00.000001+0000 0x1e0f     Default     0x0                  431    0    Runner: fix -12.345678,98.765432
+2026-09-12 10:00:00.000002+0000 0x1e0f     Default     0x0                  431    0    Runner(rust_lib_haven): fix -12.345678,98.765432
+2026-09-12 10:00:00.000003+0000 0x1e10     Info        0x0                  431    0    Runner: [frb_user:default] fix -12.345678,98.765432
+2026-09-12 10:00:00.000004+0000 0x1e11     Debug       0x0                  431    0    Runner(libsystem_network.dylib): fix -12.345678,98.765432
+2026-09-12 10:00:00.000005+0000 0x2f20     Default     0x0                  77     0    locationd: fix -12.345678,98.765432
+2026-09-12 10:00:00.000006+0000 0xdeadbeef Error       0xfeedface           4321   5    RunnerHelper: fix -12.345678,98.765432
+# --- B. written: a declared value on an UN-OWNED line is still searched ---
 2026-09-12 10:00:00.000018+0000 localhost locationd[77] <Notice>: cached identity 0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9

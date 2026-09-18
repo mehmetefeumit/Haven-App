@@ -24,9 +24,10 @@ const SCHEMA: u32 = 1;
 pub enum EntryFormat {
     /// `adb logcat -v threadtime`: `MM-DD HH:MM:SS.mmm  pid  tid P tag: message`.
     Logcat,
-    /// A `log show` text export, in either rendering: `--style syslog`
-    /// (`<date> <time+tz> <host> <process>[<pid>] <<Type>>: <message>`, which is
-    /// what the lanes capture) or the default columnar one.
+    /// A `log show` text export, in any of its renderings: what the lanes
+    /// capture (`<date> <time+tz>  <host> <process>[<pid>]: (<library>)
+    /// [<subsystem>:<category>] <message>`), the `<<Type>>:` variant, or the
+    /// default columnar one.
     Ios,
     /// Every line is Haven-owned in full (drive transcripts, `cargo test` logs).
     Plain,
@@ -119,9 +120,18 @@ pub struct SinkSpec {
     /// Log tags this repo owns. Structural rules run only on these lines.
     #[serde(default)]
     pub owned_tags: Vec<String>,
-    /// Process names this repo owns, for `log show` exports.
+    /// Record EMITTERS this repo owns, for `log show` exports.
+    ///
+    /// A `log show` line names three things, and only the innermost one says
+    /// who wrote it: the record's `os_log` SUBSYSTEM (`frb_user`), else the
+    /// emitting library/image (`rust_lib_haven`), else the process. On iOS the
+    /// process is `Runner` for Haven's own records AND for every Apple
+    /// framework linked into the app, so a process-only test hands the
+    /// structural rules `libxpc`, `UIKitCore` and `CoreLocation` output —
+    /// 31 vendor hits per lane in CI run 35280144455's captures, i.e. rc 1 and
+    /// a deleted capture on a green run. Matched exactly, never as a substring.
     #[serde(default)]
-    pub owned_processes: Vec<String>,
+    pub owned_emitters: Vec<String>,
     /// Whether the DECLARED (Dart) plant tokens must appear in this sink class.
     ///
     /// There is no default: a sink class added without an answer would inherit
@@ -261,9 +271,9 @@ impl Policy {
                         "sink `{name}` is logcat-framed but names no owned tags, so every vendor line would be scanned"
                     ));
                 }
-                EntryFormat::Ios if sink.owned_processes.is_empty() => {
+                EntryFormat::Ios if sink.owned_emitters.is_empty() => {
                     return Err(format!(
-                        "sink `{name}` is ios-framed but names no owned processes"
+                        "sink `{name}` is ios-framed but names no owned emitters, so every vendor line would be scanned"
                     ));
                 }
                 _ => {}
@@ -478,6 +488,52 @@ mod tests {
         );
     }
 
+    /// Every sink's LINE FLOOR, pinned with the capture each was sized to.
+    ///
+    /// A floor is the anti-vacuity check behind rc 4: it is what turns "the
+    /// scan read an empty or truncated file and found nothing" into a failure
+    /// rather than a clean verdict. That makes it the one number in this file
+    /// a red lane argues for lowering, so it is pinned here with its basis —
+    /// the SMALLEST COMPLETE capture of the class, never what would make a
+    /// lane pass. A lane whose captures are legitimately smaller (a per-target
+    /// logcat slice, a one-target drive) passes `seal --floor <class>=<n>`
+    /// instead; lowering a default to fit the smallest lane would take the
+    /// floor off every other one.
+    #[test]
+    fn every_sink_floor_is_pinned_with_its_basis() {
+        let policy = Policy::load().expect("policy");
+        for (sink, expected) in [
+            // A device-wide `adb logcat -v threadtime` capture of a whole
+            // scenario: 10 626 lines in the smallest of CI run 35280144455.
+            ("logcat", 2000),
+            // A `log show` export of a whole simulator boot: 283 455 lines
+            // across the two files every iOS lane hands the scanner.
+            ("ios", 2000),
+            // The Android core flow's `flutter drive` transcript, 394 lines.
+            ("drive", 100),
+            // A `cargo test` transcript: the shortest of rust-check.yml's four
+            // still prints a status block and a result line per target.
+            ("rust-test", 20),
+            // The wire proxy's log: a listen line, a per-role connect and its
+            // sidecar summary, so never fewer than a handful.
+            ("proxy", 5),
+            // A diag file is whatever a lane chose to dump — b9's is 28 lines,
+            // e2e-profile's blossom log is 1 — so existence is all it can
+            // prove.
+            ("diag", 1),
+            // The hermetic host relay prints its listen line and nothing else
+            // for a whole run. A lane whose relay is strfry (14-23 lines per
+            // `docker logs` dump) passes `--floor relay=7`, which is what
+            // catches a container torn down before the dump: ONE error line.
+            ("relay", 1),
+        ] {
+            assert_eq!(policy.sinks[sink].min_lines, expected, "`{sink}`");
+        }
+        // And every sink HAS one: a class added without a floor would be the
+        // one capture the anti-vacuity check never reads.
+        assert!(policy.sinks.values().all(|s| s.min_lines >= 1));
+    }
+
     /// Which sinks skip cargo's status lines, pinned in both directions.
     ///
     /// A cargo transcript is the only capture in the fleet that carries them, so
@@ -586,6 +642,24 @@ logcat = { term_floor = 8, declared_plants_expected = false, structural_rules = 
 "#;
         let err = Policy::parse(text).expect_err("an unscoped logcat sink must be rejected");
         assert!(err.contains("owned tags"), "{err}");
+    }
+
+    /// The `ios` twin of the rule above: an unscoped `log show` sink would put
+    /// every Apple framework linked into the app under Haven's structural rules.
+    #[test]
+    fn an_ios_sink_with_no_owned_emitters_is_rejected() {
+        let text = r#"
+schema = 1
+base64_entropy_bits = 4.2
+min_term_len = 6
+furniture = []
+[classes]
+[sinks]
+ios = { term_floor = 8, declared_plants_expected = false, structural_rules = true, reassemble = false, min_lines = 1, entry_format = "ios" }
+[ledger]
+"#;
+        let err = Policy::parse(text).expect_err("an unscoped ios sink must be rejected");
+        assert!(err.contains("owned emitters"), "{err}");
     }
 
     #[test]

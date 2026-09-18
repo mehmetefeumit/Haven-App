@@ -55,7 +55,7 @@ Then read the **device/driver** logs before the app logs:
 | Lane | Key artifacts |
 |---|---|
 | Android e2e_combined | `flutter-drive.log` (driver/isolate), `adb-logcat.log` |
-| iOS | `flutter-ios-test.log`; `sim-unified.log` (Haven's own unified-log lines: `subsystem == "frb_user" OR process == "Runner"`); `sim-unified-full.log` (the whole device, first 64 MiB — see failure mode 12 for why there is no `sim.logarchive`) |
+| iOS | `flutter-ios-test.log`; `sim-unified.log` (Haven's own unified-log lines: `subsystem == "frb_user" OR process == "Runner"`); `sim-unified-full.log` (the whole device, last 64 MiB — see failure mode 12 for why there is no `sim.logarchive`) |
 | m7 background | `diag.log` (**device state!**), `drive.a.log` (setup test result), `logcat.*.log` |
 
 **A functional assertion cannot be trusted if the device was offline/wedged or a
@@ -676,11 +676,16 @@ classify a leak as genuine.
 
 The iOS lanes no longer upload `/tmp/sim.logarchive`. The archive is a
 full-device binary capture the scanner cannot read, so the diagnostics step
-exports Haven's own lines to `sim-unified.log`, the first 64 MiB of the whole
-device to `sim-unified-full.log` (chronological, so the earliest bytes; the rest
-is discarded with the archive), deletes the archive, and runs both exports —
+exports Haven's own lines to `sim-unified.log`, the LAST 64 MiB of the whole
+device to `sim-unified-full.log`, deletes the archive, and runs both exports —
 with the transcript and the relay logs — through the same delete-on-leak gate
-before the upload step can see them.
+before the upload step can see them. The tail, not the head: `log show` emits
+chronologically and the archive opens at BOOT, so a head cap kept the boot
+storm and threw the run away — in CI run 35280144455 every lane's capped export
+ended 15-20 minutes BEFORE its app launched, because 64 MiB is about two
+minutes of a booting simulator. The archive ends at the `log collect`, so its
+tail is the scenario; what a lane logs beyond the cap while it runs is still
+discarded with the archive.
 
 ## Failure mode 13 — the runtime log scanner fails a lane (rc 1, 3 or 4)
 
@@ -728,10 +733,36 @@ the iOS lanes, the runner's own choice elsewhere):
   exact relay-producer names listed in `logscan-gate.sh`
   (`LOGSCAN_RELAY_LOG_NAMES`: `strfry*.log`, `relay.log`,
   `relay-profile-*.log`, `haven-local-relay*.log`, B5's `relay-poll.b5.log`
-  and promoted relay exports, B9's `relay-backlog-event.b9.log`) as `relay`,
-  anything else — an unknown `relay-` prefix and the blossom log included —
-  `diag` — and a directory with no `*.log` at all is rc 3: a run that recorded
-  nothing cannot be proven clean.
+  and promoted relay exports, B9's `relay-backlog-event.b9.log`) as `relay` —
+  and then by CONTENT: a file whose own lines are `adb logcat -v threadtime`
+  entries is a `logcat` sink whatever it is called
+  (`logscan_is_logcat_format`; a majority of the first twenty non-blank lines,
+  at least five of them, must carry the threadtime header). That rule exists
+  because B1's `post-pause.window.log` — the capture sliced out between the
+  handoff and the hold — was typed `diag`, which runs the structural rules over
+  the PLATFORM's lines as if Haven had written them: 342 hits in CI run
+  35280144455, every one of them vendor furniture, while the full capture it
+  was cut from scanned clean. Anything left — an unknown `relay-` prefix and
+  the blossom log included — is `diag`, and a directory with no `*.log` at all
+  is rc 3: a run that recorded nothing cannot be proven clean. Line floors are
+  per sink CLASS and summed over its files, so a slice rides on the full
+  capture beside it; a slice with no full capture in the same directory is rc 4.
+
+  Two captures are REDUCED before they become files, because their raw form is
+  legitimately full of what Rule 15 forbids uploading and no sink class could
+  forgive it. A platform `dumpsys package <pkg>` dump is piped through
+  `logscan_permission_extract`, which keeps the `android.permission.…` lines
+  the lane actually greps and drops the install paths, signing digests and
+  dexopt state (B3/B5/B6 were uploading the dump whole, and S4 read its
+  install-path furniture as a blob twice per dump in run 35280144455). The
+  Android profile lane's `docker logs blossom` is piped through
+  `logscan_http_log_summary`, which emits only counts: a Blossom access log is
+  the SERVER's view of its client — blob digests, the uploading pubkey, the
+  base64 kind-24242 auth header — and unlike strfry it has no rules-off class
+  to be forgiven by. Both reductions are still scanned as `diag`. If a
+  permission assertion fails, read the extract, not a dump that no longer
+  exists; if the blossom summary says `lines: 0`, the server saw no request at
+  all.
 * **`rules-only`** — `rust-check.yml`'s four tee'd `cargo test` transcripts
   and `coverage.yml`'s two tee'd `flutter test` transcripts: no manifest,
   because a unit-test run mints nothing declarable. The structural rules and
@@ -796,7 +827,25 @@ classes the policy names (`declared_plants_expected` in
 Android's: the Swift plant is a fixed literal and `log collect` spans the
 whole simulator boot, so a found plant says the backend reached this capture
 at some point in this boot — not that THIS run's process did, which is what
-Android's per-run token says. A missing plant means the sink was not read end
+Android's per-run token says. Both iOS plants were silently unreachable until
+CI run 35280144455, and each for its own reason, so if one goes missing check
+these first. The Swift plant sits inside `#if DEBUG`, which is a Swift
+compilation condition rather than the `DEBUG=1` preprocessor macro the project
+sets for C/ObjC: it is true only while the Runner target's
+`SWIFT_ACTIVE_COMPILATION_CONDITIONS` names DEBUG, and while that setting was
+absent the plant — and every other `#if DEBUG` in the target, the two wake
+handlers' diagnostics included — compiled to nothing. It is also an `os_log`
+under the `haven_ios` subsystem rather than an `NSLog`, for two reasons: an
+`NSLog` record's emitter is Foundation's, so the scanner could not own the line
+it proves reached the capture, and `os_log` with no `type:` is
+OS_LOG_TYPE_DEFAULT, which logd persists. The Rust plant is a
+`log::debug!`, which the `oslog` crate maps to OS_LOG_TYPE_INFO, which logd
+keeps in a wrapping MEMORY buffer and never persists: in that run it survived
+`log collect` in the two lanes whose app lived 15 s and 24 s and was gone from
+the two that ran for minutes, while the same launch's `warn!`/`info!` lines
+survived in all four. `boot-ios-sim.sh` now marks the `frb_user` subsystem
+persistent right after boot; if that `log config` call warns, expect the Rust
+plant to be duration-dependent again. A missing plant means the sink was not read end
 to end — the capture died, rotated, or was never flushed, or the file scanned
 is not the file the run wrote — so the "no leak" it would otherwise report is
 a statement about nothing. Check the logcat capture (`adb logcat -c` and the
@@ -804,11 +853,27 @@ background `adb logcat` in the runner), the final-attempt slice, and whether
 the drive reached its `close` plant; a run that failed before the end of the
 drive fails here too, and that is the intended second signal, not noise. On an
 `ios` sink (`sim-unified.log`, `sim-unified-full.log`) every line is parsed as
-`log show --style syslog` output into process, pid and body; a line that does
-not parse is un-owned (needles still searched, rules skipped), and a capture in
-which **every** line is unparseable is rc 3 — the file is not a syslog export
-(a truncated or binary capture, a `--style` change in the diagnostics step),
-not a clean device.
+`log show` output into process, pid, emitting library, `[subsystem:category]`
+and body, in the rendering the lanes capture
+(`<date> <time+tz>  <host> <process>[<pid>]: (<library>) [<sub>:<cat>] <msg>`)
+or in the `<<Type>>:` and columnar variants. Ownership is the record's EMITTER
+— its subsystem, else its library, else its process — because inside the app's
+own process every Apple framework logs as `Runner` too, so a process test would
+put libxpc's, UIKitCore's and CoreLocation's output under Haven's structural
+rules. Haven's emitters are `frb_user` (the Rust core's oslog subsystem),
+`haven_ios` (the subsystem every Haven Swift log call names — `NSLog` would
+carry Foundation's emitter instead, and `Foundation` is the library on tens of
+thousands of vendor lines per capture), `rust_lib_haven` and `Runner` (Haven's
+images), and `Flutter` (the engine's image, which carries Dart's own
+`flutter: <msg>` output; the loopback VM-service URL on it is forgiven by the
+endpoint exemption the lane already claims for its own relay). A line that does not parse is un-owned (needles still searched, rules
+skipped), and a capture in which **every** line is unparseable is rc 3 — the
+file is not a `log show` export (a truncated or binary capture, a `--style`
+change in the diagnostics step), not a clean device. A LEAK line from this sink
+carries `tag=<process>/<subsystem-or-library>` owned or not, so a hit in the
+device-wide export names the program to go and read; that export also holds
+HOST processes (`CoreSimulatorBridge` alone is a quarter of a boot window), so
+the emitter is not necessarily inside the simulator.
 
 **rc 4 — a floor unmet: `declaration floor`, `line floor`, `no manifest`.**
 META-FLOOR: fix the scenario. The seal requires the lane to have declared at
@@ -818,13 +883,39 @@ pubkey=3 --expect coordinate=4 --expect circle_name=1 --expect petname=1
 roles, the three role fakes plus the canary coordinate, one circle name, one
 petname, at least one circle, three deterministic event carriers); on a host
 lane the library's own floors over the host needles — and the scan requires
-each sink to be at least its line floor (the policy's per-class `min_lines` —
-2000 for a logcat or a unified-log export, 100 for a drive transcript, 20 for a
-test transcript; the integration and relay-customization lanes lower the drive
-floor to 20 for their single-test targets, nothing else overrides one). Below
-either, the scan proved too little to be called clean. `no manifest` on a
-device lane means the seal never ran or refused — read its error above; on a
-rules-only lane it is the summary line, not a failure.
+each sink to be at least its line floor. A floor is the anti-vacuity check: it
+turns "the scan read an empty or truncated file and found nothing" into rc 4
+instead of a green, so it is calibrated to the smallest COMPLETE capture of its
+class and never to what would make a lane pass. `tooling/logscan/policy.toml`'s
+per-class `min_lines` are the class defaults — 2000 for a logcat or a
+unified-log export, 100 for a drive transcript, 20 for a test transcript, 5 for
+a proxy log, 1 for a relay log (the hermetic host relay prints one listen line
+for a whole run) and 1 for a diag. A lane whose captures are legitimately
+smaller passes its own `--floor <class>=<n>` at its seal rather than lowering a
+default, with the measured basis and the run it came from stated beside it:
+integration and relay-customization take `drive=20` (a target is one or two
+tests), `logcat=300` (logcat is captured per target, not per scenario) and
+`relay=7`; background-catchup takes `drive=35 relay=7` and KeyPackage-rotation
+`drive=43 relay=7` (one drive target each). The core-flow iOS lane keeps the default of 100 and
+clears it a different way: it drives TWO scenarios through the one fixed
+transcript path, which the runner truncates per invocation, so each invocation
+preserves its own as `/tmp/flutter-ios-test.<scenario>.log` and both the second
+gate and the workflow's scan step weigh them together — without that, the
+mirror check's ~14 lines would be rc 4 on every green run. The four
+single-scenario iOS lanes take theirs from CI run 35280144455's complete
+transcripts — `drive=22` for
+iOS real-GPS (45 lines), `drive=24` for the profile lane's iOS job (49),
+`drive=27` for iOS auth-tier (54, per tier) and `drive=56` for iOS
+background-publish (112) — each half its measured capture, because the default
+of 100 is the core-flow drive's and read every green single-scenario run as
+truncated. Every strfry lane takes `relay=7`
+for the same reason: strfry's `docker logs` dump is 14-23 lines for a full run,
+while the same command against a container the runner has already torn down
+prints ONE line of error text, and with the structural rules off for this class
+the floor is the only thing that tells a dead capture from a live one. Below
+either kind of floor, the scan proved too little to be called clean. `no manifest` on a device lane means the
+seal never ran or refused — read its error above; on a rules-only lane it is
+the summary line, not a failure.
 
 rc 2 (`GUARD BROKEN`) is the instrument, not the run: the scanner binary
 absent or not executable (`Build the runtime log scanner` failed, or

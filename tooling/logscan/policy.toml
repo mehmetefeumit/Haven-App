@@ -62,9 +62,27 @@ plant = { kind = "plant" }
 # ---------------------------------------------------------------------------
 # `term_floor` is 8 for the device-wide captures and 6 elsewhere, because a
 # 6-character term in a logcat shared with every vendor daemon matches furniture.
-# `owned_tags` are matched as PREFIXES: `android_logger` tags a record with its
-# module path truncated to 23 characters, so `haven_core` has to cover
-# `haven_core::relay::man`.
+# `owned_tags` match a logcat tag EXACTLY, case included, or as that entry
+# followed by `::` —
+# `android_logger` tags a record with its module path, whole
+# (`haven_core::relay::live_sync::session`) or truncated to logcat's 23-char
+# limit (`haven_core::relay::man`), so `haven_core` has to cover both. Never a
+# bare prefix: `flutter` would then own the five `Flutter*` plugin tags CI run
+# 35280144455's logcats carry, and vendor text is not Haven's to answer for.
+# `owned_emitters` is the `ios` twin, matched EXACTLY against the record's own
+# emitter — its os_log subsystem, else the emitting library, else the process —
+# because on iOS the process is `Runner` for Haven's records and for every Apple
+# framework linked into the app alike (see `SinkSpec::owned_emitters`).
+# `frb_user` is the subsystem the Rust core's oslog backend installs and
+# `haven_ios` the one every Haven Swift log call names (`haven/ios/Runner/*.swift`;
+# an `NSLog` record would carry Foundation's emitter instead, and `Foundation` is
+# the library on tens of thousands of vendor lines per capture, so it can never
+# be owned). `Flutter` is the engine's image, which carries Dart's own output as
+# `flutter: <msg>`: not owning it would mean S1-S12 silently stop the day the
+# engine routes Haven's Dart text there, and every `(Flutter)` line the real
+# captures hold is clean once the lane's loopback is exempt. `rust_lib_haven`
+# and `Runner` are Haven's own images — the latter a fallback for a record with
+# no subsystem and no library, a shape no capture has yet produced.
 # `required_shape_plants` name the UNDECLARED plants (there is no native harness
 # channel to declare through), each proving that emitter's log backend reached
 # this capture.
@@ -79,6 +97,11 @@ plant = { kind = "plant" }
 # dead iOS capture is still caught. It is `false` for the sinks that carry no app output at all
 # (`rust-test`, `proxy`, `diag`, `relay`). The day a capture proves the Dart
 # token reaches `log show`, this flips to `true` and stays there.
+# `owned_tags` deliberately does NOT list the app's package name: logcat
+# truncates a process tag to its last 15 characters (`vioustech.haven`), and
+# those lines are the ART runtime's and SELinux's own text about the process,
+# not Haven's log calls — so the entry matched nothing and owning it would put
+# platform-authored text under Haven's rules.
 # `cargo_status` is `"exempt"` for `rust-test` alone: before a single test
 # runs, cargo prints the public pinned git revision of every git dependency (40
 # hex, which S2 reads as a truncated id) and the name of every crate
@@ -90,8 +113,8 @@ plant = { kind = "plant" }
 # are not exempt at all (they trip nothing as cargo prints them), and the needle
 # search reads all of them: a declared value cannot hide behind a cargo verb.
 [sinks]
-logcat = { term_floor = 8, declared_plants_expected = true, structural_rules = true, reassemble = true, min_lines = 2000, entry_format = "logcat", required_shape_plants = ["rust", "kotlin"], owned_tags = ["flutter", "haven_core", "rust_lib_haven", "RustStdoutStderr", "frb_user", "HavenApplication", "MainActivity", "PublishWakeLock", "com.oblivioustech.haven"] }
-ios = { term_floor = 8, declared_plants_expected = false, structural_rules = true, reassemble = false, min_lines = 2000, entry_format = "ios", required_shape_plants = ["rust", "swift"], owned_processes = ["Runner", "frb_user", "HavenSLC", "HavenBGTask", "haven_core"] }
+logcat = { term_floor = 8, declared_plants_expected = true, structural_rules = true, reassemble = true, min_lines = 2000, entry_format = "logcat", required_shape_plants = ["rust", "kotlin"], owned_tags = ["flutter", "haven_core", "rust_lib_haven", "RustStdoutStderr", "frb_user", "HavenApplication", "MainActivity", "PublishWakeLock"] }
+ios = { term_floor = 8, declared_plants_expected = false, structural_rules = true, reassemble = false, min_lines = 2000, entry_format = "ios", required_shape_plants = ["rust", "swift"], owned_emitters = ["frb_user", "haven_ios", "rust_lib_haven", "Flutter", "Runner"] }
 drive = { term_floor = 6, declared_plants_expected = true, structural_rules = true, reassemble = false, min_lines = 100, entry_format = "plain" }
 rust-test = { term_floor = 6, declared_plants_expected = false, structural_rules = true, reassemble = false, min_lines = 20, entry_format = "plain", cargo_status = "exempt" }
 proxy = { term_floor = 6, declared_plants_expected = false, structural_rules = true, reassemble = false, min_lines = 5, entry_format = "plain" }
@@ -100,7 +123,16 @@ diag = { term_floor = 6, declared_plants_expected = false, structural_rules = tr
 # rules are OFF here and the public classes are scoped out. What is NOT scoped
 # out is the real MLS group id, the secrets, the names and the coordinates —
 # their presence in a relay log would be the violation itself.
-relay = { term_floor = 6, declared_plants_expected = false, structural_rules = false, reassemble = false, min_lines = 5, entry_format = "plain" }
+# The line floor is what turns "the scan read an empty or truncated file and
+# found nothing" into rc 4 instead of a green, so it is sized to the SMALLEST
+# COMPLETE capture of the class and never to what makes a lane pass. Here that
+# is ONE line: `tooling/e2e/local-relay` prints its listen line and nothing
+# else for a whole run, so `relay.log` is 1 line in every iOS lane of run
+# 35280144455. With the rules off and the public classes scoped out, existence
+# and readability are all this class's floor can prove; a lane whose relay
+# writes more (strfry's `docker logs` dump runs to 14-23 lines) carries its own
+# `seal --floor relay=<n>`, which is where a truncated dump is caught.
+relay = { term_floor = 6, declared_plants_expected = false, structural_rules = false, reassemble = false, min_lines = 1, entry_format = "plain" }
 
 # ---------------------------------------------------------------------------
 # The coverage ledger

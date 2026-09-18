@@ -388,6 +388,13 @@ readonly SIGNAL_NAME='bg-publish-handshake'
 # Where the run's log is preserved for the artifact upload.
 readonly BG_LOG="/tmp/bg-publish-ios.log"
 
+# This lane's `drive` line floor, sealed by the delegate and re-stated on the
+# belt below. A COMPLETE transcript of this drive is 112 lines (measured on CI
+# run 35280144455's upload); half of it is the anti-vacuity floor, and it is
+# below the policy default of 100 because that default is calibrated to the
+# core-flow drive, which prints several times as much.
+readonly BGP_DRIVE_FLOOR=56
+
 # Handshake bounds. READY must appear after the delegated `flutter test`'s
 # incremental build (~2-4 min; the cold build happens in THIS script, before
 # the drive) plus install/launch/attach plus the in-test setup and P1 —
@@ -853,7 +860,8 @@ bgp_scan_or_contain() {
   if [[ -z "${profile}" ]]; then
     if [[ -n "${WIRE_UPSTREAM:-}${HAVEN_WIRE_SENTINEL:-}" ]]; then profile=proxy; else profile=host; fi
   fi
-  logscan_gate "${profile}" /tmp/haven-soak/needles -- \
+  logscan_gate "${profile}" /tmp/haven-soak/needles \
+    --floor "drive=${BGP_DRIVE_FLOOR}" -- \
     --sink "drive=$1,$2" --report /tmp/ios-logscan/bg-publish.ndjson
 }
 
@@ -1619,17 +1627,18 @@ Usage: simctl location <device> <action> [<arguments>]
 
   # --- (G5) THE FLAG-ON CALL SITE. logscan-gate.sh's own --self-test proves
   #     what the gate does with its arguments; only this file can prove which
-  #     it is handed: the job's profile, the fixed sidecar directory, both
-  #     copies as ONE drive sink, and the report beside (never among) the
-  #     uploaded files; the verdict comes back unchanged.
+  #     it is handed: the job's profile, the fixed sidecar directory, this
+  #     lane's own drive floor, both copies as ONE drive sink, and the report
+  #     beside (never among) the uploaded files; the verdict comes back
+  #     unchanged.
   local gate_argv="${tmp}/gate-argv" real_gate
   real_gate="$(declare -f logscan_gate)"
   logscan_gate() { printf '%s\n' "$@" > "${gate_argv}"; return "${FAKE_GATE_RC}"; }
   rc=0
   HAVEN_LOGSCAN=true HAVEN_LOGSCAN_PROFILE=host FAKE_GATE_RC=4 \
     bgp_scan_or_contain "${gate_a}" "${gate_b}" || rc=$?
-  _check "G5 the flag-on arm hands the sourced gate the profile, both copies and the report" \
-    "4 host /tmp/haven-soak/needles -- --sink drive=${gate_a},${gate_b} --report /tmp/ios-logscan/bg-publish.ndjson" \
+  _check "G5 the flag-on arm hands the sourced gate the profile, this lane's drive floor, both copies and the report" \
+    "4 host /tmp/haven-soak/needles --floor drive=${BGP_DRIVE_FLOOR} -- --sink drive=${gate_a},${gate_b} --report /tmp/ios-logscan/bg-publish.ndjson" \
     "${rc} $(tr '\n' ' ' < "${gate_argv}" | sed 's/ $//')"
   # --- (G7) THE PROFILE IS INFERRED, NEVER DEFAULTED. With the profile unset
   #     the gate is handed `proxy` under either recorder export alone and
@@ -1692,8 +1701,9 @@ Usage: simctl location <device> <action> [<arguments>]
        "structurally pinned; and the log-privacy gate is the floor alone when" \
        "HAVEN_LOGSCAN is unset, removing what it flags and nothing else, sits" \
        "between the log's preservation and the drive's exit with no echo of" \
-       "either copy, hands the sourced gate the job's profile, both copies and" \
-       "the report when the flag is on, and has no soft or bare arm)."
+       "either copy, hands the sourced gate the job's profile, this lane's own" \
+       "drive floor, both copies and the report when the flag is on, and has" \
+       "no soft or bare arm)."
   return 0
 }
 
@@ -2006,9 +2016,16 @@ echo "bg-publish — simulated-location drip every ${DRIP_SECS}s (two fixes ~5m"
 # log-privacy gate are inherited rather than reimplemented.
 # HAVEN_E2E_IOS_SKIP_UNINSTALL=1 stops the shared runner's own uninstall from
 # erasing the grant made above.
+#
+# HAVEN_LOGSCAN_DRIVE_FLOOR is this lane's own anti-vacuity floor, and it seals
+# the manifest the belt below and the workflow's own scan step both read. A
+# COMPLETE transcript of this drive is 112 lines (measured, CI run
+# 35280144455); 56 is half of it, below the policy default of 100 only because
+# the default is the core-flow drive's.
 HAVEN_LIVE_SYNC="${LIVE_SYNC}" \
 HAVEN_E2E_RELAY="${RELAY_URL}" \
 HAVEN_E2E_IOS_SKIP_UNINSTALL=1 \
+HAVEN_LOGSCAN_DRIVE_FLOOR="${BGP_DRIVE_FLOOR}" \
 HAVEN_BGP_EXPECT_TIER="${EXPECT_TIER}" \
   bash "${SIM_RUNNER}" "${SCENARIO_FILE}" "${SIM_UDID}" &
 DRIVE_PID=$!

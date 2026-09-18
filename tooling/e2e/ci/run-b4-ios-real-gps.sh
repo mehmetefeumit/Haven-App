@@ -579,6 +579,14 @@ echo "B4 — seeded the simulator location (value withheld from the log)"
 # (tooling/e2e/ci/host-needles.sh documents it as this lane's): the one value
 # this lane exists to prove is encrypted must be the one its logs are searched
 # for. The gate's arm and profile arrive from the job env.
+#
+# HAVEN_LOGSCAN_DRIVE_FLOOR is this lane's own anti-vacuity floor. A COMPLETE,
+# fully passing transcript of this single-scenario drive is 45 lines (measured,
+# CI run 35280144455), against the policy default of 100 — which is the
+# core-flow drive's and would read every green B4 run as truncated. 22 is half
+# the measured complete capture: low enough that a passing run is never rc 4,
+# high enough that a drive killed before its first test (the shape the floor
+# exists to catch, ~12 lines of Xcode build output) still is.
 set +e
 HAVEN_LIVE_SYNC="${LIVE_SYNC}" \
 HAVEN_E2E_RELAY="${RELAY_URL}" \
@@ -587,6 +595,7 @@ HAVEN_E2E_IOS_SKIP_UNINSTALL=1 \
 HAVEN_B4_GEO_LAT="${GEO_LAT}" \
 HAVEN_B4_GEO_LON="${GEO_LON}" \
 HAVEN_B4_GEO_TOLERANCE_DEG="${GEO_TOLERANCE}" \
+HAVEN_LOGSCAN_DRIVE_FLOOR=22 \
 HAVEN_LOGSCAN_HOST_COORDINATE="${GEO_LAT},${GEO_LON}" \
   bash "${SIM_RUNNER}" "${SCENARIO_FILE}" "${SIM_UDID}"
 DRIVE_RC=$?

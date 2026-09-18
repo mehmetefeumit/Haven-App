@@ -8,12 +8,12 @@
 # guard. Every listed call may print only a type name or an enum code.
 haven/android/app/src/main/kotlin/com/oblivioustech/haven/HavenApplication.kt|Log.d(TAG, "logscan-plant-kotlin-open-K2AM7DR9FT")|positive control for the runtime log scanner, literal token only|haven-core
 haven/android/app/src/main/kotlin/com/oblivioustech/haven/HavenApplication.kt|Log.e(TAG, "onCreate: Keyring.initializeNdkContext failed: ${t::class.java.simpleName}")|ships in release; interpolates the throwable's class name only, never its message or trace|haven-core
-haven/ios/Runner/AppDelegate.swift|NSLog("logscan-plant-swift-open-N48X2CR93Y")|positive control for the runtime log scanner, literal token only|haven-core
-haven/ios/Runner/HavenBGTaskHandler.swift|NSLog("[HavenBGTask] Dart error: %@", flutterError.code)|DEBUG-only; prints the FlutterError code (a typed marker), never its message or details|haven-core
-haven/ios/Runner/HavenBGTaskHandler.swift|NSLog("[HavenBGTask] %@", message)|DEBUG-only wrapper body forwarding its String parameter; every caller is listed below|haven-core
+haven/ios/Runner/AppDelegate.swift|os_log("logscan-plant-swift-open-N48X2CR93Y", log: HAVEN_RUNNER_LOG)|positive control for the runtime log scanner, literal token only; os_log under a Haven subsystem so the scanner owns the line, no type: so logd persists it|haven-core
+haven/ios/Runner/HavenBGTaskHandler.swift|os_log("Dart error: %{public}@", log: HAVEN_BGTASK_LOG, flutterError.code)|DEBUG-only; prints the FlutterError code (a typed marker), never its message or details|haven-core
+haven/ios/Runner/HavenBGTaskHandler.swift|os_log("%{public}@", log: HAVEN_BGTASK_LOG, message)|DEBUG-only wrapper body forwarding its String parameter; every caller is listed below|haven-core
 haven/ios/Runner/HavenBGTaskHandler.swift|debugLog("BGTask scheduled")|constant marker, no interpolation|haven-core
 haven/ios/Runner/HavenBGTaskHandler.swift|debugLog("BGTask submit error: \(type(of: error))")|type name of the scheduler error only|haven-core
-haven/ios/Runner/HavenSLCHandler.swift|NSLog("[HavenSLC] %@", message)|DEBUG-only wrapper body forwarding its String parameter; every caller is listed below|haven-core
+haven/ios/Runner/HavenSLCHandler.swift|os_log("%{public}@", log: HAVEN_SLC_LOG, message)|DEBUG-only wrapper body forwarding its String parameter; every caller is listed below|haven-core
 haven/ios/Runner/HavenSLCHandler.swift|debugLog("SLC didFailWithError: \(type(of: error))")|type name of the CoreLocation error only; the message could carry location data|haven-core
 haven/ios/Runner/HavenSLCHandler.swift|debugLog("region monitoring failed: \(type(of: error))")|type name only; the error may carry region details|haven-core
 haven/ios/Runner/HavenSLCHandler.swift|debugLog("SLC: Dart catch-up returned error: \(flutterError.code)")|FlutterError code (a typed marker), never its message|haven-core

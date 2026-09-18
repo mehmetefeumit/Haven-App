@@ -1,9 +1,10 @@
 //! Rendering a verdict without rendering a value.
 //!
 //! Security Rule 15 applies to this tool's own output: the report carries a
-//! path, a line number, a class, an encoding or a rule id, a tag drawn from the
-//! sink's own owned-tag list, and a count. It never carries the matched text, the
-//! surrounding line, or any value from the manifest.
+//! path, a line number, a class, an encoding or a rule id, a tag — the logcat
+//! tag Haven owns, or a `log show` record's own process/subsystem columns,
+//! reduced to a program name's character set — and a count. It never carries
+//! the matched text, the surrounding line, or any value from the manifest.
 //!
 //! The one exception is `--disclose-values`, which exists because an operator
 //! reproducing a leak locally needs to see it. It announces itself on stderr,

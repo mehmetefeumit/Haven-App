@@ -74,6 +74,29 @@ xcrun simctl boot "${UDID}" 2>/dev/null || true
 xcrun simctl bootstatus "${UDID}" -b
 
 echo "Simulator booted: ${UDID}"
+
+# Persist Haven's OWN oslog subsystem, and nothing else.
+#
+# The `oslog` crate maps Rust's `log::Debug` to OS_LOG_TYPE_INFO, and logd keeps
+# INFO records in a wrapping MEMORY buffer it never writes to the persisted
+# store — so whether `log collect` still finds them is decided by how long the
+# app ran, not by whether the backend worked. CI run 35280144455 measured
+# exactly that: the opening plant (`log::debug!`, the LAST statement of
+# `init_app`) survived in the two lanes whose app lived 15 s and 24 s and was
+# gone from the two that ran for minutes, while the `warn!`/`info!` lines of the
+# same launch survived in all four. A positive control a lane's DURATION can
+# decide is not a control, so the subsystem is marked persistent before any app
+# writes to it.
+#
+# Best-effort and loud: a runner image whose `log config` refuses leaves the
+# plant duration-dependent again, which the scanner reports as the missed
+# control it is (rc 3) rather than as a pass.
+if ! xcrun simctl spawn "${UDID}" log config --subsystem frb_user \
+     --mode "level:debug,persist:debug" 2>/dev/null; then
+  echo "WARNING: could not mark the frb_user oslog subsystem persistent; the" \
+       "runtime log scanner's Rust plant may be evicted before 'log collect'" >&2
+fi
+
 if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
   echo "udid=${UDID}" >>"${GITHUB_OUTPUT}"
 fi

@@ -847,7 +847,7 @@ jobs:
         if: always()
         run: |
           log show --archive /tmp/sim.logarchive --style syslog 2>/dev/null \
-            | head -c "${CAP}" > /tmp/sim-unified-full.log || true
+            | tail -c "${CAP}" > /tmp/sim-unified-full.log || true
           rm -rf /tmp/sim.logarchive
           cp /tmp/haven-local-relay.log /tmp/relay.log
       - name: Scan captured logs for secrets before upload
@@ -1038,7 +1038,7 @@ self_test() {
   _expect "(c) a tail of a captured log before the first gate fails" "${d}" 1 "reads a captured log into the job log"
   d="${tmp}/c3"; mut "${b}" "${d}" 'wf/e2e-android.yml' 's|^(\s+)- name: Drive|\1- name: Peek\n\1  run: grep -c ready /tmp/adb-logcat.log \| tail -n 1 \|\| true\n\1- name: Drive|'
   _expect "(c) a tail reading a pipe, not a file, passes" "${d}" 0
-  _expect "(c) head -c redirected INTO a .log passes (iOS export, base)" "${b}" 0
+  _expect "(c) tail -c redirected INTO a .log passes (iOS export, base)" "${b}" 0
   d="${tmp}/c4"; mut "${b}" "${d}" 'wf/e2e-android.yml' 's|^(\s+)- name: Drive|\1- name: Peek\n\1  run: head -n 5 /tmp/adb-logcat.log > /tmp/peek.txt\n\1- name: Drive|'
   _expect "(c) a head of a captured log before the gate fails even when redirected" "${d}" 1 "reads a captured log"
   d="${tmp}/c5"; mut "${b}" "${d}" 'wf/e2e-android.yml' 's|^(\s+)- name: Drive|\1- name: Peek\n\1  run: if cat /tmp/adb-logcat.log; then echo ok; fi\n\1- name: Drive|'

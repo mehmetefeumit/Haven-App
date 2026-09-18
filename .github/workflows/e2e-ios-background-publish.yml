@@ -569,9 +569,14 @@ jobs:
       # two `log show` exports replace it — Haven's own lines (the Rust
       # `frb_user` oslog subsystem and the Runner process), uncapped, and the
       # whole device under SIM_LOG_FULL_CAP_BYTES. `log show` emits in
-      # chronological order, so the cap keeps the EARLIEST bytes; the residual
-      # past it is discarded with the archive — evidence lost, nothing
-      # published. Every log the upload step names is scanned by the next
+      # chronological order and the archive opens at BOOT, so a head cap kept
+      # the boot storm and nothing else: in CI run 35280144455 every lane's
+      # capped export ended 15-20 minutes BEFORE its app launched, because
+      # 64 MiB is ~2 minutes of a booting simulator. `tail -c` keeps the bytes
+      # nearest the archive's END, which is the `log collect` above and so the
+      # scenario itself; the residual — a partial first line, and the start of
+      # a run that logs more than the cap after boot — is discarded with the
+      # archive, evidence lost and nothing published. Every log the upload step names is scanned by the next
       # step, before that step can see it.
       - name: Collect simulator diagnostics
         if: always()
@@ -583,7 +588,7 @@ jobs:
             --predicate 'subsystem == "frb_user" OR process == "Runner"' \
             > /tmp/sim-unified.log 2>/dev/null || true
           log show --archive /tmp/sim.logarchive --style syslog 2>/dev/null \
-            | head -c "${SIM_LOG_FULL_CAP_BYTES}" > /tmp/sim-unified-full.log || true
+            | tail -c "${SIM_LOG_FULL_CAP_BYTES}" > /tmp/sim-unified-full.log || true
           rm -rf /tmp/sim.logarchive
           cp /tmp/haven-local-relay.log /tmp/relay.log 2>/dev/null || true
 

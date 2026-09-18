@@ -54,13 +54,29 @@
 #     `logcat` sink, `*drive*` a `drive` one, and the exact names the relay
 #     producers write (LOGSCAN_RELAY_LOG_NAMES below) a `relay` one — the
 #     class whose structural rules are off and whose pubkey/event-id needles
-#     are scoped out, since a relay's own log legitimately holds them. Any
-#     other name, `relay`-prefixed or not, is `diag`: the one-line-floor,
+#     are scoped out, since a relay's own log legitimately holds them. What is
+#     left is typed by its CONTENT before its name: a file whose own lines are
+#     `adb logcat -v threadtime` entries is a `logcat` sink whatever it is
+#     called (logscan_is_logcat_format), because the rules' tag scoping is the
+#     only thing that keeps a device-wide capture's VENDOR lines out of them.
+#     Anything else, `relay`-prefixed or not, is `diag`: the one-line-floor,
 #     no-plant class that still searches every needle and runs every rule, so
 #     no name can put a file out of the scanner's reach, and no new file can
 #     type itself into the relay class by choosing a prefix. No `*.log` at all
 #     is rc 3: a run that recorded nothing cannot be proven clean. The report
 #     goes where the caller says; never inside <dir>, which is uploaded.
+#
+#   logscan_permission_extract   (stdin -> stdout)
+#   logscan_http_log_summary     (stdin -> stdout)
+#
+#     The pre-upload REDUCTIONS, here for the same reason the gate is: what a
+#     lane may keep is one decision, written down once. A platform
+#     `dumpsys package` dump and a third-party HTTP server's access log are
+#     both legitimately full of things Rule 15 forbids uploading, and neither
+#     has a sink class that could forgive them — so a lane keeps the part it
+#     actually reads (the permission lines) or a count of what it saw (the HTTP
+#     summary), and the reduction is still scanned like any other file. See
+#     each function.
 #
 # Two arms. With HAVEN_LOGSCAN=true it seals the run's needle manifest and hands
 # every named sink to scan-logs.sh, which runs the key-material floor AND the
@@ -217,6 +233,24 @@ logscan_seal() {
     [[ "${profile}" != host ]] || seal_args+=(--declared-plants none)
     [[ -z "${RELAY_URL:-}" ]] || seal_args+=(--exempt-endpoint "${RELAY_URL}")
     seal_args+=(--exempt-endpoint ws://127.0.0.1:7788 --exempt-endpoint ws://10.0.2.2:7788)
+    # The bare loopback host, claimed explicitly rather than inherited. The
+    # Flutter engine prints ONE line into every Android logcat and every drive
+    # transcript — `I flutter : The Dart VM service is listening on
+    # http://127.0.0.1:<port>/<token>/`, under the `flutter` tag Haven owns for
+    # Dart's output — and S12 reads its dotted quad as an address. Until now it
+    # was clean only because the unconditional `ws://127.0.0.1:7788` proxy
+    # exemption above happens to expand to the bare host: a real claim resting
+    # on the PROXY'S PORT SPELLING, an accident that would end with the next
+    # change to that port (run-ios-sim-scenario.sh says the same of the Blossom
+    # server's own loopback line).
+    # An emulator's or simulator's own loopback identifies no user, no device
+    # and no circle — every Haven install has the same one — so it is exempt
+    # from S7 and S12 here, for every lane and every profile, and nothing about
+    # the VM service token is exempted: it is scanned like any other text.
+    # `flutter` deliberately stays in the policy's owned_tags; the engine's
+    # line is the reason for this exemption, not a reason to stop reading
+    # Dart's output.
+    seal_args+=(--exempt-endpoint 127.0.0.1)
     [[ -z "${WIRE_UPSTREAM:-}" ]] || seal_args+=(--exempt-endpoint "${WIRE_UPSTREAM}")
     "${bin}" seal --run-id "${run_id}" "${seal_args[@]}" "$@" \
       --out "${manifest}" || seal_rc=$?
@@ -252,6 +286,144 @@ logscan_is_relay_log() { # <basename>
   return 1
 }
 
+# A logcat SLICE carries no `logcat` in its name, and typing one `diag` runs the
+# structural rules over the PLATFORM's lines as if Haven had written them:
+# run-b1-fgs-publish.sh's `post-pause.window.log` (the capture between the
+# handoff and the hold) returned 342 structural hits in CI run 35280144455,
+# every one of them vendor furniture — `keystore`/`keyguard`/`keymint` blobs
+# under S8 and S4, Java type names under S2 and S10 — while the full capture it
+# was cut from scanned clean, because the `logcat` class runs the rules over
+# Haven-OWNED tags only and the needle search over every byte either way. So the
+# class is decided by what the lines ARE, not by what the file is called.
+#
+# The shape is the threadtime header — `MM-DD HH:MM:SS.mmm  pid  tid P tag:` —
+# deliberately TIGHTER than src/scan.rs's parse_logcat, which validates only
+# five fields, a one-character fifth and a colon in the rest: a per-FILE verdict
+# must mean "this is a threadtime capture", not "this line could be read as
+# one". Mis-typing a plain file `logcat` would silence the rules over Haven's
+# own output, so the bar is a MAJORITY of the sample and at least
+# LOGSCAN_SNIFF_MIN matches — a plain diag file reaches neither, and one
+# logcat-shaped line in a short file is not evidence of a capture.
+#
+# The sample is bounded (the file can be a gigabyte) and skips blank lines;
+# logcat's own `--------- beginning of <buffer>` banners are what the majority
+# rather than a unanimity test is for (two of them sit in the first twenty lines
+# of a real capture).
+#
+# No `--floor logcat=<n>` rides along, and that is a measurement rather than an
+# omission: the scanner's line floors are per sink CLASS and summed over its
+# files (src/scan.rs `check_floors` reads `outcome.lines[class]`, accumulated
+# `+=` per file), and a slice exists only because a runner cut it out of the
+# full capture sitting in the same LOG_DIR — b1's window beside `logcat.b1.log`,
+# 10 626 lines in the smallest such capture of CI run 35280144455 against a
+# 2 000-line floor. A future slice with no full capture beside it is rc 4, which
+# is the fail-closed direction: the gate says the class proves too little
+# instead of quietly certifying a slice as a whole capture.
+#
+# A UNANIMOUS file is the second sufficient condition, and it is what makes the
+# test safe on a SHORT slice: b1's marker window is the capture between the
+# handoff and the hold, and a quiet window legitimately holds one to four
+# threadtime entries. Under the majority test alone such a slice fell short of
+# the five-line minimum and was typed `diag` — and `diag` runs the structural
+# rules over the PLATFORM's lines as if Haven had written them, which is rc 1,
+# which DELETES the lane's evidence. Wrong in the expensive direction, so a file
+# whose every non-blank line is a threadtime entry is a threadtime capture at
+# any length. `hit >= 1` is the floor: an empty file is rc 3 on its own account,
+# not a capture of anything.
+readonly LOGSCAN_SNIFF_LINES=20
+readonly LOGSCAN_SNIFF_MIN=5
+
+logscan_is_logcat_format() { # <path>
+  awk -v want="${LOGSCAN_SNIFF_LINES}" -v min="${LOGSCAN_SNIFF_MIN}" '
+    /^[[:space:]]*$/ { next }
+    { seen++ }
+    /^[0-9][0-9]-[0-9][0-9] [0-9][0-9]:[0-9][0-9]:[0-9][0-9]\.[0-9][0-9][0-9] +[0-9]+ +[0-9]+ +[A-Z] .*:/ { hit++ }
+    seen >= want { exit }
+    END { exit !((hit >= min && hit * 2 >= seen) || (hit >= 1 && hit == seen)) }
+  ' < "$1" 2>/dev/null
+}
+
+# logscan_permission_extract — stdin a raw `adb shell dumpsys package <pkg>`
+# dump, stdout the only part of it a lane reads and the only part it may keep.
+#
+# `dumpsys package <pkg>` is the PLATFORM's whole record of the package:
+# randomised base64 install-directory names, dexopt locations, signing-key
+# digests. Three lanes were uploading it verbatim as a `diag` sink, and S4 read
+# that install-path furniture as a blob — two hits per dump in CI run
+# 35280144455 (b3 `permissions.b3.log:198,201`; b5
+# `permissions.{granted,revoked}.b5.log:198,204`; b6
+# `permissions.b6.log:198,201`). None of it is a Haven identifier, and none of
+# it is read by anything: every consumer greps one permission's own line —
+# `b3_permission_granted`, `b5_permission_granted`, `b5_permission_user_fixed`,
+# `b6_permission_granted` and the three failure dumps that echo
+# `ACCESS_(FINE|COARSE)_LOCATION`.
+#
+# So the artifact carries those lines and a provenance header. What survives
+# cannot carry a blob BY CONSTRUCTION rather than by luck: a permission name, a
+# `granted=<bool>` and a `|`-joined list of AOSP flag constants, whose `.`, `_`
+# and `|` all fall outside S4's and S2's character classes. The extract is still
+# scanned as `diag`, every rule and every needle on, so that claim is checked
+# and not merely asserted.
+#
+# CRs come off here — `adb shell` writes CRLF — so a consumer needs no `tr`.
+# No permission line at all yields the header alone and rc 0: the lane's own
+# `*_permission_granted` gate is what turns that into a loud failure, and a
+# grep's rc 1 here would instead abort the capture that explains it.
+logscan_permission_extract() {
+  printf '%s\n' \
+    '# permission lines extracted from `dumpsys package <pkg>` before upload.' \
+    '# The install paths, signing digests and dexopt state are NOT kept: they are' \
+    '# platform furniture nothing reads (Security Rule 15; logscan-gate.sh).'
+  tr -d '\r' | grep -aE '^[[:space:]]*android\.permission\.[A-Za-z0-9_]+(:|$)' || true
+}
+
+# logscan_http_log_summary — stdin a third-party HTTP server's access log,
+# stdout a value-free summary of it. Nothing else about that log is ever kept.
+#
+# The Android profile lane ran `docker logs blossom` straight into a `diag`
+# sink. A Blossom server's access log is the SERVER's own view of its client,
+# and in CI run 35280144455 it carried exactly that: four 64-hex blob digests
+# (S1), the uploader's npub (S3 — and the `pubkey/bech32-npub` NEEDLE, i.e. the
+# host declarations catching Alice's own key) and the base64 kind-24242
+# Authorization event (S4). Every one of those is legitimate for the server and
+# forbidden in a 14-day public artifact. It is the position strfry's log is in,
+# with one difference that decides the fix: strfry has a rules-off `relay` sink
+# class, and an HTTP blob server must not be given one — its log carries the
+# auth EVENTS the rules exist to see (LOGSCAN_RELAY_LOG_NAMES says so, and a
+# fixture pins it).
+#
+# So the raw log never becomes a file: only this summary does, and the summary
+# can hold nothing but integers and the fixed labels below. A method token is
+# counted because ` GET ` is a word no value can spell; a status histogram is
+# deliberately NOT derived, because this server's log format is third-party and
+# unpinned and a three-digit byte count would be reported as a 2xx. "The blob
+# landed" is the drive target's assertion, not this file's.
+logscan_http_log_summary() {
+  printf '%s\n' \
+    '# Third-party HTTP server log summary. VALUES WITHHELD BY DESIGN: that log is' \
+    '# written from the server side about its client (blob digests, the uploading' \
+    '# pubkey, the base64 kind-24242 auth header), so the raw log is never written' \
+    '# to a file and only these counts are kept. Whether the blob landed is' \
+    '# asserted by the drive target, not by this file.'
+  awk '
+    { lines++; shaped = 0 }
+    /(^|[^A-Za-z])GET([^A-Za-z]|$)/     { get++;   shaped = 1 }
+    /(^|[^A-Za-z])PUT([^A-Za-z]|$)/     { put++;   shaped = 1 }
+    /(^|[^A-Za-z])HEAD([^A-Za-z]|$)/    { head++;  shaped = 1 }
+    /(^|[^A-Za-z])DELETE([^A-Za-z]|$)/  { del++;   shaped = 1 }
+    /(^|[^A-Za-z])(POST|OPTIONS|PATCH)([^A-Za-z]|$)/ { other++; shaped = 1 }
+    /[Ee]rror|ERROR|[Ff]ail|EADDRINUSE|ECONNREFUSED|EACCES/ { err++ }
+    !shaped { nomethod++ }
+    END {
+      printf "lines: %d\n", lines + 0
+      printf "lines naming an HTTP method: %d (GET %d, PUT %d, HEAD %d, DELETE %d, other %d)\n", \
+        lines - nomethod, get + 0, put + 0, head + 0, del + 0, other + 0
+      printf "lines naming no HTTP method: %d\n", nomethod + 0
+      printf "lines carrying an error keyword: %d\n", err + 0
+    }
+  '
+}
+
 logscan_gate_dir() {
   local profile="$1" needle_dir="$2" dir="$3" report="$4"
   shift 4
@@ -263,7 +435,13 @@ logscan_gate_dir() {
     case "${f##*/}" in
       *logcat*) logcat+=("${f}") ;;
       *drive*) drive+=("${f}") ;;
-      *) if logscan_is_relay_log "${f##*/}"; then relay+=("${f}"); else diag+=("${f}"); fi ;;
+      *) if logscan_is_relay_log "${f##*/}"; then
+           relay+=("${f}")
+         elif logscan_is_logcat_format "${f}"; then
+           logcat+=("${f}")
+         else
+           diag+=("${f}")
+         fi ;;
     esac
   done
   if (( ${#files[@]} == 0 )); then
@@ -286,7 +464,7 @@ logscan_gate_dir() {
 # seals from what each profile is given, hands every sink to the wrapper, folds
 # the two verdicts, and contains on a leak — never the scanner's patterns, which
 # are the crate's own tests.
-readonly LOGSCAN_GATE_SELF_TEST_FIXTURES=70
+readonly LOGSCAN_GATE_SELF_TEST_FIXTURES=84
 # bash-4-only: mapfile/readarray, coproc, declare -A, case conversion, |&, ;;&,
 # negative substring offsets.
 readonly LOGSCAN_GATE_BASH4_ONLY_RE='(^|[^[:alnum:]_])(mapfile|readarray|coproc)([^[:alnum:]_]|$)|declare[[:space:]]+-[a-zA-Z]*A|\$\{[A-Za-z_][A-Za-z0-9_]*(,,|\^\^)|\|&|;;&|\$\{[^}]*:([[:space:]]+-[0-9]|[0-9]+:[[:space:]]*-[0-9])'
@@ -428,6 +606,7 @@ logscan_gate_self_test() {
     "${needle_argv[@]}" \
     --exempt-endpoint ws://10.0.2.2:7788 \
     --exempt-endpoint ws://127.0.0.1:7788 --exempt-endpoint ws://10.0.2.2:7788 \
+    --exempt-endpoint 127.0.0.1 \
     "${floors[@]}" \
     --out "${needles}/local-local.needles.json"
   argv_is "proxy: scan argv" "${scan_argv}" scan --manifest "${needles}/local-local.needles.json" \
@@ -483,6 +662,19 @@ logscan_gate_self_test() {
          "first proxy spelling must directly follow the last host needle (it does not)" >&2
     fail=1
   fi
+  # …and the BARE loopback host is still exempted with no RELAY_URL and no
+  # upstream set. That is the whole point of claiming it here: the Flutter
+  # engine's `Dart VM service is listening on http://127.0.0.1:<port>/<token>/`
+  # line is in every logcat and every drive transcript, and its forgiveness must
+  # not depend on a lane happening to point RELAY_URL at loopback.
+  ran=$(( ran + 1 ))
+  if [[ "${got}" != *"--exempt-endpoint 127.0.0.1 "* ]]; then
+    echo "SELF-TEST FAIL (no RELAY_URL: bare loopback): the seal must exempt the bare" \
+         "loopback host on its own account — the engine's Dart VM service line is an" \
+         "S12 hit in every Android capture, and with no relay URL to expand into it" \
+         "nothing else forgives it" >&2
+    fail=1
+  fi
 
   # (3) The host profile: no sidecar is NOT 3 — the host needles are the whole
   #     declaration, with the floors they meet and no Dart plants to reconcile;
@@ -494,6 +686,7 @@ logscan_gate_self_test() {
     --declared-plants none \
     --exempt-endpoint ws://10.0.2.2:7788 \
     --exempt-endpoint ws://127.0.0.1:7788 --exempt-endpoint ws://10.0.2.2:7788 \
+    --exempt-endpoint 127.0.0.1 \
     "${floors[@]}" \
     --out "${tmp}/no-needles/local-local.needles.json"
   argv_is "host: scan argv" "${scan_argv}" scan --manifest "${tmp}/no-needles/local-local.needles.json" \
@@ -594,6 +787,7 @@ logscan_gate_self_test() {
     "${host_argv[@]}" --declared-plants none \
     --exempt-endpoint ws://10.0.2.2:7777 \
     --exempt-endpoint ws://127.0.0.1:7788 --exempt-endpoint ws://10.0.2.2:7788 \
+    --exempt-endpoint 127.0.0.1 \
     --floor drive=20 \
     --out "${tmp}/preseal/local-local.needles.json"
   : > "${tmp}/preseal/local-local.needles.json"
@@ -654,16 +848,20 @@ logscan_gate_self_test() {
          "must be forwarded verbatim, directly before --out (it is not)" >&2
     fail=1
   fi
-  # typed_as <name> <class> — one file alone under a fresh evidence directory
-  # lands in exactly that sink class. One fixture per real relay producer
-  # (LOGSCAN_RELAY_LOG_NAMES), then the names that must NOT be relay: an
-  # unknown `relay-` prefix (a new file cannot choose the rules-off class by
-  # its name) and the blossom log (an HTTP server whose log carries the
-  # kind-24242 auth events the rules must see).
+  # typed_as <name> <class> [<body>] — one file alone under a fresh evidence
+  # directory lands in exactly that sink class. <body> is written through
+  # `%b`, so `\n` separates lines; it defaults to one unremarkable line. One
+  # fixture per real relay producer (LOGSCAN_RELAY_LOG_NAMES), then the names
+  # that must NOT be relay: an unknown `relay-` prefix (a new file cannot
+  # choose the rules-off class by its name) and the blossom log (an HTTP
+  # server whose log carries the kind-24242 auth events the rules must see).
   typed_as() {
-    local name="$1" class="$2" ev="${tmp}/typed"
+    # `${3-x}`, not `${3:-x}`: an omitted body is a one-line placeholder, but an
+    # EXPLICITLY empty one writes an empty file, which is a case the sniffer has
+    # to answer. With `:-` that fixture silently tested the placeholder instead.
+    local name="$1" class="$2" body="${3-x}" ev="${tmp}/typed"
     rm -rf "${ev}"; mkdir -p "${ev}"
-    printf 'x\n' > "${ev}/${name}"
+    printf '%b\n' "${body}" > "${ev}/${name}"
     rm -f "${seal_argv}" "${scan_argv}"
     ran=$(( ran + 1 ))
     GITHUB_RUN_ID= GITHUB_RUN_ATTEMPT= WIRE_UPSTREAM= RELAY_URL= \
@@ -687,6 +885,50 @@ logscan_gate_self_test() {
   for name in relay-something-new.log relayed.log relay-poll.b5.err.log blossom.log haven-local-blossom.log; do
     typed_as "${name}" diag
   done
+  # The CONTENT sniff, under the names the real producers use. A logcat slice
+  # (b1's post-pause window, banner included) is `logcat` although nothing in
+  # its name says so; a `dumpsys`-shaped diag stays `diag`; and a short file
+  # carrying ONE logcat-shaped line stays `diag` too, because one line is not
+  # evidence of a capture and typing a plain file `logcat` would silence the
+  # structural rules over Haven's own output.
+  typed_as post-pause.window.log logcat \
+'--------- beginning of main
+09-17 22:40:43.819  1137  3232 I ActivityManager: Start proc for service
+09-17 22:40:43.820  1137  3232 D PackageManager: scanning package directory
+09-17 22:40:43.821  1137  3232 I ActivityManager: Displayed activity
+09-17 22:40:43.822  1137  3232 W Choreographer: skipped frames
+09-17 22:40:43.823  1137  3232 I flutter: a marker
+09-17 22:40:43.824  1137  3232 D BackgroundTask: a publish cycle'
+  typed_as permissions.b3.log diag \
+'Activity Resolver Table:
+  Non-Data Actions:
+      android.intent.action.MAIN:
+        com.example/.MainActivity
+    runtime permissions:
+      android.permission.ACCESS_FINE_LOCATION: granted=true'
+  typed_as provider-toggles.b6.log diag \
+'toggle 1: gps off
+09-17 22:40:43.819  1137  3232 I LocationManagerService: provider disabled
+toggle 2: gps on'
+  # A SHORT slice whose every line is a threadtime entry is a threadtime
+  # capture: b1's marker window can legitimately be this quiet, and typing it
+  # `diag` would run the structural rules over the platform's own lines and
+  # delete the lane's evidence on the rc 1 that follows.
+  typed_as quiet.window.log logcat \
+'09-17 22:40:43.819  1137  3232 I ActivityManager: Start proc for service
+09-17 22:40:43.823  1137  3232 I flutter: a marker
+09-17 22:40:43.824  1137  3232 D BackgroundTask: a publish cycle'
+  # …and unanimity is the whole of that second condition: one plain line among
+  # them and the file is a diag again, which is what keeps the minimum from
+  # being quietly lowered to admit mixed files.
+  typed_as nearly.window.log diag \
+'09-17 22:40:43.819  1137  3232 I ActivityManager: Start proc for service
+09-17 22:40:43.823  1137  3232 I flutter: a marker
+a plain line no threadtime header covers'
+  # A file with no line at all is unanimously nothing. Both classes end in rc 3
+  # here, so the verdict does not turn on it — but `logcat` would be a claim the
+  # file is a threadtime capture, and the `hit >= 1` floor is what refuses it.
+  typed_as blank.window.log diag ''
   rm -f "${seal_argv}" "${scan_argv}"
   rc=0
   ran=$(( ran + 1 ))
@@ -710,6 +952,113 @@ logscan_gate_self_test() {
     fail=1
   fi
   unset FAKE_SEAL_ARGV FAKE_SCAN_ARGV
+
+  # (9) logscan_permission_extract: what the three permission lanes upload in
+  #     place of the platform's whole package record. The raw dump is the AOSP
+  #     shape — a randomised base64 install directory, a signing digest, a
+  #     dexopt location — and every one of those lines must be gone while every
+  #     `android.permission.…` line survives BYTE FOR BYTE, because the lanes'
+  #     own predicates grep them. Asserted on content, not through the scanner:
+  #     this self-test runs where the release binary may not be built, and the
+  #     scanner's verdict over the extract is the crate's own fixture set.
+  local raw="${tmp}/dumpsys-package.raw" extract="${tmp}/perm-extract.log"
+  printf '%s\r\n' \
+    '  Package [com.oblivioustech.haven] (5e1f2a3):' \
+    '    codePath=/data/app/~~QzvxN8kLpR2mTfY7wJdBnA==/com.oblivioustech.haven-Q5SpczNlQjMGRcjTLpQ2Kg==' \
+    '    resourcePath=/data/app/~~QzvxN8kLpR2mTfY7wJdBnA==/com.oblivioustech.haven-Q5SpczNlQjMGRcjTLpQ2Kg==' \
+    '    signatures=PackageSignatures{6b2c9d1 version:3, signatures:[4f7a2c10], past signatures:[]}' \
+    '    requested permissions:' \
+    '      android.permission.ACCESS_FINE_LOCATION' \
+    '    install permissions:' \
+    '      android.permission.INTERNET: granted=true' \
+    '    User 0: ceDataInode=1835020 installed=true hidden=false' \
+    '      runtime permissions:' \
+    '        android.permission.ACCESS_FINE_LOCATION: granted=false, flags=[ USER_SET|USER_FIXED ]' \
+    '        android.permission.ACCESS_COARSE_LOCATION: granted=true, flags=[ USER_SENSITIVE_WHEN_GRANTED|USER_SENSITIVE_WHEN_DENIED|RESTRICTION_INSTALLER_EXEMPT ]' \
+    '    Dexopt state:' \
+    '      [location is /data/app/~~QzvxN8kLpR2mTfY7wJdBnA==/com.oblivioustech.haven-Q5SpczNlQjMGRcjTLpQ2Kg==/oat/x86_64/base.odex]' \
+    > "${raw}"
+  logscan_permission_extract < "${raw}" > "${extract}"
+  ran=$(( ran + 1 ))
+  if [[ "$(grep -v '^#' "${extract}")" != "$(printf '%s\n' \
+       '      android.permission.ACCESS_FINE_LOCATION' \
+       '      android.permission.INTERNET: granted=true' \
+       '        android.permission.ACCESS_FINE_LOCATION: granted=false, flags=[ USER_SET|USER_FIXED ]' \
+       '        android.permission.ACCESS_COARSE_LOCATION: granted=true, flags=[ USER_SENSITIVE_WHEN_GRANTED|USER_SENSITIVE_WHEN_DENIED|RESTRICTION_INSTALLER_EXEMPT ]')" ]]; then
+    echo "SELF-TEST FAIL (permission extract): the extract must be exactly the" \
+         "\`android.permission.…\` lines, indentation and flags kept, CRs stripped" >&2
+    fail=1
+  fi
+  ran=$(( ran + 1 ))
+  if grep -qE 'codePath|resourcePath|signatures=|Dexopt|location is|ceDataInode' "${extract}"; then
+    echo "SELF-TEST FAIL (permission extract): the platform's install paths," \
+         "signing digests, dexopt locations or per-user record reached the extract" >&2
+    fail=1
+  fi
+  # THE ARGUMENT THE FILTER RESTS ON, checked rather than asserted: a line the
+  # extract can hold cannot reach S4's 32-character `[A-Za-z0-9+/]` floor,
+  # because `.`, `_`, `|`, `=` and a space all fall outside that class and a
+  # permission line is nothing but a dotted name, a `granted=<bool>` and a
+  # `|`-joined list of underscore-separated AOSP flags. The fixture above
+  # carries the worst case — the full flag vocabulary on one line — so a widened
+  # filter that let a path or a blob back in is red here.
+  ran=$(( ran + 1 ))
+  if [[ -n "$(grep -oE '[A-Za-z0-9+/]{32,}' "${extract}")" ]]; then
+    echo "SELF-TEST FAIL (permission extract): a line of the extract carries a" \
+         "32-character base64-class run, which is S4's floor — the filter has been" \
+         "widened past what a permission line can hold" >&2
+    fail=1
+  fi
+  ran=$(( ran + 1 ))
+  rc=0
+  printf 'Dexopt state:\r\n  nothing here\r\n' \
+    | logscan_permission_extract > "${extract}" || rc=$?
+  if (( rc != 0 )) || [[ -n "$(grep -v '^#' "${extract}")" ]]; then
+    echo "SELF-TEST FAIL (permission extract: no match): a dump with no permission" \
+         "line must yield the header alone at rc 0 — the lane's own gate reports it" \
+         "(rc ${rc})" >&2
+    fail=1
+  fi
+
+  # (10) logscan_http_log_summary: what the profile lane uploads in place of
+  #      `docker logs blossom`. The fixture is the SHAPE that reddened CI run
+  #      35280144455 — a blob digest path, an npub, a base64 auth header — and
+  #      the summary must count those lines without reproducing one byte of
+  #      them. The digest, the npub and the base64 run are synthetic, and the
+  #      assertion is that none of them survives.
+  local http="${tmp}/http.log" summary="${tmp}/http-summary.log"
+  printf '%s\n' \
+    'blossom-server listening' \
+    'PUT /upload 200 - uploader qzvxn8klpr2mtfy7wjdbna3kh1pczqjmgrcjtlpq2kg9s auth QzvxN8kLpR2mTfY7wJdBnAQ5SpczNlQjMGRcjTLpQ2Kg==' \
+    'GET /3c9db8f2a1e04b7c5d6e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9012345678' \
+    'HEAD /3c9db8f2a1e04b7c5d6e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9012345678 404' \
+    'GET /list/npub1qzvxn8klpr2mtfy7wjdbna3kh1pczqjmgrcjtlpq2kg9sdz4x7w' \
+    'internal error while reading blob' \
+    > "${http}"
+  logscan_http_log_summary < "${http}" > "${summary}"
+  ran=$(( ran + 1 ))
+  if [[ "$(grep -v '^#' "${summary}")" != "$(printf '%s\n' \
+       'lines: 6' \
+       'lines naming an HTTP method: 4 (GET 2, PUT 1, HEAD 1, DELETE 0, other 0)' \
+       'lines naming no HTTP method: 2' \
+       'lines carrying an error keyword: 1')" ]]; then
+    echo "SELF-TEST FAIL (http summary): the counts must be exactly the method," \
+         "no-method and error-keyword tallies of the fixture" >&2
+    fail=1
+  fi
+  ran=$(( ran + 1 ))
+  if grep -qiE '[0-9a-f]{32}|npub1|Q5Spcz|qzvxn8' "${summary}"; then
+    echo "SELF-TEST FAIL (http summary): a blob digest, an npub or a base64 auth" \
+         "run from the raw log reached the summary" >&2
+    fail=1
+  fi
+  ran=$(( ran + 1 ))
+  if [[ "$(logscan_http_log_summary < /dev/null | grep -v '^#' | head -n 1)" != 'lines: 0' ]]; then
+    echo "SELF-TEST FAIL (http summary): an empty log must summarise as zero lines," \
+         "not as nothing — a server that logged nothing is a finding" >&2
+    fail=1
+  fi
+
   # The iOS lanes source this on macOS runners under /bin/bash 3.2, which
   # cannot be run here, so the guard is static: no bash-4-only construct
   # anywhere in this file (its own definition line excepted).
@@ -728,7 +1077,7 @@ logscan_gate_self_test() {
     echo "logscan-gate.sh: SELF-TEST FAILED — ran ${ran} fixture(s), expected exactly ${LOGSCAN_GATE_SELF_TEST_FIXTURES}; a fixture was added or removed without moving the pin" >&2
     return 1
   fi
-  echo "logscan-gate.sh: self-test passed (${ran}/${LOGSCAN_GATE_SELF_TEST_FIXTURES} fixtures: under a pinned environment the proxy profile seals from the sidecar directory with the host needles added, exempting the lane's own endpoints without declaring them, then runs scan-logs.sh over every sink, folds the two verdicts, contains on a leak even under a failed seal, fails closed on an absent binary or sidecar, and called twice in one run seals once and scans twice; the host profile seals the host needles alone with no declared plants, treats no sidecar as clean, reuses this run's manifest and still scans; the rules profile seals nothing and runs --rules-only; logscan_seal alone seals the host argv with the caller's floors, reuses this run's manifest and is a no-op flag-off; the flag-off arm is the floor alone over every sink; usage errors run nothing; the directory walker types every *.log by name — each real relay producer as relay, an unknown relay-prefixed name and the blossom log as diag — omits absent classes, forwards extra seal arguments, contains on a leak and refuses an empty directory; no bash-4-only construct)."
+  echo "logscan-gate.sh: self-test passed (${ran}/${LOGSCAN_GATE_SELF_TEST_FIXTURES} fixtures: under a pinned environment the proxy profile seals from the sidecar directory with the host needles added, exempting the lane's own endpoints and the bare loopback host without declaring them, then runs scan-logs.sh over every sink, folds the two verdicts, contains on a leak even under a failed seal, fails closed on an absent binary or sidecar, and called twice in one run seals once and scans twice; the host profile seals the host needles alone with no declared plants, treats no sidecar as clean, reuses this run's manifest and still scans; the rules profile seals nothing and runs --rules-only; logscan_seal alone seals the host argv with the caller's floors, reuses this run's manifest and is a no-op flag-off; the flag-off arm is the floor alone over every sink; usage errors run nothing; the directory walker types every *.log by name — each real relay producer as relay, an unknown relay-prefixed name and the blossom log as diag — then by CONTENT, so a threadtime slice under an unknown name is logcat, a SHORT slice whose every line is threadtime is logcat too while one plain line among them, or no line at all, makes it a diag, and a dumpsys dump and a short file holding one logcat-shaped line stay diag, omits absent classes, forwards extra seal arguments, contains on a leak and refuses an empty directory; logscan_permission_extract keeps every android.permission line byte for byte, drops the platform's install paths, signing digests and dexopt state, cannot reach S4's 32-character floor on any line it keeps, and yields the header alone at rc 0 when a dump has no permission line; logscan_http_log_summary counts a third-party server's methods, no-method lines and error keywords while reproducing no digest, npub or auth blob from them, and summarises an empty log as zero lines; no bash-4-only construct)."
   return 0
 }
 

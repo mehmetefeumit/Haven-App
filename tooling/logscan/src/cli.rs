@@ -149,10 +149,19 @@ fn parse_seal_args(args: &[String]) -> Result<SealArgs, String> {
             }
             "--expect" => {
                 let (class, raw) = pair(&value(args, &mut index, flag)?, flag)?;
-                let min = raw
+                let min: usize = raw
                     .parse()
                     .map_err(|_| format!("{flag} needs <class>=<min-count>"))?;
-                expect.insert(class, min);
+                // The STRICTER of two claims about the same class, never the
+                // last one. `logscan-gate.sh` appends a lane's own seal
+                // arguments AFTER host-needles.sh's, so last-wins let a caller
+                // repeating `--expect pubkey=3` silently lower the library's 6
+                // — a declaration floor is the one number that may only ever
+                // be raised.
+                expect
+                    .entry(class)
+                    .and_modify(|current| *current = (*current).max(min))
+                    .or_insert(min);
             }
             "--floor" => {
                 let (sink, raw) = pair(&value(args, &mut index, flag)?, flag)?;
@@ -965,6 +974,44 @@ mod tests {
         ]);
         assert_eq!(rc, RC_GUARD);
         assert!(err.contains("/tmp/haven-soak/needles"), "{err}");
+    }
+
+    /// A repeated `--expect` for one class keeps the STRICTER claim.
+    ///
+    /// `logscan-gate.sh` puts a lane's own seal arguments after
+    /// `host-needles.sh`'s, so a lane repeating a class the library already
+    /// claimed would, under last-wins, lower it: `--expect pubkey=6` followed
+    /// by `--expect pubkey=2` would seal a manifest that reads as complete with
+    /// two thirds of the run's identities undeclared. Both orders are asserted,
+    /// because "the max" and "the first" are indistinguishable in one of them.
+    #[test]
+    fn a_repeated_expectation_keeps_the_stricter_claim() {
+        for order in [["pubkey=6", "pubkey=2"], ["pubkey=2", "pubkey=6"]] {
+            let rig = Rig::new("expectmax");
+            let decl = rig.write(
+                "alice.needles.decl",
+                &format!("{{\"class\":\"pubkey\",\"value\":\"{NEEDLE}\"}}\n"),
+            );
+            let (rc, out, _) = invoke(&[
+                "seal",
+                "--run-id",
+                "x",
+                "--decl",
+                decl.to_str().expect("utf8"),
+                "--expect",
+                order[0],
+                "--expect",
+                order[1],
+                "--out",
+                rig.manifest.to_str().expect("utf8"),
+            ]);
+            assert_eq!(rc, RC_META, "{order:?}: {out}");
+            assert!(
+                out.contains("below the 6 this scenario's shape requires"),
+                "{order:?}: the surviving claim must be 6, not 2: {out}"
+            );
+            assert!(!rig.manifest.exists(), "{order:?}");
+        }
     }
 
     #[test]

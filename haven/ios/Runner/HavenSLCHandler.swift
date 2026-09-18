@@ -1,5 +1,25 @@
 import CoreLocation
 import Flutter
+import os
+
+/// The unified-log destination for this file's DEBUG diagnostics.
+///
+/// `os_log` under a Haven subsystem, never `NSLog`: the runtime log scanner
+/// decides whose line a `log show` record is from the record's own emitter —
+/// its subsystem, else the emitting library, else the process
+/// (`tooling/logscan/policy.toml`'s `owned_emitters`). An `NSLog` record
+/// reaches `_os_log_impl` from inside Foundation and carries no subsystem at
+/// all, and `Foundation` is the library on 36 673 lines of one real capture,
+/// vendor plugins included, so it can never be owned. A subsystem Haven names
+/// makes these lines Haven's by construction rather than by inference. A
+/// file-level constant so the call sites can name it bare, which is what
+/// `scripts/ci/check_native_log_allowlist.sh` admits as a logged argument.
+///
+/// No `type:` at the call sites: that is OS_LOG_TYPE_DEFAULT, which logd
+/// PERSISTS. `.debug` and `.info` live in a wrapping memory buffer that
+/// `log collect` finds only if it runs soon enough — the eviction that cost CI
+/// run 35280144455's two long lanes their Rust plant.
+private let HAVEN_SLC_LOG = OSLog(subsystem: "haven_ios", category: "slc")
 
 /// Owns a CLLocationManager for Significant-Location-Change (SLC) monitoring
 /// and triggers a Dart catch-up via a MethodChannel on SLC relaunches.
@@ -387,11 +407,12 @@ final class HavenSLCHandler: NSObject, CLLocationManagerDelegate {
 
   // MARK: - Logging
 
+
   private func debugLog(_ message: String) {
     // Only log in debug builds — release builds silence all prints per
     // Haven's security policy (no internal state in logs).
     #if DEBUG
-    NSLog("[HavenSLC] %@", message)
+    os_log("%{public}@", log: HAVEN_SLC_LOG, message)
     #endif
   }
 }

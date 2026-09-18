@@ -19,8 +19,9 @@
 #     (a name stem ends in a space, which a word-split echo would lose; read it
 #     with a `while IFS= read -r` loop — the iOS lanes run this under macOS's
 #     bash 3.2, which has no `mapfile`):
-#       proxy  the four role seeds and the constants, ADDED to the sidecar's
-#              declarations; the caller keeps its own `--expect` floors
+#       proxy  the four role seeds, the two offset seeds and the constants,
+#              ADDED to the sidecar's declarations; the caller keeps its own
+#              `--expect` floors
 #       host   the same needles plus the floors they satisfy by construction
 #       rules  nothing: a rules-only scan seals no manifest
 #
@@ -34,6 +35,31 @@ readonly HN_SEED_ALICE='01010101010101010101010101010101010101010101010101010101
 readonly HN_SEED_BOB='0202020202020202020202020202020202020202020202020202020202020202'
 readonly HN_SEED_CAROL='0303030303030303030303030303030303030303030303030303030303030303'
 readonly HN_SEED_DAVE='0404040404040404040404040404040404040404040404040404040404040404'
+
+# hn_seed_with_offset <64-hex seed> <offset> — the harness's own offset rule
+# (haven/integration_test/e2e/_lib/synthetic_user.dart's `_seedWithOffset`):
+# the leading 31 bytes unchanged, the trailing byte shifted by <offset> mod 256.
+# A scenario uses it to bootstrap several peers from ONE base seed onto one
+# relay without two of them colliding on a KeyPackage slot.
+#
+# Derived here rather than transcribed, because a hand-typed hex string would be
+# a second source of truth for arithmetic the app already defines — and a wrong
+# digit would read as a clean lane, not as a failing one. The Rust tie test ties
+# this function's output to that Dart rule and to the offsets the scenarios
+# actually pass.
+hn_seed_with_offset() {
+  printf '%s%02x' "${1:0:62}" "$(( (0x${1:62:2} + $2) & 0xFF ))"
+}
+
+# The offset identities a HOST-profile lane mints, and therefore has to declare:
+# relay_customization_publish_test.dart's two extra Bobs (`seedOffset: 1` and
+# `seedOffset: 2`). A proxy lane declares what it mints over the channel; a host
+# lane's declaration is this library, so without these two the lane's logs were
+# searched for neither pubkey. Declared for every sealing profile: a needle that
+# a lane never mints costs a term, while one it mints and does not declare costs
+# the search.
+readonly HN_SEED_BOB_OFFSET1="$(hn_seed_with_offset "${HN_SEED_BOB}" 1)"
+readonly HN_SEED_BOB_OFFSET2="$(hn_seed_with_offset "${HN_SEED_BOB}" 2)"
 
 # Role sentinel coordinates, lat,lon
 # (haven/integration_test/e2e/_lib/fake_location_service.dart).
@@ -64,6 +90,8 @@ host_needle_args() {
         --host-seed "${HN_SEED_BOB}" \
         --host-seed "${HN_SEED_CAROL}" \
         --host-seed "${HN_SEED_DAVE}" \
+        --host-seed "${HN_SEED_BOB_OFFSET1}" \
+        --host-seed "${HN_SEED_BOB_OFFSET2}" \
         --host-decl "coordinate=${HN_COORD_ALICE}" \
         --host-decl "coordinate=${HN_COORD_BOB}" \
         --host-decl "coordinate=${HN_COORD_CAROL}" \
@@ -72,7 +100,7 @@ host_needle_args() {
         --host-decl "petname=${HN_PETNAME_STEM}"
       if [[ "$1" == host ]]; then
         printf '%s\n' \
-          --expect pubkey=3 --expect coordinate=4 \
+          --expect pubkey=6 --expect coordinate=4 \
           --expect circle_name=1 --expect petname=1
       fi
       ;;
@@ -88,7 +116,7 @@ host_needle_args() {
 # --self-test — every constant is present with the shape its class demands, and
 # each profile's argv is pinned literally, so a reordering or a dropped needle
 # is a failing fixture rather than a quieter scan.
-readonly HN_SELF_TEST_FIXTURES=8
+readonly HN_SELF_TEST_FIXTURES=9
 # bash-4-only: mapfile/readarray, coproc, declare -A, case conversion, |&, ;;&,
 # negative substring offsets.
 readonly HOST_NEEDLES_BASH4_ONLY_RE='(^|[^[:alnum:]_])(mapfile|readarray|coproc)([^[:alnum:]_]|$)|declare[[:space:]]+-[a-zA-Z]*A|\$\{[A-Za-z_][A-Za-z0-9_]*(,,|\^\^)|\|&|;;&|\$\{[^}]*:([[:space:]]+-[0-9]|[0-9]+:[[:space:]]*-[0-9])'
@@ -118,15 +146,30 @@ hn_self_test() {
     echo "SELF-TEST FAIL (stems): the name stems must carry their trailing space" >&2
     fail=1
   fi
+  # The offset rule, on the three cases that matter: the two offsets a scenario
+  # actually passes, and the wrap the Dart `& 0xFF` performs. Checked against
+  # the base seed's own bytes, never against a transcribed result — the Rust tie
+  # test is what holds this function to the Dart source.
+  ran=$(( ran + 1 ))
+  if [[ "${HN_SEED_BOB_OFFSET1}" != "${HN_SEED_BOB:0:62}03" \
+     || "${HN_SEED_BOB_OFFSET2}" != "${HN_SEED_BOB:0:62}04" \
+     || "$(hn_seed_with_offset "${HN_SEED_BOB:0:62}ff" 1)" != "${HN_SEED_BOB:0:62}00" ]]; then
+    echo "SELF-TEST FAIL (offset seeds): an offset seed must keep the leading 31" \
+         "bytes and shift only the last, wrapping mod 256" >&2
+    fail=1
+  fi
 
   local -a got=() line needles=(
     --host-seed "${HN_SEED_ALICE}" --host-seed "${HN_SEED_BOB}"
     --host-seed "${HN_SEED_CAROL}" --host-seed "${HN_SEED_DAVE}"
+    --host-seed "${HN_SEED_BOB_OFFSET1}" --host-seed "${HN_SEED_BOB_OFFSET2}"
     --host-decl "coordinate=${HN_COORD_ALICE}" --host-decl "coordinate=${HN_COORD_BOB}"
     --host-decl "coordinate=${HN_COORD_CAROL}" --host-decl "coordinate=${HN_COORD_CANARY}"
     --host-decl 'circle_name=Qzvx CIRCLE ' --host-decl 'petname=Qzvx PETNAME ')
+  # The pubkey floor is the number of seeds declared above, exactly: a runner
+  # that dropped one must not be able to seal a manifest that reads as complete.
   local -a want_host=("${needles[@]}"
-    --expect pubkey=3 --expect coordinate=4 --expect circle_name=1 --expect petname=1)
+    --expect pubkey=6 --expect coordinate=4 --expect circle_name=1 --expect petname=1)
   # hn_argv_mismatch <label> <got...> -- <want...> — the first differing index
   # and the flag words there. The argv carries the seeds, so no value is ever
   # printed: a non-flag word is reported only by its length.
@@ -191,7 +234,7 @@ hn_self_test() {
     echo "host-needles.sh: SELF-TEST FAILED — ran ${ran} fixture(s), expected exactly ${HN_SELF_TEST_FIXTURES}" >&2
     return 1
   fi
-  echo "host-needles.sh: self-test passed (${ran}/${HN_SELF_TEST_FIXTURES} fixtures: four repeated-byte seeds, seven lat,lon constants, two stems with their trailing space, the proxy and host argv pinned literally, rules declares nothing, an unknown profile is refused, no bash-4-only construct)."
+  echo "host-needles.sh: self-test passed (${ran}/${HN_SELF_TEST_FIXTURES} fixtures: four repeated-byte seeds, two offset seeds that shift only the trailing byte and wrap, seven lat,lon constants, two stems with their trailing space, the proxy and host argv pinned literally, rules declares nothing, an unknown profile is refused, no bash-4-only construct)."
   return 0
 }
 

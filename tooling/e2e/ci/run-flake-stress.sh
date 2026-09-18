@@ -136,11 +136,49 @@ run_self_test() {
     echo "SELF-TEST FAIL (wiring): this runner echoes a captured log itself; only the AVD runner may, after its gate" >&2
     fail=1
   fi
+  # The lane's floor reaches the manifest only if the pre-seal runs before any
+  # gate does — and the first gate here is the INNER runner's, inside iteration
+  # 1 — so the pre-seal has to precede the loop. Pinned against the EXIT trap,
+  # which is armed between the two.
+  local seal_line trap_line
+  seal_line="$(grep -n -m1 '^logscan_seal host /tmp/haven-soak/needles "${SEAL_EXTRA\[@\]}" || seal_rc=$?$' "${BASH_SOURCE[0]}" || true)"
+  seal_line="${seal_line%%:*}"
+  trap_line="$(grep -n -m1 '^trap cleanup EXIT$' "${BASH_SOURCE[0]}" || true)"
+  trap_line="${trap_line%%:*}"
+  if [[ -z "${seal_line}" || -z "${trap_line}" ]] || (( seal_line > trap_line )) \
+     || ! grep -qE '^readonly -a SEAL_EXTRA=\(--floor relay=7\)$' "${BASH_SOURCE[0]}"; then
+    echo "SELF-TEST FAIL (wiring): the lane's manifest must be sealed once, with its relay floor, before the EXIT trap is armed (seal='${seal_line:-none}', trap='${trap_line:-none}')" >&2
+    fail=1
+  fi
+  # The relay log is only evidence if it is read out of a LIVE container and
+  # written where the gate still reaches it: after the iteration's own relay
+  # reset (so it is this iteration's relay), inside the failed-iteration branch
+  # beside the logcat and drive copies (so a green run still leaves LOG_DIR
+  # empty and nothing uploads unscanned), and exactly once. The name is checked
+  # through the walker's own predicate, so a change to the relay-name list
+  # fails here rather than silently retyping the dump as a `diag` sink, where
+  # the structural rules would read a relay's legitimate pubkeys and event ids
+  # as leaks.
+  local reset_line dump_line gate_line
+  reset_line="$(grep -n -m1 '^  bash "${START_STRFRY}"$' "${BASH_SOURCE[0]}" || true)"
+  reset_line="${reset_line%%:*}"
+  dump_line="$(grep -n -m1 '^    docker logs "${STRFRY_CONTAINER:-strfry}" > "${LOG_DIR}/strfry\.iter-${i}\.log" 2>&1 || true$' "${BASH_SOURCE[0]}" || true)"
+  dump_line="${dump_line%%:*}"
+  gate_line="$(grep -n -m1 '^  logscan_gate_dir host /tmp/haven-soak/needles "${LOG_DIR}"' "${BASH_SOURCE[0]}" || true)"
+  gate_line="${gate_line%%:*}"
+  if [[ -z "${reset_line}" || -z "${dump_line}" || -z "${gate_line}" ]] \
+     || (( reset_line > dump_line || dump_line > gate_line )) \
+     || (( "$(grep -cE '^[[:space:]]*docker logs ' <<<"${real_run}")" != 1 )) \
+     || (( "$(grep -cE '^    (cp /tmp/(adb-logcat|flutter-drive)\.log|docker logs )' <<<"${real_run}")" != 3 )) \
+     || ! logscan_is_relay_log "strfry.iter-3.log"; then
+    echo "SELF-TEST FAIL (wiring): the relay log must be dumped from the live container exactly once, after the iteration's relay reset (line ${reset_line:-none}) and before the gate (line ${gate_line:-none}), beside the failed iteration's logcat and drive copies, under a name logscan_gate_dir types as a relay sink (dump line ${dump_line:-none})" >&2
+    fail=1
+  fi
   if (( fail )); then
     echo "run-flake-stress.sh: SELF-TEST FAILED" >&2
     return 1
   fi
-  echo "run-flake-stress.sh: self-test passed (the log-privacy gate removes exactly the *.log files it scanned on a leak and touches nothing on rc 3 or rc 0; the gate library is sourced, the one gate call covers LOG_DIR with its report outside the upload, no soft scanner gate, no captured-log echo of its own)."
+  echo "run-flake-stress.sh: self-test passed (the log-privacy gate removes exactly the *.log files it scanned on a leak and touches nothing on rc 3 or rc 0; the gate library is sourced, the one gate call covers LOG_DIR with its report outside the upload, no soft scanner gate, no captured-log echo of its own, the manifest is sealed once with the lane's relay floor before the trap is armed, and each failed iteration's relay log is dumped from the live container beside its logcat and drive copies, typed as a relay sink)."
   return 0
 }
 
@@ -187,6 +225,34 @@ done
 readonly LOG_DIR="/tmp/flake-logs"
 mkdir -p "${LOG_DIR}"
 
+# The line floor this lane seals with. A floor is what turns "the scan read an
+# empty or truncated file and found nothing" into rc 4 instead of a green, so
+# it is calibrated to the smallest COMPLETE capture this lane produces and
+# never to what would make it pass.
+#
+# relay=7. The policy's 1 is sized for the hermetic host relay, which prints a
+# single listen line; this lane's relay is strfry, whose `docker logs` dump is
+# 14-23 lines for a full run across the fleet, of which the first 9 are a fixed
+# startup block. 7 is half the smallest complete dump, so a dump below it is
+# truncated or absent — which is what a container torn down before the dump
+# looks like: ONE line of docker error text. The drive and logcat floors stay
+# the policy's: every iteration drives the whole core flow onto a device-wide
+# capture, which is exactly the shape those defaults were sized for.
+#
+# Sealed ONCE, before the first iteration: every gate reuses the manifest at
+# the out path, and the first one to run is the INNER runner's, inside
+# iteration 1 — so without this the lane's manifest would carry the policy
+# defaults and this floor would never exist.
+readonly -a SEAL_EXTRA=(--floor relay=7)
+seal_rc=0
+logscan_seal host /tmp/haven-soak/needles "${SEAL_EXTRA[@]}" || seal_rc=$?
+if (( seal_rc != 0 )); then
+  echo "ERROR: could not seal this lane's needle manifest (rc ${seal_rc}) — see the" \
+       "line(s) above; every gate would fail the same way, so nothing this run" \
+       "captures can be proven clean." >&2
+  exit 1
+fi
+
 # Final relay teardown on ANY exit so nothing leaks past this script.
 # Best-effort: stop-strfry.sh always exits 0, so it can't flip our rc.
 cleanup() {
@@ -229,6 +295,23 @@ for (( i = 1; i <= ITERATIONS; i++ )); do
     # the shared /tmp/*.log paths.
     cp /tmp/adb-logcat.log "${LOG_DIR}/iter-${i}.logcat.log" 2>/dev/null || true
     cp /tmp/flutter-drive.log "${LOG_DIR}/iter-${i}.drive.log" 2>/dev/null || true
+    # The relay's OWN log, read out of the container while it still exists.
+    # `docker logs` against a torn-down container prints one line of error
+    # text, and that is exactly what the workflow's post-run collection step
+    # uploaded under this lane's relay name for as long as it existed: this
+    # script's EXIT trap `docker rm -f`s the container before any later step
+    # runs, so the relay sink this lane certified was a docker error message,
+    # not a relay log. Here the container is still up — the next reset is the
+    # first thing the NEXT iteration does.
+    # In the FAILED branch with the other two, deliberately: this lane keeps
+    # evidence only for iterations that failed (an all-green run leaves
+    # LOG_DIR empty, which is what keeps the gate below off a clean run), and
+    # a file outside the branch would be uploaded with nothing scanning it.
+    # The name must LEAD with `strfry` (logscan_gate_dir types `strfry*.log`
+    # as a `relay` sink: structural rules off, the public classes scoped out)
+    # and must contain neither `logcat` nor `drive`, which the walker matches
+    # first.
+    docker logs "${STRFRY_CONTAINER:-strfry}" > "${LOG_DIR}/strfry.iter-${i}.log" 2>&1 || true
   fi
 done
 
@@ -271,7 +354,10 @@ if (( ${#FAILED_ITERS[@]} > 0 )); then
   if (( scan_rc != 0 )); then
     echo "ERROR: log-privacy gate failed on ${LOG_DIR} (rc=${scan_rc}) — see the" \
          "line(s) above. rc=1 means key material or a declared identifier reached" \
-         "the preserved logs; rc=3 means a failing iteration left no readable log." >&2
+         "the preserved logs; rc=3 means a failing iteration left no readable log;" \
+         "rc=4 means one is below its line floor, which on THIS path is usually" \
+         "the failure itself — an iteration that died early leaves a short" \
+         "transcript. Diagnosis only: this block already exits 1." >&2
   fi
   echo
   # A flake test fails on ANY failure — even 1/N is a flake worth

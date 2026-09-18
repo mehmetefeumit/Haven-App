@@ -690,10 +690,16 @@ run_tier() {
   # Delegate: the shared runner owns the first-test watchdog, the narrowed
   # retry gate and the secret-leak scan. HAVEN_E2E_IOS_SKIP_UNINSTALL is the one
   # opt-in this lane needs from it (see this file's header).
+  #
+  # HAVEN_LOGSCAN_DRIVE_FLOOR is this lane's own anti-vacuity floor: a COMPLETE
+  # transcript of one tier's drive is 54 lines (measured, CI run 35280144455)
+  # against the policy default of 100, which is the core-flow drive's and would
+  # read every green B7 tier as truncated. 27 is half the measured capture.
   set +e
   HAVEN_LIVE_SYNC="${LIVE_SYNC}" \
   HAVEN_E2E_RELAY="${RELAY_URL}" \
   HAVEN_E2E_IOS_SKIP_UNINSTALL=1 \
+  HAVEN_LOGSCAN_DRIVE_FLOOR=27 \
     bash "${SIM_RUNNER}" "${SCENARIO_FILE}" "${SIM_UDID}"
   rc=$?
   set -e

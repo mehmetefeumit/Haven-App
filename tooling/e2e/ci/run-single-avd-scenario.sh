@@ -779,13 +779,17 @@ wlan0	0002000A	00000000	0000	0	0	0	00FFFFFF	0	0	0" 10.0.2.2; then
   local -a got=()
   # The recorder's upstream selects the proxy profile: the sidecar, the host
   # needles added, the Dart plants declared (never `--declared-plants none`),
-  # RELAY_URL and the upstream exempted, e2e_combined's floors.
+  # RELAY_URL and the upstream exempted, e2e_combined's floors. The BARE
+  # loopback host is exempted on its own account under both profiles — the
+  # Flutter engine announces its Dart VM service on `http://127.0.0.1:<port>/`
+  # in every logcat this runner captures (logscan-gate.sh states the claim).
   reset_gate_logs; gate_run ws://127.0.0.1:7777 ""
   mapfile -t got < "${seal_argv}"
   local -a want_seal=(seal --run-id local-local --decl "${needles}/default.needles.decl"
     "${host_needles[@]}"
     --exempt-endpoint ws://10.0.2.2:7788
     --exempt-endpoint ws://127.0.0.1:7788 --exempt-endpoint ws://10.0.2.2:7788
+    --exempt-endpoint 127.0.0.1
     --exempt-endpoint ws://127.0.0.1:7777
     --expect pubkey=3 --expect coordinate=4 --expect circle_name=1
     --expect petname=1 --expect nostr_group_id=1 --expect mls_group_id=1
@@ -808,6 +812,7 @@ wlan0	0002000A	00000000	0000	0	0	0	00FFFFFF	0	0	0" 10.0.2.2; then
   want_seal=(seal --run-id local-local "${host_floors[@]}" --declared-plants none
     --exempt-endpoint ws://10.0.2.2:7788
     --exempt-endpoint ws://127.0.0.1:7788 --exempt-endpoint ws://10.0.2.2:7788
+    --exempt-endpoint 127.0.0.1
     --out "${needles}/local-local.needles.json")
   if (( rc != 0 )) || [[ "$(printf '%s\n' "${got[@]}")" != "$(printf '%s\n' "${want_seal[@]}")" ]]; then
     echo "SELF-TEST FAIL (9c host seal argv): rc ${rc}; got '${got[*]}', expected '${want_seal[*]}'" >&2

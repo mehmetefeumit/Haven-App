@@ -76,6 +76,14 @@
 #   HAVEN_LOGSCAN_HOST_COORDINATE  'lat,lon' a lane seeded into the simulator
 #                    (run-b4-ios-real-gps.sh), declared at seal time beside the
 #                    host needles. Never echoed.
+#   HAVEN_LOGSCAN_DRIVE_FLOOR  This lane's `drive` line floor, sealed as
+#                    `--floor drive=<n>`. A floor is calibrated to the smallest
+#                    COMPLETE transcript of ITS lane, and the policy default
+#                    (100) is the long core-flow drive's: a single-scenario
+#                    b-lane prints a third of that on a fully passing run, so
+#                    each such lane states its own rather than the default
+#                    reading every green run as truncated. Unset keeps the
+#                    policy's.
 #
 # Retry discipline (CI_HARDENING_BACKLOG.md A6):
 #   Both iOS callers wrap this script in `nick-fields/retry@v3` with no
@@ -309,17 +317,92 @@ run_ios_test_with_watchdog() {
 # HAVEN_LOGSCAN_HOST_COORDINATE so the seal declares it beside the host
 # needles; that value is never echoed here. The transcript is one file, so
 # there is no final-attempt slice to narrow the plants to.
+#
+# Endpoint exemptions, mirroring run-single-avd-scenario.sh:321-323: every
+# endpoint THIS lane configures is infrastructure the harness named, not a value
+# the run minted, so it is exempted from S7/S12 and never declared. The gate
+# already exempts RELAY_URL and the proxy's two spellings; what it cannot know
+# is the profile pool and the Blossom server, which only the profile lane sets.
 scan_log_or_contain() {
   local profile="${HAVEN_LOGSCAN_PROFILE:-}"
   if [[ -z "${profile}" ]]; then
     if [[ -n "${WIRE_UPSTREAM:-}${HAVEN_WIRE_SENTINEL:-}" ]]; then profile=proxy; else profile=host; fi
   fi
+  # THE DRIVE SINK IS EVERY SCENARIO'S TRANSCRIPT, not just this invocation's.
+  #
+  # `$1` is one fixed path that this script TRUNCATES per invocation, so a lane
+  # that drives two scenarios through it (e2e-ios.yml: e2e_combined, then
+  # ios_bg_mirror_test) has only the last one by the time anything reads it —
+  # and the mirror check is a single `testWidgets` with no prints, ~14 lines
+  # against a `drive` floor calibrated to the core flow's ~394, i.e. rc 4 on
+  # every green run of both variants. Per-STEP floors cannot fix it: the first
+  # gate seals the manifest and every later gate reuses it, floors included
+  # (tooling/e2e/ci/logscan-gate.sh).
+  #
+  # So this scenario's live transcript is weighed together with every EARLIER
+  # scenario's preserved one, and this scenario's copy is taken after the gate
+  # (see below). Each file is counted once: the floor is a minimum, and a sink
+  # list holding both a transcript and a copy of it would halve the floor's
+  # strictness for every single-scenario lane.
+  local transcript sink="$1"
+  for transcript in "${1%.log}".*.log; do
+    [[ -f "${transcript}" ]] || continue
+    sink="${sink},${transcript}"
+  done
   local -a lane=()
   [[ -z "${HAVEN_LOGSCAN_HOST_COORDINATE:-}" ]] \
     || lane=(--host-decl "coordinate=${HAVEN_LOGSCAN_HOST_COORDINATE}")
+  [[ -z "${HAVEN_LOGSCAN_DRIVE_FLOOR:-}" ]] \
+    || lane+=(--floor "drive=${HAVEN_LOGSCAN_DRIVE_FLOOR}")
+  # The profile pool is three `ws://` URLs, which is an S7 hit on any
+  # Haven-owned line that names one — latent until CI run 35280144455 made iOS
+  # lines parse at all. Split on comma AND space so the lane's spelling cannot
+  # decide whether the exemption lands; HAVEN_E2E_PROFILE_RELAY (the pool's
+  # first member) needs no entry of its own, being one of these.
+  local endpoint
+  local -a pool=()
+  IFS=', ' read -r -a pool <<<"${HAVEN_E2E_PROFILE_RELAYS:-}"
+  for endpoint in ${pool[@]+"${pool[@]}"}; do
+    [[ -z "${endpoint}" ]] || lane+=(--exempt-endpoint "${endpoint}")
+  done
+  # The Blossom server prints `listening on 127.0.0.1:<port>` into its own log
+  # while the client's URL says `localhost`, so the exemption has to name the
+  # SERVER's spelling: `localhost` trips no rule, `127.0.0.1` trips S12. Until
+  # now that line was clean only because the gate's unconditional
+  # `ws://127.0.0.1:7788` proxy exemption happens to expand to the bare host —
+  # an accident that would end with the next change to the proxy's port.
+  [[ -z "${HAVEN_E2E_BLOSSOM_URL:-}" ]] \
+    || lane+=(--exempt-endpoint "http://127.0.0.1:${HAVEN_E2E_BLOSSOM_URL##*:}")
+  local rc=0
   logscan_gate "${profile}" /tmp/haven-soak/needles \
     ${lane[@]+"${lane[@]}"} -- \
-    --sink "drive=$1" --report /tmp/ios-logscan/sim.ndjson
+    --sink "drive=${sink}" --report /tmp/ios-logscan/sim.ndjson || rc=$?
+  # Preserve this scenario's transcript for the NEXT invocation's gate and for
+  # the artifact — AFTER the gate, never before. On rc 1 the gate has just
+  # deleted every file it scanned, because the workflows upload on failure and
+  # a leak is a failure; a copy taken beforehand would survive to be published,
+  # and fixture S1 fails on exactly that. The ORDER is what contains a leak —
+  # `cp` of a deleted source copies nothing — and the rc test below is defence
+  # in depth, not the mechanism.
+  if (( rc != 1 )); then
+    cp "$1" "$(scenario_transcript "$1")" 2>/dev/null || true
+  fi
+  return "${rc}"
+}
+
+# scenario_transcript <log> — where THIS invocation's drive log is preserved.
+#
+# One file per scenario, named after it and placed BESIDE the transcript it
+# copies, so a two-scenario lane keeps both, an artifact listing says which is
+# which, and the gate's glob above stays inside whatever directory it was
+# handed — which is what keeps the self-test's fixtures hermetic instead of
+# sweeping up a previous lane's /tmp. Sanitised the way
+# ios_retry_verdict_file sanitises its own slug: the scenario is an argument,
+# and an argument is not somewhere a path separator should be able to reach.
+scenario_transcript() {
+  local slug="${SCENARIO_FILE##*/}"
+  slug="${slug%.dart}"
+  printf '%s.%s.log' "${1%.log}" "${slug//[^A-Za-z0-9._-]/-}"
 }
 
 # ---------------------------------------------------------------------------
@@ -623,8 +706,10 @@ run_self_test() {
   gate_log="${tmp}/gate.log"
   for want in 1 3 0; do
     printf 'transcript\n' > "${gate_log}"
+    rm -f "${tmp}"/gate.*.log
     rc=0
-    HAVEN_LOGSCAN= HAVEN_LOGSCAN_PROFILE= HAVEN_LOGSCAN_HOST_COORDINATE= \
+    SCENARIO_FILE=integration_test/e2e/e2e_combined.dart \
+      HAVEN_LOGSCAN= HAVEN_LOGSCAN_PROFILE= HAVEN_LOGSCAN_HOST_COORDINATE= \
       SECRET_SCAN="${fake_scan}" FAKE_SCAN_RC="${want}" \
       HAVEN_LOGSCAN_BIN="${tmp}/no-such-binary" \
       scan_log_or_contain "${gate_log}" 2>/dev/null || rc=$?
@@ -636,7 +721,19 @@ run_self_test() {
       echo "SELF-TEST FAIL (S1): a leak (rc 1) left the transcript on disk for" \
            "the failure-artifact upload to publish" >&2
       fail=1
-    elif (( want != 1 )) && [[ ! -e "${gate_log}" ]]; then
+    fi
+    if (( want == 1 )) && [[ -e "${tmp}/gate.e2e_combined.log" ]]; then
+      echo "SELF-TEST FAIL (S1): a leak (rc 1) left a per-scenario COPY of the" \
+           "transcript on disk — the gate deleted what it scanned and the copy" \
+           "would be published in its place" >&2
+      fail=1
+    fi
+    if (( want != 1 )) && [[ ! -e "${tmp}/gate.e2e_combined.log" ]]; then
+      echo "SELF-TEST FAIL (S1): floor rc ${want} left no per-scenario copy, so" \
+           "a second scenario's gate would weigh this one's transcript as absent" >&2
+      fail=1
+    fi
+    if (( want != 1 )) && [[ ! -e "${gate_log}" ]]; then
       echo "SELF-TEST FAIL (S1): floor rc ${want} removed a log it had no" \
            "leak to contain" >&2
       fail=1
@@ -703,18 +800,23 @@ run_self_test() {
   # (S3) THE FLAG-ON CALL SITE. The library's own --self-test proves what
   #      logscan_gate does with its arguments; what only this file can prove
   #      is which arguments it is handed. A recording stub in place of the
-  #      sourced function: the job's profile, the fixed sidecar directory, the
-  #      transcript as the one drive sink, the report beside (never in) the
-  #      uploaded files, and a lane's seeded position declared beside the
-  #      host needles only when the lane hands one in; the verdict comes back
-  #      unchanged.
+  #      sourced function: the job's profile, the fixed sidecar directory, THIS
+  #      SCENARIO'S PRESERVED transcript as the drive sink (not the fixed path
+  #      the next invocation truncates), the report beside (never in) the
+  #      uploaded files, and a lane's seeded position, own drive floor and own
+  #      endpoints passed as seal arguments only when the lane hands them in;
+  #      the verdict comes back unchanged.
   local gate_argv="${tmp}/gate-argv" real_gate
+  local gate_drive="${gate_log}"
   real_gate="$(declare -f logscan_gate)"
   logscan_gate() { printf '%s\n' "$@" > "${gate_argv}"; return "${FAKE_GATE_RC}"; }
   local -a want_argv=(proxy /tmp/haven-soak/needles --
-    --sink "drive=${gate_log}" --report /tmp/ios-logscan/sim.ndjson)
+    --sink "drive=${gate_drive}" --report /tmp/ios-logscan/sim.ndjson)
   rc=0
-  HAVEN_LOGSCAN=true HAVEN_LOGSCAN_PROFILE=proxy HAVEN_LOGSCAN_HOST_COORDINATE= \
+  rm -f "${tmp}"/gate.*.log
+  SCENARIO_FILE=integration_test/e2e/e2e_combined.dart \
+    HAVEN_LOGSCAN=true HAVEN_LOGSCAN_PROFILE=proxy HAVEN_LOGSCAN_HOST_COORDINATE= \
+    HAVEN_LOGSCAN_DRIVE_FLOOR= HAVEN_E2E_PROFILE_RELAYS= HAVEN_E2E_BLOSSOM_URL= \
     FAKE_GATE_RC=4 scan_log_or_contain "${gate_log}" || rc=$?
   if (( rc != 4 )) || [[ "$(cat "${gate_argv}")" != "$(printf '%s\n' "${want_argv[@]}")" ]]; then
     echo "SELF-TEST FAIL (S3): wanted rc 4 with argv '${want_argv[*]}', got rc" \
@@ -722,10 +824,13 @@ run_self_test() {
     fail=1
   fi
   want_argv=(host /tmp/haven-soak/needles --host-decl 'coordinate=-41.234567,-134.567890' --
-    --sink "drive=${gate_log}" --report /tmp/ios-logscan/sim.ndjson)
+    --sink "drive=${gate_drive}" --report /tmp/ios-logscan/sim.ndjson)
   rc=0
-  HAVEN_LOGSCAN=true HAVEN_LOGSCAN_PROFILE=host \
+  rm -f "${tmp}"/gate.*.log
+  SCENARIO_FILE=integration_test/e2e/e2e_combined.dart \
+    HAVEN_LOGSCAN=true HAVEN_LOGSCAN_PROFILE=host \
     HAVEN_LOGSCAN_HOST_COORDINATE='-41.234567,-134.567890' \
+    HAVEN_LOGSCAN_DRIVE_FLOOR= HAVEN_E2E_PROFILE_RELAYS= HAVEN_E2E_BLOSSOM_URL= \
     FAKE_GATE_RC=0 scan_log_or_contain "${gate_log}" || rc=$?
   if (( rc != 0 )) || [[ "$(cat "${gate_argv}")" != "$(printf '%s\n' "${want_argv[@]}")" ]]; then
     echo "SELF-TEST FAIL (S3): a seeded position must be declared as one" \
@@ -733,6 +838,98 @@ run_self_test() {
          "'$(tr '\n' ' ' < "${gate_argv}")'" >&2
     fail=1
   fi
+  # A lane's own drive floor: one `--floor drive=<n>` seal argument, and only
+  # when the lane states one. The policy default is the core-flow drive's, and
+  # a b-lane that took it would read its own complete transcript as truncated
+  # (CI run 35280144455: 45, 49 and 54 lines against a floor of 100).
+  want_argv=(host /tmp/haven-soak/needles --floor drive=22 --
+    --sink "drive=${gate_drive}" --report /tmp/ios-logscan/sim.ndjson)
+  rc=0
+  rm -f "${tmp}"/gate.*.log
+  SCENARIO_FILE=integration_test/e2e/e2e_combined.dart \
+    HAVEN_LOGSCAN=true HAVEN_LOGSCAN_PROFILE=host HAVEN_LOGSCAN_HOST_COORDINATE= \
+    HAVEN_LOGSCAN_DRIVE_FLOOR=22 HAVEN_E2E_PROFILE_RELAYS= HAVEN_E2E_BLOSSOM_URL= \
+    FAKE_GATE_RC=0 scan_log_or_contain "${gate_log}" || rc=$?
+  if (( rc != 0 )) || [[ "$(cat "${gate_argv}")" != "$(printf '%s\n' "${want_argv[@]}")" ]]; then
+    echo "SELF-TEST FAIL (S3): a lane's drive floor must be one --floor seal" \
+         "argument before the separator; got rc ${rc} with" \
+         "'$(tr '\n' ' ' < "${gate_argv}")'" >&2
+    fail=1
+  fi
+
+  # A lane's own endpoints: every member of the profile pool and the Blossom
+  # server's OWN spelling, each one `--exempt-endpoint` before the separator.
+  # The pool is split on comma AND space, so the same three URLs land whichever
+  # way the workflow writes them.
+  want_argv=(host /tmp/haven-soak/needles
+    --exempt-endpoint ws://localhost:7778
+    --exempt-endpoint ws://localhost:7779
+    --exempt-endpoint ws://localhost:7780
+    --exempt-endpoint http://127.0.0.1:3000 --
+    --sink "drive=${gate_drive}" --report /tmp/ios-logscan/sim.ndjson)
+  local spelling
+  for spelling in 'ws://localhost:7778,ws://localhost:7779,ws://localhost:7780' \
+                  'ws://localhost:7778 ws://localhost:7779 ws://localhost:7780'; do
+    rc=0
+    rm -f "${tmp}"/gate.*.log
+    SCENARIO_FILE=integration_test/e2e/e2e_combined.dart \
+    HAVEN_LOGSCAN=true HAVEN_LOGSCAN_PROFILE=host HAVEN_LOGSCAN_HOST_COORDINATE= \
+      HAVEN_LOGSCAN_DRIVE_FLOOR= HAVEN_E2E_PROFILE_RELAYS="${spelling}" \
+      HAVEN_E2E_BLOSSOM_URL=http://localhost:3000 \
+      FAKE_GATE_RC=0 scan_log_or_contain "${gate_log}" || rc=$?
+    if (( rc != 0 )) || [[ "$(cat "${gate_argv}")" != "$(printf '%s\n' "${want_argv[@]}")" ]]; then
+      echo "SELF-TEST FAIL (S3): a lane's own endpoints must each be one" \
+           "--exempt-endpoint before the separator (pool spelled" \
+           "'${spelling}'); got rc ${rc} with" \
+           "'$(tr '\n' ' ' < "${gate_argv}")'" >&2
+      fail=1
+    fi
+  done
+  # …and a lane that configures neither passes neither: an exemption nobody
+  # asked for is a rule switched off for free.
+  want_argv=(host /tmp/haven-soak/needles --
+    --sink "drive=${gate_drive}" --report /tmp/ios-logscan/sim.ndjson)
+  rc=0
+  rm -f "${tmp}"/gate.*.log
+  SCENARIO_FILE=integration_test/e2e/e2e_combined.dart \
+    HAVEN_LOGSCAN=true HAVEN_LOGSCAN_PROFILE=host HAVEN_LOGSCAN_HOST_COORDINATE= \
+    HAVEN_LOGSCAN_DRIVE_FLOOR= HAVEN_E2E_PROFILE_RELAYS= HAVEN_E2E_BLOSSOM_URL= \
+    FAKE_GATE_RC=0 scan_log_or_contain "${gate_log}" || rc=$?
+  if (( rc != 0 )) || [[ "$(cat "${gate_argv}")" != "$(printf '%s\n' "${want_argv[@]}")" ]]; then
+    echo "SELF-TEST FAIL (S3): a lane that sets no endpoint must exempt none;" \
+         "got rc ${rc} with '$(tr '\n' ' ' < "${gate_argv}")'" >&2
+    fail=1
+  fi
+
+  # A SECOND scenario in the same job: e2e-ios.yml drives e2e_combined and then
+  # ios_bg_mirror_test through this script, which truncates the one fixed
+  # transcript per invocation. The mirror check is one `testWidgets` with no
+  # prints — ~14 lines against a floor calibrated to the core flow — so the
+  # second gate has to weigh the first scenario's PRESERVED transcript with it,
+  # or every green core-flow run is rc 4. Per-step floors cannot substitute:
+  # the first gate sealed the manifest and this one reuses it.
+  rm -f "${tmp}"/gate.*.log
+  printf 'the core flow, preserved by its own gate\n' > "${tmp}/gate.e2e_combined.log"
+  want_argv=(host /tmp/haven-soak/needles --
+    --sink "drive=${gate_log},${tmp}/gate.e2e_combined.log"
+    --report /tmp/ios-logscan/sim.ndjson)
+  rc=0
+  SCENARIO_FILE=integration_test/ios_bg_mirror_test.dart \
+    HAVEN_LOGSCAN=true HAVEN_LOGSCAN_PROFILE=host HAVEN_LOGSCAN_HOST_COORDINATE= \
+    HAVEN_LOGSCAN_DRIVE_FLOOR= HAVEN_E2E_PROFILE_RELAYS= HAVEN_E2E_BLOSSOM_URL= \
+    FAKE_GATE_RC=0 scan_log_or_contain "${gate_log}" || rc=$?
+  if (( rc != 0 )) || [[ "$(cat "${gate_argv}")" != "$(printf '%s\n' "${want_argv[@]}")" ]]; then
+    echo "SELF-TEST FAIL (S3): a second scenario's gate must weigh the first" \
+         "scenario's preserved transcript with its own; got rc ${rc} with" \
+         "'$(tr '\n' ' ' < "${gate_argv}")'" >&2
+    fail=1
+  fi
+  if [[ ! -e "${tmp}/gate.ios_bg_mirror_test.log" ]]; then
+    echo "SELF-TEST FAIL (S3): the gate left no transcript under THIS" \
+         "scenario's name, so a third scenario would not see it" >&2
+    fail=1
+  fi
+  rm -f "${tmp}"/gate.*.log
 
   # (S4) THE PROFILE IS INFERRED, NEVER DEFAULTED. With HAVEN_LOGSCAN_PROFILE
   #      unset the gate is handed `proxy` when the recorder's exports are
@@ -746,7 +943,10 @@ run_self_test() {
   for spec in 'sentinel|HAVEN_WIRE_SENTINEL:cafe||proxy' 'upstream||ws://127.0.0.1:7777|proxy' 'neither|||host'; do
     IFS='|' read -r label sentinel upstream want <<<"${spec}"
     rc=0
-    HAVEN_LOGSCAN=true HAVEN_LOGSCAN_PROFILE= HAVEN_LOGSCAN_HOST_COORDINATE= \
+    rm -f "${tmp}"/gate.*.log
+    SCENARIO_FILE=integration_test/e2e/e2e_combined.dart \
+      HAVEN_LOGSCAN=true HAVEN_LOGSCAN_PROFILE= HAVEN_LOGSCAN_HOST_COORDINATE= \
+      HAVEN_LOGSCAN_DRIVE_FLOOR= HAVEN_E2E_PROFILE_RELAYS= HAVEN_E2E_BLOSSOM_URL= \
       HAVEN_WIRE_SENTINEL="${sentinel}" WIRE_UPSTREAM="${upstream}" \
       FAKE_GATE_RC=0 scan_log_or_contain "${gate_log}" || rc=$?
     inferred="$(head -n 1 "${gate_argv}")"
@@ -763,7 +963,7 @@ run_self_test() {
     return 1
   fi
   echo "run-ios-sim-scenario.sh --self-test: all 8 watchdog fixtures and the" \
-       "four log-privacy-gate fixtures passed" \
+       "four log-privacy-gate fixture groups passed" \
        "(a post-build stall is caught, marked and accepted by the classifier," \
        "and stays retryable even when the process we kill overwrites the marker" \
        "on its way out; a running suite, a genuine failure, a slow build, a kill" \
@@ -773,8 +973,9 @@ run_self_test() {
        "gate is the floor alone when HAVEN_LOGSCAN is unset, removing the" \
        "transcript on a leak and on nothing else, stands at top level before" \
        "the retry classification with no echo of the transcript beside it," \
-       "hands the sourced gate the job's profile, the transcript and a seeded" \
-       "position when a lane supplies one, infers proxy from either recorder" \
+       "hands the sourced gate the job's profile, the transcript, a seeded" \
+       "position and this lane's own drive floor when it supplies them," \
+       "infers proxy from either recorder" \
        "export and host from neither when no profile is stated, and refuses a" \
        "mistyped profile before the build)."
   return 0

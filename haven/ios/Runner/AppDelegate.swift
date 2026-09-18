@@ -1,5 +1,25 @@
 import Flutter
 import UIKit
+import os
+
+/// The unified-log destination for this file's DEBUG diagnostics.
+///
+/// `os_log` under a Haven subsystem, never `NSLog`: the runtime log scanner
+/// decides whose line a `log show` record is from the record's own emitter —
+/// its subsystem, else the emitting library, else the process
+/// (`tooling/logscan/policy.toml`'s `owned_emitters`). An `NSLog` record
+/// reaches `_os_log_impl` from inside Foundation and carries no subsystem at
+/// all, and `Foundation` is the library on 36 673 lines of one real capture,
+/// vendor plugins included, so it can never be owned. A subsystem Haven names
+/// makes these lines Haven's by construction rather than by inference. A
+/// file-level constant so the call sites can name it bare, which is what
+/// `scripts/ci/check_native_log_allowlist.sh` admits as a logged argument.
+///
+/// No `type:` at the call sites: that is OS_LOG_TYPE_DEFAULT, which logd
+/// PERSISTS. `.debug` and `.info` live in a wrapping memory buffer that
+/// `log collect` finds only if it runs soon enough — the eviction that cost CI
+/// run 35280144455's two long lanes their Rust plant.
+private let HAVEN_RUNNER_LOG = OSLog(subsystem: "haven_ios", category: "runner")
 
 @main
 @objc class AppDelegate: FlutterAppDelegate {
@@ -40,6 +60,7 @@ import UIKit
   // didFinishLaunching returns.
   private let locationStreamHandler = HavenLocationStreamHandler()
 
+
   override func application(
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
@@ -54,8 +75,23 @@ import UIKit
     // the launch path. Undeclared (no host proxy channel reaches this
     // process) and matched by shape; literal token only — see
     // `scripts/ci/native_log_allowlist.txt`.
+    //
+    // `#if DEBUG` is a compile-time condition, not the `DEBUG=1` preprocessor
+    // macro the project sets for C/ObjC: it is true only while the Runner
+    // target's `SWIFT_ACTIVE_COMPILATION_CONDITIONS` names DEBUG. That setting
+    // was absent until CI run 35280144455 showed this plant missing from ALL
+    // FIVE iOS lanes' captures while the Rust one was present — every `#if
+    // DEBUG` in this target, here and in the two wake handlers, was compiling
+    // to nothing. Deleting it from the Debug configuration puts them all back
+    // to always-off, silently.
+    //
+    // `os_log` with no `type:` is OS_LOG_TYPE_DEFAULT, which logd PERSISTS.
+    // The Rust plant next door is a `log::debug!`, which the `oslog` crate maps
+    // to OS_LOG_TYPE_INFO — memory-only, and evicted before `log collect` in
+    // the two lanes of that run whose app lived longest. A control whose
+    // survival depends on how long the lane ran is not a control.
     #if DEBUG
-    NSLog("logscan-plant-swift-open-N48X2CR93Y")
+    os_log("logscan-plant-swift-open-N48X2CR93Y", log: HAVEN_RUNNER_LOG)
     #endif
 
     GeneratedPluginRegistrant.register(with: self)

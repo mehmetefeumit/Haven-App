@@ -407,18 +407,33 @@ jobs:
           retention-days: 14
           if-no-files-found: ignore
 
-      # Collect EVERY container's logs so triage can confirm the kind-0 landed
-      # on a PROFILE-plane relay (never on the circle relay) AND the blob landed
-      # on blossom — the whole point of the lane. The pool members are
-      # enumerated by name prefix so this step needs no port list.
+      # Collect EVERY relay container's log so triage can confirm the kind-0
+      # landed on a PROFILE-plane relay and never on the circle relay. The pool
+      # members are enumerated by name prefix so this step needs no port list.
+      #
+      # Blossom is the exception, and deliberately so. An HTTP blob server's
+      # access log is written from the server side ABOUT its client: in CI run
+      # 35280144455 `docker logs blossom` carried four 64-hex blob digests, the
+      # uploading npub — which the host needles caught as a needle, not merely
+      # as a shape — and the base64 kind-24242 Authorization event. That is the
+      # position strfry's log is in too, except that strfry has the rules-off
+      # `relay` sink class and an HTTP server must not be given one (its log
+      # carries the auth EVENTS the rules exist to see). So the raw log never
+      # becomes a file: it is piped straight into logscan_http_log_summary,
+      # which can emit nothing but counts, and the summary is scanned as `diag`
+      # below like any other file. That the blob landed is asserted by the
+      # drive target, which is where the claim belongs.
       - name: Collect container logs
         if: always()
         run: |
           docker logs strfry > /tmp/strfry.log 2>&1 || true
-          docker logs blossom > /tmp/blossom.log 2>&1 || true
           for c in $(docker ps -a --filter 'name=^strfry-profile-' --format '{{.Names}}'); do
             docker logs "${c}" > "/tmp/${c}.log" 2>&1 || true
           done
+          # shellcheck source=tooling/e2e/ci/logscan-gate.sh
+          source tooling/e2e/ci/logscan-gate.sh
+          docker logs blossom 2>&1 \
+            | logscan_http_log_summary > /tmp/blossom-summary.log || true
 
       # `if: always()` and `.log`, not `.txt`: the scan step below runs on every
       # outcome and refuses an absent file, and the scanner's directory walk
@@ -453,9 +468,13 @@ jobs:
       # relay logs of both planes (`relay` class: structural rules off — a
       # relay legitimately holds pubkeys and event ids) and, as `diag` sinks
       # (a one-line floor, no plant requirement, every rule and every needle
-      # on), the host diagnostics and the blossom log: an HTTP blob server,
-      # not a relay, whose log carries the kind-24242 auth events and must
-      # not be typed into the rules-off class. Scan-before-upload, as its OWN step on
+      # on), the host diagnostics and the blossom SUMMARY. The summary rather
+      # than the log, because an HTTP blob server is not a relay: its access
+      # log carries the kind-24242 auth events, the blob digests and the
+      # uploading pubkey, so it must neither be typed into the rules-off class
+      # nor kept (see the collection step). The summary is scanned here all the
+      # same — a reduction whose safety is only asserted is not a
+      # reduction. Scan-before-upload, as its OWN step on
       # every outcome short of a cancellation: a leak (rc 1) deletes every
       # scanned file and fails the lane even on an otherwise green run, so the
       # upload finds nothing to publish; an unscannable log (rc 3), a broken
@@ -471,7 +490,7 @@ jobs:
           bash tooling/e2e/ci/scan-logs.sh \
             --manifest /tmp/haven-soak/needles/*.needles.json \
             --sink "relay=$(IFS=,; echo "${relays[*]}")" \
-            --sink diag=/tmp/diag.log,/tmp/blossom.log \
+            --sink diag=/tmp/diag.log,/tmp/blossom-summary.log \
             --report /tmp/logscan-report-upload.ndjson || rc=$?
           exit "${rc}"
 
@@ -485,7 +504,7 @@ jobs:
             /tmp/flutter-drive.log
             /tmp/strfry.log
             /tmp/strfry-profile-*.log
-            /tmp/blossom.log
+            /tmp/blossom-summary.log
             /tmp/diag.log
             /tmp/scenario.apk
           retention-days: 14
@@ -573,6 +592,12 @@ jobs:
       # tooling/e2e/ci/scan-logs.sh before the retry classification can see it.
       HAVEN_LOGSCAN: "true"
       HAVEN_LOGSCAN_PROFILE: host
+      # This lane's own `drive` line floor. A COMPLETE transcript of this
+      # single-scenario drive is 49 lines (measured, CI run 35280144455)
+      # against the policy default of 100, which is the core-flow drive's and
+      # would read every green profile run as truncated; 24 is half the
+      # measured capture.
+      HAVEN_LOGSCAN_DRIVE_FLOOR: "24"
 
     steps:
       - name: Checkout
@@ -691,9 +716,14 @@ jobs:
       # two `log show` exports replace it — Haven's own lines (the Rust
       # `frb_user` oslog subsystem and the Runner process), uncapped, and the
       # whole device under SIM_LOG_FULL_CAP_BYTES. `log show` emits in
-      # chronological order, so the cap keeps the EARLIEST bytes; the residual
-      # past it is discarded with the archive — evidence lost, nothing
-      # published. Every log the upload step names is scanned by the next
+      # chronological order and the archive opens at BOOT, so a head cap kept
+      # the boot storm and nothing else: in CI run 35280144455 every lane's
+      # capped export ended 15-20 minutes BEFORE its app launched, because
+      # 64 MiB is ~2 minutes of a booting simulator. `tail -c` keeps the bytes
+      # nearest the archive's END, which is the `log collect` above and so the
+      # scenario itself; the residual — a partial first line, and the start of
+      # a run that logs more than the cap after boot — is discarded with the
+      # archive, evidence lost and nothing published. Every log the upload step names is scanned by the next
       # step, before that step can see it.
       - name: Collect simulator diagnostics
         if: always()
@@ -705,7 +735,7 @@ jobs:
             --predicate 'subsystem == "frb_user" OR process == "Runner"' \
             > /tmp/sim-unified.log 2>/dev/null || true
           log show --archive /tmp/sim.logarchive --style syslog 2>/dev/null \
-            | head -c "${SIM_LOG_FULL_CAP_BYTES}" > /tmp/sim-unified-full.log || true
+            | tail -c "${SIM_LOG_FULL_CAP_BYTES}" > /tmp/sim-unified-full.log || true
           rm -rf /tmp/sim.logarchive
           cp /tmp/haven-local-relay.log /tmp/relay.log 2>/dev/null || true
           for f in /tmp/haven-local-relay-profile-*.log; do

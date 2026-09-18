@@ -75,12 +75,13 @@ const FURNITURE_LOGCAT_LINES: u64 = 87;
 const FURNITURE_RUST_TEST_LINES: u64 = 141;
 const FURNITURE_FLUTTER_LINES: u64 = 117;
 /// Lines of `format.ios.log` whose OWNED variant must reach the rules: five of
-/// the columnar rendering, three of the `--style syslog` one the lanes capture.
-const IOS_OWNED_RULE_LINES: [u64; 8] = [15, 16, 17, 18, 23, 25, 26, 27];
+/// the rendering the lanes capture, three of the `<<Type>>` one, three of the
+/// columnar one.
+const IOS_OWNED_RULE_LINES: [u64; 11] = [45, 46, 47, 48, 49, 56, 57, 58, 61, 62, 63];
 /// The one line holding a declared value, deliberately UN-owned.
-const IOS_NEEDLE_LINE: u64 = 33;
+const IOS_NEEDLE_LINE: u64 = 68;
 /// Lines of it, pinned so a fixture that lost a variant cannot pass quietly.
-const IOS_FORMAT_LINES: u64 = 33;
+const IOS_FORMAT_LINES: u64 = 68;
 /// Structural rules, all of which the dirty fixture must exercise.
 const RULE_COUNT: usize = 12;
 /// Bytes the CLI's throughput probe generates.
@@ -1121,7 +1122,7 @@ fn case_ios_framing(rig: &Rig, mutation: Option<&'static str>) -> Case {
     require(
         rule_lines == IOS_OWNED_RULE_LINES,
         &format!(
-            "the structural rules ran on lines {rule_lines:?}, not on the owned variants of the two renderings {IOS_OWNED_RULE_LINES:?}"
+            "the structural rules ran on lines {rule_lines:?}, not on the owned variants of the three renderings {IOS_OWNED_RULE_LINES:?}"
         ),
     )?;
     let needle_lines: Vec<u64> = outcome

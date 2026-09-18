@@ -15,8 +15,8 @@
 //!   (`relay` holds pubkeys legitimately) and the sink's term floor do the
 //!   narrowing.
 //! * **rules** — Haven-owned lines only, and never on a `relay` sink. For
-//!   `logcat` they see the MESSAGE BODY rather than the whole line (the host's
-//!   own timestamp is a documented residual, not a Haven leak); for `ios` and
+//!   `logcat` and `ios` they see the MESSAGE BODY rather than the whole line
+//!   (the host's own timestamp is a documented residual, not a Haven leak); for
 //!   `plain` sinks the body IS the line, framing included.
 //! * **cross-entry reassembly** — `logcat` only. `android_logger` chunks a
 //!   record at ~4000 B and Kotlin's `Log.*` has its own per-entry cap, so
@@ -101,8 +101,12 @@ pub struct Finding {
     pub encoding: Option<String>,
     /// The rule id.
     pub rule: Option<String>,
-    /// The log tag, for logcat and `log show` sinks. `None` elsewhere: a line
-    /// PREFIX can carry remote-authored text, which Rule 15 forbids printing.
+    /// Who emitted the line: the logcat tag for a `logcat` sink (Haven's own
+    /// only — an Android tag is free text the emitter composes per call), and
+    /// `<process>/<subsystem-or-library>` for an `ios` one, owned or not, so a
+    /// hit in a device-wide `log show` names the program to go and look at.
+    /// `None` elsewhere: a `plain` line's PREFIX can carry remote-authored
+    /// text, which Rule 15 forbids printing.
     pub tag: Option<String>,
     /// How many times on that line.
     pub count: u64,
@@ -1092,8 +1096,10 @@ struct LineCtx<'a> {
 /// A line split into the part Haven owns and the framing around it.
 struct Framed<'a> {
     body: &'a str,
-    /// The tag the REPORT may print: present only when Haven owns it, because a
-    /// vendor tag is not ours to publish.
+    /// The handle the REPORT may print. On `logcat` it is present only when
+    /// Haven owns the tag, because a vendor tag is free text that is not ours
+    /// to publish; on `ios` it is the record's own process/subsystem columns,
+    /// which name a program rather than carry a message.
     tag: Option<String>,
     /// The tag as parsed, owned or not. The reassembly key needs the real tag:
     /// keying on the reportable one would join two DIFFERENT vendor entries
@@ -1123,28 +1129,30 @@ fn frame<'a>(spec: &SinkSpec, text: &'a str) -> Framed<'a> {
 
 /// A `log show` line, in either rendering the lanes can produce.
 ///
-/// * **`--style syslog`**, which is what every iOS lane captures:
-///   `<date> <time+tz> <host> <process>[<pid>[:<tid>]] <<Type>>: <message>`.
+/// * **`--style syslog`**, which is what every iOS lane captures. What the
+///   simulator actually emits (CI run 35280144455, all five lanes) is
+///   `<date> <time+tz>  <host> <process>[<pid>[:<tid>]]: [(<library>) ][[<subsystem>:<category>] ]<message>`
+///   — two spaces before the host, a parenthesised emitting library, an
+///   optional `[subsystem:category]`, and no `<<Type>>` column at all. The
+///   `<<Type>>` column IS produced by other `log` front-ends, so it stays
+///   accepted as an optional alternative to the colon after the process token;
+///   `fixtures/format.ios.log` carries captured lines of the real shape and
+///   written lines of the other.
 /// * the **default columnar** style:
-///   `<date> <time+tz> <thread> <type> <activity> <pid> <ttl> <process>: <message>`.
+///   `<date> <time+tz> <thread> <type> <activity> <pid> <ttl> <process>: <message>`,
+///   where the library rides in the process column as `Runner(Flutter)`.
 ///
 /// Both, because the capture is one `--style` flag away from the other and a
 /// rendering this function cannot frame is a rendering the structural rules
 /// silently skip. The rc-3 net in [`scan_one`] is what catches a THIRD one.
 ///
-/// In both, `<process>` may carry the emitting library in parentheses
-/// (`Runner(Flutter)`), which is framing rather than identity; the message may
-/// open with the record's `[subsystem:category]` or an `NSLog` prefix, which
-/// stay in the body, because on iOS the process is `Runner` for everything
-/// Haven emits and the subsystem is the only thing that says which layer wrote
-/// the line.
-///
-/// Ownership is an EXACT match of the process name, never a substring. A
-/// substring test owns `RunnerHelper` and — the reason this matters — owns any
-/// vendor line whose MESSAGE happens to contain the word `Runner`, putting
-/// remote-authored text under Haven's structural rules. A line that does not
-/// parse is treated as NOT owned, so the rules skip it; needles are still
-/// searched in every byte of it.
+/// Ownership is an EXACT match of the record's EMITTER — its subsystem, else
+/// its library, else its process — against the sink's `owned_emitters`, never a
+/// substring. See [`crate::policy::SinkSpec::owned_emitters`] for why the
+/// process alone is not the answer on iOS, and note that a substring test would
+/// additionally own `RunnerHelper` and any vendor line whose MESSAGE contains
+/// the word `Runner`. A line that does not parse is treated as NOT owned, so
+/// the rules skip it; needles are still searched in every byte of it.
 fn parse_ios<'a>(spec: &SinkSpec, text: &'a str) -> Framed<'a> {
     parse_ios_syslog(spec, text)
         .or_else(|| parse_ios_columnar(spec, text))
@@ -1158,23 +1166,37 @@ fn parse_ios<'a>(spec: &SinkSpec, text: &'a str) -> Framed<'a> {
         })
 }
 
-/// `<date> <time+tz> <host> <process>[<pid>[:<tid>]] <<Type>>: <message>`.
+/// `<date> <time+tz>  <host> <process>[<pid>[:<tid>]]: (<library>) [<sub>:<cat>] <message>`,
+/// the library, the subsystem/category pair and the `<<Type>>` column all
+/// optional.
 fn parse_ios_syslog<'a>(spec: &SinkSpec, text: &'a str) -> Option<Framed<'a>> {
-    let ([_date, _time, _host, token], cursor) = split_fields::<4>(text)?;
+    let ([date, time, _host, token], cursor) = split_fields::<4>(text)?;
+    if !is_iso_date(date) || !is_clock(time) {
+        return None;
+    }
+    // The colon terminates the process token in the shape the lanes capture; a
+    // `<<Type>>:` column takes its place in the other. Requiring one of the two
+    // is what keeps a THIRD rendering (`Sep 12 10:00:00 iPhone Runner[431]: …`)
+    // from parsing here on the strength of its process token alone.
+    let (token, typed) = token
+        .strip_suffix(':')
+        .map_or((token, true), |t| (t, false));
     let (process, bracketed) = token.split_once('[')?;
     // `[431]` and `[431:12345]` both occur; the thread half is framing.
     let pid = bracketed.strip_suffix(']')?.split(':').next()?;
     if pid.is_empty() || !pid.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
-    let (kind, body) = text[cursor..]
-        .trim_start()
-        .strip_prefix('<')?
-        .split_once(">:")?;
-    if kind.is_empty() || !kind.bytes().all(|b| b.is_ascii_alphanumeric()) {
-        return None;
+    let mut rest = &text[cursor..];
+    if typed {
+        let (kind, tail) = rest.trim_start().strip_prefix('<')?.split_once(">:")?;
+        if kind.is_empty() || !kind.bytes().all(|b| b.is_ascii_alphanumeric()) {
+            return None;
+        }
+        rest = tail;
     }
-    framed_ios(spec, process, pid, body)
+    let (library, rest) = split_ios_library(rest.strip_prefix(' ').unwrap_or(rest));
+    framed_ios(spec, process, library, pid, rest)
 }
 
 /// `<date> <time+tz> <thread> <type> <activity> <pid> <ttl> <process>: <message>`.
@@ -1188,31 +1210,143 @@ fn parse_ios_columnar<'a>(spec: &SinkSpec, text: &'a str) -> Option<Framed<'a>> 
         return None;
     }
     let (process, body) = text[cursor..].split_once(':')?;
-    framed_ios(spec, process, pid, body)
+    framed_ios(spec, process, None, pid, body)
 }
 
-/// The half both `ios` renderings share: strip the library suffix, decide
-/// ownership by exact name, and hand the rules the message alone.
-fn framed_ios<'a>(spec: &SinkSpec, process: &str, pid: &str, body: &'a str) -> Option<Framed<'a>> {
-    let name = process
-        .split_once('(')
-        .map_or(process, |(name, _)| name)
-        .trim();
+/// `YYYY-MM-DD`.
+fn is_iso_date(field: &str) -> bool {
+    let bytes = field.as_bytes();
+    bytes.len() == 10
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(i, b)| i == 4 || i == 7 || b.is_ascii_digit())
+}
+
+/// `HH:MM:SS` and whatever fraction/offset follows it.
+fn is_clock(field: &str) -> bool {
+    let bytes = field.as_bytes();
+    bytes.len() >= 8
+        && bytes[2] == b':'
+        && bytes[5] == b':'
+        && bytes[..8]
+            .iter()
+            .enumerate()
+            .all(|(i, b)| i == 2 || i == 5 || b.is_ascii_digit())
+}
+
+/// Splits a leading `(<library>) ` column off the message, if there is one.
+///
+/// `find(')')` rather than a nesting scan: the one line that carries a nested
+/// pair is `(null)[0]: ((null)) …`, whose process column fails to name an
+/// emitter anyway, and a scan that recursed there would only reach further into
+/// a vendor message.
+fn split_ios_library(rest: &str) -> (Option<&str>, &str) {
+    let Some(tail) = rest.strip_prefix('(') else {
+        return (None, rest);
+    };
+    let Some(close) = tail.find(')') else {
+        return (None, rest);
+    };
+    let library = &tail[..close];
+    if library.is_empty() || library.contains(' ') {
+        return (None, rest);
+    }
+    (Some(library), &tail[close + 1..])
+}
+
+/// Splits a leading `[<subsystem>:<category>] ` column off the message.
+///
+/// Only a bracket holding exactly one un-spaced `<subsystem>:<category>` pair is
+/// the column: `[0x105faf4d0] activating connection` and `[RelayManager] …` are
+/// message text and stay in the body. The category may itself hold `::` (a Rust
+/// module path is the `oslog` category), so the split is at the FIRST colon.
+fn split_ios_subsystem(rest: &str) -> (Option<&str>, &str) {
+    let Some(tail) = rest.strip_prefix('[') else {
+        return (None, rest);
+    };
+    let Some(close) = tail.find(']') else {
+        return (None, rest);
+    };
+    let inside = &tail[..close];
+    let Some((subsystem, category)) = inside.split_once(':') else {
+        return (None, rest);
+    };
+    if subsystem.is_empty() || category.is_empty() || inside.contains([' ', '[']) {
+        return (None, rest);
+    }
+    (Some(subsystem), &tail[close + 1..])
+}
+
+/// The half both `ios` renderings share: split the remaining framing columns
+/// off the message, decide ownership by the record's emitter, and hand the
+/// rules the message alone.
+fn framed_ios<'a>(
+    spec: &SinkSpec,
+    process: &str,
+    library: Option<&str>,
+    pid: &str,
+    rest: &'a str,
+) -> Option<Framed<'a>> {
+    // In the columnar rendering the library rides in the process column.
+    let (name, library) = match process.split_once('(') {
+        Some((name, inner)) if !name.is_empty() => {
+            (name, library.or_else(|| inner.strip_suffix(')')))
+        }
+        _ => (process, library),
+    };
+    let name = name.trim();
     if name.is_empty() {
         return None;
     }
+    let rest = rest.strip_prefix(' ').unwrap_or(rest);
+    let (subsystem, body) = split_ios_subsystem(rest);
+    let emitter = subsystem.or(library).unwrap_or(name);
     let owned = spec
-        .owned_processes
+        .owned_emitters
         .iter()
-        .any(|candidate| candidate == name);
+        .any(|candidate| candidate == emitter);
     Some(Framed {
         body: body.strip_prefix(' ').unwrap_or(body),
-        tag: owned.then(|| name.to_owned()),
+        // Reported whether or not Haven owns it: a `log show` process and
+        // subsystem are build-time names of a program, one per record and never
+        // free text the emitter composes, so naming them is what lets the NEXT
+        // run attribute a hit the deleted capture could not. [`ios_handle`]
+        // keeps that promise narrow.
+        tag: Some(ios_handle(name, subsystem.or(library))),
         raw_tag: Some(name.to_owned()),
         pid: Some(pid.to_owned()),
         tid: None,
         owned,
     })
+}
+
+/// `<process>/<subsystem-or-library>` for the report, with both halves reduced
+/// to the character set a program name is drawn from.
+///
+/// The columns are metadata, not values — but they are still bytes off a
+/// device, so anything outside `[A-Za-z0-9._-]` or past 48 characters is
+/// dropped rather than printed (Security Rule 15 applies to this tool's own
+/// output first).
+fn ios_handle(process: &str, inner: Option<&str>) -> String {
+    fn clean(text: &str) -> &str {
+        if !text.is_empty()
+            && text.len() <= 48
+            && text
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+        {
+            text
+        } else {
+            "?"
+        }
+    }
+    inner.map_or_else(
+        || clean(process).to_owned(),
+        |inner| format!("{}/{}", clean(process), clean(inner)),
+    )
 }
 
 /// The first `N` space-separated fields of `text`, and the offset just past
@@ -1274,22 +1408,68 @@ fn parse_logcat<'a>(spec: &SinkSpec, text: &'a str) -> Framed<'a> {
     {
         return unparseable;
     }
-    let Some((tag, body)) = text[cursor..].split_once(':') else {
+    // The boundary is the first COLON-SPACE, not the first colon: a tag carries
+    // `android_logger`'s module path (`haven_core::relay::live_sync::session`),
+    // whose `::` has no space in it. Splitting at the first colon took
+    // `rust_lib_haven` off `rust_lib_haven::api` and left `:api:` at the head of
+    // the body — which happened to keep Haven's Rust lines owned, since the
+    // crate name is also an `owned_tags` entry, and would have stopped the day
+    // anyone fixed the body. Verified against all 50 501 framed lines of CI run
+    // 35280144455's three logcats: every one has a colon-space, and in every one
+    // it is the real boundary — including the vendor tags that contain spaces
+    // (`Google Maps Android API`) and the kernel's empty tag.
+    let Some((tag, body)) = text[cursor..].split_once(": ") else {
         return unparseable;
     };
     let tag = tag.trim();
-    let owned = spec
-        .owned_tags
-        .iter()
-        .any(|candidate| candidate.eq_ignore_ascii_case(tag));
+    let owned = owns_logcat_tag(spec, tag);
     Framed {
-        body: body.strip_prefix(' ').unwrap_or(body),
+        // No further space stripped: the delimiter took the ONE space logcat
+        // puts after the tag, so a body that still starts with one started with
+        // two — which is `android_logger` having split a record BETWEEN bytes,
+        // and that space is the separator `collapse_whitespace` needs to
+        // re-join `hex-spaced` across the split
+        // (`a_spaced_hex_dump_split_between_bytes_is_rejoined`).
+        body,
         tag: owned.then(|| tag.to_owned()),
         raw_tag: Some(tag.to_owned()),
         pid: Some(pid.to_owned()),
         tid: Some(tid.to_owned()),
         owned,
     }
+}
+
+/// Whether a logcat tag is one this repo owns.
+///
+/// The tag EQUALS an `owned_tags` entry, or is that entry followed by `::` —
+/// the module path `android_logger` appends, whole
+/// (`haven_core::relay::live_sync::session`) or truncated to logcat's 23-char
+/// tag limit (`haven_core::relay::man`). Both forms still carry the `::` after
+/// the crate name, because every Haven crate name is shorter than the limit.
+///
+/// NOT a bare prefix. `flutter` would then own the five `Flutter*` plugin tags
+/// the real captures carry (`FlutterJNI`, `FlutterGeolocator`,
+/// `FlutterSecureStorage`, `FlutterRenderer`,
+/// `FlutterActivityAndFragmentDelegate`) and `RustStdoutStderr` would own
+/// `RustStdoutStderrFoo`, putting vendor text under Haven's rules — the same
+/// trap the `ios` sink's exact-emitter test avoids.
+///
+/// And not case-insensitively either. Every entry is a spelling Haven itself
+/// fixes — a crate name, a Kotlin `TAG` constant, the engine's own `flutter` —
+/// while the tag is whatever the emitter chose, so a case-folded match hands
+/// Haven's rules any vendor tag differing from one of ours only in case
+/// (`Flutter` for `flutter`, `mainactivity` for `MainActivity`).
+///
+/// Byte-wise rather than by slicing `&str`: a tag is whatever bytes the device
+/// wrote, and `tag[..n]` on a non-ASCII one would panic.
+fn owns_logcat_tag(spec: &SinkSpec, tag: &str) -> bool {
+    let bytes = tag.as_bytes();
+    spec.owned_tags.iter().any(|candidate| {
+        let want = candidate.as_bytes();
+        bytes.len() >= want.len()
+            && &bytes[..want.len()] == want
+            && (bytes.len() == want.len() || bytes[want.len()..].starts_with(b"::"))
+    })
 }
 
 /// Collapses every whitespace run to one space.
@@ -1679,9 +1859,76 @@ mod tests {
         );
     }
 
-    /// `log show` exports are scoped by process name.
+    /// The tags Haven's Android lines actually carry, and the vendor tags that
+    /// sit one character away from them.
+    ///
+    /// Every line is copied from CI run 35280144455's three logcats. The five
+    /// `Flutter*` plugin tags are the reason ownership is not a bare prefix:
+    /// `flutter` is an entry, and a prefix test would hand every one of them —
+    /// remote-authored plugin text included — to Haven's structural rules.
+    /// `vioustech.haven` is the ART runtime's tag for the app process (logcat
+    /// truncates `com.oblivioustech.haven` to its last 15 characters), and its
+    /// lines are the runtime's own (`Late-enabling -Xcheck:jni`, `SELinux` audit
+    /// records), not Haven's log calls — so it stays un-owned, and the policy
+    /// no longer carries a package-name entry that could only ever have matched
+    /// an untruncated tag no capture produces.
     #[test]
-    fn an_ios_sink_is_scoped_by_process_name() {
+    fn the_real_logcat_tags_frame_exactly_havens_lines() {
+        let spec = Policy::load().expect("policy").sinks["logcat"].clone();
+        let framed = |tag: &str| -> (bool, Option<String>, String) {
+            let line = format!("09-17 22:41:04.751  4553  4790 D {tag}: fix -12.345678,98.765432");
+            let f = super::frame(&spec, &line);
+            (f.owned, f.raw_tag.clone(), f.body.to_owned())
+        };
+        for tag in [
+            "rust_lib_haven::api",
+            "haven_core::relay::manager",
+            "haven_core::circle::storage",
+            "haven_core::relay::live_sync::session",
+            // The 23-character truncation `android_logger` applies when
+            // logcat's tag limit bites.
+            "haven_core::relay::man",
+            "flutter ",
+            "HavenApplication",
+        ] {
+            let (owned, raw, body) = framed(tag);
+            assert!(owned, "{tag} is Haven's");
+            assert_eq!(raw.as_deref(), Some(tag.trim()), "the WHOLE module path");
+            assert_eq!(body, "fix -12.345678,98.765432", "{tag}");
+        }
+        for tag in [
+            "FlutterJNI",
+            "FlutterGeolocator",
+            "FlutterSecureStorage",
+            "FlutterRenderer",
+            "FlutterActivityAndFragmentDelegate",
+            "flutterx",
+            "RustStdoutStderrFoo",
+            "vioustech.haven",
+            // The untruncated package name, pinned un-owned so the policy entry
+            // that used to list it cannot come back: no capture carries this
+            // tag, and the truncated form above is the platform's, not Haven's.
+            "com.oblivioustech.haven",
+            "Google Maps Android API",
+            "AiAiEcho",
+            // Case-only near misses of three entries. An emitter picks its own
+            // tag and every entry is a spelling Haven fixes, so differing in
+            // case is differing.
+            "Flutter",
+            "mainactivity",
+            "HAVEN_CORE::relay::manager",
+        ] {
+            let (owned, raw, _) = framed(tag);
+            assert!(!owned, "{tag} is not Haven's");
+            assert_eq!(raw.as_deref(), Some(tag), "but it is still framed");
+        }
+    }
+
+    /// A record that names no subsystem and no library is attributed to its
+    /// PROCESS — the last rung of the emitter ladder, and the only one a
+    /// columnar `<process>: <message>` line can reach.
+    #[test]
+    fn an_ios_record_with_no_subsystem_or_library_falls_back_to_its_process() {
         let dir = Dir::new("ios");
         let manifest = manifest(&[]);
         let path = dir.write(
@@ -1694,14 +1941,160 @@ mod tests {
         assert_eq!(outcome.findings[0].line, 2);
     }
 
-    /// Every documented column variant of `log show`, in BOTH renderings.
+    /// The `ios` twin of [`rules_run_on_owned_tags_only_and_on_the_message_body`].
     ///
-    /// The lines that must fire are the owned ones of each rendering; the lines
-    /// that must NOT are a vendor process, a process whose name merely CONTAINS
-    /// an owned one, a vendor line whose message contains one, and a line that
-    /// is in neither format. The last two are the substring trap the first
+    /// The lines are the rendering the lanes actually capture, and the vendor
+    /// one is Haven's OWN process: on iOS every Apple framework linked into the
+    /// app logs as `Runner`, so the process cannot be the ownership test and the
+    /// record's subsystem is.
+    #[test]
+    fn rules_run_on_owned_emitters_only_and_on_the_message_body() {
+        let dir = Dir::new("iosemitters");
+        let manifest = manifest(&[]);
+        let path = dir.write(
+            "ios.log",
+            "2026-09-17 22:45:43.010431+0000  localhost Runner[17463]: (CoreLocation) [com.apple.locationd.Core:Client] fix -12.345678,98.765432\n\
+             2026-09-17 22:45:47.709581+0000  localhost Runner[17463]: (rust_lib_haven) [frb_user:rust_lib_haven::api] fix -12.345678,98.765432\n",
+        );
+        let outcome = run(&manifest, "ios", &[path]);
+        assert_eq!(outcome.findings.len(), 1, "{:?}", outcome.findings);
+        assert_eq!(outcome.findings[0].line, 2);
+        assert_eq!(outcome.findings[0].rule.as_deref(), Some("S5"));
+        assert_eq!(
+            outcome.findings[0].tag.as_deref(),
+            Some("Runner/frb_user"),
+            "the report's handle names the process and the record's own subsystem"
+        );
+    }
+
+    /// The regression CI run 35280144455 would have produced next: with the
+    /// process as the ownership test, Apple's own lines INSIDE the app's process
+    /// reach the rules — 31 structural hits per lane in that run's captures,
+    /// which is rc 1 and a deleted capture on a green lane. Three captured
+    /// lines, one per rule that fired.
+    #[test]
+    fn apple_frameworks_inside_the_app_process_are_not_havens_lines() {
+        let dir = Dir::new("iosvendor");
+        let manifest = manifest(&[]);
+        let path = dir.write(
+            "ios.log",
+            "2026-09-17 22:45:43.010431+0000  localhost Runner[17463]: (libxpc.dylib) [com.apple.xpc:connection] [0x105faf4d0] activating connection: mach=true listener=false peer=false name=com.apple.cfprefsd.daemon\n\
+             2026-09-17 22:45:43.013393+0000  localhost Runner[17463]: (CoreServicesInternal) [com.apple.FileURL:default] kExcludedFromBackupXattrName set on path: /Users/x/Library/Developer/CoreSimulator/Devices\n",
+        );
+        let outcome = run(&manifest, "ios", &[path]);
+        assert!(
+            outcome.findings.is_empty(),
+            "an Apple framework's line is not Haven's to answer for: {:?}",
+            outcome.findings
+        );
+    }
+
+    /// Owning the Flutter engine's image is what keeps S1-S12 over Dart's own
+    /// output, and it costs nothing on the lines the lanes really produce.
+    ///
+    /// `debugPrint` CAN reach the unified log as `Runner: (Flutter) flutter:
+    /// <msg>`, so leaving `Flutter` un-owned would be fail-SILENT: the day the
+    /// engine routes Haven's Dart text there, every rule stops and nothing
+    /// says so. The three `(Flutter)` shapes CI run 35280144455's captures hold
+    /// are clean under ownership — two of them outright, and the Dart VM
+    /// service's loopback URL through the endpoint exemption every lane's seal
+    /// already carries for its own relay, which is an exemption the lane
+    /// CLAIMS rather than an allowlist entry hiding a rule.
+    #[test]
+    fn owning_the_flutter_image_catches_dart_and_forgives_its_furniture() {
+        let dir = Dir::new("iosflutter");
+        let mut manifest = manifest(&[]);
+        manifest.exempt_endpoints = crate::manifest::endpoint_spellings("ws://127.0.0.1:7777");
+        let exempt = RuleSet::new(4.2, 1_800_000_000, &manifest.exempt_endpoints, Vec::new())
+            .expect("rules");
+        let path = dir.write(
+            "ios.log",
+            "2026-09-17 22:45:44.025579+0000  localhost Runner[17463]: (Flutter) flutter: The Dart VM service is listening on http://127.0.0.1:52512/_mVsUNwyDBE=/\n\
+             2026-09-17 22:45:44.025580+0000  localhost Runner[17463]: (Flutter) [IMPORTANT:flutter/shell/platform/darwin/graphics/FlutterDarwinContextMetalImpeller.mm(89)] Using the Impeller rendering backend (Metal).\n\
+             2026-09-17 22:45:44.930958+0000  localhost Runner[17463]: (Flutter) Plugin WorkmanagerPlugin uses deprecated application lifecycle events. See https://docs.flutter.dev/release/breaking-changes/uiscenedelegate#migration-guide-for-flutter-plugins\n\
+             2026-09-17 22:45:47.709584+0000  localhost Runner[17463]: (Flutter) flutter: fix -12.345678,98.765432\n",
+        );
+        let outcome = scan_sinks(
+            &manifest,
+            &[SinkArg {
+                class: "ios".to_owned(),
+                paths: vec![path],
+            }],
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &exempt,
+            false,
+            super::ScanMode::Full,
+        );
+        let hits: Vec<(u64, Option<&str>)> = outcome
+            .findings
+            .iter()
+            .filter(|f| f.kind == FindingKind::Rule)
+            .map(|f| (f.line, f.rule.as_deref()))
+            .collect();
+        assert_eq!(
+            hits,
+            vec![(4, Some("S5"))],
+            "Dart's coordinate is caught and the engine's own furniture is not"
+        );
+        assert_eq!(
+            outcome.findings[0].tag.as_deref(),
+            Some("Runner/Flutter"),
+            "and the finding says which image wrote it"
+        );
+    }
+
+    /// The attribution handle is metadata, and stays metadata.
+    ///
+    /// It is printed for lines Haven does NOT own, which is the whole point of
+    /// it — so what it may contain is bounded by the shape of a program name
+    /// rather than by trust in the emitter (Rule 15 applies to this tool's own
+    /// output first). A column carrying anything else is reported as `?`.
+    #[test]
+    fn an_ios_handle_carries_a_program_name_or_nothing() {
+        let spec = Policy::load().expect("policy").sinks["ios"].clone();
+        let long = "a".repeat(49);
+        for (line, want) in [
+            (
+                "2026-09-17 22:45:43.010431+0000  localhost locationd[77]: (CoreLocation) [com.apple.locationd.Core:Client] settled".to_owned(),
+                "locationd/com.apple.locationd.Core",
+            ),
+            (
+                "2026-09-17 22:45:43.010431+0000  localhost locationd[77]: settled".to_owned(),
+                "locationd",
+            ),
+            (
+                format!("2026-09-17 22:45:43.010431+0000  localhost {long}[77]: settled"),
+                "?",
+            ),
+            (
+                format!("2026-09-17 22:45:43.010431+0000  localhost locationd[77]: [{long}:c] settled"),
+                "locationd/?",
+            ),
+            (
+                "2026-09-17 22:45:43.010431+0000  localhost ünïcode[77]: settled".to_owned(),
+                "?",
+            ),
+        ] {
+            assert_eq!(super::frame(&spec, &line).tag.as_deref(), Some(want), "{line}");
+        }
+    }
+
+    /// Every column variant of `log show`, in all three renderings.
+    ///
+    /// The lines that must fire are the owned ones of each rendering — Haven's
+    /// two subsystems, its two images, and the Flutter engine's — and the lines
+    /// that must NOT are a vendor library and a vendor subsystem INSIDE Haven's
+    /// own process, a vendor process, a process whose name merely CONTAINS an
+    /// owned one, a vendor line whose message contains one, and a line that is
+    /// in none of the formats. The last two are the substring trap the first
     /// implementation walked into: it owned any line with the word `Runner`
     /// anywhere in it, which puts remote-authored text under Haven's rules.
+    ///
+    /// Section A of the fixture is captured, and it is what proves owning
+    /// `Flutter` costs nothing: the three real `(Flutter)` shapes — the
+    /// Impeller notice, a plugin-deprecation notice with an `https` URL, and an
+    /// empty message — are all owned here and all clean.
     #[test]
     fn the_ios_column_variants_frame_exactly_the_owned_lines() {
         let dir = Dir::new("iosformat");
@@ -1717,18 +2110,33 @@ mod tests {
             .collect();
         assert_eq!(
             rule_lines,
-            vec![15, 16, 17, 18, 23, 25, 26, 27],
-            "only the owned variants of either rendering may reach the rules"
+            vec![45, 46, 47, 48, 49, 56, 57, 58, 61, 62, 63],
+            "only the owned variants of the three renderings may reach the rules"
         );
-        // The tag is the process with the library stripped, and only where Haven
-        // owns it — `Runner` for everything Haven emits on iOS.
-        for finding in outcome
+        // The handle names the process AND the record's own inner column, so a
+        // hit in a device-wide export says which program to go and look at.
+        let tags: Vec<Option<&str>> = outcome
             .findings
             .iter()
             .filter(|f| f.kind == FindingKind::Rule)
-        {
-            assert_eq!(finding.tag.as_deref(), Some("Runner"), "{finding:?}");
-        }
+            .map(|f| f.tag.as_deref())
+            .collect();
+        assert_eq!(
+            tags,
+            vec![
+                Some("Runner/frb_user"),
+                Some("Runner/rust_lib_haven"),
+                Some("Runner/haven_ios"),
+                Some("Runner"),
+                Some("Runner/Flutter"),
+                Some("Runner"),
+                Some("Runner/Flutter"),
+                Some("Runner/frb_user"),
+                Some("Runner"),
+                Some("Runner/rust_lib_haven"),
+                Some("Runner/frb_user"),
+            ],
+        );
         // A needle in a VENDOR line is still a disclosure in an uploaded
         // artifact, so the term search covers the lines the rules skip.
         let needle_lines: Vec<u64> = outcome
@@ -1738,21 +2146,55 @@ mod tests {
             .map(|f| f.line)
             .collect();
         assert!(
-            !needle_lines.is_empty() && needle_lines.iter().all(|line| *line == 33),
+            !needle_lines.is_empty() && needle_lines.iter().all(|line| *line == 68),
             "the declared pubkey sits on the un-owned last line: {needle_lines:?}"
+        );
+        // …and the finding names the vendor process that carried it, which is
+        // the whole point of item 3: the run that found a coordinate in a
+        // device-wide export could not say who wrote it.
+        assert!(
+            outcome
+                .findings
+                .iter()
+                .filter(|f| f.kind == FindingKind::Needle)
+                .all(|f| f.tag.as_deref() == Some("locationd")),
+            "{:?}",
+            outcome.findings
         );
     }
 
-    /// The rules run on the MESSAGE, not on the framing — in both renderings.
+    /// The rules run on the MESSAGE, not on the framing — in all renderings.
     #[test]
     fn an_ios_body_excludes_the_framing_of_either_rendering() {
         let spec = Policy::load().expect("policy").sinks["ios"].clone();
+        let captured = super::frame(
+            &spec,
+            "2026-09-17 22:45:51.209385+0000  localhost Runner[17463]: (rust_lib_haven) [frb_user:rust_lib_haven::api] settled",
+        );
+        assert_eq!(captured.body, "settled");
+        assert!(captured.owned);
+        assert_eq!(captured.tag.as_deref(), Some("Runner/frb_user"));
+        assert_eq!(captured.pid.as_deref(), Some("17463"));
+
+        // A bracket that is not a `<subsystem>:<category>` pair is MESSAGE: an
+        // xpc connection handle and Haven's own `[RelayManager]` prefix both
+        // have to stay where the rules can read them.
+        let handle = super::frame(
+            &spec,
+            "2026-09-17 22:45:43.010431+0000  localhost Runner[17463]: (rust_lib_haven) [0x105faf4d0] settled",
+        );
+        assert_eq!(handle.body, "[0x105faf4d0] settled");
+        assert_eq!(handle.tag.as_deref(), Some("Runner/rust_lib_haven"));
+
         let columnar = super::frame(
             &spec,
             "2026-09-12 10:00:00.000000+0000 0x1e0f     Default     0x0                  431    0    Runner(libsystem_network.dylib): [frb_user:default] settled",
         );
-        assert_eq!(columnar.body, "[frb_user:default] settled");
-        assert!(columnar.owned);
+        assert_eq!(columnar.body, "settled");
+        assert!(
+            columnar.owned,
+            "the record's subsystem outranks the library it was emitted from"
+        );
         assert_eq!(columnar.raw_tag.as_deref(), Some("Runner"));
         assert_eq!(columnar.pid.as_deref(), Some("431"));
 
@@ -1761,7 +2203,10 @@ mod tests {
             "2026-09-12 10:00:00.000000+0000 localhost Runner(Flutter)[431:12345] <Notice>: flutter: settled",
         );
         assert_eq!(syslog.body, "flutter: settled");
-        assert!(syslog.owned);
+        assert!(
+            syslog.owned,
+            "the engine's image carries Dart's own `flutter: <msg>` output, so it is Haven's"
+        );
         assert_eq!(syslog.raw_tag.as_deref(), Some("Runner"));
         assert_eq!(
             syslog.pid.as_deref(),
@@ -1770,11 +2215,12 @@ mod tests {
         );
 
         // A Haven record's CONTINUATION lines carry no process column at all, so
-        // they are un-owned in both renderings: the rules never see the body of
+        // they are un-owned in every rendering: the rules never see the body of
         // a multi-line panic on iOS. Needles still are searched in every byte.
         let continuation = super::frame(&spec, "    at haven_core::relay::manager (line 1)");
         assert!(!continuation.owned);
         assert!(continuation.raw_tag.is_none());
+        assert!(continuation.tag.is_none());
     }
 
     /// A progress reporter's carriage returns are RECORD boundaries, not text.

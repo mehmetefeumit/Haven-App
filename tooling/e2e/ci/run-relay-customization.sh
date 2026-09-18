@@ -205,8 +205,33 @@ run_self_test() {
   loop_line="$(grep -n -m1 '^for spec in "$@"; do' "${BASH_SOURCE[0]}")"
   loop_line="${loop_line%%:*}"
   if [[ -z "${seal_line}" || -z "${loop_line}" ]] || (( seal_line > loop_line )) \
-     || ! grep -qE '^readonly -a SEAL_EXTRA=\(--floor drive=20 --exempt-endpoint "\$\{HAVEN_E2E_RELAY_2:-ws://10\.0\.2\.2:7778\}"\)$' "${BASH_SOURCE[0]}"; then
-    echo "SELF-TEST FAIL (wiring): the lane's manifest must be sealed once, with its drive floor, before the first target (seal='${seal_line:-none}', loop='${loop_line:-none}')" >&2
+     || ! grep -qE '^readonly -a SEAL_EXTRA=\(--floor drive=20 --floor logcat=300 --floor relay=7 --exempt-endpoint "\$\{HAVEN_E2E_RELAY_2:-ws://10\.0\.2\.2:7778\}"\)$' "${BASH_SOURCE[0]}"; then
+    echo "SELF-TEST FAIL (wiring): the lane's manifest must be sealed once, with its drive, logcat and relay floors, before the first target (seal='${seal_line:-none}', loop='${loop_line:-none}')" >&2
+    fail=1
+  fi
+  # Both relay logs are only evidence if they are read out of LIVE containers
+  # and written where the aggregate gate still reaches them: after the target's
+  # own reset (so they are this target's relays), before the gate (so they are
+  # scanned), and exactly twice — one per relay, no more. The names are checked
+  # through the walker's own predicate, so a change to the relay-name list
+  # fails here rather than silently retyping a dump as a `diag` sink, where the
+  # structural rules would read a relay's legitimate pubkeys and event ids as
+  # leaks.
+  local reset_line dump_line gate_line
+  reset_line="$(grep -n -m1 '^  start_r2$' "${BASH_SOURCE[0]}" || true)"
+  reset_line="${reset_line%%:*}"
+  dump_line="$(grep -n -m1 '^  docker logs "${STRFRY_CONTAINER:-strfry}" > "${LOG_DIR}/strfry\.${s}\.log" 2>&1 || true$' "${BASH_SOURCE[0]}" || true)"
+  dump_line="${dump_line%%:*}"
+  gate_line="$(grep -n -m1 '^logscan_gate_dir host /tmp/haven-soak/needles "${LOG_DIR}"' "${BASH_SOURCE[0]}" || true)"
+  gate_line="${gate_line%%:*}"
+  if [[ -z "${reset_line}" || -z "${dump_line}" || -z "${gate_line}" ]] \
+     || (( reset_line > dump_line || dump_line > gate_line )) \
+     || (( "$(grep -cE '^[[:space:]]*docker logs ' <<<"${real_run}")" != 2 )) \
+     || (( "$(grep -cF 'if [[ "${s}" == *logcat* || "${s}" == *drive* ]]; then' <<<"${real_run}")" != 1 )) \
+     || ! grep -qF 'docker logs "${R2_CONTAINER}" > "${LOG_DIR}/strfry2.${s}.log"' "${BASH_SOURCE[0]}" \
+     || ! logscan_is_relay_log "strfry.integration_test_relay_two_plane_privacy_test_dart.log" \
+     || ! logscan_is_relay_log "strfry2.integration_test_relay_two_plane_privacy_test_dart.log"; then
+    echo "SELF-TEST FAIL (wiring): both relay logs must be dumped from the live containers exactly once each, after the target's relay reset (line ${reset_line:-none}) and before the aggregate gate (line ${gate_line:-none}), under names logscan_gate_dir types as relay sinks and behind the slug check that refuses a target whose name the walker would match first (first dump line ${dump_line:-none})" >&2
     fail=1
   fi
   if grep -qE '(^|[;&|][[:space:]]*)[[:space:]]*(cat|head|tail|less|more)[[:space:]]+[^|]*\.log' <<<"${real_run}"; then
@@ -217,7 +242,7 @@ run_self_test() {
     echo "run-relay-customization.sh: SELF-TEST FAILED" >&2
     return 1
   fi
-  echo "run-relay-customization.sh: self-test passed (the log-privacy gate removes exactly the *.log files it scanned on a leak and touches nothing on rc 3 or rc 0; the gate library is sourced, the one gate call covers LOG_DIR with its report outside the upload, no soft scanner gate, no captured-log echo of its own, the manifest is sealed once with the lane's drive floor before the first target)."
+  echo "run-relay-customization.sh: self-test passed (the log-privacy gate removes exactly the *.log files it scanned on a leak and touches nothing on rc 3 or rc 0; the gate library is sourced, the one gate call covers LOG_DIR with its report outside the upload, no soft scanner gate, no captured-log echo of its own, the manifest is sealed once with the lane's drive, logcat and relay floors before the first target; each target's TWO relay logs are dumped from the live containers, typed as relay sinks, before the aggregate gate)."
   return 0
 }
 
@@ -258,16 +283,35 @@ readonly R2_DATA_DIR="/tmp/strfry2-data"
 readonly STAGED_APK="/tmp/scenario.apk"
 readonly LOG_DIR="/tmp/relay-custom-logs"
 mkdir -p "${LOG_DIR}"
-# The drive-transcript floor this lane seals with: 20, the number its sibling
-# run-integration-tests.sh measured for a one-test target (49 lines green; 20
-# is under half of that and still above the ~15 lines `flutter drive` prints
-# before any test runs). These four targets are multi-test suites, so 20 is
-# the more conservative of the two lanes' shapes. The logcat floor stays the
-# policy's. Sealed ONCE, before the first target: the host profile reuses the
-# manifest at its out path, so the first seal's floors are the lane's — every
-# later call passes the same arguments, R2's exemption included (infrastructure
-# the lane names, never a needle).
-readonly -a SEAL_EXTRA=(--floor drive=20 --exempt-endpoint "${HAVEN_E2E_RELAY_2:-ws://10.0.2.2:7778}")
+# The line floors this lane seals with. A floor is what turns "the scan read an
+# empty or truncated file and found nothing" into rc 4 instead of a green, so
+# each is calibrated to the smallest COMPLETE capture this lane produces and
+# never to what would make it pass.
+#
+# drive=20, the number its sibling run-integration-tests.sh derives: above the
+# ~17 lines `flutter drive` prints before the first test result, so a transcript
+# that fails it is one in which no test ran. This lane's four targets are
+# multi-test suites and its smallest complete transcript is 41 lines (run
+# 35280144455), so 20 is under half of what it actually produces.
+#
+# logcat=300. The policy's 2000 is a device-wide capture of a whole scenario;
+# this lane captures logcat PER TARGET, and its smallest complete slice
+# measured is 1027 lines (same run). 300 matches the sibling lane's floor,
+# derived from the smaller 746-line slice there, and is far above the handful
+# of lines a dead or mis-pathed capture yields.
+#
+# relay=7. The policy's 1 is sized for the hermetic host relay, which prints a
+# single listen line; this lane's relays are strfry, whose `docker logs` dump
+# is 14-23 lines for a full run across the fleet, of which the first 9 are a
+# fixed startup block. 7 is half the smallest complete dump, so a dump below it
+# is truncated or absent — which is what a container torn down before the dump
+# looks like: ONE line of docker error text.
+#
+# Sealed ONCE, before the first target: the host profile reuses the manifest at
+# its out path, so the first seal's floors are the lane's — every later call
+# passes the same arguments, R2's exemption included (infrastructure the lane
+# names, never a needle).
+readonly -a SEAL_EXTRA=(--floor drive=20 --floor logcat=300 --floor relay=7 --exempt-endpoint "${HAVEN_E2E_RELAY_2:-ws://10.0.2.2:7778}")
 seal_rc=0
 logscan_seal host /tmp/haven-soak/needles "${SEAL_EXTRA[@]}" || seal_rc=$?
 if (( seal_rc != 0 )); then
@@ -421,6 +465,31 @@ run_one() {
   s="$(slug "${target}")"
   cp /tmp/adb-logcat.log "${LOG_DIR}/${s}.logcat.log" 2>/dev/null || true
   cp /tmp/flutter-drive.log "${LOG_DIR}/${s}.drive.log" 2>/dev/null || true
+  # BOTH relays' own logs, read out of the containers while they still exist.
+  # `docker logs` against a torn-down container prints one line of error text,
+  # and that is exactly what the workflow's post-run collection step uploaded
+  # under this lane's relay names for as long as it existed: the EXIT trap and
+  # the next target's reset both `docker rm -f` both containers long before a
+  # workflow step runs, so the relay sink this lane certified was two docker
+  # error messages, not two relay logs (CI run 35280144455). Here they are
+  # still up — the next reset is the first thing the NEXT iteration does — and
+  # the aggregate gate below still scans what lands in LOG_DIR. R2 is dumped
+  # as well as R1 because the two-plane proof is about what each relay did and
+  # did not receive, which is exactly what its own log records.
+  # Both names must LEAD with `strfry` (logscan_gate_dir types `strfry*.log`
+  # as a `relay` sink: structural rules off, the public classes scoped out)
+  # and the slug must contain neither `logcat` nor `drive`, which the walker
+  # matches first.
+  if [[ "${s}" == *logcat* || "${s}" == *drive* ]]; then
+    echo "ERROR: target slug '${s}' contains 'logcat' or 'drive', which" \
+         "logscan_gate_dir matches BEFORE the relay-name list — the relay dumps" \
+         "would be typed logcat or drive sinks, the structural rules would read" \
+         "the relays' own pubkeys and event ids as leaks, and the rc 1 that" \
+         "follows would delete this lane's evidence. Rename the target." >&2
+    exit 2
+  fi
+  docker logs "${STRFRY_CONTAINER:-strfry}" > "${LOG_DIR}/strfry.${s}.log" 2>&1 || true
+  docker logs "${R2_CONTAINER}" > "${LOG_DIR}/strfry2.${s}.log" 2>&1 || true
 
   if (( rc == 0 )); then
     echo "PASS: ${target}"

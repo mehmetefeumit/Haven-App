@@ -1258,6 +1258,29 @@ type=LocationServiceException streamAgeMs=52000" \
     'android.permission.ACCESS_BACKGROUND_LOCATION' || rc=1
   _case "an unlisted permission reads as not granted" 1 "${rc}"
 
+  # (19a) THE UPLOADED FILE IS AN EXTRACT (dump_permissions filters the dump
+  #       through logscan_permission_extract), so all three predicates have to
+  #       be satisfied by what the extract keeps — not by the raw platform
+  #       dump, whose install-path furniture is what tripped S4 twice per dump
+  #       in CI run 35280144455.
+  printf '%s\r\n' \
+    '  Package [com.oblivioustech.haven] (5e1f2a3):' \
+    '    codePath=/data/app/~~QzvxN8kLpR2mTfY7wJdBnA==/com.oblivioustech.haven-Q5SpczNlQjMGRcjTLpQ2Kg==' \
+    '      runtime permissions:' \
+    "        android.permission.ACCESS_COARSE_LOCATION: granted=true" \
+    "        ${perm}: granted=false, flags=[ USER_SET|USER_FIXED ]" \
+    | logscan_permission_extract > "${tmp}/extract.log"
+  rc=0; b5_permission_granted "${tmp}/extract.log" "${perm}" || rc=1
+  _case "the uploaded extract still answers granted=false" 1 "${rc}"
+  rc=0
+  b5_permission_granted "${tmp}/extract.log" \
+    'android.permission.ACCESS_COARSE_LOCATION' || rc=1
+  _case "…and granted=true for the granted neighbour" 0 "${rc}"
+  rc=0; b5_permission_user_fixed "${tmp}/extract.log" "${perm}" || rc=1
+  _case "…and USER_FIXED off the permission's own line" 0 "${rc}"
+  _eq_case "the extract keeps no install path from the raw dump" "0" \
+    "$(grep -cE 'codePath|/data/app/' "${tmp}/extract.log" || true)"
+
   # --- b5_appops_mode -----------------------------------------------------
   #
   # THE READ-BACK IS THE ONLY THING THAT KNOWS THE APP-OP CHANGED, so a
@@ -1905,14 +1928,22 @@ type=LocationServiceException streamAgeMs=52000" \
   [[ -n "${gate_at}" && -n "${cat_at}" ]] && (( gate_at < cat_at )) || rc=1
   _case "the drive log is echoed only after the log-privacy gate" 0 "${rc}"
   _eq_case "…and exactly once" "1" "$(grep -cE '^[[:space:]]*cat "\$\{(logfile|LOGCAT_FILE)\}"' <<<"${gate_scope}" || true)"
-  local gate_lit='logscan_gate host /tmp/haven-soak/needles --host-decl "coordinate=${GEO_LAT},${GEO_LON}" --host-decl "coordinate=${GEO_LAT_B},${GEO_LON}" --     --sink "logcat=${LOGCAT_FILE}" --sink "drive=${logfile}"     --report "${LOGSCAN_REPORTS}/gate-${label}.ndjson" || gate_rc=$?'
+  local gate_lit='logscan_gate host /tmp/haven-soak/needles "${SEAL_EXTRA[@]}" --     --sink "logcat=${LOGCAT_FILE}" --sink "drive=${logfile}"     --report "${LOGSCAN_REPORTS}/gate-${label}.ndjson" || gate_rc=$?'
   _eq_case "the gate names the logcat, the drive log and the injected point" "1" \
     "$(awk -v lit="${gate_lit}" \
          'index($0, lit) == 3 { n++ } END { print n + 0 }' <<<"${gate_scope}")"
+  # …and the array that call passes is this lane's whole seal claim: BOTH
+  # injected points and both line floors, pinned so a red lane cannot be turned
+  # green by lowering one of them. Counted at column 0, where the real
+  # declaration sits and this fixture's own copy does not.
+  local extra_lit='readonly -a SEAL_EXTRA=(--host-decl "coordinate=${GEO_LAT},${GEO_LON}" --host-decl "coordinate=${GEO_LAT_B},${GEO_LON}" --floor drive=20 --floor relay=7)'
+  _eq_case "the seal extras carry both injected points and both line floors" "1" \
+    "$(awk -v lit="${extra_lit}" \
+         'index($0, lit) == 1 { n++ } END { print n + 0 }' "${self}")"
   local trap_body dump_at scan_at exit_at
   trap_body="$(sed -n '/^cleanup() {/,/^}/p' <<<"${joined}")"
   dump_at="$(grep -nF 'docker logs "${STRFRY_CONTAINER}" > "${LOG_DIR}/strfry.final.log"' <<<"${trap_body}" | cut -d: -f1 | head -n 1 || true)"
-  scan_at="$(grep -nF 'logscan_gate_dir host /tmp/haven-soak/needles "${LOG_DIR}" "${LOGSCAN_REPORTS}/exit.ndjson" --host-decl "coordinate=${GEO_LAT},${GEO_LON}" --host-decl "coordinate=${GEO_LAT_B},${GEO_LON}"     || scan_rc=$?' <<<"${trap_body}" \
+  scan_at="$(grep -nF 'logscan_gate_dir host /tmp/haven-soak/needles "${LOG_DIR}" "${LOGSCAN_REPORTS}/exit.ndjson" "${SEAL_EXTRA[@]}"     || scan_rc=$?' <<<"${trap_body}" \
     | cut -d: -f1 | head -n 1 || true)"
   exit_at="$(grep -nF 'exit "${rc}"' <<<"${trap_body}" | cut -d: -f1 | head -n 1 || true)"
   rc=0
@@ -2095,6 +2126,34 @@ LOGSCAN_GATE_RC=0
 readonly LOGSCAN_REPORTS="/tmp/b5-logscan"
 mkdir -p "${LOGSCAN_REPORTS}"
 
+# The seal extras this lane's gates pass, in ONE place: its own fixed
+# coordinate (a value the harness names, which the logs must never carry) and
+# its line floors. BOTH gate calls pass this same array, because whichever runs
+# first is the one that seals the manifest and every later gate reuses what is
+# at the out path.
+#
+# A floor is what turns "the scan read an empty or truncated file and found
+# nothing" into rc 4 instead of a green, so it is sized to the smallest
+# COMPLETE capture and never to what would make the lane pass.
+#
+# drive=20. The policy's 100 is sized for the Android core flow's 394-line
+# transcript; this lane drives ONE scenario. Its own transcript was DELETED by
+# containment in run 35280144455 — the gate went rc 1 on that run's dumpsys S4
+# hits, which outranks the rc 4 underneath, so the unmet 100-line floor never
+# printed — leaving the closest measured siblings as the basis: the b4 iOS twin
+# at 45 lines and the integration lane's single-scenario transcripts at 22-88.
+# 20 is under half of 45 and above the ~17 lines `flutter drive` prints before
+# the first test result, so a transcript that fails it is one in which no test
+# ran. RE-MEASURE from the next green run's artifact and re-pin this number.
+#
+# relay=7. The policy's 1 is sized for the hermetic host relay, which prints a
+# single listen line; this lane's relay is strfry, whose `docker logs` dump is
+# 14-23 lines for a full run, of which the first 9 are a fixed startup block.
+# 7 is half the smallest complete dump, so a dump below it is truncated or
+# absent — which is what a container torn down before the dump looks like: ONE
+# line of docker error text.
+readonly -a SEAL_EXTRA=(--host-decl "coordinate=${GEO_LAT},${GEO_LON}" --host-decl "coordinate=${GEO_LAT_B},${GEO_LON}" --floor drive=20 --floor relay=7)
+
 # ---------------------------------------------------------------------------
 # Cleanup (EXIT trap): stop the background helpers, RESTORE the permission
 # (a lane that left the package revoked would silently poison any later job
@@ -2160,7 +2219,7 @@ cleanup() {
   # is pinned by a fixture rather than only by this call site.
   b5_prepare_logs_for_scan "${LOG_DIR}"
   echo "== Log-privacy scan over ${LOG_DIR} (Security Rules 6 and 15) =="
-  logscan_gate_dir host /tmp/haven-soak/needles "${LOG_DIR}" "${LOGSCAN_REPORTS}/exit.ndjson" --host-decl "coordinate=${GEO_LAT},${GEO_LON}" --host-decl "coordinate=${GEO_LAT_B},${GEO_LON}" \
+  logscan_gate_dir host /tmp/haven-soak/needles "${LOG_DIR}" "${LOGSCAN_REPORTS}/exit.ndjson" "${SEAL_EXTRA[@]}" \
     || scan_rc=$?
   if (( scan_rc == 1 || LOGSCAN_GATE_RC == 1 )); then
     {
@@ -2400,8 +2459,13 @@ wait_for_marker_polling_relay() {
 }
 
 # dump_permissions <outfile> — the authoritative permission state.
+# dump_permissions <file> — the permission state, FILTERED on the way in
+# (logscan_permission_extract): what this lane reads and what it uploads are
+# the same lines, and the platform's install-path furniture — which S4 read as
+# a blob, twice per dump, in CI run 35280144455 — never reaches a file at all.
 dump_permissions() {
-  adb -s "${DEVICE}" shell dumpsys package "${PKG}" > "$1" 2>&1 || true
+  adb -s "${DEVICE}" shell dumpsys package "${PKG}" 2>&1 \
+    | logscan_permission_extract > "$1" || true
 }
 
 # report_drive <label> <logfile> <rc> — echoes the drive log (after the
@@ -2420,7 +2484,7 @@ report_drive() {
   DRIVE_FAILED=0
   DRIVE_REASON=""
   local clean=1 gate_rc=0
-  logscan_gate host /tmp/haven-soak/needles --host-decl "coordinate=${GEO_LAT},${GEO_LON}" --host-decl "coordinate=${GEO_LAT_B},${GEO_LON}" -- \
+  logscan_gate host /tmp/haven-soak/needles "${SEAL_EXTRA[@]}" -- \
     --sink "logcat=${LOGCAT_FILE}" --sink "drive=${logfile}" \
     --report "${LOGSCAN_REPORTS}/gate-${label}.ndjson" || gate_rc=$?
   if (( gate_rc == 1 || LOGSCAN_GATE_RC == 0 )); then

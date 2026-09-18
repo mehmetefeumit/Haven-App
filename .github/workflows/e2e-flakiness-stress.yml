@@ -323,11 +323,6 @@ jobs:
           # validates the value is a positive integer and caps it.
           script: bash tooling/e2e/ci/run-with-deadline.sh 300m "e2e-flakiness-stress loop" -- bash tooling/e2e/ci/run-flake-stress.sh "${{ env.FLAKE_ITERATIONS }}" integration_test/e2e/e2e_combined.dart
 
-      - name: Collect strfry logs
-        if: always()
-        run: |
-          docker logs strfry > /tmp/strfry.log 2>&1 || true
-
       # `if: always()` and `.log`, not `.txt`: the scan step below runs on every
       # outcome short of a cancellation and refuses an absent file, and the
       # scanner's directory walk only ever picks up `*.log` — a `.txt` here
@@ -352,15 +347,19 @@ jobs:
             top -bn1 | head -40 || true
           } > /tmp/diag.log 2>&1
 
-      # Where each uploaded log is scanned, and by what. The per-target logcat
-      # and drive logs go through the runner's log-privacy gate (HAVEN_LOGSCAN
-      # above): tooling/e2e/ci/scan-logs.sh — the key-material floor AND the
-      # identifier scanner, against the manifest sealed from the host needles —
-      # deleting them on a leak, before any drive log is echoed. What is left
-      # is scanned HERE, against the SAME manifest, by the same wrapper: the
-      # relay log(s) (structural rules off — a relay legitimately holds pubkeys
-      # and event ids) and the host diagnostics as a `diag` sink (a one-line
-      # floor, no plant requirement). Scan-before-upload, as its OWN step on
+      # Where each uploaded log is scanned, and by what. The failed iterations'
+      # logcat, drive and relay logs go through the runner's log-privacy gate
+      # (HAVEN_LOGSCAN above): tooling/e2e/ci/scan-logs.sh — the key-material
+      # floor AND the identifier scanner, against the manifest sealed from the
+      # host needles — deleting them on a leak, before any drive log is echoed.
+      # The relay log is dumped BY THE RUNNER, per failed iteration, out of the
+      # live container; a step here could only ever read a container this
+      # script's own EXIT trap has already removed, which is why this job no
+      # longer collects one (it uploaded a line of docker error text under the
+      # relay name until CI run 35280144455 measured the same defect in the
+      # sibling lanes). What is left is scanned HERE, against the SAME
+      # manifest, by the same wrapper: the host diagnostics as a `diag` sink (a
+      # one-line floor, no plant requirement). Scan-before-upload, as its OWN step on
       # every outcome short of a cancellation: a leak (rc 1) deletes every
       # scanned file and fails the lane even on an otherwise green run, so the
       # upload finds nothing to publish; an unscannable log (rc 3), a broken
@@ -376,15 +375,16 @@ jobs:
           rc=0
           bash tooling/e2e/ci/scan-logs.sh \
             --manifest /tmp/haven-soak/needles/*.needles.json \
-            --sink relay=/tmp/strfry.log \
             --sink diag=/tmp/diag.log \
             --report /tmp/logscan-report-upload.ndjson || rc=$?
           exit "${rc}"
 
       # run-flake-stress.sh copies each FAILED iteration's logcat +
-      # drive log under /tmp/flake-logs/iter-<n>.* so the failing
-      # iteration's evidence survives. if: always() so a passing run
-      # still uploads strfry.log for reference.
+      # drive log under /tmp/flake-logs/iter-<n>.* and dumps that
+      # iteration's relay log beside them as strfry.iter-<n>.log, so the
+      # failing iteration's evidence survives. An all-green run leaves the
+      # directory empty on purpose (nothing flaked, so there is nothing to
+      # preserve); if: always() so the diagnostics still upload.
       - name: Upload flake-stress artifacts
         if: always()
         uses: actions/upload-artifact@v6
@@ -392,7 +392,6 @@ jobs:
           name: e2e-flake-stress-${{ github.run_id }}
           path: |
             /tmp/flake-logs/
-            /tmp/strfry.log
             /tmp/diag.log
           retention-days: 14
           if-no-files-found: ignore

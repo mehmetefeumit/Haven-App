@@ -1,5 +1,25 @@
 import BackgroundTasks
 import Flutter
+import os
+
+/// The unified-log destination for this file's DEBUG diagnostics.
+///
+/// `os_log` under a Haven subsystem, never `NSLog`: the runtime log scanner
+/// decides whose line a `log show` record is from the record's own emitter —
+/// its subsystem, else the emitting library, else the process
+/// (`tooling/logscan/policy.toml`'s `owned_emitters`). An `NSLog` record
+/// reaches `_os_log_impl` from inside Foundation and carries no subsystem at
+/// all, and `Foundation` is the library on 36 673 lines of one real capture,
+/// vendor plugins included, so it can never be owned. A subsystem Haven names
+/// makes these lines Haven's by construction rather than by inference. A
+/// file-level constant so the call sites can name it bare, which is what
+/// `scripts/ci/check_native_log_allowlist.sh` admits as a logged argument.
+///
+/// No `type:` at the call sites: that is OS_LOG_TYPE_DEFAULT, which logd
+/// PERSISTS. `.debug` and `.info` live in a wrapping memory buffer that
+/// `log collect` finds only if it runs soon enough — the eviction that cost CI
+/// run 35280144455's two long lanes their Rust plant.
+private let HAVEN_BGTASK_LOG = OSLog(subsystem: "haven_ios", category: "bgtask")
 
 /// Registers and handles a `BGAppRefreshTask` that triggers a Dart catch-up
 /// sweep as a background floor for when SLC monitoring is insufficient.
@@ -236,7 +256,7 @@ final class HavenBGTaskHandler {
       if let flutterError = result as? FlutterError {
         // Dart threw — log type only.
         #if DEBUG
-        NSLog("[HavenBGTask] Dart error: %@", flutterError.code)
+        os_log("Dart error: %{public}@", log: HAVEN_BGTASK_LOG, flutterError.code)
         #endif
         task?.setTaskCompleted(success: false)
       } else {
@@ -249,9 +269,10 @@ final class HavenBGTaskHandler {
 
   // MARK: - Logging
 
+
   private func debugLog(_ message: String) {
     #if DEBUG
-    NSLog("[HavenBGTask] %@", message)
+    os_log("%{public}@", log: HAVEN_BGTASK_LOG, message)
     #endif
   }
 }
