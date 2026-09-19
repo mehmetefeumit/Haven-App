@@ -1,0 +1,46 @@
+# The nightly soak profile: everything the PR budget cannot hold.
+#
+# Superset of `pr` — every PR arm runs here too, so a nightly red is never
+# something the PR lane silently stopped covering. The three scenarios that
+# appear only here (S17, S18, S19) have NO lane execution in Phase 1: the
+# scheduler workflows land in Phase 2, and until then they run under
+# `run_soak_local.sh` and in the crate's own oracle tests.
+name = "nightly"
+run_budget_secs = 4200
+deadline_secs = 4800
+margin_secs = 300
+duration_secs = 900
+tick_ms = 250
+
+[world]
+members = 4
+circles = 3
+relays = 2
+
+[[scenarios]]
+id = "S01"
+arms = ["single-relay-outage", "all-relay-outage", "rolling-outage"]
+
+[[scenarios]]
+id = "S06"
+arms = ["stuck-row-sweep"]
+
+[[scenarios]]
+id = "S11"
+arms = ["quiet-circle-resume"]
+
+[[scenarios]]
+id = "S13"
+arms = ["hydration-quarantine"]
+
+[[scenarios]]
+id = "S17"
+arms = ["closed-prefixes", "notice"]
+
+[[scenarios]]
+id = "S18"
+arms = ["swallowed-ok-create", "swallowed-ok-relay-update", "swallowed-ok-location-send"]
+
+[[scenarios]]
+id = "S19"
+arms = ["duplicate-replay", "reordered-pages", "cross-sub-eose", "commit-gap"]

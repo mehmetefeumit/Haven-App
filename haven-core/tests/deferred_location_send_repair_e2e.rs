@@ -373,9 +373,10 @@ async fn the_engine_itself_clears_a_current_epoch_orphan_without_the_sweep() {
         assert_eq!(
             c.bob
                 .session()
-                .stored_message_state_for_test(&orphan_id)
+                .stored_message_record_for_test(&orphan_id)
                 .await
-                .expect("read the row"),
+                .expect("read the row")
+                .map(|probe| probe.state),
             Some(MessageState::EpochInvalidated),
             "the ENGINE must resolve a current-epoch {state:?} orphan; reading `Failed` \
              would mean Haven's sweep claimed a row that was never its to claim, and \
@@ -447,9 +448,10 @@ async fn a_future_epoch_row_stays_stuck_across_a_reopen_and_only_the_sweep_clear
         CircleManager::new_unencrypted(bob_dir.path(), &bob_keys).expect("bob's session reopens");
     assert_eq!(
         bob.session()
-            .stored_message_state_for_test(&stuck)
+            .stored_message_record_for_test(&stuck)
             .await
-            .expect("read the row"),
+            .expect("read the row")
+            .map(|probe| probe.state),
         Some(MessageState::Retryable),
         "hydration must not resolve a future-epoch row — it is waiting for a commit"
     );
@@ -477,9 +479,10 @@ async fn a_future_epoch_row_stays_stuck_across_a_reopen_and_only_the_sweep_clear
     );
     assert_eq!(
         bob.session()
-            .stored_message_state_for_test(&stuck)
+            .stored_message_record_for_test(&stuck)
             .await
-            .expect("read the swept row"),
+            .expect("read the swept row")
+            .map(|probe| probe.state),
         Some(MessageState::Failed),
         "the row must carry a TERMINAL disposition, not be deleted or left retryable"
     );
@@ -529,9 +532,10 @@ async fn a_future_epoch_row_past_the_horizon_is_retired_at_the_next_session_open
 
     assert_eq!(
         bob.session()
-            .stored_message_state_for_test(&stuck)
+            .stored_message_record_for_test(&stuck)
             .await
-            .expect("read the swept row"),
+            .expect("read the swept row")
+            .map(|probe| probe.state),
         Some(MessageState::Failed),
         "opening the session must retire a row the relay can no longer redeliver"
     );
@@ -596,9 +600,10 @@ async fn the_sweep_never_retires_a_commit_at_any_age() {
     assert_eq!(
         c.bob
             .session()
-            .stored_message_state_for_test(&stuck_commit)
+            .stored_message_record_for_test(&stuck_commit)
             .await
-            .expect("read the commit row"),
+            .expect("read the commit row")
+            .map(|probe| probe.state),
         Some(MessageState::Created),
         "the commit row must be left exactly as it was"
     );

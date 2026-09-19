@@ -260,3 +260,33 @@ unbudgeted e2e-ios-auth-tier.yml::e2e_ios_auth_tier the attempt timeout is the o
 unbudgeted e2e-ios-background-publish.yml::e2e_ios_bg_publish the attempt timeout is the only bound on flutter test's build and run
 unbudgeted e2e-ios-real-gps.yml::e2e_ios_real_gps the attempt timeout is the only bound on flutter test's build and run
 unbudgeted e2e-profile.yml::e2e_profile_ios the attempt timeout is the only bound on flutter test's build and run
+
+# ---------------------------------------------------------------------------
+# The Tier-1 soak lane. No emulator, no app: the rig is a cargo binary this
+# runner launches under the lane's inner deadline.
+#
+# It carries ONE bound, deliberately, and this manifest is where that decision
+# is visible. A second inner `timeout` around the rig would be charged here at
+# its own bound, and the pr lane's arithmetic makes that impossible: the run
+# budget is 300 s of scenario work under a 360 s deadline, and every lane also
+# carries the 180 s unbounded-work allowance this check declares once for all
+# of them — so any inner bound large enough to let a healthy run finish would
+# push the worst case past the deadline and force it to ~9 m for no diagnostic
+# gain. The rig's rc taxonomy names WHAT went wrong; the deadline only ever
+# names THAT it hung. The `cargo run` itself is unbounded work that is not a
+# wait (the header's last section), so it is priced by that allowance and by
+# nothing else — which is exactly the honest reading: the deadline is the bound.
+# ---------------------------------------------------------------------------
+
+unit tooling/e2e/ci/run-soak-core.sh
+# Both scans read files already on disk: the key-material floor and the
+# identifier scanner over the evidence tree, once against the manifest the rig
+# sealed from its own declarations and once against the host needles. Neither
+# waits for anything, so each costs the wrapper's own budget.
+#
+# The path is a glob because one scan is reached three ways — the end of a
+# healthy run, the EXIT trap that catches the reaper, and the `--scan-only`
+# entry the lane's scan-before-upload step uses — and all three are the same
+# two calls, at the same cost.
+rig-scan */bash:scan-logs.sh#1 charge @
+logscan */lib:logscan_gate#1 charge @

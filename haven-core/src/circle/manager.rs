@@ -3376,6 +3376,27 @@ impl CircleManager {
         self.storage.circle_health(nostr_group_id)
     }
 
+    /// Reads a circle's epoch-rotation stamps.
+    ///
+    /// Test-only. A harness that steps a policy clock must compute what a
+    /// rotation gate will decide from the stamps the WRITE side actually
+    /// recorded — which it stamps from real time
+    /// ([`Self::note_inbound_group_events`], `note_epoch_changes`,
+    /// [`Self::confirm_published`]) — and never from the offset it applied,
+    /// because the two are different clocks. The stamps are milliseconds and the
+    /// gates take seconds; convert at the call site.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn circle_rotation_state(
+        &self,
+        nostr_group_id: &[u8; 32],
+    ) -> Result<super::CircleRotationState> {
+        self.storage.circle_rotation_state(nostr_group_id)
+    }
+
     /// Removes the last-known location for a single sender in a circle.
     ///
     /// # Errors
@@ -5002,10 +5023,11 @@ mod tests {
     /// If this stops finding a table, MDK renamed it at the pinned rev — the
     /// invariant under test is unchanged, only the injection needs re-aiming.
     fn tamper_session_db(data_dir: &std::path::Path, sql: &str) {
+        let key = crate::nostr::mls::StorageConfig::test_sqlcipher_key().expect("test key");
         let conn = rusqlite::Connection::open(data_dir.join("session.sqlite")).expect("open");
         conn.pragma_update(None, "cipher_compatibility", 4i64)
             .expect("cipher compatibility");
-        conn.pragma_update(None, "key", "haven-test-mls-passphrase")
+        conn.pragma_update(None, "key", key.as_secret_str())
             .expect("sqlcipher key");
         conn.execute_batch(sql).expect("tamper");
     }

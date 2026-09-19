@@ -29,6 +29,24 @@ pub use cgka_traits::transport::TransportMessage;
 pub use cgka_traits::types::{EpochId, GroupId, MemberId, MessageId};
 pub use nostr::Event;
 
+// ── Typed engine errors — MATCHED, NEVER FORMATTED ───────────────────────────
+//
+// Gated because these two are the one pair of Dark Matter types whose own
+// renderings are Rule-15 identifiers: `EngineError::ForkedEpoch`'s derived
+// `Debug` prints a real MLS group id, and its `#[error(…)]` Display prints two
+// ABSOLUTE epochs. Production never sees them — every shipped path flattens
+// through `map_mls_err`, which is and stays the redaction boundary. They exist
+// here for exactly one consumer, `SessionManager::process_event_typed_for_test`,
+// whose caller classifies an undecryptable event by MATCHING the variant.
+//
+// The consuming rule, which is not negotiable: match, never format. No `{:?}`,
+// no `{e:?}`, no `.unwrap()`/`.expect()` on a `Result<_, SessionError>`, no
+// `assert!(…, "{e}")` — a classification may carry only a value-free verdict.
+#[cfg(any(test, feature = "test-utils"))]
+pub use cgka_session::SessionError;
+#[cfg(any(test, feature = "test-utils"))]
+pub use cgka_traits::error::EngineError;
+
 use crate::log_alias::{self, LogAliasClass};
 
 // ── Haven-local ingest screening ─────────────────────────────────────────────
@@ -377,6 +395,29 @@ impl std::fmt::Debug for LocationMessageResult {
                 .finish(),
         }
     }
+}
+
+// ── Stored-row probe (test-only) ─────────────────────────────────────────────
+
+/// The two fields of a stored message row a test may read — and nothing else.
+///
+/// A deliberate projection of `MessageRecord`, never the record: the record also
+/// carries the real MLS `group_id` (Security Rule 4) and the `payload`
+/// ciphertext, and a caller that holds those can render them. This carries a
+/// disposition and an epoch, both of which a caller needs to tell a branch loss
+/// (`EpochInvalidated`) from an ordinary past-epoch drop (`Failed`) and to place
+/// a row against the epoch that produced it.
+///
+/// **No `Debug`, deliberately.** `epoch` is an absolute epoch, which Rule 15
+/// forbids in any rendering; a consumer reports it as a delta from its own
+/// origin or not at all.
+#[cfg(any(test, feature = "test-utils"))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct StoredMessageProbe {
+    /// The epoch column the engine stamped on the row.
+    pub epoch: EpochId,
+    /// The row's disposition.
+    pub state: MessageState,
 }
 
 // ── Stuck convergence inputs (the outbound send gate) ────────────────────────

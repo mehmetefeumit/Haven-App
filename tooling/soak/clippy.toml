@@ -1,0 +1,8 @@
+# Deliberately NOT a copy of haven-core/clippy.toml.
+#
+# That file bans `rand::thread_rng` because jitter a relay observer could
+# predict is a privacy defect. Here the opposite is true: the nemesis schedule
+# MUST be reproducible from its seed, so a seeded `StdRng` is the whole point.
+# The rule that the RNG lives only in `nemesis/generator.rs` — never inside a
+# tick, where it would make a run unreproducible — is a review rule, because no
+# lint can express "in one module only".

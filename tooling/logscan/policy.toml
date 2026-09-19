@@ -152,6 +152,28 @@ diag = { term_floor = 6, declared_plants_expected = false, structural_rules = tr
 # writes more (strfry's `docker logs` dump runs to 14-23 lines) carries its own
 # `seal --floor relay=<n>`, which is where a truncated dump is caught.
 relay = { term_floor = 6, declared_plants_expected = false, structural_rules = false, reassemble = false, min_lines = 1, entry_format = "plain" }
+# The Tier-1 soak rig's own captures: one file per scenario (the lines the rig's
+# installed `log` sink captured while that scenario ran), plus the banner, the
+# timeline and the rig's redirected stdout, which the lane scans from its upload
+# tree. Everything in them is the rig's own or haven-core's own, so the
+# structural rules run in full and no class is scoped out — a relay URL or an
+# MLS group id here would be the violation itself, and the rig declares both.
+# `declared_plants_expected = false` because the rig is a Rust process with no
+# Dart channel at all: nothing can hand it a declared token to print, so that
+# control could never be satisfied. Its `rust` SHAPE plant carries the sink-reach
+# claim instead, emitted through the installed sink as the first and last line of
+# every scenario capture — which is exactly why it proves the sink was reached
+# and a token written straight into the file would not.
+# `min_lines = 2` is the smallest COMPLETE capture of this class, never what
+# makes a lane pass: a scenario capture is complete when it holds its opening and
+# its closing plant, and everything between them is the SUBJECT's logging, which
+# the release surface filters and which Rule 15 works to keep at zero. A capture
+# missing either plant is caught by `required_shape_plants` and by the rig's own
+# first/last-line discipline, not by this floor.
+# `cargo_status = "exempt"`: the lane captures the rig's own `cargo run` transcript
+# (a cold build prints the same pinned git revisions and crate names as rust-test);
+# the exemption is S2/S6 on cargo's crate-build line only, as for rust-test.
+soak = { term_floor = 6, declared_plants_expected = false, structural_rules = true, reassemble = false, min_lines = 2, entry_format = "plain", required_shape_plants = ["rust"], cargo_status = "exempt" }
 
 # ---------------------------------------------------------------------------
 # The coverage ledger

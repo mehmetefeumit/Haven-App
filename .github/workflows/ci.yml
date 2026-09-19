@@ -331,6 +331,20 @@ jobs:
     needs: [rust]
     uses: ./.github/workflows/e2e-profile.yml
 
+  # The Tier-1 soak rig: several whole Haven devices in ONE process against
+  # hermetic relays the rig breaks on a seeded schedule, asserting the
+  # invariants no functional lane reaches — one branch, a converged roster, no
+  # permanently undecryptable row, quiescence. No emulator and no app: the
+  # subject is haven-core. Only the `pr` profile runs per commit; `nightly` and
+  # `weekly` wait for the Phase-2 schedulers, so the scenarios they carry
+  # (S17/S18/S19) have no lane execution yet — docs/SOAK_LANE.md says which.
+  soak-core-pr:
+    name: Soak Core (pr profile)
+    needs: [rust]
+    uses: ./.github/workflows/soak-core.yml
+    with:
+      profile: pr
+
   # ---------------------------------------------------------------------------
   # Stage 5 — build verification: debug builds for every mobile target
   # (Android arm64/arm/x64 + iOS), proving the Flutter + Rust + toolchain

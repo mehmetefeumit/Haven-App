@@ -787,6 +787,20 @@ impl LiveSyncCore {
         &self.circle
     }
 
+    /// The engine processor this core drives.
+    ///
+    /// Test-only, and exposes nothing new in kind: [`EngineProcessor`] and its
+    /// constructor are already public. A quiescence predicate needs the
+    /// processor's own counters (`all_advances_consumed`,
+    /// `commit_activity_count`, `in_flight_publishes`), and reconstructing a
+    /// second processor over the same `CircleManager` would answer about a
+    /// different object than the one receiving events.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[must_use]
+    pub fn processor(&self) -> &EngineProcessor {
+        &self.processor
+    }
+
     /// Whether the session is live: not stopped, and its ingest worker is still
     /// alive.
     ///

@@ -2352,7 +2352,12 @@ lb_check_repo() {
       lb_die "${base}:${v%%$'\t'*}: an env mapping this check cannot read (${v#*$'\t'}); write it as a block mapping"
     fi
     while IFS=$'\t' read -r file job jobcap runs_on stepname stepcap uses retry_to retry_ma boot_to cmd body; do
-      is_emulator_step "${uses}" || is_simulator_body "${body}" || continue
+      # `is_soak_body` joins the gate for the reason it joined the ordering
+      # guard's: the soak lane is a plain `ubuntu-latest` `run:` step, so
+      # without it the lane declares NOTHING in the manifest and gets no budget
+      # protection at all — and a stale-declaration check cannot report a
+      # section nobody ever reaches.
+      is_emulator_step "${uses}" || is_simulator_body "${body}" || is_soak_body "${body}" || continue
       is_drive_body "${body}" || continue
       LB_LANES=$(( LB_LANES + 1 ))
       local lkey="${base}::${job}" label="${base}::${job} (${stepname})"
@@ -2592,7 +2597,7 @@ lb_main() {
 
 # Cases lb_self_test must run, pinned by EQUALITY: a deleted case must fail
 # the suite, not shrink it.
-readonly LB_SELF_TEST_CASES=168
+readonly LB_SELF_TEST_CASES=171
 
 # The base lane's budget, from the fixture's constants: the helper's
 # UP_SECS + 1 tick, BARRIER_SECS, READY_SECS, SETTLE_SECS and the drive's
@@ -3643,6 +3648,57 @@ lb_self_test() {
   _lb_tree second-reading-count
   _lb_sub "${lane}" "${settle}" "${settle}"'; (( n = $(sleep 300; echo 1) ))'
   _lb_expect "a line where the lexer sees more waits than the analyzer read stops the check" 2 "run-lane.sh:[0-9]+: app-install-lib.sh's lexer sees 2 wait\(s\) here"
+
+  # --- The SOAK lane: a plain `ubuntu-latest` `run:` step, no emulator action
+  # and no simulator harness in its body. Before is_soak_body() the walk
+  # `continue`d past it, so the lane declared nothing here and got no budget
+  # protection at all — and the stale-section check cannot report a section
+  # nobody ever reaches. Three cases: the lane is SEEN (an unclaimed wait in it
+  # fails), it passes once the wait is claimed, and a `--self-test` invocation
+  # of the same runner is still not a lane.
+  _lb_soak() { # _lb_soak <claim?>
+    cat >"${t}/tooling/e2e/ci/run-soak-core.sh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+readonly SOAK_SETTLE_SECS=25
+if [[ "${1:-}" == "--self-test" ]]; then
+  exit 0
+fi
+sleep "${SOAK_SETTLE_SECS}"
+SH
+    cat >"${t}/.github/workflows/soak.yml" <<YML
+name: soak
+on: [workflow_call]
+jobs:
+  e2e_soak_core_pr:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Run the soak
+        timeout-minutes: 10
+        run: bash tooling/e2e/ci/run-with-deadline.sh 6m "soak-core pr" -- bash tooling/e2e/ci/run-soak-core.sh pr
+YML
+    [[ "${1:-}" != claim ]] || _lb_mf '' 'unit tooling/e2e/ci/run-soak-core.sh' \
+      'settle sleep:SOAK_SETTLE_SECS#1 charge SOAK_SETTLE_SECS'
+  }
+
+  _lb_tree soak-unclaimed
+  _lb_soak
+  _lb_expect "a wait in the soak runner is SEEN, not skipped for want of an emulator" 1 \
+    'sleep:SOAK_SETTLE_SECS#1: a sleep the budget does not claim'
+
+  _lb_tree soak-claimed
+  _lb_soak claim
+  _lb_expect "a claimed soak lane is budgeted against its own deadline" 0 \
+    "soak.yml::e2e_soak_core_pr .*: $(( 25 + A )) s = 25 \+ ${A} allowance <= 6m"
+
+  _lb_tree soak-self-test
+  _lb_soak
+  _lb_sub "${t}/.github/workflows/soak.yml" \
+    '        run: bash tooling/e2e/ci/run-with-deadline.sh 6m "soak-core pr" -- bash tooling/e2e/ci/run-soak-core.sh pr' \
+    '        run: bash tooling/e2e/ci/run-soak-core.sh --self-test'
+  _lb_expect "a --self-test invocation of the soak runner is not a lane" 0 '' \
+    'run-soak-core.sh'
 
   if (( cases != LB_SELF_TEST_CASES )); then
     echo "[${LB_NAME}] self-test FAILED: ran ${cases} case(s), expected ${LB_SELF_TEST_CASES}" >&2

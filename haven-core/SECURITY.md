@@ -12,10 +12,35 @@ If you discover a security vulnerability, please report it privately by emailing
 
 ## Known Vulnerabilities
 
-None currently open. New advisories are surfaced by the weekly `cargo audit` CI
-job; document them here as they appear. Advisories deliberately *not* blocking
-CI (unreachable transitive code, informational warnings) are justified
-individually in `haven-core/.cargo/audit.toml`, not here.
+New advisories are surfaced by the weekly `cargo audit` CI job; document them
+here as they appear. Advisories deliberately *not* blocking CI (unreachable
+transitive code, informational warnings) are justified individually in
+`haven-core/.cargo/audit.toml`, not here.
+
+### Open, non-blocking
+
+- **RUSTSEC-2026-0237** — `nostr-relay-builder` is **unmaintained**
+  (informational; `patched = []`, so there is no version to move to). It is a
+  dev-dependency of `haven-core` and of `haven/rust_builder`, a real dependency
+  of `tooling/e2e/local-relay`, and a real dependency of `tooling/soak`
+  (the Tier-1 soak rig, which embeds it to build the hermetic relays it breaks
+  on a schedule). It appears in four of the five audited lockfiles and is
+  measured non-blocking: `cargo audit` returns rc 0 and counts it among its
+  allowed warnings.
+
+  **No `audit.toml` ignore, deliberately.** `cargo audit`'s ignore list has no
+  expiry field, so an ignore is a silencing change with no end date and nothing
+  that would ever bring it back for review. The controls instead are: the
+  per-lockfile `cargo audit` step for every crate that resolves it (five steps
+  in `audit.yml` since the soak crate landed), this row, and the residual
+  recorded in `docs/SOAK_LANE.md`.
+
+  **What lifts it:** `nostr-sdk` ≥ 0.45 subsumes the crate. The whole tree is
+  pinned to 0.44 against MDK's pinned `nostr` types, so lifting this is a
+  graph-wide bump, not a dependency edit. Nothing about it reaches a shipped
+  build: the crate is a harness relay, and
+  `scripts/ci/check_soak_test_only.sh` / `check_wire_proxy_test_only.sh` are
+  what keep it that way.
 
 ### Resolved
 

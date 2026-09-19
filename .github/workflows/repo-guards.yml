@@ -1928,6 +1928,77 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_logscan_policy.sh --self-test
 
+      # The Tier-1 soak rig links haven-core with `test-utils` ON: the five
+      # probe seams and the unencrypted-store constructors. This is the
+      # negative half of its boundary — no production reach, no build path, the
+      # feature still a DEV edge of rust_builder, and the one line that would
+      # disarm haven-core's `compile_error!` trap (`debug-assertions = true`
+      # under any shipped `[profile.*]`) absent from every manifest but the
+      # rig's own. Plus the two rules the rig's own tests cannot see: no `{:?}`
+      # of a haven_core/cgka/nostr/openmls value, and a timeline field-class
+      # test whose case count is pinned.
+      - name: Soak rig stays test-only
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_soak_test_only.sh
+
+      # Both directions per check over synthetic trees — including the arm that
+      # is the whole reason this is not a bare grep: `test-utils` as a
+      # DEV-dependency of rust_builder must PASS, and as a normal, build- or
+      # target-scoped dependency must fail. Count pinned by equality.
+      - name: Soak test-only guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_soak_test_only.sh --self-test
+
+      # The rig steps a clock forward on purpose — that is how a five-minute
+      # run reaches a 288-second horizon — and exactly one kind of seam may see
+      # the offset. A policy instant at a cursor, anchor or delivery-window seam
+      # does not accelerate anything: it fabricates the fork the run then
+      # reports, indistinguishably from a real one. The seam vocabulary is
+      # derived from haven-core, so a rename is BROKEN rather than clean.
+      - name: Soak clock partition
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_soak_clock_partition.sh
+
+      # Fixtures for every converting shape (both `From` directions, a named
+      # `into_wall()`, one outside clock.rs), both partition directions, and
+      # every route to blindness: a renamed newtype, a missing clock module, a
+      # seam that no longer exists in haven-core. Count pinned by equality.
+      - name: Soak clock-partition guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_soak_clock_partition.sh --self-test
+
+      # The POSITIVE half: does anything RUN the rig? A soak rig nothing drives
+      # is the most expensive instance of the failure mode
+      # docs/CI_HARDENING_BACKLOG.md catalogues — written, reviewed, green on
+      # its own fixtures, executed nowhere. Six links: ci.yml calls the pr
+      # profile on `needs: [rust]`; the job names are inside the pattern
+      # e2e-flakiness.yml counts (read from that file, never restated);
+      # rust-check.yml runs the shipped binary's `--self-test`; every job drives
+      # through the gated runner under an inner deadline and uploads only after
+      # it; the profiles nest; and the TOML's deadline equals the workflow's
+      # literal.
+      - name: Soak lane is reached and its numbers agree
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_soak_lane_reachable.sh
+
+      # Every link broken in turn over synthetic workflow trees, plus both
+      # false-positive directions and every way the extractor could go blind
+      # (an unreadable flakiness regex, a job list it cannot parse, a profile
+      # declaring nothing). Count pinned by equality.
+      - name: Soak lane-reachability guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_soak_lane_reachable.sh --self-test
+
+      # The soak runner's own hermetic fixtures: the sink spec, the containment
+      # branch (every capture deleted, one harness-authored line left, nothing
+      # interpolated into it), the fixed needle directory, the wiring pin
+      # check_logscan_wired_everywhere.sh's RUNNER_PINS names, and the two paths
+      # that scan a tree the drive did not finish with — the trap a reaper fires
+      # and the `--scan-only` entry the lane's own scan step uses.
+      - name: E2E harness self-test (soak lane runner)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/run-soak-core.sh --self-test
+
       - name: Identity-delete prefs residue
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_identity_delete_prefs_residue.sh

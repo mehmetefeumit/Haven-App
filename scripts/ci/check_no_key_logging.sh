@@ -56,6 +56,14 @@
 #   1. Rust: no `log::{trace,debug,info,warn,error}!`, `print*!`, `dbg!` in
 #      haven-core/src or haven/rust_builder/src interpolates a secret-shaped
 #      expression.
+#   1b. The same over `tooling/soak/src` — its own root, its own floor. The
+#      soak rig is not shipped, and that is exactly why it needs this: it
+#      MATERIALISES more key material than any other Rust in this tree. Every
+#      simulated device mints a `nostr::Keys`, opens a SQLCipher store with a
+#      passphrase, and reads OpenMLS group state out of it; the rig then writes
+#      every line it captured to a file the lane uploads. Test trees are out of
+#      scope here because nothing prints them anywhere; the rig's output is an
+#      artifact.
 #   2. Dart: no `debugPrint(`/`print(` in haven/lib does.
 #   3. EVERY logger backend `init_app` installs, on every platform, is an
 #      ALLOWLIST of Haven's own targets (`haven_core`, `rust_lib_haven`) with
@@ -91,6 +99,21 @@ readonly SCRIPT_NAME='check_no_key_logging'
 # a parser that has stopped recognising invocations collapses well past them.
 readonly MIN_RUST_SITES=70
 readonly MIN_DART_SITES=380
+# `tooling/soak/src`, its own root and its own floor: merging it into the Rust
+# pass would let a collapse in one root be masked by volume in the other. The
+# rig is landing file by file as this lands, so this is the smallest floor that
+# still reds the failure a floor exists to catch — an extractor that has stopped
+# recognising invocations in this root reports zero. Re-pinned to
+# floor(measured x 0.8) in the commit that completes the crate.
+# Re-measured 2026-09-18, the commit that completes the crate: 29 invocations
+# under tooling/soak; floor(29 x 0.8) = 23. The provisional 1 was the
+# smallest floor that still reds an extractor that stopped matching; now it is the
+# same 20 % margin the other roots carry.
+# Re-measured 2026-09-19: 21. The capture tests moved out of `src/logsink.rs`
+# into `tooling/soak/tests/logsink_capture.rs` — the lease serialises leaseholders, not
+# emitters, so a capture is only attributable in a binary where every world
+# takes it — and their `log::` invocations went with them. floor(21 x 0.8) = 16.
+readonly MIN_SOAK_SITES=16
 # `init_app` installs one backend per shipped platform family (Android, Apple).
 readonly MIN_LOG_BACKENDS=2
 # Self-test equality pin: 16 Rust + 7 Dart scanner fixtures, 2 floor probes and
@@ -880,6 +903,19 @@ main() {
   rc=0; scan dart "${MIN_DART_SITES}" 'haven/lib' "${dart_files[@]}" || rc=$?
   (( rc == 2 )) && exit 2
   (( rc == 0 )) || status=1
+
+  # The soak rig: its own root, its own floor. While the crate is not in the
+  # tree the pass says so rather than reporting a clean scan of nothing.
+  local soak_src="${REPO_ROOT}/tooling/soak/src"
+  local -a soak_files=()
+  [[ -d "${soak_src}" ]] && mapfile -t soak_files < <(find "${soak_src}" -name '*.rs' | sort)
+  if (( ${#soak_files[@]} == 0 )); then
+    log "SKIP: tooling/soak — the rig is not in the tree yet; nothing scanned, nothing claimed."
+  else
+    rc=0; scan rust "${MIN_SOAK_SITES}" 'tooling/soak/src' "${soak_files[@]}" || rc=$?
+    (( rc == 2 )) && exit 2
+    (( rc == 0 )) || status=1
+  fi
 
   rc=0; check_keyring_filter "${api}" || rc=$?
   (( rc == 2 )) && exit 2

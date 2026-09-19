@@ -1,0 +1,47 @@
+# The per-PR soak profile.
+#
+# Four scenarios, one relay. The set is pinned here rather than left to a run:
+# S01's single-relay outage alone carries the pool's own 123-second reconnect
+# ladder, and any S17 arm starts at the 684-second delivery-silence window.
+#
+# `run_budget_secs` is the work — the ARMS and the background nemesis phase the
+# driver walks before them, both priced at the product's own worst-case
+# constants by `tests/budget.rs`. It is a CEILING, not an expectation: a healthy
+# run measures about twenty seconds, because a bound is only paid when
+# something fails to happen. The four scenarios cost about 261 s of bound and
+# the background schedule about 1 016 s (one graded round per scheduled probe
+# at the pool's reconnect ladder, plus the teardown sweep), so 1 320 s is the
+# smallest whole minute that holds the priced run plus the margin.
+#
+# `deadline_secs` is the timeout the lane arms above it — the budget plus twice
+# the margin, as every profile here does — so a hung run is killed with time
+# left to write its banner, its timeline and its verdict. The only thing the
+# wider ceiling costs is how long a HUNG run blocks a pull request before it is
+# reaped; it costs a healthy one nothing.
+name = "pr"
+run_budget_secs = 1320
+deadline_secs = 1380
+margin_secs = 30
+duration_secs = 120
+tick_ms = 250
+
+[world]
+members = 3
+circles = 2
+relays = 1
+
+[[scenarios]]
+id = "S01"
+arms = ["single-relay-outage"]
+
+[[scenarios]]
+id = "S06"
+arms = ["stuck-row-sweep"]
+
+[[scenarios]]
+id = "S11"
+arms = ["quiet-circle-resume"]
+
+[[scenarios]]
+id = "S13"
+arms = ["hydration-quarantine"]

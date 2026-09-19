@@ -5,11 +5,12 @@
 # `Cargo.lock`s, and `rust_builder`'s is the one whose resolution actually ships
 # inside the app — auditing only `haven-core` let rust_builder drift unnoticed
 # (it sat on rustls-webpki 0.103.9 with four cert/CRL-validation advisories, and
-# time 0.3.46, long after haven-core had resolved past both). The two tooling
+# time 0.3.46, long after haven-core had resolved past both). The three tooling
 # crates never ship, but `haven-logscan` carries a secp256k1 implementation
-# (`k256`, to derive the E2E identities it hunts for) and `haven-local-relay`
-# sits in the app's socket path on every E2E lane, so an advisory against either
-# is still a finding this repository must see.
+# (`k256`, to derive the E2E identities it hunts for), `haven-local-relay` sits
+# in the app's socket path on every E2E lane, and `haven-soak` links haven-core
+# itself with `test-utils` on, so an advisory against any of them is still a
+# finding this repository must see.
 #
 # Every step runs from `haven-core` so cargo-audit picks up the single
 # `haven-core/.cargo/audit.toml` policy: that file reads relative to the working
@@ -55,3 +56,24 @@ jobs:
       - name: Run cargo audit (haven-local-relay — the hermetic relay and wire proxy)
         if: always()
         run: cargo audit --file ../tooling/e2e/local-relay/Cargo.lock
+
+      # The soak rig has its own lockfile because it is its own cargo project
+      # (an empty `[workspace]`, so no future root workspace can absorb it and
+      # drop its custom profile). It never ships, but it links haven-core with
+      # `test-utils` on and embeds nostr-relay-builder, so an advisory against
+      # anything it resolves is a finding about the crate the rig is built to
+      # exercise. It carries RUSTSEC-2026-0237 (nostr-relay-builder,
+      # unmaintained, no patched version) exactly as three of the four
+      # lockfiles above already do: measured non-blocking, recorded as a
+      # residual in haven-core/SECURITY.md and docs/SOAK_LANE.md, and
+      # deliberately NOT given an `audit.toml` ignore — cargo-audit's ignore
+      # list has no expiry field, so an ignore is a silencing change with no
+      # end date.
+      #
+      # scripts/ci/check_mdk_supply_chain.sh reads haven-core/Cargo.lock only,
+      # so this lockfile is outside its scope; the soak job's own one-version
+      # step in rust-check.yml is the only other control over what this crate
+      # resolves.
+      - name: Run cargo audit (haven-soak — the Tier-1 soak rig)
+        if: always()
+        run: cargo audit --file ../tooling/soak/Cargo.lock

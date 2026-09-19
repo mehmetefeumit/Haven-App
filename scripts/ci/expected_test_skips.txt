@@ -7,13 +7,17 @@
 #
 #     <surface>|<test-id>|<skip-reason>|<expected-count>
 #
-#   surface         haven-core | rust_builder | e2e_tooling | logscan | flutter
+#   surface         haven-core | rust_builder | e2e_tooling | logscan |
+#                   haven_soak | flutter
 #                   — reconciled independently, so a haven-core row is never
-#                   reported stale while checking rust_builder. The two
-#                   tooling crates (tooling/e2e/local-relay, tooling/logscan)
-#                   have no rows: neither declares a skip, and rust-check.yml
-#                   reconciles each against this file so one cannot appear
-#                   unannounced.
+#                   reported stale while checking rust_builder. The three
+#                   tooling crates (tooling/e2e/local-relay, tooling/logscan,
+#                   tooling/soak) have no rows: none declares a skip, and
+#                   rust-check.yml reconciles each against this file so one
+#                   cannot appear unannounced. `haven_soak` is the soak rig;
+#                   its whole point is that a scenario either runs or reddens
+#                   the lane, so an `#[ignore]` there is a scenario that has
+#                   quietly stopped grading anything.
 #   test-id         Rust:  <cargo target>::<libtest name>, where the target is
 #                          `src/lib.rs`, `tests/<file>.rs`, or `doc` for
 #                          doctests (whose churning `(line N)` suffix is

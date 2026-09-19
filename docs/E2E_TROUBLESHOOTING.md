@@ -26,6 +26,7 @@ what keeps that true).
 | `e2e-ios.yml` | `e2e_combined.dart` + `ios_bg_mirror_test.dart`; every captured log — the transcript, both unified-log exports, the relay, proxy and summary logs — runs through `scan-logs.sh` against the manifest sealed from the proxy's declarations plus the host needles (failure mode 13) | `flutter test -d <udid>` on a booted simulator, behind the recording wire proxy | host-native relay behind the proxy, `ws://127.0.0.1:7788` → `ws://localhost:7777` |
 | `e2e-background-catchup.yml` | M7 background catch-up runtime proof (4 phases + a guest reboot); each drive log is gated through `scan-logs.sh` (host needles) before it is echoed, and the whole log directory before upload (failure mode 13) | `run-m7-background-catchup.sh` under `reactivecircus/android-emulator-runner` | strfry container, `ws://10.0.2.2:7777` |
 | `e2e-live-sync.yml` | The SAME two lanes, flag-ON (`HAVEN_LIVE_SYNC=true`) — a manual re-run of what `ci.yml` already gates on | `workflow_dispatch` only | — |
+| `soak-core.yml` | the Tier-1 soak rig (`tooling/soak`): several whole Haven devices in one process against hermetic relays broken on a seeded schedule, grading haven-core's invariants; no app, no emulator. Every capture is scanned twice before the upload — against the manifest the rig sealed from its own declarations and against the host needles (failure mode 14) | `run-soak-core.sh` under `run-with-deadline.sh`, on a plain ubuntu runner | in-process `nostr-relay-builder` relays, ws:// loopback |
 | `e2e-integration.yml` | seven component targets (`smoke_test`, `app_test`, `keyring_test`, …), one after another; the lane's one manifest is sealed from the host needles before the first target, and every target's captures and the aggregate go through `scan-logs.sh` (failure mode 13) | `run-integration-tests.sh` → `run-single-avd-scenario.sh` per target, on one AVD | strfry container reset per target, `ws://10.0.2.2:7777` |
 
 `e2e-android.yml` / `e2e-ios.yml` take a `live_sync` boolean input (default
@@ -952,6 +953,54 @@ lane). The scanner's findings reports (`/tmp/logscan-report*.ndjson`,
 `/tmp/<lane>-logscan/*.ndjson`, `/tmp/ios-logscan/*.ndjson` — sink:line and
 class only) are not uploaded either — the same guard bans every `.ndjson` from
 an upload path — so the LEAK lines in the scanning steps' logs are the record.
+
+## Failure mode 14 — `soak-core-pr` is red
+
+The soak lane (`soak-core.yml`, driven by `tooling/e2e/ci/run-soak-core.sh`) is
+not an app lane: there is no emulator, no simulator and no APK. It builds a
+whole Haven world in ONE process — several devices with real MLS stores and
+real live-sync engines, against hermetic relays it breaks on a seeded schedule
+— and grades `haven-core`. So the "diagnose first" rule above does not apply
+here in its usual form: there is no unhealthy emulator to rule out. What there
+is instead is an rc that already says which half is at fault.
+
+**Read the exit code first. It is the diagnosis.**
+
+| rc | It means | Where to look |
+|---|---|---|
+| 1 | a declared invariant broke, OR a capture carried a declared identifier | `VIOLATION.marker` vs `LEAK.marker` in the uploaded tree. A violation keeps its first-violation snapshot; a LEAK deleted the tree on purpose and left one line saying so, with the class/encoding/`sink:line` in the job log and no value anywhere |
+| 2 | **the rig is broken, not the subject** | the rig leaked an `Arc` and the session stayed live; `allow_ws_loopback_for_test` was called twice; S13's key set-difference was not exactly one, i.e. the upstream schema moved under the pinned engine. Do not open a product issue for an rc 2 |
+| 3 | the run proves nothing | a scheduled fault never fired, an expectation floor was unmet, a shape plant was missed. The world, not the subject |
+| 4 | the run proves too little | a manifest with no searchable term, or a declaration floor unmet. Also the rig, not the subject |
+
+Then the **banner**, which is the first file in the uploaded tree and is
+written BEFORE the run starts precisely so an rc-3 run still has its seed on
+record. It carries the profile, the seed, the short commit, the rustc version
+and the 8-hex schedule tag — enough to reproduce:
+
+```
+scripts/run_soak_local.sh core --profile pr --seed <seed> --count 3
+```
+
+3/3 is a defect. 1/3 is a race in the rig, which is itself a bug to fix in the
+rig — never a retry and never a loosened bound.
+
+Two failures that look like the product and are not:
+
+* **An anonymous 124 with no rc line.** The inner deadline
+  (`run-with-deadline.sh 6m`) fired. The rig carries exactly one inner bound by
+  design (docs/SOAK_LANE.md explains the arithmetic), so this says only THAT it
+  hung; the timeline in the uploaded tree is what says where.
+* **`if-no-files-found: error` on the upload step.** The evidence tree was
+  empty, which after a LEAK it is not (containment leaves one file). An empty
+  tree means the rig never reached the point of writing its banner — look at
+  the redirected stdout capture, which is in that same tree and is scanned like
+  every other file.
+
+Everything else — what green does and does not prove, which of PLAN §2.1's
+S1–S9 this actually grades, and which scenarios have no lane execution yet — is
+in `docs/SOAK_LANE.md`, and is worth reading before concluding that a green
+soak lane covers a behaviour.
 
 ## What these lanes do NOT cover
 

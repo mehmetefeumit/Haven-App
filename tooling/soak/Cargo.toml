@@ -1,0 +1,90 @@
+# Tier-1 soak rig: an in-process Haven world (real MLS stores, real engines, a
+# real relay) driven by a seeded nemesis schedule, graded by oracles.
+#
+# It is a separate Cargo project (NOT a member of haven-core) so it never enters
+# the app build and never becomes a dependency of anything shipped. Its only
+# door into the product is haven-core's `test-utils` feature.
+[package]
+name = "haven-soak"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Tier-1 soak rig for Haven: seeded nemesis schedules over real MLS/Nostr state."
+license = "MIT"
+
+# Not a member of any workspace: the repository has no root Cargo.toml, and an
+# empty `[workspace]` table keeps a future one from silently absorbing this
+# crate into the app's dependency graph — which would also drop `[profile.soak]`
+# on the floor, because only a workspace root may define a profile.
+[workspace]
+
+[lib]
+name = "haven_soak"
+path = "src/lib.rs"
+
+[[bin]]
+name = "haven-soak"
+path = "src/main.rs"
+
+[dependencies]
+# The subject under test. `test-utils` is what makes the unencrypted-store
+# constructors and the probe seams visible; haven-core turns a build with it
+# into a compile error unless debug assertions are on, which is one of the two
+# reasons `[profile.soak]` sets them (see below).
+haven-core = { path = "../../haven-core", features = ["test-utils"] }
+# The scanner runs IN-PROCESS over each scenario's captured lines, through the
+# same expander the lanes use — two expanders would mean two coverage claims.
+haven-logscan = { path = "../logscan" }
+# Every direct nostr-stack dependency is exact-pinned to the version
+# haven-core/Cargo.lock resolves. A different 0.44.x would split the `nostr`
+# type graph from MDK's pinned rev, and this is the one crate where haven-core's
+# `nostr` types and the relay's must be the same universe.
+nostr = { version = "=0.44.7", features = ["std", "nip44"] }
+nostr-sdk = { version = "=0.44.1", default-features = false, features = ["nip44", "nip59"] }
+nostr-relay-builder = "=0.44.1"
+nostr-database = "=0.44.0"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "io-util", "sync"] }
+chrono = { version = "0.4", features = ["serde"] }
+rand = "0.8"
+tempfile = "3.10"
+hex = "0.4"
+log = "0.4"
+zeroize = { version = "1", features = ["zeroize_derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# The schedule digest. Same version haven-core and haven-logscan already resolve.
+sha2 = "0.10"
+# The checked-in profile declarations.
+toml = "0.8"
+#
+# NOT here, deliberately: `openmls`, `cgka-*` and `rusqlite` (one universe per
+# crate — a second `openmls` would be a second MLS type graph), and
+# `transport-nostr-peeler`, ever: `check_no_exporter_label_override.sh` roots at
+# `haven-core/src` + `haven/rust_builder/src` and would not see a Rule-11
+# exporter-label downgrade written here. Adding it means extending that guard in
+# the same change.
+
+[profile.soak]
+inherits = "release"
+# haven-core's `test-utils` + `not(debug_assertions)` is a compile_error!, and
+# the `ws://` loopback opt-in the rig needs to dial its own relay is
+# `cfg(debug_assertions)` with a release stub that always errs.
+debug-assertions = true
+# Cheap correctness, and the one thing that turns an epoch-arithmetic underflow
+# into a loud failure instead of a wrapped number.
+overflow-checks = true
+# No `debug = 1`: the symbols inflate a CI cache that shares one LRU budget with
+# four other crates' caches, and the timeline — not a backtrace — is the
+# diagnostic this rig is built around.
+
+[profile.test]
+# Scenario worlds run real MLS under `cargo test`; the dev profile makes that
+# roughly an order of magnitude slower for no diagnostic gain.
+opt-level = 2
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }

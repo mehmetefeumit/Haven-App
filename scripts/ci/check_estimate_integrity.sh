@@ -767,12 +767,24 @@ scan_tree() {
   done
 
   # --- check 2 ------------------------------------------------------------
-  local cite hist strict resolved cand
+  local cite hist strict resolved cand crate_root
   while IFS=$'\t' read -r f line_no cite hist strict; do
     [[ -n "${f}" ]] || continue
     rel="${f#"${base}"/}"
     resolved=''
-    for cand in "${base}/${cite}" "${base}/haven-core/${cite}" "${base}/haven/${cite}"; do
+    # A crate-relative cite (`tests/x.rs`) from a file under a nested crate
+    # resolves against THAT crate's root, found by walking up to its manifest.
+    crate_root="$(dirname "${f}")"
+    while [[ "${crate_root}" != "${base}" && "${crate_root}" != "/" \
+             && ! -f "${crate_root}/Cargo.toml" && ! -f "${crate_root}/pubspec.yaml" ]]; do
+      crate_root="$(dirname "${crate_root}")"
+    done
+    # `tooling/soak` for the same reason `haven-core` and `haven` are here: a
+    # guard under scripts/ci cites the soak crate's own tests crate-relatively,
+    # and the walk above anchors at the repo root for a file that is in no
+    # crate.
+    for cand in "${base}/${cite}" "${crate_root}/${cite}" "${base}/haven-core/${cite}" \
+                "${base}/haven/${cite}" "${base}/tooling/soak/${cite}"; do
       [[ -f "${cand}" ]] && { resolved="${cand}"; break; }
     done
     if [[ -z "${resolved}" ]]; then
@@ -823,7 +835,7 @@ scan_tree() {
 # ---------------------------------------------------------------------------
 self_test() {
   # Bump this in the SAME commit that adds or removes an assertion.
-  local -r SELF_TEST_FIXTURES=104
+  local -r SELF_TEST_FIXTURES=106
   local tmp fails=0 checked=0
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
@@ -1149,6 +1161,19 @@ self_test() {
     '//! DELETED-WITH-SUBJECT (Dark Matter, DM-5a).' \
     '//! HISTORICAL measurement: `tests/probe_test.rs` sampled p50 ~= 104 ms,' \
     '//! and that suite is DELETED, so the figure cannot be reproduced.'
+  _nested_cite_case() {
+    local dir="${tmp}/cite_nested" want="$1" label="$2" got=0
+    rm -rf "${dir}"; mkdir -p "${dir}/tooling/probe/src" "${dir}/tooling/probe/tests"
+    printf '[package]\nname = "probe"\n' >"${dir}/tooling/probe/Cargo.toml"
+    printf '//! The MEASUREMENT lives in `tests/probe_test.rs`: p99 ~= 106 ms.\n' \
+      >"${dir}/tooling/probe/src/lib.rs"
+    (( want == 0 )) && printf '#[test] fn probe() {}\n' >"${dir}/tooling/probe/tests/probe_test.rs"
+    _run "${dir}" '' 0 || got=$?
+    _record "${label}" "${want}" "${got}"
+  }
+  _nested_cite_case 0 'a nested crate cites its OWN tests/ dir -> PASS (resolved at the crate root)'
+  _nested_cite_case 1 'a nested crate cites a tests/ file it does not have -> FAIL'
+
   _cite_case 'cited instrument is live -> PASS' 0 \
     '//! A live probe.' \
     '//! The MEASUREMENT lives in `tests/probe_test.rs`: p99 ~= 106 ms.'

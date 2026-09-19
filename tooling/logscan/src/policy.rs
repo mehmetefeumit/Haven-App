@@ -753,6 +753,7 @@ ios = { term_floor = 8, declared_plants_expected = false, structural_rules = tru
         let policy = Policy::load().expect("policy");
         for (sink, expected) in [
             ("rust-test", CargoStatus::Exempt),
+            ("soak", CargoStatus::Exempt),
             ("logcat", CargoStatus::Scanned),
             ("drive", CargoStatus::Scanned),
             ("ios", CargoStatus::Scanned),
@@ -765,6 +766,7 @@ ios = { term_floor = 8, declared_plants_expected = false, structural_rules = tru
         // And the exemption never stands in for the rules being off: the sink
         // that skips cargo's lines still runs S1–S12 over every other one.
         assert!(policy.sinks["rust-test"].structural_rules);
+        assert!(policy.sinks["soak"].structural_rules);
     }
 
     #[test]

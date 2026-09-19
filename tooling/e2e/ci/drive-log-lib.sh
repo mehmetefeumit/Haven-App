@@ -640,6 +640,10 @@ readonly DRIVE_LOG_WIRING_EXEMPT=(
   # A generic deadline wrapper: it runs whatever command line it is handed and
   # drives nothing of its own, so the predicate belongs in the runner it wraps.
   run-with-deadline.sh
+  # The soak lane drives a Rust binary (`haven-soak`), never `flutter drive`, so
+  # there is no drive log for the failure predicate to read; its verdict is the
+  # binary's own rc and the markers it writes (docs/SOAK_LANE.md).
+  run-soak-core.sh
 )
 
 # Everything a runner SAYS rather than does: full-line `#` comments, a ` # `
@@ -825,9 +829,17 @@ drive_log_check_wiring() {
   while IFS= read -r f; do
     runners+=("$(basename "${f}")")
   done < <(find "${dir}" -maxdepth 1 -name 'run-*.sh' | sort)
-  if (( ${#runners[@]} < 2 )); then
-    echo "ERROR: found ${#runners[@]} run-*.sh under ${dir}; this check has" >&2
-    echo "gone blind rather than found a clean tree." >&2
+  # Blind = no runner this check could ever grade: the exempt set exists in
+  # every tree by construction, so counting it would let a glob that sees only
+  # the exemptions pass as "every runner is wired" over an empty set.
+  local graded=0 name
+  for name in "${runners[@]}"; do
+    case " ${DRIVE_LOG_WIRING_EXEMPT[*]} " in *" ${name} "*) continue ;; esac
+    graded=$(( graded + 1 ))
+  done
+  if (( graded < 1 )); then
+    echo "ERROR: found ${#runners[@]} run-*.sh under ${dir}, none of them" >&2
+    echo "gradable; this check has gone blind rather than found a clean tree." >&2
     return 2
   fi
 
@@ -1468,16 +1480,23 @@ DART
 # Suite 4: the runners against the predicate.
 #
 # Two fixture trees, because the two ways to reach it fail differently. `_mk`
-# writes one runner; every tree carries the exempt wrapper, whose presence is
-# what the stale-exemption rule reads, so a tree that omits it is fixture 36's
+# writes one runner; every tree carries BOTH exempt runners (the deadline wrapper
+# and the soak driver), whose presence is what the stale-exemption rule reads, so
+# a tree that omits one is fixture 36's
 # own case rather than an accident.
 # ---------------------------------------------------------------------------
 _dl_mk_runner() { # <tree> <name> <body>
   mkdir -p "${1}/tooling/e2e/ci"
   printf '#!/usr/bin/env bash\n%s\n' "$3" > "${1}/tooling/e2e/ci/${2}"
 }
-_dl_mk_tree_a() { # <tree> — one direct caller, one delegating runner
+# Every fixture tree must carry every exempt runner (the stale-exemption rule
+# reads their presence), so one helper writes the whole set.
+_dl_mk_exempt() { # <tree>
   _dl_mk_runner "$1" run-with-deadline.sh 'exec "$@"'
+  _dl_mk_runner "$1" run-soak-core.sh 'cargo run --profile soak -- "$@"'
+}
+_dl_mk_tree_a() { # <tree> — one direct caller, one delegating runner
+  _dl_mk_exempt "$1"
   _dl_mk_runner "$1" run-direct.sh '
 source "${SCRIPT_DIR}/drive-log-lib.sh"
 flutter drive --target="${TARGET}" > "${LOG}" 2>&1 || drc=$?
@@ -1553,7 +1572,7 @@ flutter drive --target="${target}" || rc=$?'
   #      iOS-only manifest rows hang off this edge alone. Isolated in a tree
   #      whose only non-exempt runner needs it, so nothing else can carry it.
   wtree="${tmp}/wiring-source"
-  _dl_mk_runner "${wtree}" run-with-deadline.sh 'exec "$@"'
+  _dl_mk_exempt "${wtree}"
   _dl_mk_runner "${wtree}" run-sourced.sh '
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/flake-lib.sh"
 flutter test "${SCENARIO}" -d "${UDID}" || rc=$?'
@@ -1575,7 +1594,7 @@ flutter test "${SCENARIO}" -d "${UDID}" || rc=$?'
   #      none) must report that it can no longer see the tree, never "every
   #      runner is wired" over an empty set.
   wtree="${tmp}/wiring-blind"
-  _dl_mk_runner "${wtree}" run-with-deadline.sh 'exec "$@"'
+  _dl_mk_exempt "${wtree}"
   _dl_expect_wiring_rc 37 2 "${wtree}"
 
   # (38) The predicate named inside a DOUBLE-QUOTED string. Fixture 34 covers
@@ -1725,7 +1744,7 @@ bash "${INNER}" "${target}" || rc=$?'
   #       code, it HANGS — the fixture converts a silent recursion into a
   #       timed-out job.
   wtree="${tmp}/wiring-cycle"
-  _dl_mk_runner "${wtree}" run-with-deadline.sh 'exec "$@"'
+  _dl_mk_exempt "${wtree}"
   _dl_mk_runner "${wtree}" run-ping.sh '
 readonly INNER="${script_dir}/run-pong.sh"
 bash "${INNER}" "${target}" || rc=$?'

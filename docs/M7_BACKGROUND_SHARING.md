@@ -1514,3 +1514,37 @@ nostr_group_id_hex=?` in the `delete_circle` cascade (`storage.rs:824-877`) = wi
   the fail-safe posture keeps provisional and iOS-17 Always on the When-In-Use shape, so only
   *confirmed* Always enters the un-evidenced one. The revert, if 0a ever fails, is one line in
   `arm()`.
+- 2026-09-18 — **iOS reclaimed the drive inside P3's settle window, and the wrapper said nothing
+  (CI run 35397118356, `always-live-sync`).** The drive printed every proof through
+  `BACKGROUND_SHARING_DISABLED` and then died 42 s later, mid-window, with the test and its
+  `tearDownAll` reported as "did not complete". Its own `sim-unified.log` names the sequence and
+  the commit under test does not appear in it (that commit changed `toString()` renderings and
+  field names only, no background manager, no SLC/BGTask handler, no silence path): at
+  `22:18:26.05` the disable dropped every CoreLocation claim — `stopUpdatingLocation`,
+  `setAllowsBackgroundLocationUpdates:0`, the service session invalidated,
+  `stopMonitoringSignificantLocationChanges`, `cancelAllTaskRequests` — leaving the app holding
+  only the two `Flutter debug task` UIApplication background tasks the DEBUG engine begins on
+  backgrounding (taskIDs 4 and 6, created at `22:13:27`, never ended). At `22:19:03.899` RunningBoard
+  delivered the expiration warning and the invalidation in the same 0.6 ms; unlike every healthy
+  run, no `Expiration notification complete`, no `Firing background task expiration handlers` and no
+  `Ending task … Flutter debug task` followed, and the process never logged again. The host's
+  VM-service connection closed 4.9 s after that, which is what `IntegrationTestTestDevice` turns
+  into a closed suite channel and package:test into "did not complete". The Dart heartbeat due 20 s
+  after the disable — present in all four comparison runs (35376588206, 35311161479,
+  35280144455 x2) — never printed, so the app had already stopped executing before the warning
+  arrived. **Not proven, and not provable from the artifact:** which process ended it. `Suspending
+  task`/jetsam/watchdog lines belong to `runningboardd`, `SpringBoard` and the kernel, which the
+  Runner-scoped export excludes by predicate and the device-wide export excluded by its blind 64 MiB
+  TAIL cap — that export's window began at `22:21:56`, 2 min 52 s AFTER the death. Fixes: the
+  workflow adds a third, predicate-scoped export (`sim-lifecycle.log`: every non-Runner process's
+  lines that name the app, uncapped in practice), so the next occurrence is attributable; and
+  `run-ios-bg-publish.sh` shortens the exposure it controls — `bgp_wait_until` measures WALL CLOCK
+  instead of summing its own sleeps, and the DISARM budget is anchored on the drive's own disable
+  append (`bgp_budget_after_lag`, one-sided so it can never wake the app early), which takes the
+  measured 216.8-222.0 s wake-up back to ~210 s and restores the margin to the 238 s kind-445
+  eviction bound past which P3's re-fetch collects silence and the wire half passes VACUOUSLY.
+  **What no wrapper can fix:** from the disable the app has no execution claim — that is the
+  guarantee under test — so the OS may take the process at any point in those 200 s. The DISARM
+  wait's drive-exited branch now says so, with the app's process state beside it (calibrated at
+  READY, so a read that never saw the app reports `unknown` rather than blaming iOS), instead of
+  leaving an rc=79 to be read as an assertion failure.

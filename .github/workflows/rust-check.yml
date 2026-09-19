@@ -1,11 +1,16 @@
 # Reusable workflow: Rust checks
-# Verifies formatting, linting, and tests for all four Rust crates:
+# Verifies formatting, linting, and tests for all five Rust crates:
 #   - haven-core: the protocol/crypto library (pure Rust)
 #   - haven/rust_builder: the flutter_rust_bridge FFI surface
 #   - tooling/e2e/local-relay: the hermetic E2E relay + the recording wire proxy
 #     (harness-only; never part of a shipped build)
 #   - tooling/logscan: the runtime log-privacy scanner the E2E lanes run over
 #     every captured log (harness-only; never part of a shipped build)
+#   - tooling/soak: the Tier-1 soak rig, which builds a whole Haven world in
+#     one process against relays it breaks on a seeded schedule (harness-only;
+#     never part of a shipped build, and the only one of the three that
+#     compiles haven-core — with `test-utils` on, which is why it is also the
+#     only job here with an explicit timeout)
 #
 # Every job also builds that scanner and runs it, rules-only, over its own
 # tee'd `cargo test` transcript before anything else reads the file
@@ -404,3 +409,251 @@ jobs:
         run: |
           rm -f /tmp/haven-soak/needles/mutation-*.needles.json
           rm -rf "${RUNNER_TEMP}/logscan-mutation"
+
+  # ============================================================================
+  # soak-tooling — tooling/soak: the Tier-1 soak rig (`haven-soak`).
+  #
+  # Same shape as logscan-tooling, with two differences that matter.
+  #
+  # FIRST: this is the only tooling job that COMPILES haven-core, with
+  # `test-utils` on. That pulls libsqlite3-sys with
+  # bundled-sqlcipher-vendored-openssl, i.e. a vendored OpenSSL and SQLCipher
+  # built from source, and `[profile.soak]` is a new target subdirectory on top
+  # of it. A cache miss here is minutes, and because every stage-4 lane waits on
+  # this workflow, a cold build here delays the WHOLE pipeline — hence the
+  # explicit `timeout-minutes` (this workflow's other jobs have none) and the
+  # single `shared-key` shared with soak-core.yml, so the lane reads the cache
+  # this job wrote rather than building the crate a second time. `key:` would
+  # not do: it APPENDS to the automatic job-scoped key, which would give every
+  # job its own cold build.
+  #
+  # SECOND: the self-test runs under `--profile soak`, NOT `--release`.
+  # e2e-tooling's `--release` line is deliberate for the wire proxy and wrong
+  # here: haven-core's lib.rs is
+  # `#[cfg(all(feature = "test-utils", not(debug_assertions)))] compile_error!`,
+  # and the ws:// loopback opt-in the rig needs is `#[cfg(debug_assertions)]`
+  # with a release stub that always errors. `[profile.soak]` is release with
+  # debug-assertions and overflow-checks back on, and it is the profile the
+  # lane runs, so it is the artifact this job must prove.
+  #
+  # Every soak binary invocation redirects BOTH streams to a file that a later
+  # step scans. A bare invocation would put whatever the rig prints into the
+  # job log, which nothing can retract.
+  # ============================================================================
+  soak-tooling:
+    name: soak tooling (Tier-1 soak rig)
+    runs-on: ubuntu-latest
+    # 60, not 45: two cold compiles (test, then [profile.soak]) of haven-core with vendored OpenSSL + SQLCipher, then a suite whose own bounded waits are minutes.
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: tooling/soak
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            tooling/soak
+            tooling/logscan
+          # NOT `key:` — see the job header. `shared-key` replaces the automatic
+          # job-based key, so soak-core.yml's three jobs and this one share one
+          # cache entry for the same crate. rust-cache's target cleanup finds a
+          # profile directory by the `deps`/`.fingerprint`/`build` markers
+          # inside it rather than by a fixed debug/release list, so
+          # `target/soak` is pruned like any other.
+          shared-key: soak-crate
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      # `--all-targets`, matching the other tooling jobs: the crate's six
+      # `tests/*.rs` targets are where the oracle, determinism, budget and
+      # timeline-field proofs live, and bare clippy compiles none of them.
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      # ONE VERSION, ONE SOURCE — and the same version haven-core resolved.
+      #
+      # The soak crate has its own Cargo.lock, so nothing but this step stops it
+      # resolving a second `openmls` (the two-universes trap: two openmls
+      # versions in one binary are two incompatible type graphs that still
+      # compile), or a `nostr` 0.44.x different from the one MDK's pinned rev
+      # was built against — which would split the nostr type graph between
+      # haven-core's events and the rig's relay.
+      - name: One version, one source, and equal to haven-core's
+        run: |
+          set -euo pipefail
+          status=0
+          for crate in openmls cgka-traits cgka-engine libsqlite3-sys \
+                       nostr nostr-sdk nostr-relay-pool nostr-database; do
+            versions="$(cargo tree -i "${crate}" --prefix none --no-dedupe 2>/dev/null \
+                          | awk -v c="${crate}" '$1 == c { print $2 }' | sort -u)"
+            n="$(printf '%s\n' "${versions}" | grep -c . || true)"
+            if [[ "${n}" != 1 ]]; then
+              # Zero lines means either the crate is not in this graph at all or
+              # `cargo tree -i` refused an ambiguous spec — which is what it does
+              # when SEVERAL versions of it are present, i.e. the two-universes
+              # trap itself. Both are this step failing, and the printed tree
+              # says which.
+              echo "::error::${crate} does not resolve to exactly one version in tooling/soak (parsed ${n}): ${versions//$'\n'/ }"
+              cargo tree -i "${crate}" --prefix none --no-dedupe || true
+              status=1
+              continue
+            fi
+            want="$(awk -v c="${crate}" '
+              /^name = / { name = $3 }
+              /^version = / { if (name == "\"" c "\"") { print $3; exit } }
+            ' ../../haven-core/Cargo.lock | tr -d '"')"
+            got="${versions#v}"
+            if [[ -z "${want}" ]]; then
+              echo "::error::${crate} is not in haven-core/Cargo.lock, so there is nothing to agree with. Either the dependency left haven-core (drop it from this list in the same change) or this parser has rotted."
+              status=1
+            elif [[ "${want}" != "${got}" ]]; then
+              echo "::error::${crate} is ${got} here and ${want} in haven-core/Cargo.lock. The soak is the one crate where haven-core's types and the relay's must be one universe; pin it."
+              status=1
+            fi
+          done
+          exit "${status}"
+
+      # `test-utils` MUST NOT reach a shipped build. `rust_builder` names it as
+      # a DEV-dependency on purpose (its own tests need the seams), and a bare
+      # `cargo tree -e features` therefore always finds it — the edge `no-dev`
+      # is exactly what removes. What this asserts is the real property: on the
+      # non-dev graph of the crate that ships inside the app, haven-core carries
+      # no `test-utils` feature.
+      - name: test-utils is absent from the shipped FFI graph
+        working-directory: haven/rust_builder
+        run: |
+          set -euo pipefail
+          tree="$(cargo tree -e features,no-dev -p haven-core)"
+          if grep -qE '(^|[^a-z-])feature "test-utils"' <<<"${tree}"; then
+            echo '::error::haven-core is built with the test-utils feature on the non-dev graph of rust_builder. That feature gates the five soak seams and re-exports types whose Debug prints a real MLS group id.'
+            exit 1
+          fi
+          echo "test-utils is absent from rust_builder's non-dev haven-core graph"
+
+      # The rig derives S01's and S17's liveness bounds from nostr-relay-pool's
+      # own reconnect constants. They are private to that crate, so the rig
+      # carries its own copies; this step is what stops the two drifting — it
+      # reads the VENDORED source cargo just resolved, not a doc.
+      - name: Reconnect constants still say what the bounds assume
+        run: |
+          set -euo pipefail
+          # Depth 5 under registry/src: index / crate / src / relay / file.
+          # sort -V, because 0.44.10 sorts before 0.44.3 lexically.
+          src="$(find "${CARGO_HOME:-${HOME}/.cargo}/registry/src" \
+                   -maxdepth 5 -type f -path '*nostr-relay-pool-*/src/relay/constants.rs' \
+                   | sort -V | tail -1)"
+          if [[ -z "${src}" ]]; then
+            echo "::error::nostr-relay-pool's vendored constants.rs was not found, so the rig's reconnect bounds are pinned against nothing. This is a broken guard, not a passing one."
+            exit 2
+          fi
+          status=0
+          for want in \
+            'DEFAULT_CONNECTION_TIMEOUT' \
+            'MAX_RETRY_INTERVAL' \
+            'JITTER_RANGE'; do
+            grep -qE "^pub(\((crate|super)\))? const ${want}" "${src}" || {
+              echo "::error::${want} is gone from nostr-relay-pool's constants.rs; tooling/soak/src/oracle/bounds.rs derives a liveness bound from it."
+              status=1
+            }
+          done
+          grep -nE '^pub(\((crate|super)\))? const (DEFAULT_CONNECTION_TIMEOUT|MAX_RETRY_INTERVAL|JITTER_RANGE)' "${src}" || true
+          # Same for the two private haven-core constants behind
+          # `location_publish_window()`: one attempt, a 5 s ack window.
+          loc=haven-core/src/relay/manager.rs
+          grep -qE '^const LOCATION_ACK_WINDOW: Duration = Duration::from_secs\(5\);' "${loc}" || {
+            echo "::error::LOCATION_ACK_WINDOW is no longer 5 s in ${loc}; tooling/soak/src/oracle/bounds.rs::location_publish_window derives from it."
+            status=1
+          }
+          grep -qE '^const LOCATION_PUBLISH_ATTEMPTS: u32 = 1;' "${loc}" || {
+            echo "::error::LOCATION_PUBLISH_ATTEMPTS is no longer 1 in ${loc}; tooling/soak/src/oracle/bounds.rs::location_publish_window assumes a single attempt."
+            status=1
+          }
+          exit "${status}"
+
+      # As in haven-core: built before the transcript exists, `id` for the
+      # scan steps' `if:`.
+      - name: Build the runtime log scanner
+        id: build-scanner
+        working-directory: ${{ github.workspace }}
+        run: cargo build --release --manifest-path tooling/logscan/Cargo.toml
+
+      - name: Run tests
+        run: |
+          set -o pipefail
+          cargo test 2>&1 | tee "${RUNNER_TEMP}/soak-tooling-cargo-test.log"
+
+      # Security Rule 15 over the transcript, rules-only, before anything else
+      # reads it; the haven-core job's step says why the job log is the sink.
+      - name: Scan the test transcript for identifiers
+        if: ${{ !cancelled() && steps.build-scanner.outcome == 'success' }}
+        working-directory: ${{ github.workspace }}
+        run: bash tooling/e2e/ci/scan-logs.sh --rules-only --exempt-endpoint 127.0.0.1 --sink rust-test="${RUNNER_TEMP}/soak-tooling-cargo-test.log"
+
+      - name: No undeclared test skips
+        run: bash ../../scripts/ci/check_no_undeclared_skips.sh cargo haven_soak "${RUNNER_TEMP}/soak-tooling-cargo-test.log"
+
+      # The ARTIFACT the lane launches, end to end over a two-device one-relay
+      # world with one planted defect per oracle family. `--profile soak`, never
+      # `--release` (job header). Redirected, because a run that mints device
+      # keys and group ids must not print into the job log.
+      - name: Rig self-test (soak profile)
+        run: |
+          set -o pipefail
+          cargo run --profile soak --bin haven-soak -- --self-test \
+            > "${RUNNER_TEMP}/soak-selftest.log" 2>&1
+
+      - name: List the registered scenarios
+        run: |
+          set -o pipefail
+          cargo run --profile soak --bin haven-soak -- --list-scenarios \
+            > "${RUNNER_TEMP}/soak-scenarios.log" 2>&1
+
+      # Both redirected outputs, scanned before anything reads them. Rules-only
+      # and `rust-test`-classed for the same reason the transcripts above are:
+      # these files are `cargo run` output, so they carry cargo's own
+      # crate-build furniture, and there is no sealed manifest in this job — the
+      # verdict certifies that the structural rules ran, not that a declared
+      # value is absent. The rig's OWN per-scenario scan, against its sealed
+      # manifest, is what certifies the latter, and it runs in process.
+      - name: Scan the rig's own output for identifiers
+        if: ${{ !cancelled() && steps.build-scanner.outcome == 'success' }}
+        working-directory: ${{ github.workspace }}
+        run: |
+          bash tooling/e2e/ci/scan-logs.sh --rules-only --exempt-endpoint 127.0.0.1 \
+            --sink rust-test="${RUNNER_TEMP}/soak-selftest.log,${RUNNER_TEMP}/soak-scenarios.log"
+
+      # Every scenario a profile TOML declares is one the shipped binary
+      # actually registers. `tests/budget.rs` proves the other direction (every
+      # registered scenario appears in some profile, and pr ⊆ nightly ⊆ weekly)
+      # from inside the crate; this half needs the BINARY, because a scenario
+      # dropped from the registry but left in a TOML is a lane that silently
+      # runs less than it says.
+      - name: Every declared scenario is registered
+        run: |
+          set -euo pipefail
+          status=0
+          declared="$(grep -ohEi '\bs[0-9]{2}\b' profiles/*.toml | tr 'A-Z' 'a-z' | sort -u)"
+          [[ -n "${declared}" ]] || {
+            echo "::error::no scenario id found in tooling/soak/profiles/*.toml — this check would pass vacuously."
+            exit 2
+          }
+          listed="$(grep -ohEi '\bs[0-9]{2}\b' "${RUNNER_TEMP}/soak-scenarios.log" | tr 'A-Z' 'a-z' | sort -u)"
+          while IFS= read -r id; do
+            [[ -n "${id}" ]] || continue
+            grep -qxF "${id}" <<<"${listed}" || {
+              echo "::error::${id} is declared in a profile TOML but the binary does not register it."
+              status=1
+            }
+          done <<<"${declared}"
+          exit "${status}"

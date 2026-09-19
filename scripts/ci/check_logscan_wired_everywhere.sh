@@ -154,14 +154,26 @@ readonly RULES_ONLY_WORKFLOWS=('rust-check.yml' 'coverage.yml')
 # The `rust-test` sink class carries the cargo-status exemption, so it belongs to
 # the workflow that scans cargo transcripts and nowhere else. coverage.yml's
 # `flutter test` logs are `drive`, which has no exemption of any kind.
+#
+# rust-check.yml's soak-tooling job types two further captures as `rust-test`:
+# the redirected stdout of `cargo run -- --self-test` and of
+# `cargo run -- --list-scenarios`. That is the class used honestly rather than
+# widened — both files ARE cargo output, carrying the same `Compiling …` /
+# `Finished …` furniture the exemption exists for — and both stay inside the one
+# workflow this list names. What the exemption does NOT do is forgive anything
+# the rig itself prints: those lines are scanned by every structural rule, and
+# the rig's per-scenario in-process scan against its sealed manifest is what
+# searches them for a declared value.
 readonly RUST_TEST_SINK_RE='--sink[[:space:]]+rust-test='
 readonly RUST_TEST_SINK_WORKFLOWS=('rust-check.yml')
 
-# Measured 2026-09-16: 18 e2e jobs + rust-check's four + coverage's flutter
-# job = 23 capturing jobs; the floor is 80 % of that. Six tee'd transcripts —
-# one fewer is a scan that stopped, which is a decision to record here.
-readonly MIN_CAPTURING_JOBS=18
-readonly MIN_TEE_CAPTURES=6
+# Measured 2026-09-18, with the soak lane landed: 21 e2e/soak jobs +
+# rust-check's five cargo jobs + coverage's flutter job = 27 capturing jobs; the
+# floor is 80 % of that. Seven tee'd transcripts (rust-check's five cargo jobs
+# and coverage's two flutter runs) — one fewer is a scan that stopped, which is
+# a decision to record here rather than to absorb.
+readonly MIN_CAPTURING_JOBS=21
+readonly MIN_TEE_CAPTURES=7
 
 # The gated runners: every `run-*.sh` that sources logscan-gate.sh, paired
 # with the label of the fixture in its own --self-test that pins the gate
@@ -183,6 +195,12 @@ declare -A RUNNER_PINS=(
   ['run-b8-clock-skew.sh']='SELF-TEST FAIL (19): the drive log must be echoed exactly once, after the'
   ['run-b9-network-reconnect.sh']='_case "the drive log is echoed only after the log-privacy gate"'
   ['run-kp-rotation.sh']='_case "the drive log is echoed only after the log-privacy gate"'
+  # The soak runner echoes NO captured log at all — it has no device log to
+  # tail and no drive transcript to show — so its pin asserts the stronger
+  # property directly: the gate call exists at a command position AND no
+  # reading command names a `.log` anywhere in the file. That is the same
+  # invariant the ordering pins above express, at its limit.
+  ['run-soak-core.sh']='_case "the log-privacy gate runs and no captured log is ever echoed"'
 )
 
 # Uploaded paths that are scanned by their producer rather than by a `--sink`

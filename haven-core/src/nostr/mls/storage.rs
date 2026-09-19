@@ -419,6 +419,135 @@ impl StorageConfig {
             NostrError::StorageError(format!("Failed to open in-memory MLS storage: {e}"))
         })
     }
+
+    /// The fixed `SQLCipher` key every keyring-free test session opens with.
+    ///
+    /// The ONE place [`TEST_SQLCIPHER_PASSPHRASE`] is spelled into a key, so a
+    /// fixture that has to reach the same database — `new_unencrypted`'s
+    /// session, a fault injector, [`openmls_group_keys_for_test`] — cannot open
+    /// it with a passphrase that has silently drifted from the session's.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NostrError::StorageError`] if the key cannot be constructed.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn test_sqlcipher_key() -> Result<SqlCipherKey> {
+        SqlCipherKey::new(TEST_SQLCIPHER_PASSPHRASE)
+            .map_err(|e| NostrError::StorageError(format!("failed to build test key: {e}")))
+    }
+}
+
+/// The constant passphrase of every keyring-free test database.
+///
+/// Not a secret in any threat model Haven has: it protects nothing, guards no
+/// user data, and exists only because the Dark Matter `storage-sqlite` backend
+/// has no unencrypted mode. It is gated all the same, so no shipped build can
+/// name it.
+#[cfg(any(test, feature = "test-utils"))]
+const TEST_SQLCIPHER_PASSPHRASE: &str = "haven-test-mls-passphrase";
+
+/// One `openmls_values.group_key` — an opaque handle to one group's `OpenMLS`
+/// state rows.
+///
+/// Opaque on purpose, and with **no `Debug`**: the value is
+/// `serde_json::to_vec(openmls::group::GroupId)`, i.e. a serde encoding of a
+/// real MLS group id (Security Rule 4). A `Vec<u8>` would carry the same bytes
+/// while being a std type that every `{:?}` ban is written in terms of foreign
+/// *named* types, so it would slip straight through. Nothing outside this
+/// module can read the bytes back out; a caller compares handles and passes
+/// them to [`delete_openmls_group_state_for_test`].
+#[cfg(any(test, feature = "test-utils"))]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct OpenMlsGroupKey(Vec<u8>);
+
+/// Every distinct `openmls_values.group_key` in the MLS database at `db_path`.
+///
+/// Test-only fault injection. The engine sets a group's hydration quarantine
+/// only at session open, and exposes no way to induce it — so the only honest
+/// mechanism is to remove the `OpenMLS` state the next open hydrates from, on a
+/// **closed** database, and reopen. Discover the victim by taking the set
+/// difference across a circle creation; a difference that is not exactly one
+/// key means the upstream schema or key encoding moved, and the caller must
+/// fail loudly rather than delete a key it did not identify.
+///
+/// Mirrors the connection discipline of the in-crate `tamper_session_db`
+/// fixture: a plain `rusqlite` connection, `cipher_compatibility = 4`, then the
+/// key. If a table named here can no longer be found, MDK renamed it at the
+/// pinned rev — the invariant under test is unchanged, only the injection needs
+/// re-aiming.
+///
+/// # Errors
+///
+/// Returns [`NostrError::StorageError`] if the database cannot be opened,
+/// decrypted, or read.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn openmls_group_keys_for_test(
+    db_path: &Path,
+    key: &SqlCipherKey,
+) -> Result<Vec<OpenMlsGroupKey>> {
+    let conn = open_tamper_connection(db_path, key)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT DISTINCT group_key FROM openmls_values
+             WHERE group_key IS NOT NULL ORDER BY group_key",
+        )
+        .map_err(|_| storage_err("prepare the openmls_values read"))?;
+    let keys = stmt
+        .query_map([], |row| row.get::<_, Vec<u8>>(0).map(OpenMlsGroupKey))
+        .map_err(|_| storage_err("read openmls_values"))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|_| storage_err("collect openmls_values"))?;
+    Ok(keys)
+}
+
+/// Deletes every `OpenMLS` state row belonging to `group`, returning how many
+/// rows went.
+///
+/// The induction mechanism for hydration quarantine: the next session open finds
+/// no `OpenMLS` group to load and quarantines that group for the life of the
+/// session, leaving every sibling group in the same database healthy. Run it on
+/// a **closed** database (Rule 14 — a live session holds its own connection and
+/// its own in-memory state).
+///
+/// # Errors
+///
+/// Returns [`NostrError::StorageError`] if the database cannot be opened,
+/// decrypted, or written.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn delete_openmls_group_state_for_test(
+    db_path: &Path,
+    key: &SqlCipherKey,
+    group: &OpenMlsGroupKey,
+) -> Result<usize> {
+    let conn = open_tamper_connection(db_path, key)?;
+    conn.execute(
+        "DELETE FROM openmls_values WHERE group_key = ?1",
+        [&group.0],
+    )
+    .map_err(|_| storage_err("delete openmls_values"))
+}
+
+/// A plain `rusqlite` connection onto a CLOSED MLS database, keyed the way
+/// `storage-sqlite` keys its own.
+#[cfg(any(test, feature = "test-utils"))]
+fn open_tamper_connection(db_path: &Path, key: &SqlCipherKey) -> Result<rusqlite::Connection> {
+    let conn =
+        rusqlite::Connection::open(db_path).map_err(|_| storage_err("open the MLS database"))?;
+    conn.pragma_update(None, "cipher_compatibility", 4i64)
+        .map_err(|_| storage_err("set cipher compatibility"))?;
+    conn.pragma_update(None, "key", key.as_secret_str())
+        .map_err(|_| storage_err("apply the SQLCipher key"))?;
+    Ok(conn)
+}
+
+/// A storage error naming what failed and nothing else.
+///
+/// The `rusqlite` cause is dropped deliberately rather than redacted: its
+/// message can quote the bound values of the statement that failed, and on this
+/// table those are serde-encoded MLS group ids (Security Rule 15).
+#[cfg(any(test, feature = "test-utils"))]
+fn storage_err(doing: &str) -> NostrError {
+    NostrError::StorageError(format!("failed to {doing}"))
 }
 
 /// Reads the MLS DB passphrase from the keyring, minting it on first use.

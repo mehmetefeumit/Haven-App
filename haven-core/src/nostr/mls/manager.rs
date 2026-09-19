@@ -67,6 +67,8 @@ use transport_nostr_peeler::{NostrMlsPeeler, NostrTransportEvent};
 use super::retention::RetentionBoundPeeler;
 use super::signer::HavenIdentityProofSigner;
 use super::storage::{LiveSessionGuard, StorageConfig};
+#[cfg(any(test, feature = "test-utils"))]
+use super::types::StoredMessageProbe;
 use super::types::{
     beyond_relay_retention, ConvergedRoster, ConvergenceSweep, LocationGroupConfig,
     LocationMessageResult, PreAuthRejection, ScreenedIngest,
@@ -294,8 +296,7 @@ impl SessionManager {
             NostrError::StorageError(format!("failed to create MLS data directory: {e}"))
         })?;
         let config = StorageConfig::new(data_dir);
-        let key = SqlCipherKey::new("haven-test-mls-passphrase")
-            .map_err(|e| NostrError::StorageError(format!("failed to build test key: {e}")))?;
+        let key = StorageConfig::test_sqlcipher_key()?;
         Self::open_session(config.database_path(), key, keys)
     }
 
@@ -869,6 +870,21 @@ impl SessionManager {
     /// raised. A failure of the pre-engine transport parse is not an error here;
     /// it comes back as [`PreAuthRejection::Malformed`].
     pub async fn process_event(&self, event: &Event) -> Result<ScreenedIngest> {
+        match Self::screen_before_auth(event) {
+            Err(rejection) => Ok(ScreenedIngest::RejectedBeforeAuth(rejection)),
+            Ok(msg) => self.ingest(msg).await.map(ScreenedIngest::Ingested),
+        }
+    }
+
+    /// Runs Haven's two pre-authentication screens over `event` and, if both
+    /// pass, converts it to the transport message the engine ingests.
+    ///
+    /// The single implementation of both screens, so the production entry point
+    /// above and the typed test seam below cannot drift: a screen re-implemented
+    /// beside its caller asserts the copy, not the policy.
+    fn screen_before_auth(
+        event: &Event,
+    ) -> std::result::Result<cgka_traits::transport::TransportMessage, PreAuthRejection> {
         if let Some(expires_at) = event.tags.iter().find_map(|t| match t.as_standardized() {
             Some(nostr::TagStandard::Expiration(ts)) => Some(*ts),
             _ => None,
@@ -879,9 +895,7 @@ impl SessionManager {
                     .saturating_add(crate::location::ttl::RECEIVER_EXPIRATION_GRACE_SECS),
             );
             if Timestamp::now() > grace {
-                return Ok(ScreenedIngest::RejectedBeforeAuth(
-                    PreAuthRejection::Expired,
-                ));
+                return Err(PreAuthRejection::Expired);
             }
         }
         // ── The pure pre-engine parse, and why its failure is a pre-auth
@@ -923,18 +937,50 @@ impl SessionManager {
         //
         // # The boundary, which must not move
         //
-        // Scoped deliberately to THIS call's `Err`. `self.ingest` below still
-        // propagates its own errors, so an engine-side or decryption-side
+        // Scoped deliberately to THIS call's `Err`. The ingest the callers run
+        // still propagates its own errors, so an engine-side or decryption-side
         // failure — anything that has already touched key material — keeps
         // holding the cursor. Widening this arm to cover those would hand an
         // attacker a SKIP primitive over authenticated-path failures, which is
         // the exact defect this module's cursor contract exists to prevent.
-        let Ok(msg) = Self::event_to_transport_message(event) else {
-            return Ok(ScreenedIngest::RejectedBeforeAuth(
-                PreAuthRejection::Malformed,
-            ));
-        };
-        self.ingest(msg).await.map(ScreenedIngest::Ingested)
+        Self::event_to_transport_message(event).map_err(|_| PreAuthRejection::Malformed)
+    }
+
+    /// [`Self::process_event`] with the engine's own error type preserved.
+    ///
+    /// Test-only. Identical in every observable respect but one: the ingest
+    /// error is NOT flattened through [`map_mls_err`], so the caller can tell a
+    /// forked epoch from a storage failure by MATCHING the variant instead of
+    /// by reading redacted prose. Both pre-authentication screens run, from the
+    /// same [`Self::screen_before_auth`] the production entry point uses.
+    ///
+    /// # One event, one ingest, one call
+    ///
+    /// Never call this AND [`Self::process_event`] on the same event: the
+    /// engine records each message's outcome and answers a second ingest with
+    /// `Stale { AlreadySeen }`, so the second call classifies differently from
+    /// the first and a fork silently reads as a duplicate.
+    ///
+    /// # Errors
+    ///
+    /// Returns the engine's own error for a hard ingest failure. **Match it,
+    /// never format it** — see the re-export note on
+    /// [`SessionError`](super::types::SessionError).
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn process_event_typed_for_test(
+        &self,
+        event: &Event,
+    ) -> std::result::Result<ScreenedIngest, SessionError> {
+        match Self::screen_before_auth(event) {
+            Err(rejection) => Ok(ScreenedIngest::RejectedBeforeAuth(rejection)),
+            Ok(msg) => self
+                .session
+                .lock()
+                .await
+                .ingest(msg)
+                .await
+                .map(ScreenedIngest::Ingested),
+        }
     }
 
     /// Advances stored convergence for a group, releasing queued work and
@@ -1367,22 +1413,33 @@ impl SessionManager {
         Ok(id)
     }
 
-    /// The stored state of one message row, or `None` when no such row exists.
+    /// The readable part of one stored message row, or `None` when no such row
+    /// exists.
     ///
     /// Test-only: lets a test assert that the sweep changed exactly the row it
-    /// was supposed to and left the others alone.
+    /// was supposed to and left the others alone, and lets an undecryptable-event
+    /// classifier tell a branch loss (`EpochInvalidated`) from an ordinary
+    /// past-epoch drop (`Failed`).
+    ///
+    /// Returns a [`StoredMessageProbe`], not the `MessageRecord`: the record
+    /// also carries the real MLS `group_id` and the ciphertext payload, neither
+    /// of which any caller of this needs and both of which a caller that holds
+    /// them can render (Security Rules 4 and 15).
     ///
     /// # Errors
     ///
     /// Returns an error if the store cannot be read.
     #[cfg(any(test, feature = "test-utils"))]
-    pub async fn stored_message_state_for_test(
+    pub async fn stored_message_record_for_test(
         &self,
         id: &MessageId,
-    ) -> Result<Option<MessageState>> {
+    ) -> Result<Option<StoredMessageProbe>> {
         let _session = self.session.lock().await;
         match self.message_store.get_message(id) {
-            Ok(record) => Ok(Some(record.state)),
+            Ok(record) => Ok(Some(StoredMessageProbe {
+                epoch: record.epoch,
+                state: record.state,
+            })),
             Err(StorageError::NotFound) => Ok(None),
             Err(e) => Err(map_storage_err(e)),
         }

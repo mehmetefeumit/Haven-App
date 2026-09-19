@@ -117,6 +117,29 @@
 # (the one haven/test/lints/harness_assertion_redaction_test.dart honours) is
 # honoured there and only there, under the same reason-required rule.
 #
+# `tooling/soak` (src AND tests) is scanned the same way — its own Rust pass,
+# its own floor, NOT merged into `rust_files` — for a sharper reason than the
+# harness's. The soak rig builds real devices, real circles and real relays in
+# one process and writes every line it captures to a file the lane uploads, so
+# a print there reaches the same artifact a device log does. Two consequences
+# are deliberate and are decisions, not omissions:
+#
+#   * The floor is SEPARATE. Merging the rig into the product's Rust pass would
+#     let a collapse in one root be masked by volume in the other, which is the
+#     exact rot a floor exists to catch.
+#   * The `wrappers` pass is NOT extended to it. That pass requires any
+#     function named `*_alias`/`*_handle`/`bucket`/`magnitude_bucket`/
+#     `relative_secs` to call `haven_core::log_alias`, and the rig CANNOT: the
+#     production salt is `OsRng`, per-process and un-injectable, while the
+#     rig's tags must be deterministic for `tests/determinism.rs` to mean
+#     anything (same seed ⇒ identical `simdev#`/`simcircle#`/`simrelay#`
+#     tables). So the rig mints its own ordinals through functions named
+#     OUTSIDE that vocabulary — `sim_tag()`, `sim_magnitude()` — and its tags
+#     are disjoint from production's (`simdev#` vs `circle#`), because both land
+#     in the same evidence file from the same process. Buying determinism by
+#     injecting a salt into `haven_core::log_alias` is the move this exemption
+#     exists to forbid.
+#
 # Not covered, deliberately: generated bindings, Rust `#[cfg(test)]`
 # modules (a test's panic message is its diagnostic and never ships; the
 # in-process LogCapture tests cover what production code logs UNDER test),
@@ -155,6 +178,17 @@ readonly MIN_DART_SITES=641
 # before — took it to 494 (9 call sites; the two DECLARATIONS are typed
 # parameter lists and are skipped). floor(494 × 0.8).
 readonly MIN_ITEST_SITES=395
+# `tooling/soak/{src,tests}`, its own root with its own floor (see the header).
+# Re-measured 2026-09-18, the commit that completes the crate: 227 invocations
+# under tooling/soak; floor(227 x 0.8) = 181. The provisional 1 was the
+# smallest floor that still reds an extractor that stopped matching; now it is the
+# same 20 % margin the other roots carry.
+# Re-measured 2026-09-19: 334. The review pass added the per-scenario
+# mis-configuration controls, the capture binary and the rendering enumeration,
+# and every assertion message in them is a panic invocation this scanner reads.
+# floor(334 x 0.8) = 267; leaving 181 would have let the extractor lose nearly
+# half its population and stay green.
+readonly MIN_SOAK_SITES=267
 # Same contract for the wrapper-DEFINITION scan, whose population `scan()`'s
 # floors cannot see: measured 2 (Rust) and 7 (Dart, haven/lib + the harness)
 # on 2026-09-18. floor(2 × 0.8) = 1 and floor(7 × 0.8) = 5 — a lexer that
@@ -1280,6 +1314,24 @@ main() {
   rc=0; SCAN_MARKERS='log-scan-ok|harness-log-ok' scan dart "${MIN_ITEST_SITES}" 'haven/integration_test' "${itest_files[@]}" || rc=$?
   (( rc == 2 )) && exit 2
   (( rc == 0 )) || status=1
+
+  # The soak rig: a fourth Rust pass, its own root, its own floor, `wrappers`
+  # deliberately not extended (header). While the crate is not in the tree the
+  # pass says so rather than reporting a clean scan of nothing — an absent
+  # subject is not a verdict.
+  local soak_src="${REPO_ROOT}/tooling/soak/src"
+  local soak_tests="${REPO_ROOT}/tooling/soak/tests"
+  local -a soak_files=()
+  if [[ -d "${soak_src}" ]]; then
+    mapfile -t soak_files < <(find "${soak_src}" "${soak_tests}" -name '*.rs' 2>/dev/null | sort)
+  fi
+  if (( ${#soak_files[@]} == 0 )); then
+    log "SKIP: tooling/soak — the rig is not in the tree yet; nothing scanned, nothing claimed."
+  else
+    rc=0; scan rust "${MIN_SOAK_SITES}" 'tooling/soak (src + tests)' "${soak_files[@]}" || rc=$?
+    (( rc == 2 )) && exit 2
+    (( rc == 0 )) || status=1
+  fi
 
   rc=0; wrappers rust "${MIN_RUST_WRAPDEFS}" 'Rust wrapper definitions' "${rust_files[@]}" || rc=$?
   (( rc == 2 )) && exit 2

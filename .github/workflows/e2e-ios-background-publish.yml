@@ -336,7 +336,10 @@ jobs:
     #   drive step cap                                       135m / poll 129m
     #   diagnostics + artifact upload, UNCAPPED: a `log collect` of a
     #     multi-GB .logarchive, then (since 2026-09-12) two `log show`
-    #     passes over it and the secret scan of the exports, and (since
+    #     passes over it — three since 2026-09-18, the added one
+    #     predicate-scoped to the lifecycle daemons and so cheap to write
+    #     but not to read, and the measured figure below predates it —
+    #     and the secret scan of the exports, and (since
     #     0c) the seal + identifier scan in the runner and at the scan
     #     step — unmeasured yet: re-measure. Deliberately left uncapped
     #     — a step cap that
@@ -566,9 +569,10 @@ jobs:
 
       # The unified-log archive is a full-device capture (binary tracev3,
       # multi-GB) that the scanner cannot read, so it never leaves the runner:
-      # two `log show` exports replace it — Haven's own lines (the Rust
-      # `frb_user` oslog subsystem and the Runner process), uncapped, and the
-      # whole device under SIM_LOG_FULL_CAP_BYTES. `log show` emits in
+      # three `log show` exports replace it — Haven's own lines (the Rust
+      # `frb_user` oslog subsystem and the Runner process), uncapped; every
+      # OTHER process's lines that NAME the app, uncapped; and the whole device
+      # under SIM_LOG_FULL_CAP_BYTES. `log show` emits in
       # chronological order and the archive opens at BOOT, so a head cap kept
       # the boot storm and nothing else: in CI run 35280144455 every lane's
       # capped export ended 15-20 minutes BEFORE its app launched, because
@@ -578,15 +582,41 @@ jobs:
       # a run that logs more than the cap after boot — is discarded with the
       # archive, evidence lost and nothing published. Every log the upload step names is scanned by the next
       # step, before that step can see it.
+      #
+      # The lifecycle export exists because a byte cap at EITHER end is the
+      # wrong instrument for this lane's own question. What ends a backgrounded
+      # app's life is never written by the app: `runningboardd` logs the
+      # suspend and the termination, `locationd` the assertion it stops
+      # holding, `SpringBoard` the visibility change — all outside the
+      # Runner-scoped predicate, and in CI run 35397118356 all outside the
+      # capped device-wide export too, whose last 64 MiB began 2 min 52 s AFTER
+      # the app died (the retry's build and teardown log ~0.6 MiB/s). The one
+      # question that run could not answer from its own artifact — which
+      # process ended the app, and why — is answerable from these lines, they
+      # are a few MiB at most, and they are a strict subset of the device-wide
+      # export's content, so they add no class of thing the scanner has not
+      # already been reading. A one-line placeholder keeps the file non-empty:
+      # an absent sink is rc 3 at the scan step, which would report a missing
+      # diagnostic as a broken lane.
       - name: Collect simulator diagnostics
         if: always()
         env:
           SIM_LOG_FULL_CAP_BYTES: "67108864"
+          SIM_LOG_LIFECYCLE_CAP_BYTES: "16777216"
         run: |
           xcrun simctl spawn booted log collect --output /tmp/sim.logarchive 2>/dev/null || true
           log show --archive /tmp/sim.logarchive --style syslog --info --debug \
             --predicate 'subsystem == "frb_user" OR process == "Runner"' \
             > /tmp/sim-unified.log 2>/dev/null || true
+          log show --archive /tmp/sim.logarchive --style syslog --info \
+            --predicate \
+            'process != "Runner" AND eventMessage CONTAINS "oblivioustech"' \
+            2>/dev/null \
+            | tail -c "${SIM_LOG_LIFECYCLE_CAP_BYTES}" \
+            > /tmp/sim-lifecycle.log || true
+          [ -s /tmp/sim-lifecycle.log ] \
+            || echo "sim-lifecycle: no daemon line named the app here" \
+                 > /tmp/sim-lifecycle.log
           log show --archive /tmp/sim.logarchive --style syslog 2>/dev/null \
             | tail -c "${SIM_LOG_FULL_CAP_BYTES}" > /tmp/sim-unified-full.log || true
           rm -rf /tmp/sim.logarchive
@@ -609,7 +639,7 @@ jobs:
           rc=0
           bash tooling/e2e/ci/scan-logs.sh \
             --manifest /tmp/haven-soak/needles/*.needles.json \
-            --sink ios=/tmp/sim-unified.log,/tmp/sim-unified-full.log \
+            --sink ios=/tmp/sim-unified.log,/tmp/sim-lifecycle.log,/tmp/sim-unified-full.log \
             --sink drive=/tmp/bg-publish-ios.log,/tmp/flutter-ios-test.log \
             --sink relay=/tmp/relay.log \
             --report /tmp/logscan-report-upload.ndjson || rc=$?
@@ -627,6 +657,7 @@ jobs:
             /tmp/flutter-ios-test.log
             /tmp/relay.log
             /tmp/sim-unified.log
+            /tmp/sim-lifecycle.log
             /tmp/sim-unified-full.log
           retention-days: 14
           if-no-files-found: ignore

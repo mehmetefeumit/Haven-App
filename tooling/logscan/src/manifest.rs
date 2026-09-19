@@ -31,10 +31,11 @@ use std::path::{Component, Path};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::expand::{Declared, Dropped, Term};
-use crate::ledger::Claim;
-use crate::plants::{DeclaredPlant, DeclaredPlants, PlantSlot};
+use crate::expand::{expand, Declared, Dropped, Term};
+use crate::ledger::{reconcile, sealed_claims, Claim};
+use crate::plants::{assert_inert, resolve_slots, DeclaredPlant, DeclaredPlants, PlantSlot};
 use crate::policy::{Policy, SinkSpec};
+use crate::rules::RuleSet;
 
 /// The one directory a manifest or a sidecar may live in.
 pub const NEEDLE_DIR: &str = "/tmp/haven-soak/needles";
@@ -492,6 +493,240 @@ pub fn write_manifest(path: &Path, manifest: &Manifest) -> Result<(), String> {
     Ok(())
 }
 
+/// Everything a seal needs that is not a declaration.
+///
+/// The declarations are the run's; these are the operator's: what the run is
+/// called, whether it had a channel to plant a declared token through, how many
+/// values of each class its shape requires, and which line floors and endpoint
+/// exemptions it carries.
+#[derive(Clone, Debug, Default)]
+pub struct SealInputs {
+    /// The run this manifest belongs to. Must differ per invocation in a job
+    /// that seals twice: [`write_manifest`] is `create_new`.
+    pub run_id: String,
+    /// Whether the run could hand the app a declared (Dart) token at all.
+    pub declared_plants: DeclaredPlants,
+    /// Declaration floors per needle class.
+    pub expect: BTreeMap<String, usize>,
+    /// Line-floor overrides per sink class.
+    pub floors: BTreeMap<String, u64>,
+    /// Endpoint spellings S7 and S12 skip, already expanded by
+    /// [`endpoint_spellings`].
+    pub exempt: Vec<String>,
+}
+
+/// Why a seal produced no manifest.
+///
+/// Counts, classes and reasons only — never a value, because the whole input to
+/// a seal is the set of values a run minted. The caller's contract is the shared
+/// rc taxonomy: `rc` is [`crate::RC_GUARD`] for a broken instrument (a
+/// mis-designed plant, a declaration the expander refuses), [`crate::RC_UNUSABLE`]
+/// for a ledger that no longer reconciles, and [`crate::RC_META`] for a manifest
+/// that would prove too little.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SealRefusal {
+    /// The exit code the refusal demands.
+    pub rc: i32,
+    /// One operator-facing sentence per problem found.
+    pub lines: Vec<String>,
+}
+
+impl SealRefusal {
+    /// Folds one problem in, keeping the worst code (`1 > 2 > 3 > 4 > 0`).
+    fn note(&mut self, rc: i32, message: String) {
+        self.rc = crate::worse(self.rc, rc);
+        self.lines.push(message);
+    }
+}
+
+/// Seals declarations into a manifest, without touching the filesystem.
+///
+/// This is the whole of a seal except its I/O: plants are resolved and proven
+/// inert, every declared value is expanded into every encoding the tree can
+/// render, the coverage ledger is reconciled and the meta floors are applied.
+/// The caller decides what to do with the result — `seal --out` writes it, and
+/// the Tier-1 soak rig keeps it in memory and scans its own captures with it.
+/// One sealing path, so a rig and a lane cannot disagree about what "sealed"
+/// means.
+///
+/// # Errors
+///
+/// [`SealRefusal`] carrying every problem found and the code the worst of them
+/// demands. A refusal is never a partial manifest: a manifest that proves too
+/// little must not become the basis of a clean verdict.
+pub fn seal_from_declarations(
+    policy: &Policy,
+    declarations: &Declarations,
+    inputs: &SealInputs,
+) -> Result<Manifest, SealRefusal> {
+    let mut refusal = SealRefusal {
+        rc: crate::RC_CLEAN,
+        lines: Vec::new(),
+    };
+    let guard = |message: String| SealRefusal {
+        rc: crate::RC_GUARD,
+        lines: vec![message],
+    };
+
+    for sink in inputs.floors.keys() {
+        policy.sink(sink).map_err(&guard)?;
+    }
+    for class in inputs.expect.keys() {
+        policy.class(class).map_err(&guard)?;
+    }
+
+    let plants = if inputs.declared_plants == DeclaredPlants::None {
+        if !declarations.plants.is_empty() {
+            return Err(guard(
+                "--declared-plants none, but a sidecar declared a Dart plant: the run had a channel after all, and the two claims cannot both be true"
+                    .to_owned(),
+            ));
+        }
+        Vec::new()
+    } else {
+        resolve_slots(&declarations.plants).map_err(&guard)?
+    };
+    let inertness = RuleSet::new(
+        policy.base64_entropy_bits,
+        crate::cli::now_unix(),
+        &inputs.exempt,
+        Vec::new(),
+    )
+    .map_err(&guard)?;
+    for slot in &plants {
+        assert_inert(&slot.token, &inertness).map_err(&guard)?;
+    }
+
+    let declared: Vec<Declared> = declarations
+        .values
+        .iter()
+        .map(|(declared, _)| declared.clone())
+        .collect();
+    let expansion = expand(policy, &declared).map_err(&guard)?;
+
+    for mismatch in reconcile(policy, &expansion) {
+        refusal.note(crate::RC_UNUSABLE, mismatch.message());
+    }
+    check_meta_floors(declarations, &expansion, &inputs.expect, &mut refusal);
+
+    if refusal.rc == crate::RC_CLEAN {
+        Ok(build_manifest(
+            policy,
+            inputs,
+            declarations,
+            &expansion,
+            plants,
+        ))
+    } else {
+        Err(refusal)
+    }
+}
+
+/// The rc-4 conditions: a manifest with nothing to search for, a class declared
+/// fewer times than the scenario's shape requires, and a value nobody could
+/// confirm was ever applied.
+fn check_meta_floors(
+    declarations: &Declarations,
+    expansion: &crate::expand::Expansion,
+    expect: &BTreeMap<String, usize>,
+    refusal: &mut SealRefusal,
+) {
+    // The crate's own vacuity rule, applied to its own artifact: a manifest with
+    // no searchable term would let `scan` report rc 0 having looked for nothing,
+    // and the only thing standing between that and a green lane would be the
+    // runner remembering to pass `--expect`.
+    if expansion.terms.is_empty() {
+        refusal.note(
+            crate::RC_META,
+            "no searchable term was declared; a manifest that searches for nothing cannot certify a capture as clean".to_owned(),
+        );
+    }
+    for (class, min) in expect {
+        // DISTINCT values, by commitment: the floor exists to catch a runner
+        // that dropped a declaration, and counting lines would let the same
+        // value declared twice — a sidecar the proxy appended to twice, a
+        // lane passing a `--host-decl` the library already emits — stand in
+        // for the missing one.
+        let have = declarations
+            .values
+            .iter()
+            .filter(|(_, entry)| &entry.class == class)
+            .map(|(_, entry)| entry.commitment.as_str())
+            .collect::<std::collections::BTreeSet<&str>>()
+            .len();
+        if have < *min {
+            refusal.note(
+                crate::RC_META,
+                format!(
+                    "declaration floor unmet: class `{class}` names {have} distinct value(s), below the {min} this scenario's shape requires; a manifest that names fewer values than the run minted cannot read as complete"
+                ),
+            );
+        }
+    }
+    let unconfirmed = declarations
+        .values
+        .iter()
+        .filter(|(_, entry)| !entry.planted_confirmed)
+        .count();
+    if unconfirmed > 0 {
+        refusal.note(
+            crate::RC_META,
+            format!(
+                "{unconfirmed} declared value(s) were never confirmed planted; a value the run minted but never applied proves nothing about what a log may hold"
+            ),
+        );
+    }
+}
+
+/// Assembles the manifest from everything the seal resolved.
+///
+/// The sink specs, the class scoping and S4's entropy floor are COPIED from the
+/// policy rather than re-read by `scan`: a policy edit between the two halves of
+/// one run would otherwise change the meaning of the verdict with nothing saying
+/// so.
+fn build_manifest(
+    policy: &Policy,
+    inputs: &SealInputs,
+    declarations: &Declarations,
+    expansion: &crate::expand::Expansion,
+    plants: Vec<PlantSlot>,
+) -> Manifest {
+    Manifest {
+        schema: SCHEMA,
+        run_id: inputs.run_id.clone(),
+        roles: declarations.roles.clone(),
+        values: declarations
+            .values
+            .iter()
+            .map(|(_, entry)| entry.clone())
+            .collect(),
+        terms: expansion.terms.clone(),
+        dropped: expansion.dropped.clone(),
+        ledger: sealed_claims(policy, expansion),
+        plants,
+        declared_plants: inputs.declared_plants,
+        floors: policy
+            .sinks
+            .iter()
+            .map(|(name, spec)| {
+                (
+                    name.clone(),
+                    inputs.floors.get(name).copied().unwrap_or(spec.min_lines),
+                )
+            })
+            .collect(),
+        expect: inputs.expect.clone(),
+        scoped_out: policy
+            .classes
+            .iter()
+            .map(|(name, spec)| (name.clone(), spec.scoped_out.clone()))
+            .collect(),
+        sinks: policy.sinks.clone(),
+        base64_entropy_bits: policy.base64_entropy_bits,
+        exempt_endpoints: inputs.exempt.clone(),
+    }
+}
+
 /// Reads a sealed manifest.
 ///
 /// # Errors
@@ -920,6 +1155,195 @@ mod tests {
             policy.sinks["rust-test"].min_lines
         );
         assert_eq!(manifest.floor("drive"), policy.sinks["drive"].min_lines);
+    }
+
+    /// One host declaration per `(class, value)`, through the same door a
+    /// caller uses.
+    fn declared(pairs: &[(&str, &str)]) -> Declarations {
+        let policy = Policy::load().expect("policy");
+        let mut ids = 0;
+        let mut into = Declarations::default();
+        for (class, value) in pairs {
+            add_host_decl(&policy, class, value, &mut ids, &mut into).expect("declaration");
+        }
+        into
+    }
+
+    fn inputs(run_id: &str) -> super::SealInputs {
+        super::SealInputs {
+            run_id: run_id.to_owned(),
+            declared_plants: super::DeclaredPlants::None,
+            ..super::SealInputs::default()
+        }
+    }
+
+    const A_PUBKEY: &str = "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d";
+    const A_SECRET: &str = "0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9";
+
+    #[test]
+    fn a_seal_in_memory_carries_the_terms_the_floors_and_the_sinks() {
+        let policy = Policy::load().expect("policy");
+        let manifest = super::seal_from_declarations(
+            &policy,
+            &declared(&[("pubkey", A_PUBKEY)]),
+            &inputs("m1"),
+        )
+        .expect("seals");
+        assert_eq!(manifest.run_id, "m1");
+        assert_eq!(manifest.schema, SCHEMA);
+        assert!(!manifest.terms.is_empty());
+        assert!(!manifest.ledger.is_empty());
+        assert_eq!(
+            manifest.sinks.keys().collect::<Vec<_>>(),
+            policy.sinks.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(manifest.floor("soak"), policy.sinks["soak"].min_lines);
+        assert_eq!(manifest.declared_plants, super::DeclaredPlants::None);
+        assert!(manifest.plants.is_empty());
+    }
+
+    #[test]
+    fn a_secret_sealed_in_memory_is_committed_and_never_serialised() {
+        let policy = Policy::load().expect("policy");
+        let manifest = super::seal_from_declarations(
+            &policy,
+            &declared(&[("pubkey", A_PUBKEY), ("nsec", A_SECRET)]),
+            &inputs("m2"),
+        )
+        .expect("seals");
+        let secret = manifest
+            .values
+            .iter()
+            .find(|entry| entry.class == "nsec")
+            .expect("the secret is recorded");
+        assert!(secret.raw_withheld);
+        // The rendering the whole manifest is: no term may carry the raw value
+        // in any case, and nor may the serialised file.
+        let serialised = serde_json::to_string(&manifest).expect("serialises");
+        for spelling in [
+            A_SECRET.to_owned(),
+            A_SECRET.to_uppercase(),
+            A_SECRET[..16].to_owned(),
+        ] {
+            assert!(
+                !manifest.terms.iter().any(|term| term.text == spelling),
+                "a secret-class raw encoding became a searchable term"
+            );
+            assert!(
+                !serialised.contains(&spelling),
+                "a secret-class raw encoding reached the manifest"
+            );
+        }
+    }
+
+    #[test]
+    fn a_seal_with_nothing_to_search_for_refuses_at_the_meta_floor() {
+        let policy = Policy::load().expect("policy");
+        let refusal =
+            super::seal_from_declarations(&policy, &Declarations::default(), &inputs("m3"))
+                .expect_err("a manifest that searches for nothing is refused");
+        assert_eq!(refusal.rc, crate::RC_META);
+        assert!(refusal
+            .lines
+            .iter()
+            .any(|l| l.contains("no searchable term")));
+    }
+
+    #[test]
+    fn a_declaration_floor_unmet_refuses_at_the_meta_floor() {
+        let policy = Policy::load().expect("policy");
+        let mut opts = inputs("m4");
+        opts.expect.insert("pubkey".to_owned(), 2);
+        let refusal =
+            super::seal_from_declarations(&policy, &declared(&[("pubkey", A_PUBKEY)]), &opts)
+                .expect_err("one value cannot satisfy a floor of two");
+        assert_eq!(refusal.rc, crate::RC_META);
+        assert!(refusal
+            .lines
+            .iter()
+            .any(|l| l.contains("declaration floor unmet")));
+    }
+
+    #[test]
+    fn a_floor_or_expectation_naming_no_such_sink_or_class_is_a_broken_instrument() {
+        let policy = Policy::load().expect("policy");
+        let values = declared(&[("pubkey", A_PUBKEY)]);
+
+        let mut opts = inputs("m5");
+        opts.floors.insert("no-such-sink".to_owned(), 1);
+        let refusal = super::seal_from_declarations(&policy, &values, &opts)
+            .expect_err("a floor on a sink the policy does not declare");
+        assert_eq!(refusal.rc, crate::RC_GUARD);
+
+        let mut opts = inputs("m6");
+        opts.expect.insert("no-such-class".to_owned(), 1);
+        let refusal = super::seal_from_declarations(&policy, &values, &opts)
+            .expect_err("an expectation on a class the policy does not declare");
+        assert_eq!(refusal.rc, crate::RC_GUARD);
+    }
+
+    #[test]
+    fn declaring_no_channel_while_a_sidecar_declared_a_plant_is_a_broken_instrument() {
+        let policy = Policy::load().expect("policy");
+        let mut ids = 0;
+        let mut order = 0;
+        let mut into = declared(&[("pubkey", A_PUBKEY)]);
+        parse_decl(
+            &policy,
+            "{\"class\":\"plant\",\"value\":\"logscan-plant-dart-open-ABCDEFGHJK\",\"sink\":\"dart\",\"phase\":\"open\"}\n",
+            &mut ids,
+            &mut order,
+            &mut into,
+        )
+        .expect("parse");
+        let refusal = super::seal_from_declarations(&policy, &into, &inputs("m7"))
+            .expect_err("the two claims cannot both be true");
+        assert_eq!(refusal.rc, crate::RC_GUARD);
+        assert_eq!(refusal.lines.len(), 1);
+    }
+
+    #[test]
+    fn the_command_line_seal_writes_exactly_what_the_library_sealed() {
+        let policy = Policy::load().expect("policy");
+        let path = SealedPath::new("libtie");
+        let args: Vec<String> = [
+            "seal",
+            "--run-id",
+            "libtie",
+            "--declared-plants",
+            "none",
+            "--host-decl",
+            &format!("pubkey={A_PUBKEY}"),
+            "--out",
+            &path.0.display().to_string(),
+        ]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        assert_eq!(crate::cli::run(&args, &mut out, &mut err), crate::RC_CLEAN);
+
+        let written = read_manifest(&path.0).expect("reads back");
+        let in_memory = super::seal_from_declarations(
+            &policy,
+            &declared(&[("pubkey", A_PUBKEY)]),
+            &inputs("libtie"),
+        )
+        .expect("seals");
+        // The file path is the only difference there may be between them: two
+        // sealing paths would mean two definitions of what a run declared.
+        assert_eq!(written.run_id, in_memory.run_id);
+        assert_eq!(written.terms.len(), in_memory.terms.len());
+        assert_eq!(
+            written.terms.iter().map(|t| &t.text).collect::<Vec<_>>(),
+            in_memory.terms.iter().map(|t| &t.text).collect::<Vec<_>>()
+        );
+        assert_eq!(written.values.len(), in_memory.values.len());
+        assert_eq!(written.values[0].commitment, in_memory.values[0].commitment);
+        assert_eq!(written.declared_plants, in_memory.declared_plants);
+        assert_eq!(written.floors, in_memory.floors);
+        assert_eq!(written.ledger.len(), in_memory.ledger.len());
     }
 
     #[test]

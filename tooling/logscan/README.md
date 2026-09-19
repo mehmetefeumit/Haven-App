@@ -25,6 +25,13 @@ the app build, buildable on a runner with no mobile toolchain, and deliberately
 discipline, not a convenience, so this crate does not belong in
 `cross-check.yml`.
 
+It is also consumed as a **library**. The Tier-1 soak rig (`tooling/soak`) seals
+its declarations in memory with `manifest::seal_from_declarations` and scans each
+scenario's captured lines in process with `scan::scan_sinks`, so a rig and a lane
+run the same expander, the same rules and the same rc taxonomy — two expanders
+would mean two coverage claims, and only one of them would be tested. Sealing to
+disk stays in `cli::seal`, which is the only caller that needs a file.
+
 ## Commands
 
 ```bash
@@ -235,7 +242,14 @@ dead capture and a mis-installed log backend all look clean to a needle search.
   `debugPrint` through `vsyslog`, which does reach the unified log as
   `Runner(Flutter)[pid] … flutter: <msg>` — and the first iOS capture that
   carries one flips the flag to `true` for good. It is `false` for the classes
-  that carry no app output at all (`rust-test`, `proxy`, `diag`, `relay`).
+  that carry no app output at all (`rust-test`, `proxy`, `diag`, `relay`), and
+  for `soak`, where the reason is stronger than "unproven": the Tier-1 rig is a
+  Rust process with no Dart channel of any kind, so nothing can hand it a token
+  to print and a declared plant would be a control nothing could ever satisfy.
+  Its `rust` shape plant carries the sink-reach claim instead — emitted through
+  the rig's installed `log` sink as the first and last line of every scenario
+  capture, never written straight into the file, because a token the harness
+  wrote itself proves only that the harness can write a file.
   Demanding an unproven control would make every iOS lane rc 3 for a reason that
   is not a privacy fact.
 * Each declared token must appear **at least once** in every scanned sink class
@@ -439,7 +453,9 @@ allowed to read.
   record, and without them a hit in a device-wide export cannot be attributed
   at all. Both halves are reduced to `[A-Za-z0-9._-]`, 48 characters, or `?`.
 * **`plain`** — every line is Haven's in full (drive transcripts, `cargo test`
-  and `flutter test` logs, relay and diag files).
+  and `flutter test` logs, relay and diag files, and the Tier-1 soak rig's
+  captures: one file per scenario, plus its banner, its timeline and its
+  redirected stdout).
 
 A line that does not parse is treated as **not owned**: the rules skip it and
 every byte of it is still searched for needles, because a declared value in a
@@ -461,8 +477,11 @@ truncated file and found nothing" into a failure rather than a clean verdict.
 A floor is therefore calibrated to the smallest COMPLETE capture of its class
 and **never** to whatever would make a lane pass. `relay` is 1, because the
 hermetic host relay (`tooling/e2e/local-relay`) prints its listen line and
-nothing else for a whole run; `diag` is 1 for the same reason. The
-device-wide and whole-scenario classes are far higher.
+nothing else for a whole run; `diag` is 1 for the same reason. `soak` is 2: a
+scenario capture is complete once it holds its opening and its closing `rust`
+plant, and everything between them is the subject's own logging, which Rule 15
+works to keep at zero. The device-wide and whole-scenario classes are far
+higher.
 
 A lane whose captures are legitimately smaller than the class default — a
 per-target logcat slice rather than a device-wide capture, a one-target drive
@@ -531,7 +550,7 @@ sentence beats a boundary discovered by an adversarial reader later.
 |---|---|---|
 | **S4** | a base64 run of 32 or more characters with no `=` padding whose digits are absent or all in ONE contiguous run (roughly one random 44-character blob in a hundred and sixty) | S1/S2 for the hex spellings, S8 when a key word is within 24 characters, the needle search for every value the run declared, and `scan-logs-for-secrets.sh`'s keyword-anchored patterns |
 | **S6** | a geohash cell immediately followed by `_`, `(` or `::` | the needle search for a declared coordinate's `geohash` renderings; an undeclared cell in that position is a code path in every capture this tree has produced |
-| **cargo's crate-build line** (`rust-test` only) | **S2 and S6 only**, and only on a `Compiling\|Checking\|Downloaded <name> v<semver> [(<source>)]` line: a 32–63-hex run or a geohash-shaped token in the crate-name or source-URL slot. Every other rule still fires on that line, and cargo's other status lines are not exempt at all | the needle search, which reads those lines byte for byte like any other; S1 for a 64-hex run; and the shape itself, which has to be produced deliberately |
+| **cargo's crate-build line** (`rust-test` and `soak` only) | **S2 and S6 only**, and only on a `Compiling\|Checking\|Downloaded <name> v<semver> [(<source>)]` line: a 32–63-hex run or a geohash-shaped token in the crate-name or source-URL slot. Every other rule still fires on that line, and cargo's other status lines are not exempt at all | the needle search, which reads those lines byte for byte like any other; S1 for a 64-hex run; and the shape itself, which has to be produced deliberately |
 | **`locationd` / `com.apple.locationd.Position`** (`ios` only) | the `coordinate` NEEDLE, on records whose process AND emitter are exactly those: a lane injects the fix into that daemon, so it holds the value by construction | every other program (Haven's own included, and that same subsystem inside Haven's process), every other class on the same records, every structural rule, and the other sinks — the same coordinate in a logcat, a drive transcript or a relay log is reported as before |
 | **escaped value** | a value the app printed immediately after a LITERAL `ESC [` it emitted itself: the CSI consumer eats the parameter bytes (digits, `;`, `:`, `<=>?`) up to the first `@`–`~`, so the head of such a value is removed before matching | `tooling/e2e/ci/scan-logs-for-secrets.sh`, which runs FIRST and over raw bytes; and the fact that nothing in this tree emits a bare `ESC [` — the app's own log backends do not colour |
 
@@ -582,7 +601,9 @@ and the name of every crate it touches (one of which S6 reads as a cell next to 
 `geo` keyword), so both `cargo test` jobs of CI run 35244067610 went rc 1 over
 nothing but the toolchain's own output. Neither is a Haven identifier — they are
 public facts about this tree's dependency list, printed by cargo rather than by
-the app — so `policy.toml`'s `rust-test` sink sets `cargo_status = "exempt"`.
+the app — so `policy.toml`'s `rust-test` sink sets `cargo_status = "exempt"`, and so
+does the `soak` sink, because the soak lane captures the rig binary's own `cargo
+run` transcript and a cold build prints the same lines ahead of the rig.
 
 Two bounds make that an exemption rather than a blind spot, and both are
 mechanical:

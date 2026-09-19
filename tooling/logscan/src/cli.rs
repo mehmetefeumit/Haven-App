@@ -9,13 +9,11 @@ use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use crate::expand::expand;
-use crate::ledger::{reconcile, sealed_claims};
 use crate::manifest::{
-    add_host_decl, endpoint_spellings, parse_decl, read_manifest, validate_out_path,
-    write_manifest, Declarations, Manifest, SCHEMA,
+    add_host_decl, endpoint_spellings, parse_decl, read_manifest, seal_from_declarations,
+    validate_out_path, write_manifest, Declarations, Manifest, SealInputs,
 };
-use crate::plants::{assert_inert, resolve_slots, DeclaredPlants, DECLARED_EMITTER, PHASES};
+use crate::plants::{DeclaredPlants, DECLARED_EMITTER, PHASES};
 use crate::policy::Policy;
 use crate::report::{write_ndjson, write_report};
 use crate::rules::{validate_allowlist, AllowEntry, RuleSet, Today};
@@ -196,12 +194,6 @@ fn seal(argv: &[String], out: &mut dyn Write) -> Result<i32, String> {
     validate_out_path(&sealing.output)?;
 
     let policy = Policy::load()?;
-    for sink in sealing.floors.keys() {
-        policy.sink(sink)?;
-    }
-    for class in sealing.expect.keys() {
-        policy.class(class)?;
-    }
 
     let mut verdict = Verdict::new();
     let mut declarations = Declarations::default();
@@ -234,39 +226,27 @@ fn seal(argv: &[String], out: &mut dyn Write) -> Result<i32, String> {
         add_host_decl(&policy, "nsec", seed, &mut ids, &mut declarations)?;
     }
 
-    let plants = if sealing.declared_plants == DeclaredPlants::None {
-        if !declarations.plants.is_empty() {
-            return Err(
-                "--declared-plants none, but a sidecar declared a Dart plant: the run had a channel after all, and the two claims cannot both be true"
-                    .to_owned(),
-            );
-        }
-        Vec::new()
-    } else {
-        resolve_slots(&declarations.plants)?
+    // Everything but the I/O is the library's, so the soak rig — which seals in
+    // memory and never writes a file — runs the same sealing path this does.
+    let inputs = SealInputs {
+        run_id: sealing.run_id.clone(),
+        declared_plants: sealing.declared_plants,
+        expect: sealing.expect.clone(),
+        floors: sealing.floors.clone(),
+        exempt: sealing.exempt.clone(),
     };
-    let inertness = RuleSet::new(
-        policy.base64_entropy_bits,
-        now_unix(),
-        &sealing.exempt,
-        Vec::new(),
-    )?;
-    for slot in &plants {
-        assert_inert(&slot.token, &inertness)?;
+    let sealed = seal_from_declarations(&policy, &declarations, &inputs);
+    if let Err(refusal) = &sealed {
+        // A broken instrument is rc 2 and reads on stderr with the verb that
+        // failed; a floor unmet is the run's own verdict and reads on stdout
+        // beside the NOT-sealed line. Folding them would print one as the other.
+        if refusal.rc == RC_GUARD {
+            return Err(refusal.lines.join("\n"));
+        }
+        for line in &refusal.lines {
+            verdict.note(refusal.rc, line.clone());
+        }
     }
-
-    let declared: Vec<crate::expand::Declared> = declarations
-        .values
-        .iter()
-        .map(|(declared, _)| declared.clone())
-        .collect();
-    let expansion = expand(&policy, &declared)?;
-
-    for mismatch in reconcile(&policy, &expansion) {
-        verdict.note(RC_UNUSABLE, mismatch.message());
-    }
-    check_meta_floors(&declarations, &expansion, &sealing.expect, &mut verdict);
-
     if verdict.rc != RC_CLEAN {
         for line in &verdict.lines {
             let _ = writeln!(out, "{line}");
@@ -278,7 +258,7 @@ fn seal(argv: &[String], out: &mut dyn Write) -> Result<i32, String> {
         return Ok(verdict.rc);
     }
 
-    let manifest = build_manifest(&policy, &sealing, &declarations, &expansion, plants);
+    let manifest = sealed.map_err(|refusal| refusal.lines.join("\n"))?;
     write_manifest(&sealing.output, &manifest)?;
 
     let gaps = manifest.dropped.iter().filter(|d| d.coverage_gap).count();
@@ -299,111 +279,6 @@ fn seal(argv: &[String], out: &mut dyn Write) -> Result<i32, String> {
         manifest.ledger.len()
     );
     Ok(RC_CLEAN)
-}
-
-/// The rc-4 conditions: a manifest with nothing to search for, a class declared
-/// fewer times than the scenario's shape requires, and a value nobody could
-/// confirm was ever applied.
-fn check_meta_floors(
-    declarations: &Declarations,
-    expansion: &crate::expand::Expansion,
-    expect: &BTreeMap<String, usize>,
-    verdict: &mut Verdict,
-) {
-    // The crate's own vacuity rule, applied to its own artifact: a manifest with
-    // no searchable term would let `scan` report rc 0 having looked for nothing,
-    // and the only thing standing between that and a green lane would be the
-    // runner remembering to pass `--expect`.
-    if expansion.terms.is_empty() {
-        verdict.note(
-            RC_META,
-            "no searchable term was declared; a manifest that searches for nothing cannot certify a capture as clean".to_owned(),
-        );
-    }
-    for (class, min) in expect {
-        // DISTINCT values, by commitment: the floor exists to catch a runner
-        // that dropped a declaration, and counting lines would let the same
-        // value declared twice — a sidecar the proxy appended to twice, a
-        // lane passing a `--host-decl` the library already emits — stand in
-        // for the missing one.
-        let have = declarations
-            .values
-            .iter()
-            .filter(|(_, entry)| &entry.class == class)
-            .map(|(_, entry)| entry.commitment.as_str())
-            .collect::<std::collections::BTreeSet<&str>>()
-            .len();
-        if have < *min {
-            verdict.note(
-                RC_META,
-                format!(
-                    "declaration floor unmet: class `{class}` names {have} distinct value(s), below the {min} this scenario's shape requires; a manifest that names fewer values than the run minted cannot read as complete"
-                ),
-            );
-        }
-    }
-    let unconfirmed = declarations
-        .values
-        .iter()
-        .filter(|(_, entry)| !entry.planted_confirmed)
-        .count();
-    if unconfirmed > 0 {
-        verdict.note(
-            RC_META,
-            format!(
-                "{unconfirmed} declared value(s) were never confirmed planted; a value the run minted but never applied proves nothing about what a log may hold"
-            ),
-        );
-    }
-}
-
-/// Assembles the manifest from everything the seal resolved.
-///
-/// The sink specs, the class scoping and S4's entropy floor are COPIED from the
-/// policy rather than re-read by `scan`: a policy edit between the two halves of
-/// one run would otherwise change the meaning of the verdict with nothing saying
-/// so.
-fn build_manifest(
-    policy: &Policy,
-    args: &SealArgs,
-    declarations: &Declarations,
-    expansion: &crate::expand::Expansion,
-    plants: Vec<crate::plants::PlantSlot>,
-) -> Manifest {
-    Manifest {
-        schema: SCHEMA,
-        run_id: args.run_id.clone(),
-        roles: declarations.roles.clone(),
-        values: declarations
-            .values
-            .iter()
-            .map(|(_, entry)| entry.clone())
-            .collect(),
-        terms: expansion.terms.clone(),
-        dropped: expansion.dropped.clone(),
-        ledger: sealed_claims(policy, expansion),
-        plants,
-        declared_plants: args.declared_plants,
-        floors: policy
-            .sinks
-            .iter()
-            .map(|(name, spec)| {
-                (
-                    name.clone(),
-                    args.floors.get(name).copied().unwrap_or(spec.min_lines),
-                )
-            })
-            .collect(),
-        expect: args.expect.clone(),
-        scoped_out: policy
-            .classes
-            .iter()
-            .map(|(name, spec)| (name.clone(), spec.scoped_out.clone()))
-            .collect(),
-        sinks: policy.sinks.clone(),
-        base64_entropy_bits: policy.base64_entropy_bits,
-        exempt_endpoints: args.exempt.clone(),
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -669,7 +544,7 @@ fn proof_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-fn now_unix() -> u64 {
+pub(crate) fn now_unix() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())

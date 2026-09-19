@@ -1,0 +1,314 @@
+# Reusable workflow: the Tier-1 soak lane (tooling/soak, the `haven-soak` rig).
+#
+# The rig builds a whole Haven world IN PROCESS — several devices, each with a
+# real CircleManager and a real live-sync engine, against hermetic
+# `nostr-relay-builder` relays it can break on a schedule — and then asserts
+# the invariants a functional lane cannot reach: one branch, a converged
+# roster, no permanently undecryptable row, quiescence. There is no emulator,
+# no simulator and no app here; the subject is haven-core.
+#
+# # Three profiles, one workflow
+#
+# `pr` is the only profile ci.yml calls (stage 4, `needs: [rust]`). `nightly`
+# and `weekly` exist so the scheduler workflows Phase 2 adds have something to
+# call; in Phase 1 nothing dispatches them, and S17/S18/S19 therefore have no
+# LANE execution at all — they run in `tests/oracles.rs` and under
+# `scripts/run_soak_local.sh`. docs/SOAK_LANE.md says so in those words, so a
+# reader cannot mistake a green PR lane for coverage of the nightly set.
+#
+# # The bounds, innermost first (check_e2e_step_timeout_ordering.sh)
+#
+#   run budget   the work the profile TOML declares — the arms AND the
+#                background nemesis phase the driver walks before them
+#                (pr: 1320 s). The rig owns it; `tests/budget.rs` proves the
+#                priced run fits. It is a ceiling of worst-case product
+#                constants, not an expectation: a healthy pr run measures about
+#                twenty seconds.
+#   deadline     run-with-deadline.sh 23m / 80m / 300m — above the run budget
+#                so a hung run is killed with time left to finalise, and
+#                ATTRIBUTABLE where a bare 124 would not be.
+#   step cap     above the deadline + the 1 min SIGTERM→SIGKILL grace.
+#   job cap      above every step cap.
+#
+# There is deliberately no second inner `timeout` around the rig itself. The
+# lane-budget guard prices a lane as (sum of its bounded waits + a flat 180 s
+# unbounded-work allowance) and refuses a deadline below that, so a 5 m inner
+# bound under the lane's deadline is arithmetically impossible: the honest
+# choice is ONE bound the rig runs under, not a second one that would force the
+# deadline up for no diagnostic gain. The rig's own rc taxonomy is what names
+# what went wrong; the deadline only names THAT it hung.
+#
+# # Log privacy
+#
+# `HAVEN_LOGSCAN: "true"` at job level: the runner seals the rig's manifest and
+# runs every capture through tooling/e2e/ci/scan-logs.sh before this workflow
+# uploads anything. Twice, from two places — inside the drive and again in the
+# scan step below it — because the deadline reaps the drive's whole process
+# group and the upload fires on that outcome too; the second pass is the one no
+# reaping can skip. The uploadable tree is `${RUNNER_TEMP}/soak-upload/`, NOT
+# /tmp/haven-soak — that root holds the needles and the per-scenario evidence
+# and is wholly upload-banned (check_wire_proxy_test_only.sh checks 3 and 6).
+# Nothing in this file names a /tmp/haven-soak path under a reading command, in
+# a step summary or in an upload path; the rotation and the discard write and
+# delete, which is all a lane may do with them.
+
+name: Soak Core
+
+on:
+  workflow_call:
+    inputs:
+      profile:
+        description: 'Which soak profile to run (pr | nightly | weekly).'
+        required: true
+        type: string
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # pr — the per-commit profile: S01 (single-relay outage arm), S06, S11, S13.
+  # ---------------------------------------------------------------------------
+  e2e_soak_core_pr:
+    name: e2e_soak_core_pr
+    if: ${{ inputs.profile == 'pr' }}
+    runs-on: ubuntu-latest
+    # Inner deadline 23m (the profile's own `deadline_secs`, which
+    # `check_soak_lane_reachable.sh` L6 ties to this literal), drive step cap 25
+    # (budget 23 + 1 kill grace + 0 boot = 24, and C2 fails on budget >= cap),
+    # job cap 65 — above the SUM of the step caps (10 scanner + 25 rig + 25
+    # drive = 60) so the drive's own deadline, not the job's, is what reaps a
+    # hung run: a job-level reap cancels the scan-and-contain steps below. The
+    # cold build is what makes the sum this large: haven-core pulls
+    # libsqlite3-sys with bundled-sqlcipher-vendored-openssl, so a cache miss
+    # compiles a vendored OpenSSL and SQLCipher from source, and
+    # `[profile.soak]` is a new target subdirectory on top of that.
+    timeout-minutes: 65
+    env:
+      HAVEN_LOGSCAN: "true"
+      # No recording proxy runs here, so the seal's declarations are the
+      # harness's host-known constants (tooling/e2e/ci/host-needles.sh). The
+      # values the RIG mints are declared by the rig itself and sealed into its
+      # own manifest, which the runner scans against separately.
+      HAVEN_LOGSCAN_PROFILE: host
+
+    steps:
+      - name: Checkout
+        id: checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # ONE `shared-key` with rust-check.yml's soak-tooling job, deliberately:
+      # `key:` appends to a JOB-scoped key, which would give this lane its own
+      # cold build of the same crate. soak-tooling runs inside the `rust`
+      # dependency this job needs, so the cache is written before the lane
+      # starts.
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            tooling/soak
+            tooling/logscan
+          shared-key: soak-crate
+
+      # Built before the first capture exists: an absent scanner is a broken
+      # guard (rc 2), never a skipped scan.
+      - name: Build the runtime log scanner
+        timeout-minutes: 10
+        run: cargo build --release --manifest-path tooling/logscan/Cargo.toml
+
+      # Rotated before the first capture too. A manifest left by an earlier run
+      # on a reused runner would be REUSED as this run's (the host-profile gate
+      # reuses whatever sits at its out path), sealing the last run's
+      # identifiers into this run's verdict.
+      - name: Rotate the needle directory
+        run: bash tooling/e2e/ci/rotate-needle-dir.sh
+
+      # Separate from the drive step so a cold compile cannot eat the drive's
+      # bound, and so a build failure is not reported as a soak failure.
+      - name: Build the soak rig
+        timeout-minutes: 25
+        run: cargo build --profile soak --manifest-path tooling/soak/Cargo.toml
+
+      - name: Run the soak (pr profile)
+        id: soak
+        timeout-minutes: 25
+        run: bash tooling/e2e/ci/run-with-deadline.sh 23m "soak-core pr" -- bash tooling/e2e/ci/run-soak-core.sh pr
+
+      # Scan-before-upload, as its OWN step and on every outcome short of a
+      # cancellation, exactly as every other lane carries one. The drive above
+      # scans what it captured — but the deadline reaps its whole PROCESS
+      # GROUP, so a run that overruns dies between the rig and that scan, and
+      # the upload below fires on rc 124 all the same. This step is what stands
+      # there then: the same finalize path, over the same tree, against the
+      # same two manifests, so a leak (rc 1) empties the tree and reds the lane
+      # before anything can be published.
+      #
+      # Gated on the CHECKOUT, never on the drive: keyed to the drive's outcome
+      # it would be skipped in precisely the case it exists for.
+      #
+      # Deliberately unbounded, like the other lanes' scan steps: a bound here
+      # would fail OPEN, since a reaped scan step still lets the upload run,
+      # while an unbounded one dies at the job cap with nothing published at
+      # all. check_e2e_step_timeout_ordering.sh's is_soak_body() excludes it for
+      # that reason — it boots nothing and drives no rig.
+      - name: Scan the soak evidence before upload
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/run-soak-core.sh --scan-only pr
+
+      # Both scans are behind us now: the drive's (on a healthy run) and the
+      # step above (on every run). `if-no-files-found: error` because a soak
+      # run that produced no evidence proves nothing, and the containment
+      # branch leaves a file behind on purpose so this step still has one.
+      #
+      # Gated on the drive having STARTED, not merely on the job not being
+      # cancelled: when the build step fails the drive is skipped, no tree is
+      # ever created, and an unconditional `if-no-files-found: error` would add
+      # a second, misleading red on top of a plain compile failure.
+      - name: Upload soak evidence
+        if: ${{ !cancelled() && steps.soak.outcome != 'skipped' }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: soak-core-pr-${{ github.run_id }}
+          path: ${{ runner.temp }}/soak-upload/
+          retention-days: 14
+          if-no-files-found: error
+
+      # After every upload, on every outcome: the sealed manifests hold the
+      # run's declared identifiers verbatim and must not outlive the job.
+      - name: Discard needle manifests
+        if: always()
+        run: rm -f /tmp/haven-soak/needles/*.needles.decl /tmp/haven-soak/needles/*.needles.json /tmp/haven-soak/needles/*.canaries.json
+
+  # ---------------------------------------------------------------------------
+  # nightly — pr plus the all-relay and rolling S01 arms, S17's two ClosedKind
+  # arms, S18 and S19. No scheduler dispatches this in Phase 1.
+  # ---------------------------------------------------------------------------
+  e2e_soak_core_nightly:
+    name: e2e_soak_core_nightly
+    if: ${{ inputs.profile == 'nightly' }}
+    runs-on: ubuntu-latest
+    # PLAN §9.2: deadline 80m, drive step cap 84 (budget 81); job cap 125 is
+    # above the step-cap sum (10 + 25 + 84) so the drive reaps before the job.
+    timeout-minutes: 125
+    env:
+      HAVEN_LOGSCAN: "true"
+      HAVEN_LOGSCAN_PROFILE: host
+
+    steps:
+      - name: Checkout
+        id: checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            tooling/soak
+            tooling/logscan
+          shared-key: soak-crate
+
+      - name: Build the runtime log scanner
+        timeout-minutes: 10
+        run: cargo build --release --manifest-path tooling/logscan/Cargo.toml
+
+      - name: Rotate the needle directory
+        run: bash tooling/e2e/ci/rotate-needle-dir.sh
+
+      - name: Build the soak rig
+        timeout-minutes: 25
+        run: cargo build --profile soak --manifest-path tooling/soak/Cargo.toml
+
+      - name: Run the soak (nightly profile)
+        id: soak
+        timeout-minutes: 84
+        run: bash tooling/e2e/ci/run-with-deadline.sh 80m "soak-core nightly" -- bash tooling/e2e/ci/run-soak-core.sh nightly
+
+      # The pr job's comment says why this step exists and why it is gated on
+      # the checkout rather than on the drive.
+      - name: Scan the soak evidence before upload
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/run-soak-core.sh --scan-only nightly
+
+      - name: Upload soak evidence
+        if: ${{ !cancelled() && steps.soak.outcome != 'skipped' }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: soak-core-nightly-${{ github.run_id }}
+          path: ${{ runner.temp }}/soak-upload/
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Discard needle manifests
+        if: always()
+        run: rm -f /tmp/haven-soak/needles/*.needles.decl /tmp/haven-soak/needles/*.needles.json /tmp/haven-soak/needles/*.canaries.json
+
+  # ---------------------------------------------------------------------------
+  # weekly — every registered scenario, including S17's full-intake arm, whose
+  # bound alone starts at the engine's 684 s silence window. No scheduler
+  # dispatches this in Phase 1.
+  # ---------------------------------------------------------------------------
+  e2e_soak_core_weekly:
+    name: e2e_soak_core_weekly
+    if: ${{ inputs.profile == 'weekly' }}
+    runs-on: ubuntu-latest
+    # PLAN §9.2: deadline 300m, drive step cap 305 (budget 301); job cap 355 is
+    # above the step-cap sum (10 + 25 + 305 = 340) so the drive reaps before the
+    # job, and still under GitHub's own 360-minute ceiling for a hosted job.
+    timeout-minutes: 355
+    env:
+      HAVEN_LOGSCAN: "true"
+      HAVEN_LOGSCAN_PROFILE: host
+
+    steps:
+      - name: Checkout
+        id: checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            tooling/soak
+            tooling/logscan
+          shared-key: soak-crate
+
+      - name: Build the runtime log scanner
+        timeout-minutes: 10
+        run: cargo build --release --manifest-path tooling/logscan/Cargo.toml
+
+      - name: Rotate the needle directory
+        run: bash tooling/e2e/ci/rotate-needle-dir.sh
+
+      - name: Build the soak rig
+        timeout-minutes: 25
+        run: cargo build --profile soak --manifest-path tooling/soak/Cargo.toml
+
+      - name: Run the soak (weekly profile)
+        id: soak
+        timeout-minutes: 305
+        run: bash tooling/e2e/ci/run-with-deadline.sh 300m "soak-core weekly" -- bash tooling/e2e/ci/run-soak-core.sh weekly
+
+      # The pr job's comment says why this step exists and why it is gated on
+      # the checkout rather than on the drive.
+      - name: Scan the soak evidence before upload
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/run-soak-core.sh --scan-only weekly
+
+      - name: Upload soak evidence
+        if: ${{ !cancelled() && steps.soak.outcome != 'skipped' }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: soak-core-weekly-${{ github.run_id }}
+          path: ${{ runner.temp }}/soak-upload/
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Discard needle manifests
+        if: always()
+        run: rm -f /tmp/haven-soak/needles/*.needles.decl /tmp/haven-soak/needles/*.needles.json /tmp/haven-soak/needles/*.canaries.json

@@ -1,0 +1,44 @@
+# The weekly soak profile: every scenario, every arm, the biggest world.
+#
+# Superset of `nightly`. The one arm that appears only here is S17's full
+# intake, whose bound starts at the 684-second delivery-silence window and so
+# cannot share a run with anything shorter.
+name = "weekly"
+run_budget_secs = 16200
+deadline_secs = 18000
+margin_secs = 900
+duration_secs = 3600
+tick_ms = 250
+
+[world]
+members = 5
+circles = 4
+relays = 3
+
+[[scenarios]]
+id = "S01"
+arms = ["single-relay-outage", "all-relay-outage", "rolling-outage"]
+
+[[scenarios]]
+id = "S06"
+arms = ["stuck-row-sweep"]
+
+[[scenarios]]
+id = "S11"
+arms = ["quiet-circle-resume"]
+
+[[scenarios]]
+id = "S13"
+arms = ["hydration-quarantine"]
+
+[[scenarios]]
+id = "S17"
+arms = ["closed-prefixes", "notice", "full-intake"]
+
+[[scenarios]]
+id = "S18"
+arms = ["swallowed-ok-create", "swallowed-ok-relay-update", "swallowed-ok-location-send"]
+
+[[scenarios]]
+id = "S19"
+arms = ["duplicate-replay", "reordered-pages", "cross-sub-eose", "commit-gap"]

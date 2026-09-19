@@ -182,7 +182,7 @@ extract_steps() {
           stepname, stepcap, uses, retry_to, retry_ma, boot_to,
           (cmd == "" ? "-" : cmd), body)
       }
-      in_step = 0; in_cmd = 0
+      in_step = 0; in_cmd = 0; in_run = 0
       stepname = "-"; stepcap = "-"; uses = "-"
       retry_to = "-"; retry_ma = "-"; boot_to = "-"; cmd = "-"; body = ""
     }
@@ -196,7 +196,7 @@ extract_steps() {
       job = "-"; jobcap = "-"; runs_on = "-"
       stepname = "-"; stepcap = "-"; uses = "-"
       retry_to = "-"; retry_ma = "-"; boot_to = "-"; cmd = "-"; body = ""
-      in_jobs = 0; in_steps = 0; in_step = 0; in_cmd = 0; nrec = 0
+      in_jobs = 0; in_steps = 0; in_step = 0; in_cmd = 0; in_run = 0; nrec = 0
     }
     # Top-level key: leaving (or entering) the jobs: block.
     /^[A-Za-z_][A-Za-z0-9_-]*:/ {
@@ -240,6 +240,24 @@ extract_steps() {
       c = $0; sub(/^          (script|command):[[:space:]]*/, "", c); gsub(/\t/, " ", c)
       if (c ~ /^[>|][-+]?[[:space:]]*$/) {
         in_cmd = 1; cmd_sep = (c ~ /^[|]/) ? " ; " : " "; cmd = (c ~ /^[|]/) ? "|" : ""
+      } else cmd = c
+    }
+    # A plain `run:` is a command too. Until the soak lane there was no DRIVE
+    # step that used one — an emulator drive is the `script:` of the action and
+    # a macOS drive is the `command:` of nick-fields/retry — so `cmd` stayed "-"
+    # for them and check_e2e_lane_budget.sh could not read what a plain step
+    # runs. A body at ten spaces belongs to a block scalar here (a `with:` block
+    # sits at the same depth, but a step has either `run:` or `uses:`, never
+    # both, so `in_run` is only ever set for the first).
+    in_run && /^          / {
+      c = $0; sub(/^[[:space:]]+/, "", c); gsub(/\t/, " ", c)
+      cmd = cmd (cmd == "" || cmd == "|" ? "" : run_sep) c
+    }
+    in_run && !/^          / && !/^[[:space:]]*$/ { in_run = 0 }
+    /^        run:[[:space:]]*/ {
+      c = $0; sub(/^        run:[[:space:]]*/, "", c); gsub(/\t/, " ", c)
+      if (c ~ /^[>|][-+]?[[:space:]]*$/) {
+        in_run = 1; run_sep = (c ~ /^[|]/) ? " ; " : " "; cmd = (c ~ /^[|]/) ? "|" : ""
       } else cmd = c
     }
     /^        timeout-minutes:/ { stepcap = value($0) }
@@ -352,6 +370,26 @@ is_simulator_body() {
      || "$1" == *"run-b7-ios-auth-tier.sh"* \
      || "$1" == *"run-b4-ios-real-gps.sh"* ]]
 }
+# The SOAK lane runs on a plain `ubuntu-latest` `run:` step: no emulator action
+# to recognise, no simulator harness in the body. Before this predicate existed
+# such a step got C3 alone — the step cap below the job cap — and C1, C2 and C4
+# never fired, so the lane could have driven a 5-minute rig with no inner
+# deadline at all and this guard would have reported it compliant. The vacuity
+# checks could not catch it either: check (c) `continue`s any workflow with no
+# emulator marker.
+#
+# `--self-test` is excluded for the same reason it is above: repo-guards.yml
+# invokes the same runner hermetically, in seconds, with no rig behind it.
+# `--scan-only` — the lane's scan-before-upload step — is excluded because it
+# boots nothing and drives no rig either, and because a bound there would fail
+# OPEN: a reaped scan step returns and the upload, which fires on every outcome
+# short of a cancellation, publishes what the scan never read. Unbounded, a
+# hung scanner dies at the job cap with nothing published at all. Every other
+# lane's scan-before-upload step is unbounded for the same reason.
+is_soak_body() {
+  [[ "$1" == *"--self-test"* || "$1" == *"--scan-only"* ]] && return 1
+  [[ "$1" == *"run-soak-core.sh"* ]]
+}
 # A DRIVE step actually runs a lane's harness. An AVD-snapshot step uses the
 # same action but only echoes, so it needs a cap (C5) and no deadline (C1).
 is_drive_body() { [[ "$1" == *"tooling/e2e/ci/run-"* ]]; }
@@ -416,6 +454,10 @@ check_dir() {
       local is_emu=0 is_sim=0
       if is_emulator_step "${uses}"; then is_emu=1; fi
       if is_simulator_body "${body}"; then is_sim=1; fi
+      # A soak step boots nothing, so it is neither; it is counted with them
+      # because C1/C2/C4 are exactly the bounds it needs and nothing else
+      # applies them to a plain `run:` step.
+      if is_soak_body "${body}"; then is_sim=1; fi
       (( is_emu || is_sim )) || {
         # Not an emulator/sim step — C3 still applies to any step that carries
         # a cap, because an inoperative cap is inoperative everywhere.
@@ -609,6 +651,14 @@ check_job_caps() {
     while IFS=$'\t' read -r _file job jc _runs_on stepname stepcap uses _rto _rma _boot _cmd body; do
       jobcap[${job}]="${jc}"
       local vals=("${jc}" "${stepcap}") v w
+      # `is_soak_body` is deliberately NOT OR-ed in here, unlike in check_dir.
+      # C6 demands a `# job-uncapped-minutes: <m> (<N> runs, worst <run id>)`
+      # declaration, whose whole point is that it is MEASURED — a count of runs
+      # and the id of the worst one. A lane that has never run cannot state one,
+      # and a fabricated declaration is worse than none: it is a number a
+      # reviewer would re-derive and find nothing behind. The soak jobs are
+      # covered by C1-C5 through check_dir; C6 joins them in the commit that
+      # can cite real runs.
       if is_emulator_step "${uses}" || is_simulator_body "${body}"; then
         scope[${job}]=1
         if is_drive_body "${body}"; then
@@ -721,7 +771,7 @@ check_extractor_sees_the_repo() {
   # step bodies. Without this a commented-out `uses:` line, or a comment naming
   # a harness script, would be counted as a lane the extractor "lost" — a guard
   # that reds on a correct repo gets deleted rather than fixed.
-  local MARKERS='uses:.*reactivecircus/android-emulator-runner|run-ios-sim-scenario\.sh|boot-ios-sim\.sh|run-b7-ios-auth-tier\.sh|run-b4-ios-real-gps\.sh'
+  local MARKERS='uses:.*reactivecircus/android-emulator-runner|run-ios-sim-scenario\.sh|boot-ios-sim\.sh|run-b7-ios-auth-tier\.sh|run-b4-ios-real-gps\.sh|run-soak-core\.sh'
   _uncommented() { grep -v '^[[:space:]]*#' "$1"; }
 
   # (0) Every step list is laid out as the extractor reads it: items at six
@@ -785,7 +835,7 @@ self_test() {
   # cases)" in the closing line is how a deleted fixture reports "all passed"
   # while running one check fewer — the exact rot this whole self-test exists to
   # prevent in the checks it covers.
-  local -r SELF_TEST_CASES=44
+  local -r SELF_TEST_CASES=50
   local tmp failures=0 cases=0
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
@@ -1361,6 +1411,75 @@ self_test() {
 '      run: bash tooling/e2e/ci/run-with-deadline.sh 40m x -- bash tooling/e2e/ci/run-ios-sim-scenario.sh x' \
     >> "${v0}/two.yml"
   _expect_vacuity "vacuity: a step list the extractor cannot read is named" "${v0}" 2 "two.yml:18"
+
+  # --- Fixture S: the SOAK lane. A plain `ubuntu-latest` `run:` step with no
+  # emulator action and no simulator harness in its body. Before is_soak_body()
+  # such a step got C3 and nothing else, so a lane could drive a five-minute rig
+  # with no inner deadline at all and this guard would call it compliant.
+  local s1="${tmp}/s1"; mkdir -p "${s1}"
+  write_fixture "${s1}/soak.yml" \
+'name: soak' \
+'on: [workflow_call]' \
+'jobs:' \
+'  e2e_soak_core_pr:' \
+'    runs-on: ubuntu-latest' \
+'    # job-uncapped-minutes: 4 (1 runs, worst 12345678901)' \
+'    timeout-minutes: 60' \
+'    steps:' \
+'      - name: Run the soak' \
+'        timeout-minutes: 10' \
+'        run: bash tooling/e2e/ci/run-with-deadline.sh 6m "soak-core pr" -- bash tooling/e2e/ci/run-soak-core.sh pr'
+  _expect "a correctly bounded soak lane passes" "${s1}" 0
+
+  local s2="${tmp}/s2"; mkdir -p "${s2}"
+  sed 's|bash tooling/e2e/ci/run-with-deadline.sh 6m "soak-core pr" -- ||' \
+    "${s1}/soak.yml" > "${s2}/soak.yml"
+  _expect "a soak drive with no inner deadline reds C1" "${s2}" 1 "C1 soak.yml"
+
+  local s3="${tmp}/s3"; mkdir -p "${s3}"
+  sed 's|run: bash tooling/e2e/ci/run-with-deadline.sh|run: HAVEN_SOAK_DRIVE_TIMEOUT=6m bash tooling/e2e/ci/run-with-deadline.sh|' \
+    "${s1}/soak.yml" > "${s3}/soak.yml"
+  _expect "a soak drive timeout at or above its deadline reds C4" "${s3}" 1 "C4 soak.yml"
+
+  # ...and the exclusion that keeps the predicate from turning repo-guards.yml
+  # into a lane: the SAME runner, hermetically, in seconds, owes no deadline.
+  local s4="${tmp}/s4"; mkdir -p "${s4}"
+  write_fixture "${s4}/guards.yml" \
+'name: guards' \
+'on: [push]' \
+'jobs:' \
+'  guards:' \
+'    runs-on: ubuntu-latest' \
+'    timeout-minutes: 20' \
+'    steps:' \
+'      - name: Soak runner self-test' \
+'        timeout-minutes: 5' \
+'        run: bash tooling/e2e/ci/run-soak-core.sh --self-test'
+  _expect "a --self-test invocation of the soak runner is not a lane" "${s4}" 0
+
+  # ...and the same for the lane's scan-before-upload step, which runs the same
+  # runner over files already on disk. It owes no bound — one there would fail
+  # open, since a reaped scan step still lets the upload run — but the drive
+  # beside it still owes both, which is what the mutation below asserts.
+  local s5="${tmp}/s5"; mkdir -p "${s5}"
+  write_fixture "${s5}/soak.yml" \
+'name: soak' \
+'on: [workflow_call]' \
+'jobs:' \
+'  e2e_soak_core_pr:' \
+'    runs-on: ubuntu-latest' \
+'    timeout-minutes: 60' \
+'    steps:' \
+'      - name: Run the soak' \
+'        timeout-minutes: 10' \
+'        run: bash tooling/e2e/ci/run-with-deadline.sh 6m "soak-core pr" -- bash tooling/e2e/ci/run-soak-core.sh pr' \
+'      - name: Scan the soak evidence before upload' \
+'        run: bash tooling/e2e/ci/run-soak-core.sh --scan-only pr'
+  _expect "the soak lane's scan-before-upload step is not a drive" "${s5}" 0
+
+  local s6="${tmp}/s6"; mkdir -p "${s6}"
+  sed 's|run-soak-core.sh --scan-only pr|run-soak-core.sh pr|' "${s5}/soak.yml" > "${s6}/soak.yml"
+  _expect "...but a real drive in that same unbounded step reds C5" "${s6}" 1 "C5 soak.yml"
 
   VIOLATIONS=0
   if (( cases != SELF_TEST_CASES )); then

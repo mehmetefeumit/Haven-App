@@ -561,8 +561,15 @@ check_oracle_runs() { # <records> <file> <job>
 # list reads no flag, and demanding one there would pin a lie. Widen
 # LOGSCAN_RUNNER_RE in the commit that gives another runner the arm;
 # check_logscan_wired_everywhere.sh's RUNNER_PINS is the list it must match.
+#
+# `run-soak-core.sh` is in the list because it has the arm (it sources
+# logscan-gate.sh and reads the flag), and for no other reason: the soak lane
+# starts no hermetic relay, so it never enters the population this guard
+# reasons over and this entry can never fire. It is here so the two lists stay
+# one list — the day a soak job does bring up a relay, the flag is demanded
+# without anybody having to remember why.
 # ---------------------------------------------------------------------------
-readonly LOGSCAN_RUNNER_RE='run-(single-avd-scenario|ios-sim-scenario|ios-bg-publish|b4-ios-real-gps|b7-ios-auth-tier|integration-tests|relay-customization|flake-stress|m7-background-catchup|b1-fgs-publish|b3-real-gps|b5-permission-revocation|b6-location-provider-toggle|b8-clock-skew|b9-network-reconnect|kp-rotation)[.]sh'
+readonly LOGSCAN_RUNNER_RE='run-(single-avd-scenario|ios-sim-scenario|ios-bg-publish|b4-ios-real-gps|b7-ios-auth-tier|integration-tests|relay-customization|flake-stress|m7-background-catchup|b1-fgs-publish|b3-real-gps|b5-permission-revocation|b6-location-provider-toggle|b8-clock-skew|b9-network-reconnect|kp-rotation|soak-core)[.]sh'
 
 check_logscan_is_on() { # <records> <file> <job>
   local records="$1" file="$2" job="$3"

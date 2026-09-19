@@ -39,7 +39,7 @@
 #       (matched literally, never expanded) has a `[ledger.<class>]` table, and
 #       every ledger table names a declared class.
 #   P6  CARGO EXEMPTION CONFINED. `cargo_status = "exempt"` appears on exactly
-#       the sinks in CARGO_STATUS_EXEMPT (today: `rust-test`), every other
+#       the sinks in CARGO_STATUS_EXEMPT (today: `rust-test`, `soak`), every other
 #       `[sinks]` entry either omits the key or says `"scanned"`, and the
 #       README explains the knob and names each exempt sink. It is the one
 #       exemption that belongs to a sink class rather than to a rule, so a
@@ -104,6 +104,7 @@ declare -A STRUCTURAL_RULES_OFF=(
 # narrowest exemption rests on.
 declare -A CARGO_STATUS_EXEMPT=(
   ['rust-test']='the only class that holds a cargo transcript; cargo prints the public pinned git revision of every git dependency and every crate name before a test runs'
+  ['soak']='the soak lane captures the rig binary through cargo run, so a cold build prints the same pinned git revisions and crate names ahead of the rig'
 )
 # The policy's ONE needle exemption, pinned verbatim: the emitter whose own
 # records are the SOURCE of a class rather than a place it leaked to. Every
@@ -124,6 +125,7 @@ declare -A DECLARED_PLANTS_OFF=(
   ['proxy']='the recorder log carries no app output'
   ['diag']='host diagnostics carry no app output'
   ['relay']='a relay log carries no app output'
+  ['soak']='the Tier-1 rig is a Rust process with no Dart channel at all: nothing can hand it a declared token to print, so a Dart plant would be a control nothing could ever satisfy. Its `rust` shape plant is what proves the sink was reached — emitted through the installed log sink as the first and last line of every scenario capture, never written straight to the file'
 )
 
 VIOLATIONS=0
@@ -479,7 +481,7 @@ main() {
     echo "and CLAUDE.md (Log anonymity, Security Rule 15)." >&2
     exit 1
   fi
-  log "OK — no deferral vocabulary, structural rules on except relay, the cargo exemption on rust-test alone and explained, the needle exemption pinned to one emitter and one class and explained, plant expectations pinned and explained, allowlist entries shaped and live, every class ledgered."
+  log "OK — no deferral vocabulary, structural rules on except relay, the cargo exemption on the listed cargo-transcript sinks only and explained, the needle exemption pinned to one emitter and one class and explained, plant expectations pinned and explained, allowlist entries shaped and live, every class ledgered."
 }
 
 main "$@"

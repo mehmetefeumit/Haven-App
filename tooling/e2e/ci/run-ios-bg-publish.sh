@@ -189,10 +189,11 @@
 #   4. When the drive disables background sharing it appends
 #      `[bg-publish] BACKGROUND_SHARING_DISABLED`. That is the instant the
 #      app loses its right to run in the background, so this script times
-#      P3's settle window from there and re-foregrounds Haven itself once it
-#      has elapsed: a suspended drive cannot re-fetch the relay, and the
-#      re-fetch has to happen before the window's own kind-445s age past
-#      their 228 s NIP-40 expiration (see DISARM_WAIT_SECS).
+#      P3's settle window from there — from the APPEND's mtime, not from the
+#      poll that read it — and re-foregrounds Haven itself once it has
+#      elapsed: a suspended drive cannot re-fetch the relay, and the re-fetch
+#      has to happen before the window's own kind-445s age past their 228 s
+#      NIP-40 expiration (see DISARM_WAIT_SECS).
 #   5. After the drive's LAST marker (`[bg-publish] SESSION_DISARMED`) this
 #      script re-foregrounds Haven (`simctl launch` on the running bundle
 #      activates it) so flutter_test's post-suite teardown gets real engine
@@ -528,6 +529,35 @@ readonly BGP_DRIVE_FLOOR=56
 # eviction bound. A run where the app was NOT suspended signals DISARMED
 # first and never reaches the deadline.
 #
+# Both of those bounds are WALL-CLOCK facts about the app and the relay, so
+# the 210 s has to be measured the same way, from the same instant they are:
+# the app's OWN disable append. It was neither. The wait counted its own
+# sleeps and ignored what the poll's container sweep spent, and it started
+# from the poll that NOTICED the marker rather than from the append — so the
+# wake-up landed 216.8-222.0 s after the disable across five runs
+# (35376588206, 35311161479, 35280144455 x2, 34798752509 — marker in the
+# drive log to re-foreground line, so each is a LOWER bound on the app's own
+# wait) instead of 210,
+# leaving 16-21 s of the 238 s eviction bound rather than 28, and shrinking
+# under load, which is exactly when a runner is slowest to wake the app.
+# `bgp_wait_until` therefore measures wall clock, and `bgp_budget_after_lag`
+# takes the observation lag off the budget (bounded by
+# DISARM_ANCHOR_MAX_LAG_SECS, and one-sided: it may never wake the app EARLY,
+# which is the error that reds a correct app). Overshooting is not merely
+# untidy — past the eviction bound P3's re-fetch collects silence whichever
+# way the disable went, and the wire half passes VACUOUSLY.
+#
+# What neither bound can do is keep the app ALIVE. From the disable it holds
+# no execution claim — the guarantee under test — so iOS owns the process for
+# the whole window, and in CI run 35397118356 it took it: 37 s after the
+# disable the app's background-task assertions invalidated without UIKit ever
+# running their expiration handlers, the process logged nothing again, and
+# the host's VM-service connection closed 5 s later, so the drive died with
+# P3 neither proved nor disproved. Shortening the exposure to the 210 s the
+# proof actually needs is all a wrapper can do about that; the DISARM wait's
+# exit branch says the rest out loud rather than leaving an rc to be read as
+# an assertion failure.
+#
 # P2c does not move either side of that, and the re-derivation above is why it
 # does not have to: P2c runs entirely BEFORE the disable, so it changes when
 # the DISABLED signal arrives (which DISABLE_WAIT_SECS above absorbs) and
@@ -606,6 +636,18 @@ if ! [[ "${READY_WAIT_SECS}" =~ ^[1-9][0-9]*$ ]] \
   echo "ERROR: HAVEN_BGP_*_SECS overrides must be positive integers." >&2
   exit 2
 fi
+
+# How much of the DISARM budget may be reclaimed from the OBSERVATION lag —
+# the stretch between the drive APPENDING the disable marker and this script's
+# poll reading it. That lag is one poll plus the container sweep the poll runs:
+# 0.2-3.5 s measured (CI runs 35376588206, 35311161479, 35280144455 x2,
+# 34798752509), so two poll intervals is a ceiling, not a budget. Anything
+# larger is not a lag but a stale signal or a moved clock, and
+# `bgp_budget_after_lag` keeps the WHOLE budget rather than trust it — waking
+# the app early is the error that cannot be recovered from (see there).
+# Derived after the validation above, so a garbage override reports itself
+# rather than becoming a 0 in an arithmetic expansion.
+readonly DISARM_ANCHOR_MAX_LAG_SECS=$(( MARKER_POLL_SECS * 2 ))
 
 # ---------------------------------------------------------------------------
 # Pure helpers (exercised by --self-test)
@@ -815,6 +857,121 @@ bgp_marker_present_under() {
   return 1
 }
 
+# bgp_now — the wall clock, in epoch seconds.
+#
+# The one unit every deadline here is stated in, and the unit
+# `bgp_file_mtime` reports, so a budget and an anchor are always comparable.
+bgp_now() {
+  date +%s
+}
+
+# bgp_file_mtime <path> — when the file was last written, in epoch seconds,
+# or NOTHING at all when that cannot be read.
+#
+# BSD `stat` first (this lane runs on macOS), GNU second, because --self-test
+# runs on the Linux guards job: a helper that worked on only one of the two
+# would be pinned by fixtures that never exercise the half CI depends on.
+# Each spelling's OUTPUT is validated rather than its exit status, because GNU
+# `stat -f %m <path>` neither fails cleanly nor stays quiet — it reads `%m` as
+# a second path, complains about it on stderr, and prints the filesystem's
+# block counts for the real one on stdout. Chained on status alone that junk
+# becomes the answer, and every caller that then rejects it as non-numeric
+# silently loses the anchor it asked for.
+bgp_file_mtime() {
+  local path="${1:-}" mtime
+  mtime="$(stat -f %m "${path}" 2>/dev/null || true)"
+  [[ "${mtime}" =~ ^[0-9]+$ ]] \
+    || mtime="$(stat -c %Y "${path}" 2>/dev/null || true)"
+  [[ "${mtime}" =~ ^[0-9]+$ ]] || return 0
+  printf '%s\n' "${mtime}"
+}
+
+# bgp_signal_mtime_with <app-data-root> <name> <marker> — when the drive
+# APPENDED <marker>, in epoch seconds; non-zero when no signal carries it.
+#
+# The drive appends its markers in phase order and nothing else writes the
+# file, so the mtime of a copy carrying the newest marker IS the instant the
+# drive reached that phase — read off the app's own write instead of off this
+# script's poll, which trails it by a whole MARKER_POLL_SECS plus a sweep.
+bgp_signal_mtime_with() {
+  local root="${1:-}" name="$2" marker="$3" path mtime
+  while IFS= read -r path; do
+    [[ -n "${path}" ]] || continue
+    bgp_marker_present "${path}" "${marker}" || continue
+    mtime="$(bgp_file_mtime "${path}")"
+    [[ -n "${mtime}" ]] || continue
+    printf '%s\n' "${mtime}"
+    return 0
+  done < <(bgp_signal_paths "${root}" "${name}")
+  return 1
+}
+
+# bgp_budget_after_lag <anchor-epoch> <budget-secs> <max-lag-secs> — what is
+# left of <budget> once it is measured from <anchor> rather than from now.
+#
+# The two directions of error are not each other's mirror, so the correction
+# is deliberately one-sided: it may only ever give back the observation lag
+# this script itself introduced, never move a wake-up later, and never give
+# back more than <max-lag>. Waking Haven EARLY re-foregrounds it INSIDE the
+# drive's settle window, where a correct app publishes on the foreground path
+# and P3 reds for the app behaving properly — an unrecoverable wrong verdict.
+# Waking it late only spends margin. So an anchor in the future (a clock that
+# moved), older than <max-lag> (a signal from a previous attempt), or not a
+# number at all is not trusted: the caller gets the whole budget, which is
+# exactly the behaviour that predates the anchor.
+bgp_budget_after_lag() {
+  local anchor="${1:-}" budget="$2" max_lag="$3" lag
+  [[ "${anchor}" =~ ^[0-9]+$ ]] || { printf '%s\n' "${budget}"; return 0; }
+  lag=$(( $(bgp_now) - anchor ))
+  if (( lag < 0 || lag > max_lag )); then
+    printf '%s\n' "${budget}"
+    return 0
+  fi
+  printf '%s\n' "$(( budget - lag ))"
+}
+
+# bgp_app_process_state <udid> — `running`, `gone`, or `unknown`: is the app
+# under test still a process on this device?
+#
+# Asked in exactly one place — when the drive dies inside P3's settle window,
+# the one stretch of this lane where the app holds NO execution claim and iOS
+# may take the process away (CI run 35397118356). "The drive exited" and "the
+# OS reclaimed the app" produce the same rc and the same truncated transcript,
+# and only this tells them apart.
+#
+# A simulator app is an ordinary host process whose argv names the bundle
+# inside THIS device's container tree, so `pgrep -f` answers it without going
+# through `simctl` — whose own answer for a process the OS is tearing down is
+# the thing being asked about. Reports `unknown` rather than guessing when
+# there is no `pgrep` or no device, so a wrong diagnosis is never printed as a
+# confident one.
+bgp_app_process_state() {
+  local udid="${1:-}"
+  command -v pgrep >/dev/null 2>&1 || { printf 'unknown\n'; return 0; }
+  [[ -n "${udid}" ]] || { printf 'unknown\n'; return 0; }
+  if pgrep -f "/Devices/${udid}/data/Containers/Bundle/.*/Runner\.app/Runner" \
+       >/dev/null 2>&1; then
+    printf 'running\n'
+  else
+    printf 'gone\n'
+  fi
+}
+
+# bgp_calibrated_app_state <calibration> <state> — <state>, or `unknown` when
+# the read that produced it was never shown to work on this runner.
+#
+# The read above matches an argv layout, and an argv layout is the simulator's
+# to change. So it is taken ONCE while the app is unarguably alive (the drive
+# has just signalled READY from inside it), and a `gone` that follows is only
+# evidence if that calibration saw the app. Otherwise the honest answer is
+# `unknown`: a diagnosis that blamed iOS for reclaiming an app that was still
+# there would send the next reader past the drive's own failure.
+bgp_calibrated_app_state() {
+  local calibration="${1:-}" state="${2:-}"
+  [[ "${calibration}" == 'running' ]] || { printf 'unknown\n'; return 0; }
+  printf '%s\n' "${state}"
+}
+
 # bgp_wait_until <pid> <deadline-secs> <poll-secs> -- <cmd> [args…] — bounded
 # wait for a predicate command to succeed while a process is still alive.
 #
@@ -823,15 +980,28 @@ bgp_marker_present_under() {
 # flutter_tools picks by default in CI it is not observable until the drive
 # exits.
 #
+# The deadline is WALL CLOCK, and that is not a detail. Every poll also RUNS
+# the predicate — a `find` over the app-data tree plus a `grep` per candidate
+# — and a loop that counts only its own sleeps spends that time for free: the
+# DISARM wait took 216.8-222.0 s of wall clock for its 210 s budget across
+# five CI runs (35376588206, 35311161479, 35280144455 x2, 34798752509). Both
+# of that budget's bounds are wall-clock facts about the app and the relay —
+# the drive's settle window below it and the 228 s kind-445 expiration above
+# it — so a counted deadline walks P3's re-fetch towards the eviction that
+# makes it meaningful, where a leak that aged out reads as silence. The same
+# argument applies one phase up: the DISABLE deadline is derived to sit inside
+# the drive's own Timeout, which is also wall clock.
+#
 # Returns:
 #   0  the predicate succeeded
 #   2  the process exited first (the predicate is re-evaluated before this
 #      verdict, so a signal written as the drive's last act still counts)
 #   3  the deadline elapsed with the process still running
 bgp_wait_until() {
-  local pid="$1" deadline="$2" poll="$3" waited=0
+  local pid="$1" deadline="$2" poll="$3" started
   shift 3
   [[ "${1:-}" == '--' ]] && shift
+  started="$(bgp_now)"
   while :; do
     if "$@"; then return 0; fi
     if ! kill -0 "${pid}" 2>/dev/null; then
@@ -839,9 +1009,8 @@ bgp_wait_until() {
       if "$@"; then return 0; fi
       return 2
     fi
-    if (( waited >= deadline )); then return 3; fi
+    if (( $(bgp_now) - started >= deadline )); then return 3; fi
     sleep "${poll}"
-    waited=$(( waited + poll ))
   done
 }
 
@@ -876,7 +1045,7 @@ run_self_test() {
   # check_ios_background_publish.sh's SELF_TEST_FIXTURES enforces). A count in
   # the summary line alone reports whatever ran: a fixture deleted with the
   # code it covered would print a smaller number and still say "all passed".
-  local -r SELF_TEST_FIXTURES=73
+  local -r SELF_TEST_FIXTURES=92
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
   trap "rm -rf '${tmp}'" RETURN
@@ -1238,6 +1407,131 @@ Usage: simctl location <device> <action> [<arguments>]
   kill "${wpid}" 2>/dev/null || true; wait "${wpid}" 2>/dev/null || true
   _check "W4 a silent live process hits the deadline (3)" 3 "${rc}"
 
+  # --- (W5) REGRESSION (CI run 35397118356's window): the deadline is WALL
+  #     CLOCK, so the time the PREDICATE spends counts against it. Every real
+  #     poll runs a container sweep, and a loop that summed only its own
+  #     sleeps handed that time back: the DISARM wait spent 216.8-222.0 s on a
+  #     210 s budget in five CI runs, each of those seconds one more second
+  #     the app is suspended with no execution claim and one less of margin
+  #     to the 228 s kind-445 expiration P3's re-fetch has to beat.
+  #
+  #     A 2 s predicate against a 4 s deadline at a 1 s poll: wall clock
+  #     returns at t=5 (predicate, no deadline yet, sleep, predicate, 5 >= 4),
+  #     the summed-sleeps loop at t=14 (it needs FOUR sleeps to reach 4). The
+  #     threshold is halfway between, so both readings are 4-5 s clear of it
+  #     and only a loop that stopped measuring wall clock can cross it.
+  _bgp_slow_false_predicate() {
+    sleep 2
+    return 1
+  }
+  local w5_start w5_elapsed
+  ( sleep 30 ) & wpid=$!
+  w5_start="$(bgp_now)"
+  rc=0; bgp_wait_until "${wpid}" 4 1 -- _bgp_slow_false_predicate || rc=$?
+  w5_elapsed=$(( $(bgp_now) - w5_start ))
+  kill "${wpid}" 2>/dev/null || true; wait "${wpid}" 2>/dev/null || true
+  _check "W5 a slow predicate still ends on the deadline (3)" 3 "${rc}"
+  _check "W5b the deadline is wall clock, not a sum of sleeps" 'within' \
+    "$( (( w5_elapsed <= 9 )) && echo within || echo "over (${w5_elapsed}s)" )"
+
+  # --- (W6) The DISARM budget is measured from the drive's OWN disable
+  #     append, not from the poll that read it — and the correction is
+  #     one-sided. `bgp_budget_after_lag` may only ever hand back the lag this
+  #     script introduced; an anchor it cannot trust leaves the budget whole,
+  #     because a budget that came out too SMALL re-foregrounds Haven inside
+  #     the settle window and reds P3 for an app that did nothing wrong.
+  local w6_now
+  w6_now="$(bgp_now)"
+  got="$(bgp_budget_after_lag "$(( w6_now - 4 ))" 210 10)"
+  _check "W6 a 4 s observation lag comes off the budget" 206 "${got}"
+  got="$(bgp_budget_after_lag "$(( w6_now - 10 ))" 210 10)"
+  _check "W6b a lag of exactly the cap still counts" 200 "${got}"
+  got="$(bgp_budget_after_lag "$(( w6_now - 11 ))" 210 10)"
+  _check "W6c a lag past the cap is not trusted (whole budget)" 210 "${got}"
+  got="$(bgp_budget_after_lag "$(( w6_now + 30 ))" 210 10)"
+  _check "W6d an anchor in the FUTURE is not trusted" 210 "${got}"
+  got="$(bgp_budget_after_lag '' 210 10)"
+  _check "W6e an unreadable anchor is not trusted" 210 "${got}"
+
+  # --- (W7) …and the anchor is the mtime of the signal that CARRIES the
+  #     marker. A sweep that returned the first signal it found would anchor
+  #     P3's wake-up on a container the drive stopped writing to (the rotation
+  #     S1 exists for), and a marker-blind read would anchor it on READY —
+  #     minutes early, so the wake-up would land inside the settle window.
+  local w7root="${tmp}/anchor/Containers/Data/Application"
+  mkdir -p "${w7root}/AAAA/tmp" "${w7root}/BBBB/tmp"
+  printf '%s\n' "${READY_MARKER}" > "${w7root}/AAAA/tmp/${SIGNAL_NAME}"
+  printf '%s\n%s\n' "${READY_MARKER}" "${DISABLED_MARKER}" \
+    > "${w7root}/BBBB/tmp/${SIGNAL_NAME}"
+  # The abandoned container's own mtime is dated away from this second, so a
+  # read that returned the first signal it found rather than the one carrying
+  # the marker cannot pass by landing on the same whole second as the right
+  # answer. `touch -t` is the one spelling BSD and GNU share.
+  touch -t 202001010000 "${w7root}/AAAA/tmp/${SIGNAL_NAME}"
+  got="$(bgp_signal_mtime_with "${w7root}" "${SIGNAL_NAME}" \
+           "${DISABLED_MARKER}" || true)"
+  _check "W7 the anchor is the mtime of the signal carrying the marker" \
+    "$(bgp_file_mtime "${w7root}/BBBB/tmp/${SIGNAL_NAME}")" "${got}"
+  rc=0
+  bgp_signal_mtime_with "${w7root}" "${SIGNAL_NAME}" "${DISARMED_MARKER}" \
+    >/dev/null || rc=$?
+  _check "W7b a marker nothing carries yields no anchor" 1 "${rc}"
+  # The read under all of that, against a mtime this fixture SET rather than
+  # against itself: W7 compares one call with another and so cannot see a
+  # spelling that answers with something other than the file's own time.
+  # TZ-pinned, so the literal is the epoch and not this runner's timezone.
+  local w7fixed="${tmp}/anchor/fixed-mtime"
+  : > "${w7fixed}"
+  TZ=UTC touch -t 202001010000 "${w7fixed}"
+  _check "W7c the mtime read answers with the file's own epoch seconds" \
+    1577836800 "$(bgp_file_mtime "${w7fixed}")"
+  _check "W7d an unreadable path yields no mtime at all" \
+    '' "$(bgp_file_mtime "${tmp}/anchor/no-such-file")"
+
+  # --- (W8) The app-liveness read the settle-window diagnosis rests on. It
+  #     must distinguish a process that is there from one that is not, and
+  #     must say `unknown` rather than `gone` when it has no device to ask
+  #     about — a confident wrong answer here would blame iOS for a drive that
+  #     died on its own.
+  local w8_udid='DEAD-BEEF-0000-1111-222233334444'
+  local w8_app="${tmp}/Devices/${w8_udid}/data/Containers/Bundle/A/Runner.app"
+  got="$(bgp_app_process_state "${w8_udid}")"
+  _check "W8 no such process reads 'gone'" 'gone' "${got}"
+  # A real executable at a real path, because `sh -c '<one command>'` execs
+  # that command and the argv this read matches on would be gone with it.
+  mkdir -p "${w8_app}"
+  printf '#!/bin/sh\nsleep 30\n' > "${w8_app}/Runner"
+  chmod +x "${w8_app}/Runner"
+  "${w8_app}/Runner" & local w8pid=$!
+  # The child must be in the process table before the read: `pgrep` against a
+  # fork that has not exec'd yet reports 'gone' for a live process, which
+  # would make this fixture the flake it exists to prevent. Bounded, so a
+  # child that never starts fails the check instead of hanging the suite.
+  local w8_waited=0
+  until pgrep -f "${w8_app}/Runner" >/dev/null 2>&1 || (( w8_waited >= 50 )); do
+    sleep 0.1
+    w8_waited=$(( w8_waited + 1 ))
+  done
+  got="$(bgp_app_process_state "${w8_udid}")"
+  kill "${w8pid}" 2>/dev/null || true; wait "${w8pid}" 2>/dev/null || true
+  _check "W8b a live process under the device's bundle tree reads 'running'" \
+    'running' "${got}"
+  got="$(bgp_app_process_state '')"
+  _check "W8c no device reads 'unknown', never 'gone'" 'unknown' "${got}"
+
+  # --- (W9) …and a read that never saw the app when it was ALIVE reports
+  #     nothing at all afterwards. The pattern it matches is the simulator's
+  #     argv layout to change; a `gone` derived from a read that was already
+  #     blind would blame iOS for reclaiming an app that never went anywhere,
+  #     and send the next reader straight past the drive's own failure.
+  got="$(bgp_calibrated_app_state 'running' 'gone')"
+  _check "W9 a calibrated read's 'gone' stands" 'gone' "${got}"
+  got="$(bgp_calibrated_app_state 'gone' 'gone')"
+  _check "W9b an uncalibrated read reports 'unknown', not 'gone'" 'unknown' \
+    "${got}"
+  got="$(bgp_calibrated_app_state 'running' 'running')"
+  _check "W9c a calibrated read's 'running' stands" 'running' "${got}"
+
   # --- (S1) REGRESSION (CI run 32618134993): the drive's own install ROTATES
   #     the app's data container, so the container that exists when this
   #     script resolves one is not the container the drive ends up writing
@@ -1577,6 +1871,62 @@ Usage: simctl location <device> <action> [<arguments>]
   _check "H8 the DISABLE deadline is per-leg and selected from LIVE_SYNC" \
     0 "${rc}"
 
+  # --- (H9) STRUCTURAL: the wake-up that ends P3 is timed from the drive's
+  #     OWN disable append. The real run must derive its budget through
+  #     `bgp_budget_after_lag` off `bgp_signal_mtime_with … DISABLED_MARKER`
+  #     and hand THAT to the wait, never the raw constant. W6 proves the
+  #     arithmetic; only this proves the run uses it, and the mutation it
+  #     catches — passing DISARM_WAIT_SECS again — is invisible to every
+  #     behavioural fixture because both spellings are the same number on a
+  #     runner with no observation lag, which is every runner but a loaded one.
+  #     The anchor must also be read from the DISABLED marker: anchoring on
+  #     READY is minutes early and would re-foreground Haven INSIDE the settle
+  #     window, where a correct app publishes and P3 reds for it.
+  rc=0
+  [[ -n "${body}" ]] || rc=1
+  grep -qF 'bgp_wait_until "${DRIVE_PID}" "${DISARM_BUDGET_SECS}"' \
+    <<<"${body}" || rc=1
+  grep -qF 'DISARM_BUDGET_SECS="$(bgp_budget_after_lag' <<<"${body}" || rc=1
+  grep -qF '"$(bgp_signal_mtime_with "${APP_DATA_ROOT}" "${SIGNAL_NAME}" \' \
+    <<<"${body}" || rc=1
+  grep -qF '"${DISABLED_MARKER}" || true)" \' <<<"${body}" || rc=1
+  _check "H9 the DISARM wake-up is anchored on the disable append" 0 "${rc}"
+
+  # --- (H10) STRUCTURAL: a drive that exits INSIDE P3's settle window is
+  #     reported, and reported with the app's process state. That branch used
+  #     to be a bare `:`, so CI run 35397118356 — iOS reclaiming the suspended
+  #     app 42 s into the window — surfaced as a bare rc=79 over a transcript
+  #     ending at the disable, indistinguishable from an assertion failure
+  #     until someone parsed the simulator's own log. Nothing behavioural can
+  #     see a missing diagnostic; only this can.
+  local disarm_exit
+  # `|| true` throughout: an empty match exits 1, and under `set -e` with
+  # `pipefail` that would abort the whole suite mid-run — so a DELETED branch,
+  # the very mutation this fixture exists for, would report nothing at all.
+  disarm_exit="$(sed -n '/^    case "${DISARM_RC}" in$/,/^    esac$/p' \
+                   "${BASH_SOURCE[0]}" \
+                 | sed -n '/^      \*)$/,/^        ;;$/p' \
+                 | grep -v '^[[:space:]]*#' || true)"
+  rc=0
+  [[ -n "${disarm_exit}" ]] || rc=1
+  grep -qF 'bgp_app_process_state "${SIM_UDID}"' <<<"${disarm_exit}" || rc=1
+  grep -qF 'bgp_calibrated_app_state' <<<"${disarm_exit}" || rc=1
+  grep -qF "P3's settle window" <<<"${disarm_exit}" || rc=1
+  # The calibration itself must be taken while the app is unarguably alive,
+  # i.e. inside the READY branch and before the backgrounding. Taken later it
+  # would read the very state it is supposed to qualify.
+  local ready_probe bg_call
+  ready_probe="$(grep -nF 'APP_PROBE_AT_READY="$(bgp_app_process_state' \
+                   <<<"${body}" | cut -d: -f1 | head -n 1 || true)"
+  bg_call="$(grep -nF 'if ! bgp_background_app; then' <<<"${body}" \
+               | cut -d: -f1 | head -n 1 || true)"
+  [[ -n "${ready_probe}" && -n "${bg_call}" ]] || rc=1
+  if [[ -n "${ready_probe}" && -n "${bg_call}" ]]; then
+    (( ready_probe < bg_call )) || rc=1
+  fi
+  _check "H10 a drive that dies inside the settle window is attributed" \
+    0 "${rc}"
+
   # --- (G1-G3) The flag-off arm CONTAINS. The workflow uploads this lane's
   #     log `if: failure()` and a leak is a failure, so unless the gate removes
   #     what it flagged the lane publishes the line it went red on. Driven
@@ -1686,9 +2036,17 @@ Usage: simctl location <device> <action> [<arguments>]
        "under when-in-use, and fails closed on a tier or a live-sync value it" \
        "does not recognise; the tier derivation maps one" \
        "input to both the grant and the compiled pin and refuses anything" \
-       "else; the marker wait is bounded" \
+       "else; the marker wait is bounded by WALL CLOCK rather than by its own" \
+       "sleeps" \
        "and distinguishes a dead drive from a slow one, the re-check after" \
-       "it included; the signal sweep survives the container rotation the" \
+       "it included; P3's wake-up budget is measured from the drive's own" \
+       "disable append, off the signal that CARRIES that marker, and refuses" \
+       "an anchor that is stale, future-dated or unreadable rather than wake" \
+       "the app early; the app-liveness read behind the settle-window" \
+       "diagnosis tells a live process from a gone one, says 'unknown' rather" \
+       "than guess, and disqualifies its own answer when it never saw the app" \
+       "while the app was alive; the signal sweep survives the container" \
+       "rotation the" \
        "drive's own install causes, stays marker-specific and clears every" \
        "container; the app-data root is derived AND validated; the signal" \
        "name, the disable marker, the always marker, the receive marker, the" \
@@ -1697,7 +2055,9 @@ Usage: simctl location <device> <action> [<arguments>]
        "background step and its call, the per-wait markers, the fail-closed" \
        "grant, the uninstall" \
        "skip, the tier threaded to the delegate, the single validated tier" \
-       "input, the per-leg DISABLE deadline and the moving location drip are" \
+       "input, the per-leg DISABLE deadline, the anchored DISARM budget, the" \
+       "attribution of a drive that dies inside the settle window and the" \
+       "moving location drip are" \
        "structurally pinned; and the log-privacy gate is the floor alone when" \
        "HAVEN_LOGSCAN is unset, removing what it flags and nothing else, sits" \
        "between the log's preservation and the drive's exit with no echo of" \
@@ -2042,6 +2402,10 @@ case "${READY_RC}" in
   0)
     echo "bg-publish — READY signal observed; backgrounding the app by" \
          "launching ${OVERLAY_BUNDLE_ID} over it."
+    # Calibrate the liveness read while the app is unarguably alive — READY
+    # was written from inside it — so the settle-window diagnosis below knows
+    # whether a later `gone` is the app dying or the read failing.
+    APP_PROBE_AT_READY="$(bgp_app_process_state "${SIM_UDID}")"
     if ! bgp_background_app; then
       # Loud, but NOT a kill: the drive's own paused-wait fails in <=180s
       # with a message naming this step, so the lane reds with attribution
@@ -2061,10 +2425,18 @@ case "${READY_RC}" in
          "${DISABLED_MARKER}"
     DISABLE_RC=$?
     set -e
+    # The budget for the wake-up below, ANCHORED on the drive's own append
+    # rather than on the poll that noticed it. Unanchored is the full budget,
+    # which is what every branch but the first one gets.
+    DISARM_BUDGET_SECS="${DISARM_WAIT_SECS}"
     case "${DISABLE_RC}" in
       0)
+        DISARM_BUDGET_SECS="$(bgp_budget_after_lag \
+          "$(bgp_signal_mtime_with "${APP_DATA_ROOT}" "${SIGNAL_NAME}" \
+               "${DISABLED_MARKER}" || true)" \
+          "${DISARM_WAIT_SECS}" "${DISARM_ANCHOR_MAX_LAG_SECS}")"
         echo "bg-publish — disable signal observed; P3's settle window is" \
-             "running. Re-foregrounding in at most ${DISARM_WAIT_SECS}s."
+             "running. Re-foregrounding in at most ${DISARM_BUDGET_SECS}s."
         ;;
       3)
         echo "WARN: the drive signalled no ${DISABLED_MARKER} within" >&2
@@ -2086,7 +2458,8 @@ case "${READY_RC}" in
     # 228 s kind-445 expiration (see DISARM_WAIT_SECS). It also still un-wedges
     # a frame-bound teardown. On (2) the drive already exited.
     set +e
-    bgp_wait_until "${DRIVE_PID}" "${DISARM_WAIT_SECS}" "${MARKER_POLL_SECS}" \
+    bgp_wait_until "${DRIVE_PID}" "${DISARM_BUDGET_SECS}" \
+      "${MARKER_POLL_SECS}" \
       -- bgp_marker_present_under "${APP_DATA_ROOT}" "${SIGNAL_NAME}" \
          "${DISARMED_MARKER}"
     DISARM_RC=$?
@@ -2097,13 +2470,37 @@ case "${READY_RC}" in
         bgp_foreground_app
         ;;
       3)
-        echo "bg-publish — no ${DISARMED_MARKER} within ${DISARM_WAIT_SECS}s of" \
-             "the disable; re-foregrounding ${BUNDLE_ID} so the suspended" \
-             "drive can re-fetch the relay and finish P3."
+        echo "bg-publish — no ${DISARMED_MARKER} within" \
+             "${DISARM_BUDGET_SECS}s of the disable; re-foregrounding" \
+             "${BUNDLE_ID} so the suspended drive can re-fetch the relay" \
+             "and finish P3."
         bgp_foreground_app
         ;;
       *)
-        : # 2 — the drive exited on its own; its rc is collected below.
+        # 2 — the drive exited on its own, INSIDE P3's settle window. This is
+        # the one stretch of the lane where the app holds no execution claim
+        # (that is the guarantee being proven), so it is also the one where
+        # iOS can end the process under a drive that has printed every proof
+        # but its last two. In CI run 35397118356 it did: the app's background
+        # assertions invalidated 37 s after the disable without UIKit ever
+        # running their expiration handlers, the process logged nothing again,
+        # and the host's VM-service connection closed 5 s later — package:test
+        # reported the test AND its tearDownAll as "did not complete" over a
+        # transcript that ends at the disable. Unsaid, that is indistinguishable
+        # from an assertion failure and the next reader repeats the forensics.
+        DRIVE_EXIT_APP_STATE="$(bgp_calibrated_app_state \
+          "${APP_PROBE_AT_READY}" "$(bgp_app_process_state "${SIM_UDID}")")"
+        echo "bg-publish — the drive exited INSIDE P3's settle window," >&2
+        echo "      before ${DISARMED_MARKER}, with the app process" >&2
+        echo "      '${DRIVE_EXIT_APP_STATE}'." >&2
+        echo "      'gone' means the OS reclaimed the suspended app" >&2
+        echo "      before the wake-up above could re-foreground it, and" >&2
+        echo "      P3 was neither proved nor disproved; 'running' means" >&2
+        echo "      the drive died with its app still there, which is the" >&2
+        echo "      drive's own failure and its transcript's to explain." >&2
+        echo "      The device log's lifecycle daemons are the record" >&2
+        echo "      either way (sim-lifecycle.log in this job's artifact)." >&2
+        echo "      The drive's rc is collected below." >&2
         ;;
     esac
     ;;
