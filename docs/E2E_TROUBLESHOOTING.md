@@ -1033,6 +1033,112 @@ S1–S9 this actually grades, and which scenarios have no lane execution yet —
 in `docs/SOAK_LANE.md`, and is worth reading before concluding that a green
 soak lane covers a behaviour.
 
+## Failure mode 15 — "Android SDK provisioning failed" (infrastructure; no test ran)
+
+**Symptom.** An Android lane reds on the step **Provision the Android SDK**,
+with one annotation:
+
+```
+Android SDK provisioning failed for package system-images;android-34;google_apis;x86_64
+after 3 attempt(s) or a spent 360s budget. This is INFRASTRUCTURE, not a product
+failure: sdkmanager could not install a package the emulator needs, and no test
+ran in this job.
+```
+
+**What it means.** Exactly what it says. The step runs before the lane's first
+use of `reactivecircus/android-emulator-runner` and installs the four packages
+that action needs — `platform-tools`, `platforms;android-<api>`, `emulator` and
+the system image — retrying each and **verifying it on disk** rather than
+trusting sdkmanager's exit code. A red here is a download that did not land, or
+a package that landed unusable. Nothing was built, nothing was driven, no
+assertion was evaluated: it is never a product regression, and the artifacts
+hold no drive log because there was no drive.
+
+The step's own exit code separates the two ways it can end:
+
+| rc | It means |
+|---|---|
+| 2 | the step is broken, not the lane: bad arguments, or no `sdkmanager` under `$ANDROID_HOME/cmdline-tools/latest/bin` **and none on `PATH`**. Look at the runner image, not the network |
+| 3 | provisioning failed — infrastructure. The `::error::` names the package |
+
+**Why the step exists.** Without it the action installs the packages itself,
+with bare `sdkmanager --install` calls it tries exactly once. In CI run
+35524002720 (`e2e-relay-customization`) the emulator's download failed
+(`Warning: Failed to download package!`), `sdkmanager` exited non-zero and the
+action stopped at the install — no AVD was created and nothing was booted. The
+LAST thing the job printed, though, was the action's unconditional teardown:
+
+```
+error: could not connect to TCP port 5554: Connection refused
+```
+
+— a message about the emulator, from a job whose real fault was a transient
+download, which is why triage goes to the wrong place. CI run 35280144455
+(network-reconnect) had the other shape of the same class: a corrupt emulator
+zip, where the package directory is complete and the binary does not run. The
+retry answers the first; grading each attempt by what is on disk (never by
+`sdkmanager`'s exit code, in either direction) answers the second.
+
+**If it recurs.** Three attempts per package (10 s then 30 s apart), each capped
+at 180 s, under a 360 s whole-step budget — so a red means three failures or a
+genuine stall, not one unlucky request. Re-running the job is reasonable exactly
+once; a second red in a row is an SDK-mirror outage, not a flake. One package is
+deliberately still un-hardened: the action's own `build-tools;<latest>`, whose
+version it resolves at run time and which ships on the runner image. A "Failed
+to download package!" naming `build-tools` therefore still fails the old way —
+inside the action, with the emulator's adb-port message.
+
+**What keeps it wired.** `scripts/ci/check_android_sdk_provisioned.sh` fails the
+repo-guards job if any job that uses the emulator action lacks the step, places
+it after the action's first use, gates it on an `if:`, or passes api/target/arch
+that differ from what that job's action steps declare.
+
+## Failure mode 16 — `E2E Flakiness Stress` fails the same scenario every iteration
+
+`e2e-flakiness-stress.yml` is the one lane that drives `e2e_combined.dart` with
+**no recording proxy in path**: it points the app straight at strfry
+(`HAVEN_E2E_RELAY: ws://10.0.2.2:7777`) and mints no `HAVEN_WIRE_SENTINEL`, so
+the app compiles `TestRelay`'s default token and `wireRecorderDeclared` is
+false. Everything that speaks the proxy's control vocabulary is therefore gated
+on `wireRecorderDeclared`: the needle declarations, the MLS-group-id
+announcement, the canary manifest, and the wire-journal sentinel.
+
+From 2026-08-12 the sentinel was not. Every iteration of every nightly run
+failed the last test in the file with `Bad state: no wire-journal sentinel ack
+within 15s. Either this connection does not run through the recording proxy, or
+the proxy is not recording.` — literally true and entirely expected on this
+lane: the harness verb went to a real relay, which neither intercepts nor
+answers it. The lane exists to measure this scenario's flake rate, and for that
+month it measured nothing. No push-triggered workflow runs it, so nothing
+surfaced the failure.
+
+If that message appears here again, the cause is a CALLER that lost its gate,
+never the relay. `TestRelay.emitWireJournalSentinel` refuses the compiled-default
+token before anything reaches the socket;
+`haven/test/lints/wire_sentinel_recorder_gate_test.dart` fails on a PR when the
+scenario's `if (wireRecorderDeclared)` no longer covers EVERY emit; and the
+"recorder gate" group in `haven/test/e2e/test_relay_transport_test.dart` pins
+that an undeclared build writes no frame at all. On the WIRED lanes
+(`e2e-android.yml`, `e2e-ios.yml`) the same message still means the app was
+pointed past the proxy or the proxy stopped recording, and a missing sentinel
+there is a META-FLOOR at every host oracle, never a pass.
+
+The same lane then failed a second way once the log scanner reached it:
+**rc 3, "a Dart plant token in a scanned sink matches no declaration"**. The
+harness prints its plant token whether or not a recorder is listening and
+declares it only when one is (`log_needles.dart`), so on a
+`HAVEN_LOGSCAN_PROFILE: host` lane the token is undeclared by design, and the
+lost-declaration rule applies only to a manifest sealed WITH a declaration
+channel. One problem is reported per sink class carrying the token, so one
+token in logcat and drive reads as two. Conversely, **rc 2 "…but a
+`*.needles.decl` sidecar sits in /tmp/haven-soak/needles"** means the lane ran
+the recording proxy while sealing `host`: fix the profile
+(`HAVEN_LOGSCAN_PROFILE` / `WIRE_UPSTREAM`), never the manifest.
+
+Standing rule: a nightly-only lane is invisible to a push. After any change to
+the scanner, the gate or the shared harness, read the next morning's nightly and
+stress results, or replay their uploaded artifacts.
+
 ## What these lanes do NOT cover
 
 The iOS simulator keeps the app alive and the VM-service attached, so it does

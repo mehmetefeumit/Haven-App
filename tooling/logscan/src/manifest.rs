@@ -43,6 +43,9 @@ pub const NEEDLE_DIR: &str = "/tmp/haven-soak/needles";
 /// The extension the repo guard keys on.
 pub const MANIFEST_SUFFIX: &str = ".needles.json";
 
+/// The extension a declaration sidecar carries.
+pub const DECL_SUFFIX: &str = ".needles.decl";
+
 /// The manifest schema this build reads and writes.
 pub const SCHEMA: u32 = 1;
 
@@ -427,6 +430,50 @@ pub fn validate_out_path(path: &Path) -> Result<(), String> {
         return Err(format!(
             "a manifest must live in `{NEEDLE_DIR}` — there is deliberately no override, because a relocatable path defeats the upload ban"
         ));
+    }
+    Ok(())
+}
+
+/// Refuses a channel-less manifest that sits beside a declaration sidecar.
+///
+/// `--declared-plants none` turns the undeclared-Dart-plant rule OFF, because a
+/// lane with no channel prints tokens nobody could ever have declared. A
+/// sidecar in the manifest's own directory is proof that a channel DID run, so
+/// the label is wrong and the relaxation would forgive precisely the lost
+/// declaration it exists to catch. A mislabelled lane is refused rather than
+/// quietly scanned — `logscan_seal host` globs the sidecars and then ignores
+/// them, and the pre-drive seals (the stress, integration and relay-customization
+/// lanes seal before their first capture) mean seal time cannot see one yet.
+///
+/// # Errors
+///
+/// Returns the reason, naming the directory and never a sidecar: a sidecar is
+/// named after the proxy role that wrote it. An unreadable directory is the
+/// same refusal, because a mislabel cannot be ruled out from it.
+pub fn refuse_mislabelled_channel(manifest_path: &Path) -> Result<(), String> {
+    let dir = manifest_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let entries = std::fs::read_dir(dir).map_err(|e| {
+        format!(
+            "the manifest's directory cannot be read [{:?}], so a run that sealed `--declared-plants none` while a declaration channel was recording cannot be ruled out",
+            e.kind()
+        )
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|e| {
+            format!(
+                "the manifest's directory cannot be listed [{:?}], so a mislabelled lane cannot be ruled out",
+                e.kind()
+            )
+        })?;
+        if entry.file_name().to_string_lossy().ends_with(DECL_SUFFIX) {
+            return Err(format!(
+                "this manifest sealed `--declared-plants none` — no declaration channel — but a `*{DECL_SUFFIX}` sidecar sits in {}: the run recorded declarations after all, and under that label an undeclared Dart plant is forgiven rather than reported",
+                dir.display()
+            ));
+        }
     }
     Ok(())
 }
@@ -1345,6 +1392,34 @@ mod tests {
             .expect_err("the two claims cannot both be true");
         assert_eq!(refusal.rc, crate::RC_GUARD);
         assert_eq!(refusal.lines.len(), 1);
+    }
+
+    /// The other half of that contradiction, which the seal cannot see: the
+    /// sidecar the lane never passed to `--decl` — `logscan_seal host` globs
+    /// them and then ignores them — or one written after a lane sealed ahead of
+    /// its first capture.
+    #[test]
+    fn a_sidecar_beside_a_channel_less_manifest_is_refused() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.subsec_nanos());
+        let dir = std::env::temp_dir().join(format!(
+            "haven-logscan-mislabel-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let manifest = dir.join(format!("run{MANIFEST_SUFFIX}"));
+        super::refuse_mislabelled_channel(&manifest).expect("a directory with no sidecar");
+
+        let sidecar = dir.join(format!("alice{}", super::DECL_SUFFIX));
+        std::fs::write(&sidecar, "").expect("sidecar");
+        let refusal = super::refuse_mislabelled_channel(&manifest)
+            .expect_err("a recorded lane cannot seal as a channel-less one");
+        assert!(refusal.contains(&dir.display().to_string()), "{refusal}");
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+        // Fails closed: an unreadable directory cannot rule a mislabel out.
+        super::refuse_mislabelled_channel(&manifest).expect_err("no directory to read");
     }
 
     #[test]

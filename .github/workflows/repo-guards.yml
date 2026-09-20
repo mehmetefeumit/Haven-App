@@ -471,6 +471,15 @@
 #     `flutter test` has no bound of its own, are accepted only by declaration
 #     and only while what makes them so stays true.
 #
+#   Android SDK provisioning          scripts/ci/check_android_sdk_provisioned.sh
+#     Every job that uses reactivecircus/android-emulator-runner must run
+#     tooling/e2e/ci/provision-android-sdk.sh before its FIRST use of the
+#     action, unconditionally, with that job's own api-level/target/arch. The
+#     action's own `sdkmanager --install` exits 0 after "Failed to download
+#     package!", so an unprovisioned lane boots an emulator that was never
+#     installed and reds on the missing emulator instead — no test run, and
+#     nothing in the log to say the fault was a download.
+#
 #   Skip-manifest self-test           scripts/ci/check_no_undeclared_skips.sh
 #     The guard that fails a run when a test SKIPS without being declared in
 #     scripts/ci/expected_test_skips.txt. THIS gate must parse real test
@@ -1390,6 +1399,37 @@ jobs:
       - name: E2E lane-budget guard self-test
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_e2e_lane_budget.sh --self-test
+
+      # Bounds are not the only thing an emulator lane can lose silently. The
+      # action installs the SDK itself, with `sdkmanager --install` calls it
+      # tries once: in CI run 35524002720 one download failed, the action
+      # stopped, and its teardown's adb-port error was the last line of a job
+      # that ran no test. Every such job now provisions and VERIFIES the SDK
+      # first; this keeps that step present, ahead of the job's FIRST use of
+      # the action (the AVD snapshot boots one too), unconditional (the AVD
+      # cache holds the AVD alone, so a hit still needs the emulator and the
+      # system image) and carrying that job's own api/target/arch.
+      - name: Android SDK is provisioned before every emulator step
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_android_sdk_provisioned.sh
+
+      # Both directions, since a guard that only ever passes is decoration: a
+      # missing step, one placed after the action, a wrong api level, target or
+      # arch, a commented-out one and one gated on an `if:` each fail; a job
+      # that boots no emulator needs none. A step list the reader cannot parse
+      # stops the guard rather than passing it, and the case count is pinned by
+      # equality.
+      - name: Android SDK provisioning guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_android_sdk_provisioned.sh --self-test
+
+      # The provisioning step itself: an sdkmanager that exits 0 having
+      # installed nothing, and a package whose binary does not run, must both
+      # fail CLOSED and say infrastructure — the two shapes that reached CI as
+      # a story about the emulator.
+      - name: E2E harness self-test (Android SDK provisioning)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/provision-android-sdk.sh --self-test
 
       # The inner deadline itself. Its critical fixture is exit-code
       # PASS-THROUGH: if a genuine test failure were ever reported as 124,

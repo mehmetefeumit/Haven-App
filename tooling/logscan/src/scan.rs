@@ -36,7 +36,7 @@ use regex::Regex;
 
 use crate::expand::Term;
 use crate::manifest::Manifest;
-use crate::plants::{self, PlantSlot};
+use crate::plants::{self, DeclaredPlants, PlantSlot};
 use crate::policy::{CargoStatus, EntryFormat, SinkSpec};
 use crate::rules::RuleSet;
 use crate::{worse, RC_CLEAN, RC_GUARD, RC_LEAK, RC_META, RC_UNUSABLE};
@@ -673,20 +673,29 @@ fn check_plants(
 
     // A plant-shaped Dart token that matches no declaration means a declaration
     // was lost on the way to the sidecar, which is exactly the channel failure
-    // the plants exist to detect.
-    let known: std::collections::BTreeSet<&str> = manifest
-        .plants
-        .iter()
-        .flat_map(|slot| {
-            std::iter::once(slot.token.as_str()).chain(slot.superseded.iter().map(String::as_str))
-        })
-        .collect();
-    for (_, token) in counts.keys() {
-        if token.starts_with("logscan-plant-dart-") && !known.contains(token.as_str()) {
-            outcome.problems.push(Problem {
-                rc: RC_UNUSABLE,
-                message: "a Dart plant token in a scanned sink matches no declaration; a declaration was lost between the app and the sidecar".to_owned(),
-            });
+    // the plants exist to detect — and only a run that HAD a sidecar can suffer
+    // it. `LogNeedles.plant` prints its token unconditionally and declares it
+    // only where a recorder channel exists, so under a channel-less manifest an
+    // undeclared token is the harness working as designed and this rule's
+    // premise is false; asserting it anyway made every green host lane rc 3.
+    // What keeps that from being a quiet waiver is `refuse_mislabelled_channel`:
+    // a manifest claiming `none` beside a sidecar never reaches a scan.
+    if manifest.declared_plants != DeclaredPlants::None {
+        let known: std::collections::BTreeSet<&str> = manifest
+            .plants
+            .iter()
+            .flat_map(|slot| {
+                std::iter::once(slot.token.as_str())
+                    .chain(slot.superseded.iter().map(String::as_str))
+            })
+            .collect();
+        for (_, token) in counts.keys() {
+            if token.starts_with("logscan-plant-dart-") && !known.contains(token.as_str()) {
+                outcome.problems.push(Problem {
+                    rc: RC_UNUSABLE,
+                    message: "a Dart plant token in a scanned sink matches no declaration; a declaration was lost between the app and the sidecar".to_owned(),
+                });
+            }
         }
     }
 
@@ -1594,12 +1603,18 @@ mod tests {
     use crate::manifest::{Manifest, SCHEMA};
     use crate::policy::Policy;
     use crate::rules::RuleSet;
-    use crate::{RC_GUARD, RC_META, RC_UNUSABLE};
+    use crate::{RC_CLEAN, RC_GUARD, RC_META, RC_UNUSABLE};
 
     const PUBKEY: &str = "0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9";
     /// One line per documented `log show --style syslog` column variant.
     const IOS_FORMAT: &str = include_str!("../fixtures/format.ios.log");
     const MLS_GROUP_ID: &str = "3f4a5b6c7d8e9f0a1b2c3d4e5f6071823f4a5b6c7d8e9f0a1b2c3d4e5f607182";
+    /// A drive transcript with a reporter line and both Dart plant phases,
+    /// none of them declared by any manifest below.
+    const HOST_DRIVE: &str = "00:00 +0: the core flow\n\
+                              flutter: logscan-plant-dart-open-ZZZZZZZZZZ\n\
+                              flutter: logscan-plant-dart-close-YYYYYYYYYY\n\
+                              00:42 +1: All tests passed!\n";
 
     /// A scratch directory, removed on drop.
     struct Dir(PathBuf);
@@ -2638,6 +2653,46 @@ mod tests {
         );
         let outcome = run(&manifest, "logcat", &[opening]);
         assert!(outcome.problems.is_empty(), "{:?}", outcome.problems);
+    }
+
+    /// The transcript a host lane really writes: `LogNeedles.plant` prints its
+    /// token whether or not a recorder is there to declare it, so on a lane
+    /// sealed `--declared-plants none` both phases reach the sink undeclared.
+    /// That is the harness's documented behaviour, not a lost declaration.
+    #[test]
+    fn a_channel_less_manifest_forgives_an_undeclared_dart_plant() {
+        let dir = Dir::new("hostplant");
+        let mut manifest = manifest(&[("pubkey", PUBKEY)]);
+        manifest.declared_plants = crate::plants::DeclaredPlants::None;
+        let path = dir.write("host.drive.log", HOST_DRIVE);
+        let outcome = run(&manifest, "drive", &[path]);
+        assert_eq!(outcome.rc(), RC_CLEAN, "{:?}", outcome.problems);
+        assert_eq!(outcome.plants_required, 0);
+    }
+
+    /// The same bytes under a manifest that DID have a channel: each phase is a
+    /// declaration that never arrived, and the verdict is unchanged.
+    #[test]
+    fn a_manifest_with_a_channel_still_reports_an_undeclared_dart_plant() {
+        let dir = Dir::new("channelplant");
+        let manifest = manifest(&[("pubkey", PUBKEY)]);
+        assert_eq!(
+            manifest.declared_plants,
+            crate::plants::DeclaredPlants::Dart
+        );
+        let path = dir.write("channel.drive.log", HOST_DRIVE);
+        let outcome = run(&manifest, "drive", &[path]);
+        assert_eq!(outcome.rc(), RC_UNUSABLE);
+        let lost: Vec<&super::Problem> = outcome
+            .problems
+            .iter()
+            .filter(|p| p.message.contains("matches no declaration"))
+            .collect();
+        assert_eq!(lost.len(), 2, "one per phase: {:?}", outcome.problems);
+        assert_eq!(
+            lost[0].message,
+            "a Dart plant token in a scanned sink matches no declaration; a declaration was lost between the app and the sidecar"
+        );
     }
 
     /// Real furniture from CI run 34766632019, rule-scanned in both framings.

@@ -2757,8 +2757,9 @@ void main() {
   // `test/lints/integration_test_propagation_test.dart`. Both facts here have
   // to be ASSERTED rather than merely attempted:
   //
-  //   * no sentinel ack means this run did not route through the recording
-  //     proxy at all, so whatever journal the host reads does not describe it;
+  //   * on a lane that declared a recorder, no sentinel ack means this run did
+  //     not route through the recording proxy at all, so whatever journal the
+  //     host reads does not describe it;
   //   * a canary with no plant proof means the forbid half was searching for
   //     a value that was never applied to anything, which passes for free.
   //
@@ -2786,55 +2787,63 @@ void main() {
         );
       }
 
-      // The marker is INTERCEPTED by the proxy and never forwarded upstream,
-      // so emitting it on the probe socket perturbs nothing on the relay.
-      // Any connection will do: `wire_seq` is monotonic across the whole
-      // journal (docs/WIRE_JOURNAL.md), so the boundary it names is global.
-      Object? sentinelFailure;
-      try {
-        final sentinel = await ctx.relay.emitWireJournalSentinel();
-        _canaries.recordSentinel(
-          token: sentinel.token,
-          wireSeq: sentinel.wireSeq,
-        );
-        debugPrint(
-          // harness-log-ok: recording-proxy journal ordinals, not user data
-          // — parsed verbatim by e2e-android.yml/e2e-ios.yml's conn_id grep.
-          '[e2e_combined] wire-journal sentinel acked — '
-          'wire_seq=${sentinel.wireSeq} conn=${sentinel.connId}',
-        );
-      } on Object catch (e) {
-        // Captured, not rethrown yet. The manifest still has to reach the
-        // drive log: without it the host loses the plant proofs as well as
-        // the anchor, and reports a second, misleading verdict on top of this
-        // one. Security Rule 8 — the runtimeType only, never the message.
-        sentinelFailure = e;
-      }
-
-      // ONE announcement, at the very end, so every carrier id recorded
-      // anywhere in this file is inside it. Goes over the proxy's control
-      // channel to the `.canaries.json` sidecar (Phase 0b) — never the drive
-      // log, which is a CI artifact with weeks of retention and would also
-      // trip the runtime scanner's structural rules on the very values this
-      // manifest exists to prove absent. Guarded exactly like
-      // `_announceMlsGroupId`: `announceCanaryManifest` throws on an
-      // undeclared recorder (there is no sidecar for an unproxied lane to
-      // reach), so this is the polite half of that same fail-closed pair.
+      // ONE gate over the whole proxy-only region, mirroring the pair's own
+      // fail-closed send sites (`emitWireJournalSentinel` and
+      // `announceCanaryManifest` both throw on an undeclared recorder). On a
+      // lane with no proxy in path — `e2e-flakiness-stress.yml` drives
+      // straight at strfry — the marker would be a harness verb written to a
+      // real relay, waiting out its budget for an ack nothing there can send,
+      // and the manifest would be canary content with no sidecar to reach.
+      // Skipping them cannot soften a WIRED lane: a journal with no sentinel
+      // is META-FLOOR at every host oracle, never a pass.
       if (wireRecorderDeclared) {
-        await _needles.announceCanaryManifest(_canaries.manifest().toJson());
-      }
+        // The marker is INTERCEPTED by the proxy and never forwarded
+        // upstream, so emitting it on the probe socket perturbs nothing on
+        // the relay. Any connection will do: `wire_seq` is monotonic across
+        // the whole journal (docs/WIRE_JOURNAL.md), so the boundary it names
+        // is global.
+        Object? sentinelFailure;
+        try {
+          final sentinel = await ctx.relay.emitWireJournalSentinel();
+          _canaries.recordSentinel(
+            token: sentinel.token,
+            wireSeq: sentinel.wireSeq,
+          );
+          debugPrint(
+            // harness-log-ok: recording-proxy journal ordinals, not user data
+            // — parsed verbatim by e2e-android.yml/e2e-ios.yml's conn_id grep.
+            '[e2e_combined] wire-journal sentinel acked — '
+            'wire_seq=${sentinel.wireSeq} conn=${sentinel.connId}',
+          );
+        } on Object catch (e) {
+          // Captured, not rethrown yet. The manifest still has to reach the
+          // sidecar: without it the host loses the plant proofs as well as
+          // the anchor, and reports a second, misleading verdict on top of
+          // this one. Security Rule 8 — the runtimeType only, never the
+          // message.
+          sentinelFailure = e;
+        }
 
-      expect(
-        sentinelFailure,
-        isNull,
-        reason:
-            'the wire-journal sentinel was never acked '
-            '(${sentinelFailure?.runtimeType}). Either this run pointed the '
-            'app straight at strfry instead of through the recording proxy, '
-            'or the proxy stopped recording. Without the marker the host '
-            'oracles cannot tell a genuinely quiet journal from one that '
-            'never saw this run at all, so they fail closed.',
-      );
+        // ONE announcement, at the very end, so every carrier id recorded
+        // anywhere in this file is inside it. Goes over the proxy's control
+        // channel to the `.canaries.json` sidecar (Phase 0b) — never the
+        // drive log, which is a CI artifact with weeks of retention and would
+        // also trip the runtime scanner's structural rules on the very values
+        // this manifest exists to prove absent.
+        await _needles.announceCanaryManifest(_canaries.manifest().toJson());
+
+        expect(
+          sentinelFailure,
+          isNull,
+          reason:
+              'the wire-journal sentinel was never acked '
+              '(${sentinelFailure?.runtimeType}). This build declared a '
+              'recording proxy, so either the app was pointed past it at '
+              'strfry, or the proxy stopped recording. Without the marker '
+              'the host oracles cannot tell a genuinely quiet journal from '
+              'one that never saw this run at all, so they fail closed.',
+        );
+      }
 
       // Drive-side floor on the SAME two conditions the host reports as
       // META-FLOOR, asserted here where the cause is still visible. This is

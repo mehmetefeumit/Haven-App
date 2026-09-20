@@ -160,8 +160,8 @@ available and the needle search is the point;
 |---|---|---|
 | 0 | clean: every sink present, regular, readable, above its floor, segments and ledger reconciled, every positive control caught | — |
 | 1 | **leak**: a needle term or a non-allowlisted structural hit | the app (and the caller deletes the sink before any upload) |
-| 2 | **guard broken**: bad arguments, a mis-shaped manifest, a bad out path, an expired allowlist entry, a dangling proof, a plant that trips a structural rule | the instrument |
-| 3 | **unusable**: an absent/irregular/unreadable/empty sink, a capture in a rendering its sink class cannot frame, a declaration sidecar that cannot be read or parsed, a ledger mismatch, a segment-count mismatch, **any** missed or undeclared positive control | the capture, not the app |
+| 2 | **guard broken**: bad arguments, a mis-shaped manifest, a bad out path, an expired allowlist entry, a dangling proof, a plant that trips a structural rule, a manifest claiming no declaration channel beside a sidecar | the instrument |
+| 3 | **unusable**: an absent/irregular/unreadable/empty sink, a capture in a rendering its sink class cannot frame, a declaration sidecar that cannot be read or parsed, a ledger mismatch, a segment-count mismatch, **any** missed positive control, and an undeclared Dart one on a lane that had a channel to declare it | the capture, not the app |
 | 4 | **meta floor**: below a line floor, no manifest, a declaration floor unmet, a manifest with no searchable term at all, a value nobody confirmed was planted | the scenario |
 
 Aggregation across sinks is `1 > 2 > 3 > 4 > 0`: a leak anywhere takes the
@@ -207,9 +207,10 @@ dead capture and a mis-installed log backend all look clean to a needle search.
   `superseded`, which are ignored on sight. Position, not `seq`: the proxy's
   sequence counter restarts at 0 in a new process while it appends to a sidecar
   it did not create, so ordering by `seq` would let a restarted lane's stale
-  token outrank the fresh one. A plant-shaped Dart token matching
-  **no** declaration is rc 3: a declaration was lost. When no declaration
-  arrived at all, `seal` mints the token itself and `plant` prints it.
+  token outrank the fresh one. On a lane that HAD a channel, a plant-shaped
+  Dart token matching **no** declaration is rc 3: a declaration was lost. When
+  no declaration arrived at all, `seal` mints the token itself and `plant`
+  prints it.
 * **Rust**, **Kotlin** and **Swift** plants are undeclared and matched by shape
   (there is no native harness channel to declare through): `logcat` requires a
   `rust` and a `kotlin` **opening** token, `ios` a `rust` and a `swift` one, at
@@ -232,9 +233,16 @@ dead capture and a mis-installed log backend all look clean to a needle search.
   deleted. Those lanes seal `--declared-plants none`; the manifest records it,
   `scan` reconciles no Dart token, `plant --sink dart` is rc 2 ("no declaration
   channel"), and both summaries say `declared plants: none (host profile)`. The
-  **shape** plants still apply, so a dead capture is still caught. Declaring
-  `none` while a sidecar declared a plant is rc 2: the two claims cannot both be
-  true.
+  **shape** plants still apply, so a dead capture is still caught. The harness
+  prints its token either way — `LogNeedles.plant` declares only where a channel
+  exists — so under this label an undeclared Dart token is the harness working
+  as designed and is NOT rc 3; ten nightly `E2E Flakiness Stress` runs were rc 3
+  on nothing else. Declaring `none` while a sidecar declared a plant is rc 2:
+  the two claims cannot both be true. So is SCANNING a `none` manifest while a
+  `*.needles.decl` sidecar sits in its directory — a lane that recorded
+  declarations must not certify itself as one that could not have, and the seal
+  alone cannot catch it (`logscan_seal host` globs those sidecars and ignores
+  them, and three lanes seal before their first capture, when none exists yet).
 * Which sink classes must carry the declared tokens is the policy's
   `declared_plants_expected`, not a list in the code. It is `true` for `logcat`
   and `drive`, and `false` for `ios`: no captured `log show` export has yet shown

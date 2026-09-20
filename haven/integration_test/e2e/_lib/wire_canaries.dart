@@ -87,19 +87,23 @@
 /// canaries.recordPetnameOpportunity(evt.id);     // any app->relay event
 ///                                                // published AFTER the set
 ///
-/// // 4. Anchor. TestRelay's marker is intercepted by the proxy and never
+/// // 4. Anchor — proxied lanes only, which is why both calls below sit
+/// //    behind the gate and each refuses an undeclared recorder in its own
+/// //    right. TestRelay's marker is intercepted by the proxy and never
 /// //    forwarded upstream; its ack returns the wire_seq the snapshot ends
 /// //    at. Emit it AFTER the traffic that should be inside the snapshot.
-/// final sentinel = await ctx.relay.emitWireJournalSentinel();
-/// canaries.recordSentinel(
-///   token: sentinel.token,
-///   wireSeq: sentinel.wireSeq,
-/// );
+/// if (wireRecorderDeclared) {
+///   final sentinel = await ctx.relay.emitWireJournalSentinel();
+///   canaries.recordSentinel(
+///     token: sentinel.token,
+///     wireSeq: sentinel.wireSeq,
+///   );
 ///
-/// // 5. Announce ONCE, at the very end, so every carrier is included. This
-/// //    goes over the proxy's control channel to a `.canaries.json` sidecar
-/// //    the lane never uploads — never the drive log (see below).
-/// await logNeedles.announceCanaryManifest(canaries.manifest().toJson());
+///   // 5. Announce ONCE, at the very end, so every carrier is included. This
+///   //    goes over the proxy's control channel to a `.canaries.json` sidecar
+///   //    the lane never uploads — never the drive log (see below).
+///   await logNeedles.announceCanaryManifest(canaries.manifest().toJson());
+/// }
 /// ```
 ///
 /// The lane then runs, on the host:

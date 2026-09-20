@@ -75,6 +75,15 @@ const String wireJournalSentinelToken = String.fromEnvironment(
   defaultValue: kDefaultWireSentinelToken,
 );
 
+/// Whether [token] is a lane's statement that a recording proxy is in path.
+///
+/// THE rule, in one place. [wireRecorderDeclared] asks it about the token this
+/// BUILD carries; [TestRelay.emitWireJournalSentinel] asks it about the token
+/// it is on the point of writing, which is the same question put to the value
+/// that would actually reach the socket.
+bool wireRecorderDeclaredFor(String token) =>
+    token != kDefaultWireSentinelToken;
+
 /// Whether THIS BUILD was made by a lane that declared a recording proxy.
 ///
 /// The token is minted per run by the lane and passed to the drive and to the
@@ -82,14 +91,19 @@ const String wireJournalSentinelToken = String.fromEnvironment(
 /// (link 4) pins that a lane which runs an oracle also passes this define. So a
 /// non-default token is a lane's explicit statement that a recorder is in path.
 ///
-/// This gates [TestRelay.announceMlsGroupId], and it is a SECURITY gate, not a
+/// This gates [TestRelay.announceMlsGroupId] and
+/// [TestRelay.emitWireJournalSentinel], and it is a SECURITY gate, not a
 /// convenience one. `e2e-flakiness-stress.yml` drives this same scenario
 /// against strfry directly (`HAVEN_E2E_RELAY: ws://10.0.2.2:7777`, no proxy).
 /// An unconditional announce there would put the REAL MLS group id on a relay
 /// socket every night — a direct Security Rule 4 violation — because the frame
-/// is written before the missing ack can be noticed 15 s later.
+/// is written before the missing ack can be noticed 15 s later. The marker is
+/// not a Rule-4 value, but it is still a harness verb written to a real relay,
+/// and the ack it then waits out its full budget for cannot come from
+/// anything: emitted ungated, it failed every iteration of that lane — a flake
+/// measurement that measured nothing.
 bool get wireRecorderDeclared =>
-    wireJournalSentinelToken != kDefaultWireSentinelToken;
+    wireRecorderDeclaredFor(wireJournalSentinelToken);
 
 /// Frame verb the recording proxy intercepts as a snapshot marker. Must match
 /// `SENTINEL_VERB` in `tooling/e2e/local-relay/src/frame.rs`.
@@ -863,9 +877,14 @@ class TestRelay {
   /// other three declaration frames below share the default and the reasoning
   /// verbatim.)
   ///
-  /// Throws [StateError] if the marker could not be written, or if no ack
-  /// arrives within [timeout] — which is also what happens when the lane
-  /// pointed the app straight at a relay instead of through the proxy.
+  /// Throws [StateError] if [token] declares no recorder — the compiled
+  /// default, which is a lane saying nothing is in path to intercept the
+  /// marker — if the marker could not be written, or if no ack arrives within
+  /// [timeout]. The last of those is what a lane that minted a token but
+  /// pointed the app PAST the proxy looks like (link 1 of
+  /// `check_wire_oracle_lane_reachable.sh`); the first is what a lane with no
+  /// proxy at all looks like, and it is refused before anything reaches the
+  /// wire rather than 15 s after.
   Future<WireJournalSentinel> emitWireJournalSentinel({
     String token = wireJournalSentinelToken,
     Duration timeout = const Duration(seconds: 15),
@@ -879,6 +898,20 @@ class TestRelay {
     String token,
     Duration timeout,
   ) async {
+    // FIRST STATEMENT, before the closed check and before the writability
+    // poll — same placement as [_announceMlsGroupIdOnce]'s gate, for the same
+    // reason: the ack timeout below fires only AFTER the frame is already on
+    // the socket, so it cannot stand in for this check. Asked of the token
+    // about to be WRITTEN rather than of the compiled-in one, so the rule
+    // covers the value that would actually reach the wire.
+    if (!wireRecorderDeclaredFor(token)) {
+      throw StateError(
+        'refusing to emit the wire-journal sentinel: this build declares no '
+        'recording proxy (HAVEN_WIRE_SENTINEL is the compiled default), so '
+        'the marker would be a harness verb on the relay itself and no ack '
+        'could ever answer it. Callers must gate on wireRecorderDeclared.',
+      );
+    }
     if (_closed) {
       throw StateError(
         'TestRelay is closed; the wire-journal sentinel was never emitted.',

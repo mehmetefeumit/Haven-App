@@ -10,8 +10,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::manifest::{
-    add_host_decl, endpoint_spellings, parse_decl, read_manifest, seal_from_declarations,
-    validate_out_path, write_manifest, Declarations, Manifest, SealInputs,
+    add_host_decl, endpoint_spellings, parse_decl, read_manifest, refuse_mislabelled_channel,
+    seal_from_declarations, validate_out_path, write_manifest, Declarations, Manifest, SealInputs,
 };
 use crate::plants::{DeclaredPlants, DECLARED_EMITTER, PHASES};
 use crate::policy::Policy;
@@ -400,7 +400,16 @@ fn scan(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> Result<i32
             );
             return Ok(RC_META);
         }
-        read_manifest(path)?
+        let manifest = read_manifest(path)?;
+        // Checked at SCAN rather than at seal: the scan is where the label's
+        // relaxation is applied, and it is the only moment that sees a sidecar
+        // written after a lane sealed (the stress, integration and
+        // relay-customization lanes seal before their first drive and every
+        // later gate reuses that manifest).
+        if manifest.declared_plants == DeclaredPlants::None {
+            refuse_mislabelled_channel(path)?;
+        }
+        manifest
     };
 
     let allowlist: Vec<AllowEntry> = serde_json::from_str(ALLOWLIST_JSON)

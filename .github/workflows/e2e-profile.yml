@@ -96,14 +96,15 @@ jobs:
     # The job cap must clear the SUM of the step caps: below it, a run whose
     # every step is still inside its own cap can die here, and a job-cap death
     # skips every `if: failure()` step (e2e-android.yml states the rule). So:
-    # Build the runtime log scanner 10 + Build E2E test APK 25 + Create AVD
-    # snapshot (on an AVD-cache miss) 15 + the drive step 45 (derived there) +
-    # the most the work no step cap bounds has taken, 12.9 min over 201 runs of
-    # this job and of e2e-android.yml's on both paths (ci.yml and
-    # e2e-nightly.yml, 2026-07-29..09-11; 11.1 of it one Setup Flutter stall in
-    # e2e-android.yml's job, run 30792258968), taken as 13 = 108 -> 110.
+    # Build the runtime log scanner 10 + Build E2E test APK 25 + Provision the
+    # Android SDK 11 (derived in that script) + Create AVD snapshot (on an
+    # AVD-cache miss) 15 + the drive step 45 (derived there) + the most the
+    # work no step cap bounds has taken, 12.9 min over 201 runs of this job and
+    # of e2e-android.yml's on both paths (ci.yml and e2e-nightly.yml,
+    # 2026-07-29..09-11; 11.1 of it one Setup Flutter stall in e2e-android.yml's
+    # job, run 30792258968), taken as 13 = 119 -> 121.
     # job-uncapped-minutes: 12.9 (201 runs with e2e-android.yml's, worst 30792258968)
-    timeout-minutes: 110
+    timeout-minutes: 121
     env:
       HAVEN_E2E_RELAY: ws://10.0.2.2:7777
       # Profile plane. DISJOINT from HAVEN_E2E_RELAY above by construction —
@@ -239,6 +240,25 @@ jobs:
             | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
+
+      # Install and VERIFY every SDK package the emulator action needs, before
+      # its FIRST use below. The action installs them itself, with bare
+      # `sdkmanager --install` calls tried once and checked by nothing: in CI
+      # run 35524002720 the emulator's download failed, the action stopped,
+      # and the last thing it printed was its teardown's "could not connect to
+      # TCP port 5554" — a message about the emulator, from a job that ran no
+      # test.
+      # Unconditional, deliberately — the AVD cache holds `~/.android/avd/*`
+      # only, so a cache HIT still needs the emulator binary and the system
+      # image. The arguments MUST equal the api-level/target/arch of every
+      # emulator step in this job (check_android_sdk_provisioned.sh). Once the
+      # packages are present the action's own installs are no-ops (5 s).
+      # The cap is the script's worst case, 9.5 min (its 360 s budget + the one
+      # 180 s attempt that can start inside it + that attempt's 30 s emulator
+      # probe), plus the step's own startup, rounded up.
+      - name: Provision the Android SDK
+        timeout-minutes: 11
+        run: bash tooling/e2e/ci/provision-android-sdk.sh 34 google_apis x86_64
 
       - name: AVD cache
         uses: actions/cache@v4

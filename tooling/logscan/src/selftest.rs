@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 
 use crate::expand::expand;
 use crate::ledger::reconcile;
-use crate::manifest::{parse_decl, read_manifest, Declarations, Manifest, NEEDLE_DIR};
+use crate::manifest::{parse_decl, read_manifest, Declarations, Manifest, DECL_SUFFIX, NEEDLE_DIR};
 use crate::policy::Policy;
 use crate::rules::{validate_allowlist, AllowEntry, RuleSet};
 use crate::scan::{scan_sinks, FindingKind, Outcome, ScanMode, SinkArg};
@@ -34,7 +34,7 @@ use crate::{RC_CLEAN, RC_GUARD, RC_LEAK, RC_META, RC_UNUSABLE};
 
 /// Number of cases [`run`] must execute. A case that stops running is a case that
 /// stops proving anything, and silence is how that goes unnoticed.
-const DECLARED_CASES: usize = 18;
+const DECLARED_CASES: usize = 19;
 
 const DECL: &str = include_str!("../fixtures/selftest.needles.decl");
 const CLEAN_DRIVE: &str = include_str!("../fixtures/clean.drive.log");
@@ -164,6 +164,10 @@ pub(crate) fn run_with(
             "R a capture in which no test ever started",
             case_proof_of_run(&rig, mutation),
         ),
+        (
+            "S a lane with no declaration channel",
+            case_channel_less_plants(&rig),
+        ),
     ] {
         executed += 1;
         match result {
@@ -204,6 +208,11 @@ struct Rig {
     manifest: PathBuf,
     /// Sealed with the policy's real floors, for the floor case.
     manifest_real_floors: PathBuf,
+    /// Sealed `--declared-plants none` and then MOVED into a directory of its
+    /// own: the mislabel case has to plant a declaration sidecar beside a
+    /// manifest, and the needle directory is shared with every other test in
+    /// this process, whose host-profile scans would read it as a mislabel.
+    manifest_host: PathBuf,
     stamp: String,
 }
 
@@ -219,6 +228,7 @@ impl Rig {
             manifest: Path::new(NEEDLE_DIR).join(format!("selftest-{stamp}.needles.json")),
             manifest_real_floors: Path::new(NEEDLE_DIR)
                 .join(format!("selftest-floors-{stamp}.needles.json")),
+            manifest_host: dir.join("host-needles").join("host.needles.json"),
             dir,
             stamp,
         };
@@ -257,7 +267,45 @@ impl Rig {
                 &rig.manifest_real_floors.display().to_string(),
             ],
         )?;
+        rig.seal_host()?;
         Ok(rig)
+    }
+
+    /// Seals the channel-less twin of `manifest` — the same values, none of the
+    /// plant declarations — and moves it into a directory of its own, which is
+    /// what lets the mislabel case plant a sidecar next to it.
+    fn seal_host(&self) -> Result<(), String> {
+        let host_decl = self.write("host.needles.decl", &rejoin(DECL, "\"class\":\"plant\""))?;
+        let sealed =
+            Path::new(NEEDLE_DIR).join(format!("selftest-host-{}.needles.json", self.stamp));
+        expect_rc(
+            RC_CLEAN,
+            &[
+                "seal",
+                "--run-id",
+                &format!("selftest-host-{}", self.stamp),
+                "--decl",
+                &host_decl.display().to_string(),
+                "--declared-plants",
+                "none",
+                "--floor",
+                "drive=1",
+                "--out",
+                &sealed.display().to_string(),
+            ],
+        )?;
+        let dir = self
+            .manifest_host
+            .parent()
+            .ok_or_else(|| "the host manifest has no directory".to_owned())?;
+        std::fs::create_dir_all(dir).map_err(|e| format!("host manifest dir: {:?}", e.kind()))?;
+        std::fs::rename(&sealed, &self.manifest_host).map_err(|e| {
+            let _ = std::fs::remove_file(&sealed);
+            format!(
+                "cannot move the host manifest out of the needle directory: {:?}",
+                e.kind()
+            )
+        })
     }
 
     fn write(&self, name: &str, body: &str) -> Result<PathBuf, String> {
@@ -747,6 +795,49 @@ fn case_plants_missed(rig: &Rig, mutation: Option<&'static str>) -> Case {
                 .collect::<Vec<_>>()
                 .join(" | ")
         ),
+    )
+}
+
+/// A lane with no declaration channel, and a lane that mislabelled itself one.
+///
+/// `LogNeedles.plant` `debugPrint`s its token whether or not a recorder is
+/// listening and declares it only when one is, so on a `host` lane both phases
+/// reach the sinks undeclared. Under a channel-less manifest that is the
+/// harness working as designed and must be clean — ten nightly `E2E Flakiness
+/// Stress` runs were rc 3 on nothing else — while under a manifest that HAD a
+/// channel it stays the lost declaration case G asserts. What keeps the
+/// forgiveness honest is the sidecar beside the manifest: a run that recorded
+/// declarations cannot certify itself as one that could not have.
+fn case_channel_less_plants(rig: &Rig) -> Case {
+    let drive = rig.write("channel-less.drive.log", CLEAN_DRIVE)?;
+    let manifest = rig.manifest_host.display().to_string();
+    let sink = format!("drive={}", drive.display());
+    let argv = ["scan", "--manifest", &manifest, "--sink", &sink];
+    let (rc, transcript) = invoke(&argv);
+    require(
+        rc == RC_CLEAN,
+        &format!("a channel-less lane's undeclared Dart plants read as rc {rc}: {transcript}"),
+    )?;
+    require(
+        transcript.contains("declared plants: none (host profile)"),
+        &format!("the summary must say which control was not reconciled: {transcript}"),
+    )?;
+
+    let sidecar = rig
+        .manifest_host
+        .with_file_name(format!("alice{DECL_SUFFIX}"));
+    std::fs::write(&sidecar, "").map_err(|e| format!("sidecar: {:?}", e.kind()))?;
+    let (rc, transcript) = invoke(&argv);
+    let _ = std::fs::remove_file(&sidecar);
+    require(
+        rc == RC_GUARD,
+        &format!(
+            "a manifest claiming no declaration channel beside a sidecar reads as rc {rc}: {transcript}"
+        ),
+    )?;
+    require(
+        transcript.contains("sidecar sits in"),
+        &format!("the refusal must name what contradicts the label: {transcript}"),
     )
 }
 

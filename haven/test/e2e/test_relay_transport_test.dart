@@ -50,6 +50,13 @@
 /// leaves false (`log_needles_test.dart`'s doc records the same limit and what
 /// covers it instead). They take the same floor from the same helper.
 ///
+/// The sentinel is the one of those gates BOTH of whose branches are reachable
+/// here, because it is asked of the token being written rather than of the
+/// compiled-in one: a test that supplies its own token is a declared recorder,
+/// and the parameter's default is the undeclared lane verbatim. The last group
+/// pins both — what an unproxied lane must never put on a relay socket, and
+/// the exact frame a proxied one does.
+///
 /// Runs under plain `flutter test`: no Rust bridge, no relay, no device.
 library;
 
@@ -414,6 +421,89 @@ void main() {
       );
     });
   });
+
+  group('the recorder gate — the compiled default token is not traffic', () {
+    // `wireRecorderDeclared` is false throughout this suite
+    // (`log_needles_test.dart` pins that), so the parameter's default IS what
+    // an unproxied lane compiles: `e2e-flakiness-stress.yml` drives
+    // e2e_combined straight at strfry with no recorder anywhere in path.
+
+    test('the default token is refused, and no frame is written', () async {
+      await connect();
+
+      await expectLater(
+        relay.emitWireJournalSentinel(),
+        throwsA(isA<StateError>()),
+      );
+
+      // Ordering, not timing: one connection delivers in order, so a frame
+      // the refused call had written would already be in `frames` by the time
+      // this one is acked.
+      await relay.emitWireJournalSentinel(
+        token: 'after-the-refusal',
+        timeout: _fastPing * 5,
+      );
+
+      expect(
+        recorder.frames,
+        <Object?>[
+          <Object?>['HAVEN_WIRE_SENTINEL', 'after-the-refusal'],
+        ],
+        reason: 'a harness verb has no business on a relay that is not the '
+            'recorder, and the ack it would then wait out its whole budget '
+            'for cannot come from anything — a scenario reported as failed '
+            'every night while measuring nothing',
+      );
+    });
+
+    test('the refusal waits for nothing', () async {
+      // A recorder that answers no sentinel: were the gate BELOW the write,
+      // this call would sit on its answer budget instead of settling.
+      recorder.answerSentinels = false;
+      await connect();
+
+      var settled = false;
+      final refusal = relay
+          .emitWireJournalSentinel()
+          .then<void>((_) {}, onError: (Object _) {})
+          .whenComplete(() => settled = true);
+
+      // One event-loop turn, not a duration: the microtask queue is fully
+      // drained before a zero-duration timer runs, while every wait in
+      // `TestRelay` is a timer of at least a second. So this is a
+      // deterministic "was a timer armed?" probe, not a race a loaded runner
+      // can lose.
+      await Future<void>.delayed(Duration.zero);
+
+      expect(
+        settled,
+        isTrue,
+        reason: 'the gate is the first statement of the emit — ahead of the '
+            'closed check, the writability poll and the ack wait',
+      );
+      await refusal;
+    });
+
+    test('a declared token writes exactly the sentinel frame', () async {
+      await connect();
+
+      final ack = await relay.emitWireJournalSentinel(
+        token: 'declared',
+        timeout: _fastPing * 5,
+      );
+
+      expect(ack.token, 'declared');
+      expect(
+        recorder.frames,
+        <Object?>[
+          <Object?>['HAVEN_WIRE_SENTINEL', 'declared'],
+        ],
+        reason: 'the proxy intercepts on the verb in position 0 and acks on '
+            'the token in position 1 (frame.rs); anything else about this '
+            'frame would be forwarded upstream to the relay instead',
+      );
+    });
+  });
 }
 
 /// A minimal signed-shaped Nostr event; only `id` is read by `TestRelay`.
@@ -442,6 +532,14 @@ class _FakeRecorder {
   /// Sentinel tokens observed, in arrival order.
   final List<String> sentinelTokens = <String>[];
 
+  /// Every frame observed, decoded, in arrival order.
+  ///
+  /// [sentinelTokens] answers "did the marker land?"; this answers "was
+  /// anything written at all, and was it exactly the frame the proxy parses?"
+  /// — the two questions the recorder gate is made of. `TestRelay` only ever
+  /// writes `jsonEncode`d arrays, so a decoded frame is the whole write.
+  final List<Object?> frames = <Object?>[];
+
   /// Event ids observed, in arrival order.
   final List<String> publishedEventIds = <String>[];
 
@@ -464,6 +562,7 @@ class _FakeRecorder {
         if (data is! String) return;
         final dynamic decoded = jsonDecode(data);
         if (decoded is! List || decoded.isEmpty) return;
+        frames.add(decoded);
         switch (decoded.first) {
           case 'HAVEN_WIRE_SENTINEL':
             final token = decoded[1] as String;
