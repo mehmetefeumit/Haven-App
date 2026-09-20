@@ -113,7 +113,10 @@ readonly MIN_DART_SITES=380
 # into `tooling/soak/tests/logsink_capture.rs` — the lease serialises leaseholders, not
 # emitters, so a capture is only attributable in a binary where every world
 # takes it — and their `log::` invocations went with them. floor(21 x 0.8) = 16.
-readonly MIN_SOAK_SITES=16
+# Re-measured 2026-09-20: 24. The rig now opens and closes its own stdout — the
+# capture the LANE scans — with a printed shape plant, and says so when one
+# cannot be minted. floor(24 x 0.8) = 19.
+readonly MIN_SOAK_SITES=19
 # `init_app` installs one backend per shipped platform family (Android, Apple).
 readonly MIN_LOG_BACKENDS=2
 # Self-test equality pin: 16 Rust + 7 Dart scanner fixtures, 2 floor probes and

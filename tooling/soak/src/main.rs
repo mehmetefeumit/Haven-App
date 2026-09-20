@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use haven_soak::banner::Provenance;
 use haven_soak::driver::{self, chain_pairs, teardown_then, Refusal, RunPlan, RunWorld};
-use haven_soak::logsink::SoakLogs;
+use haven_soak::logsink::{self, SoakLogs};
 use haven_soak::nemesis::generator::Generator;
 use haven_soak::nemesis::types::Schedule;
 use haven_soak::oracle::bounds::WaitScale;
@@ -394,12 +394,44 @@ fn list_scenarios() {
     }
 }
 
+/// Drives a run between this stream's own positive controls.
+///
+/// The lane redirects this process's stdout into the tree it scans as a `soak`
+/// sink, so the stream is a capture of that class and its scan needs the same
+/// opening plant every other capture carries: without one, a lane that read the
+/// right tree and a lane that read a tree nothing wrote are the same verdict.
+///
+/// The token is therefore the FIRST line this binary writes for a run — ahead
+/// of the plan line, the banner and the first world — so a run the lane's
+/// reaper kills before any of those still answers for the stream it opened. The
+/// closing token is the last, on every way out of the run including a refused
+/// invocation.
+///
+/// `--self-test` and `--list-scenarios` stay plant-free: their output is
+/// scanned as `rust-test`, which requires no shape plant, and a second stream
+/// minting tokens of this shape is a way for one that never ran the profile to
+/// satisfy the control of one that did.
+async fn drive(cli: &Cli) -> Rc {
+    if let Err(refused) = logsink::plant_stdout("open") {
+        eprintln!("haven-soak: {refused}");
+        return refused.rc();
+    }
+    let rc = drive_planned(cli).await;
+    match logsink::plant_stdout("close") {
+        Ok(_) => rc,
+        Err(refused) => {
+            eprintln!("haven-soak: {refused}");
+            rc.folded(refused.rc())
+        }
+    }
+}
+
 /// Resolves the invocation into a plan and drives it.
 ///
 /// Everything the CLI decides happens here — the profile, the overrides, the
 /// seed, the schedule minted from it — and nothing else does: the driver takes
 /// a plan, so a caller that is not a command line builds one directly.
-async fn drive(cli: &Cli) -> Rc {
+async fn drive_planned(cli: &Cli) -> Rc {
     let spec = match cli.spec() {
         Ok(spec) => spec,
         Err(refused) => {

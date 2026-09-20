@@ -190,9 +190,14 @@ relay = { term_floor = 6, declared_plants_expected = false, structural_rules = f
 # `declared_plants_expected = false` because the rig is a Rust process with no
 # Dart channel at all: nothing can hand it a declared token to print, so that
 # control could never be satisfied. Its `rust` SHAPE plant carries the sink-reach
-# claim instead, emitted through the installed sink as the first and last line of
-# every scenario capture — which is exactly why it proves the sink was reached
-# and a token written straight into the file would not.
+# claim instead, minted per capture and emitted by whichever path that capture's
+# reach depends on: through the installed `log` sink as the first and last line
+# of every SCENARIO capture — which is exactly why it proves the sink was reached
+# and a token written straight into the file would not — and PRINTED on stdout,
+# first line and last, for the lane-level tree, whose reach claim is the
+# redirection rather than the log backend. The lane scans that tree as this one
+# class, so before the rig printed a pair of its own, `required_shape_plants`
+# could not be satisfied there by any run, however healthy.
 # `min_lines = 2` is the smallest COMPLETE capture of this class, never what
 # makes a lane pass: a scenario capture is complete when it holds its opening and
 # its closing plant, and everything between them is the SUBJECT's logging, which

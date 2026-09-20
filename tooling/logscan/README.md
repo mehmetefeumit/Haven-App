@@ -246,12 +246,16 @@ dead capture and a mis-installed log backend all look clean to a needle search.
   for `soak`, where the reason is stronger than "unproven": the Tier-1 rig is a
   Rust process with no Dart channel of any kind, so nothing can hand it a token
   to print and a declared plant would be a control nothing could ever satisfy.
-  Its `rust` shape plant carries the sink-reach claim instead — emitted through
-  the rig's installed `log` sink as the first and last line of every scenario
-  capture, never written straight into the file, because a token the harness
-  wrote itself proves only that the harness can write a file.
-  Demanding an unproven control would make every iOS lane rc 3 for a reason that
-  is not a privacy fact.
+  Its `rust` shape plant carries the sink-reach claim instead, minted per
+  capture and emitted by whichever path that capture's reach depends on:
+  through the rig's installed `log` sink as the first and last line of every
+  SCENARIO capture — never written straight into the file, because a token the
+  harness wrote itself proves only that the harness can write a file — and
+  printed on stdout, first line and last, for the LANE's tree (the banner, the
+  schedule, the timeline and the rig's redirected stdout, scanned together as
+  this one class), whose reach claim is the redirection rather than the log
+  backend. Demanding an unproven control would make every iOS lane rc 3 for a
+  reason that is not a privacy fact.
 * Each declared token must appear **at least once** in every scanned sink class
   that carries Dart output (the classes with `declared_plants_expected` —
   `logcat` and `drive` today). "At least once", not

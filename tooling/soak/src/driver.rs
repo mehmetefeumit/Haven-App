@@ -399,6 +399,7 @@ impl Run {
 
         let mut applied = 0_u64;
         let mut probes = 0_u32;
+        let mut stopping = false;
         self.phase_started = tokio::time::Instant::now();
         for index in 0..=last {
             let due: Vec<&ScheduledOp> = ops.iter().filter(|op| op.tick == index).collect();
@@ -419,26 +420,34 @@ impl Run {
                 self.grade_probe(world, probes).await?;
             }
             if self.stop_at_step.is_some_and(|stop| applied >= stop) {
-                self.stop_at_step(world)?;
-                return Ok(());
+                stopping = true;
+                break;
             }
         }
 
-        if applied_faults != scheduled_faults {
-            // A fault that did not fire makes every bound derived from it a
-            // fiction, and the floor below is graded on what fired.
-            self.verdicts.fold_invariant(Rc::Unusable);
+        if !stopping {
+            if applied_faults != scheduled_faults {
+                // A fault that did not fire makes every bound derived from it a
+                // fiction, and the floor below is graded on what fired.
+                self.verdicts.fold_invariant(Rc::Unusable);
+            }
+            self.grade_settled(
+                world,
+                &Scheduled::new(scheduled_faults, scheduled_probes),
+                applied_faults,
+                probes,
+            )
+            .await?;
         }
-        self.grade_settled(
-            world,
-            &Scheduled::new(scheduled_faults, scheduled_probes),
-            applied_faults,
-            probes,
-        )
-        .await?;
+        // One way out of the capture, and it goes through the scan: a stop
+        // asked for mid-schedule leaves lines behind it like any other exit.
         logsink::plant("close")?;
         let lines = world.drain_logs(mark);
-        self.scan("nemesis", &lines, manifest)
+        self.scan("nemesis", &lines, manifest)?;
+        if stopping {
+            self.stop_at_step(world)?;
+        }
+        Ok(())
     }
 
     /// Builds one phase's world and seals the manifest that scans it.

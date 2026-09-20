@@ -32,6 +32,11 @@
 #      manifests on purpose — `logscan_seal` REUSES whatever sits at its own
 #      run-id path, so a rig manifest written there would replace the host
 #      needles instead of adding to them.
+#      Both passes read this tree as the `soak` class, whose positive control is
+#      the `rust` opening plant the rig PRINTS on its own stdout as the first
+#      line of a run (the per-scenario plants live in captures neither pass
+#      reads). An rc 3 here naming a missed control is that line's absence, not
+#      the subject's doing.
 #   4. On a LEAK (rc 1) the wrapper has already deleted the sinks it named;
 #      this runner removes what is left of the tree and leaves one
 #      harness-authored line in its place, so the lane's upload publishes the

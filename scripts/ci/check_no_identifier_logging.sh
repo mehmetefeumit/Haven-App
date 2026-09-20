@@ -188,7 +188,10 @@ readonly MIN_ITEST_SITES=395
 # and every assertion message in them is a panic invocation this scanner reads.
 # floor(334 x 0.8) = 267; leaving 181 would have let the extractor lose nearly
 # half its population and stay green.
-readonly MIN_SOAK_SITES=267
+# Re-measured 2026-09-20: 347, the lane-level capture test (one real run of the
+# rig, three scans of the tree it wrote) and the two refusals the stdout plants
+# print. floor(347 x 0.8) = 277.
+readonly MIN_SOAK_SITES=277
 # Same contract for the wrapper-DEFINITION scan, whose population `scan()`'s
 # floors cannot see: measured 2 (Rust) and 7 (Dart, haven/lib + the harness)
 # on 2026-09-18. floor(2 × 0.8) = 1 and floor(7 × 0.8) = 5 — a lexer that

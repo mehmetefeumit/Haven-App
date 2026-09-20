@@ -236,6 +236,20 @@ own run-id path, so a rig manifest written there would replace the host needles
 rather than add to them. The rig's manifest is suffixed (`<run-id>-soak`) for
 exactly that reason.
 
+**Both passes rest on the plant the rig prints on its own stdout.** The tree
+they read is scanned as the `soak` class, which requires a `rust` OPENING plant
+(`tooling/logscan/policy.toml`), and the rig's per-scenario plants are in the
+per-scenario captures — a tree nothing may upload and neither pass reads. So the
+rig opens its stdout with a plant of its own and closes it with one, first line
+and last, before the plan line and the banner: that stream is a capture of the
+class, and the reach it has to prove is the lane's REDIRECTION of it, not the
+log backend. Without it both passes are rc 3 ("positive control missed") on
+every healthy run, which is how a control gets deleted instead of fixed. The
+plant is written and flushed before the first world is built, so a reaped run
+carries it too; `tooling/soak/tests/lane_capture.rs` drives a real run and
+replays both halves — the tree as it stands, and the same tree with the opening
+line removed.
+
 ### ...and why that pair runs from three places
 
 The deadline is `timeout`, which signals the whole PROCESS GROUP: an overrunning

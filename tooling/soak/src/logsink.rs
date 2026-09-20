@@ -405,6 +405,33 @@ pub fn plant(phase: &str) -> Result<String, SinkError> {
     Ok(token)
 }
 
+/// Mints one `rust` shape plant and prints it on STDOUT.
+///
+/// The lane redirects this process's stdout into the tree it uploads and scans
+/// as one more `soak` sink, so that stream is a capture of this class too and
+/// owes the same control — printed rather than logged because the emission path
+/// it proves is the REDIRECTION: what a reader must be able to rule out here is
+/// "the scanner read a file this process never wrote", which is what a whole
+/// upload tree of clean-looking captures otherwise reads as.
+///
+/// Flushed, because the lane reaps with a signal that can land anywhere: a run
+/// killed between its first world and its scan is still read, and its capture
+/// still has to carry the control it was opened with.
+///
+/// # Errors
+///
+/// [`SinkError::PlantUnmintable`] if the OS CSPRNG is unavailable, for the
+/// reason [`plant`] gives.
+pub fn plant_stdout(phase: &str) -> Result<String, SinkError> {
+    let token = mint(PLANT_EMITTER, phase).map_err(|_| SinkError::PlantUnmintable)?;
+    println!("{token}");
+    // Nothing to report a failure THROUGH: this is the stream the report goes
+    // on, and a capture that lost it is rc 3 at the scan, which is the verdict
+    // a lost control is supposed to produce.
+    let _ = std::io::stdout().flush();
+    Ok(token)
+}
+
 /// Every value the rig minted, declared through typed wrappers.
 ///
 /// The class is never a caller's string. `add_host_decl` decides whether a
