@@ -136,6 +136,8 @@ pub struct Outcome {
     pub bytes_read: u64,
     /// Lines per sink class.
     pub lines: BTreeMap<String, u64>,
+    /// Sink classes whose capture carried the class's proof-of-run line.
+    pub proven: std::collections::BTreeSet<String>,
     /// Declared plants caught, out of those required.
     pub plants_caught: usize,
     /// Declared plant requirements.
@@ -263,6 +265,8 @@ struct FileReport {
     /// in a non-empty file means the capture is not in the format the sink
     /// class frames, so no structural rule ran over any of it.
     framed: u64,
+    /// Whether a line matched the sink class's `proof_of_run`.
+    proof_of_run: bool,
     /// `(term index, line, reassembled)` → `(count, sample)`.
     needles: BTreeMap<(usize, u64, bool), (u64, String)>,
     /// `(rule, line, tag)` → `(count, sample)`.
@@ -367,6 +371,16 @@ pub fn scan_sinks(
                 continue;
             }
         };
+        let Ok(proof) = spec.proof_of_run.as_deref().map(Regex::new).transpose() else {
+            outcome.problems.push(Problem {
+                rc: RC_GUARD,
+                message: format!(
+                    "sink class `{}` declares a proof-of-run pattern that is not a valid regular expression",
+                    sink.class
+                ),
+            });
+            continue;
+        };
         let mut tally = PlantTally {
             counts: &mut plant_counts,
             shapes: &mut shape_seen,
@@ -381,6 +395,7 @@ pub fn scan_sinks(
                     needles: &needles,
                     rules,
                     disclose,
+                    proof: proof.as_ref(),
                     reconcile_plants: plants_in.get(&sink.class).is_none_or(|only| only == path),
                 },
                 &mut tally,
@@ -390,6 +405,7 @@ pub fn scan_sinks(
     }
 
     check_floors(manifest, sinks, &mut outcome);
+    check_proofs_of_run(manifest, sinks, &mut outcome);
     if mode == ScanMode::Full {
         check_plants(manifest, sinks, &plant_counts, &shape_seen, &mut outcome);
     }
@@ -404,6 +420,8 @@ struct SinkFile<'a> {
     needles: &'a Needles<'a>,
     rules: &'a RuleSet,
     disclose: bool,
+    /// The sink class's compiled `proof_of_run`, where it declares one.
+    proof: Option<&'a Regex>,
     /// Whether plants found here count. `--plants-in` narrows reconciliation to
     /// one file of the class while every file is still searched for needles.
     reconcile_plants: bool,
@@ -431,6 +449,7 @@ fn scan_one(file: &SinkFile<'_>, tally: &mut PlantTally<'_>, outcome: &mut Outco
         file.needles,
         file.rules,
         tally.shape,
+        file.proof,
         file.disclose,
     ) {
         Ok(report) => report,
@@ -444,6 +463,9 @@ fn scan_one(file: &SinkFile<'_>, tally: &mut PlantTally<'_>, outcome: &mut Outco
     };
     outcome.bytes_read += report.bytes;
     *outcome.lines.entry(file.class.to_owned()).or_default() += report.lines;
+    if report.proof_of_run {
+        outcome.proven.insert(file.class.to_owned());
+    }
 
     // A framed sink whose every line failed to parse is a capture in a rendering
     // this sink class does not know — a different `log show --style`, a logcat
@@ -578,6 +600,27 @@ fn check_floors(manifest: &Manifest, sinks: &[SinkArg], outcome: &mut Outcome) {
                 ),
             });
         }
+    }
+}
+
+/// The other half of the anti-vacuity check, for the classes that can carry it.
+///
+/// A line floor answers "was the capture truncated"; it cannot answer "did the
+/// subject ever run", because the two look identical at the short end. A class
+/// that declares a `proof_of_run` answers the second question from a line its
+/// producer writes before the first test body does.
+fn check_proofs_of_run(manifest: &Manifest, sinks: &[SinkArg], outcome: &mut Outcome) {
+    let classes: std::collections::BTreeSet<&String> = sinks.iter().map(|s| &s.class).collect();
+    for class in classes {
+        if manifest.proof_of_run(class).is_none() || outcome.proven.contains(class) {
+            continue;
+        }
+        outcome.problems.push(Problem {
+            rc: RC_META,
+            message: format!(
+                "sink class `{class}` carries no proof-of-run line (the test reporter's `HH:MM +N:` progress line); the capture is readable but proves too little: no test ever started"
+            ),
+        });
     }
 }
 
@@ -843,6 +886,7 @@ fn scan_file(
     needles: &Needles<'_>,
     rules: &RuleSet,
     plant_shape: &Regex,
+    proof: Option<&Regex>,
     disclose: bool,
 ) -> Result<FileReport, String> {
     let mut file = std::fs::File::open(path)
@@ -865,6 +909,7 @@ fn scan_file(
         needles,
         rules,
         plant_shape,
+        proof,
         sink_path: &sink_path,
         disclose,
     };
@@ -947,6 +992,12 @@ fn handle_line(
     let framed = frame(ctx.spec, text);
     if framed.raw_tag.is_some() {
         report.framed += 1;
+    }
+    // The WHOLE line, framing included: the proof is about the capture's
+    // producer, not about which part of the line Haven owns — on Android the
+    // reporter's own output reaches the transcript through logcat's prefix.
+    if !report.proof_of_run && ctx.proof.is_some_and(|proof| proof.is_match(text)) {
+        report.proof_of_run = true;
     }
     // Only for a line the window pass already matched on. The window pass for a
     // chunk completes before the line pass of the same chunk, and a match
@@ -1109,6 +1160,8 @@ struct LineCtx<'a> {
     needles: &'a Needles<'a>,
     rules: &'a RuleSet,
     plant_shape: &'a Regex,
+    /// The sink class's compiled `proof_of_run`, where it declares one.
+    proof: Option<&'a Regex>,
     sink_path: &'a str,
     disclose: bool,
 }
@@ -1541,7 +1594,7 @@ mod tests {
     use crate::manifest::{Manifest, SCHEMA};
     use crate::policy::Policy;
     use crate::rules::RuleSet;
-    use crate::{RC_GUARD, RC_UNUSABLE};
+    use crate::{RC_GUARD, RC_META, RC_UNUSABLE};
 
     const PUBKEY: &str = "0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9";
     /// One line per documented `log show --style syslog` column variant.
@@ -2335,6 +2388,65 @@ mod tests {
         assert!(!continuation.owned);
         assert!(continuation.raw_tag.is_none());
         assert!(continuation.tag.is_none());
+    }
+
+    /// What a line count cannot see: a SHORT complete transcript and a LONG
+    /// empty one.
+    ///
+    /// Both scans here are above every floor (the test manifest seals 0), so
+    /// the only thing under test is the reporter's progress line. The short
+    /// capture is the shape of CI run 35464818348's phase C2 — 19 lines,
+    /// complete, and rc 4 under the line floor that lane then carried.
+    #[test]
+    fn the_reporter_line_and_not_the_line_count_proves_a_test_ran() {
+        let dir = Dir::new("proofofrun");
+        let manifest = manifest(&[]);
+
+        let mut short = String::from("Installing /tmp/x.apk...      1,362ms\n");
+        for _ in 0..8 {
+            short.push_str("D/FlutterGeolocator( 4457): Binding to location service.\n");
+        }
+        short.push_str("I/flutter ( 4457): 00:00 +0: M7 disable: register a task\n");
+        for _ in 0..7 {
+            short.push_str("VMServiceFlutterDriver: Isolate is paused at start.\n");
+        }
+        short.push_str("I/flutter ( 4457): 00:00 +1: (tearDownAll)\nAll tests passed.\n");
+        let path = dir.write("short.drive.log", &short);
+        let outcome = run(&manifest, "drive", &[path]);
+        assert_eq!(outcome.lines.get("drive"), Some(&19));
+        assert!(
+            outcome.problems.is_empty(),
+            "a nineteen-line transcript in which a test RAN proves enough: {:?}",
+            outcome.problems
+        );
+
+        // The failing reporter's rendering (`+3 -1:`) is proof just the same:
+        // a test that ran and failed is still a test that ran.
+        let failed = short.replace("+0: M7 disable", "+3 -1: M7 disable");
+        let path = dir.write("failed.drive.log", &failed);
+        assert!(
+            run(&manifest, "drive", &[path]).problems.is_empty(),
+            "a failing run's reporter line proves a test started too"
+        );
+
+        let long = "D/FlutterGeolocator( 4457): Binding to location service.\n".repeat(500);
+        let path = dir.write("long.drive.log", &long);
+        let outcome = run(&manifest, "drive", std::slice::from_ref(&path));
+        assert_eq!(outcome.lines.get("drive"), Some(&500));
+        assert_eq!(outcome.rc(), RC_META);
+        let message = &outcome.problems[0].message;
+        assert!(message.contains("`drive`"), "{message}");
+        assert!(
+            !message.contains(&path.display().to_string()),
+            "Rule 15: the problem names the class, never the capture's path: {message}"
+        );
+
+        // A class that declares no proof is untouched by any of it.
+        let same = dir.write("long.rust-test.log", &long);
+        assert!(
+            run(&manifest, "rust-test", &[same]).problems.is_empty(),
+            "only a class whose captures come from a test reporter carries the proof"
+        );
     }
 
     /// A progress reporter's carriage returns are RECORD boundaries, not text.

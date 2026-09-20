@@ -911,12 +911,37 @@ smaller passes its own `--floor <class>=<n>` at its seal rather than lowering a
 default, with the measured basis and the run it came from stated beside it:
 integration and relay-customization take `drive=20` (a target is one or two
 tests), `logcat=300` (logcat is captured per target, not per scenario) and
-`relay=7`; background-catchup takes `drive=35 relay=7` and KeyPackage-rotation
-`drive=43 relay=7` (one drive target each). The core-flow iOS lane keeps the default of 100 and
-clears it a different way: it drives TWO scenarios through the one fixed
-transcript path, which the runner truncates per invocation, so each invocation
-preserves its own as `/tmp/flutter-ios-test.<scenario>.log` and both the second
-gate and the workflow's scan step weigh them together — without that, the
+`relay=7`; background-catchup takes `drive=9 relay=7` and KeyPackage-rotation
+`drive=43 relay=7` (one drive target each).
+
+For a **`drive` sink the line count is not what proves a test ran** — a
+transcript's length is the tool's own output plus whatever logcat furniture the
+device happened to forward, so the floor that clears the shortest COMPLETE one
+also clears a transcript in which nothing ran, which is how a complete 19-line
+capture went rc 4 under a floor of 20 in CI run 35464818348. The proof is the
+test reporter's own progress line (`HH:MM +N: <name>`, forwarded by logcat as
+`I/flutter ( pid): 00:00 +0: …`), which the scanner demands of every `drive`
+capture through `policy.toml`'s `proof_of_run`; its absence is rc 4 saying "no
+test ever started", and no `--floor` can remove it. An ANDROID drive floor is
+therefore calibrated to the lines `flutter drive` prints on the HOST alone — the
+`Installing …` line, the six `VMServiceFlutterDriver:` lines, the verdict and
+`Leaving the application running.` where the lane keeps the app alive (9 in
+every complete background-catchup transcript of run 35464818348, 8 in every
+other Android lane's, which let the driver stop the app) — and never
+re-measured from a transcript that also carries forwarded device chatter.
+Background-catchup is so far the ONLY floor derived that way; the other Android
+numbers above are still transcript-measured and are re-derived like this when
+one next reds, rather than chased down by the length of whatever capture reddened
+it. An iOS capture carries none of that skeleton — the simulator forwards no
+device chatter and `flutter drive` prints only the reporter's own lines — so the
+iOS floors below stay measured, with `proof_of_run` answering "did anything run"
+there too.
+
+The core-flow iOS lane keeps the default of 100 and clears it a different way:
+it drives TWO scenarios through the one fixed transcript path, which the runner
+truncates per invocation, so each invocation preserves its own as
+`/tmp/flutter-ios-test.<scenario>.log` and both the second gate and the
+workflow's scan step weigh them together — without that, the
 mirror check's ~14 lines would be rc 4 on every green run. The four
 single-scenario iOS lanes take theirs from CI run 35280144455's complete
 transcripts — `drive=22` for

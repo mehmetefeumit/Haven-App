@@ -34,7 +34,7 @@ use crate::{RC_CLEAN, RC_GUARD, RC_LEAK, RC_META, RC_UNUSABLE};
 
 /// Number of cases [`run`] must execute. A case that stops running is a case that
 /// stops proving anything, and silence is how that goes unnoticed.
-const DECLARED_CASES: usize = 17;
+const DECLARED_CASES: usize = 18;
 
 const DECL: &str = include_str!("../fixtures/selftest.needles.decl");
 const CLEAN_DRIVE: &str = include_str!("../fixtures/clean.drive.log");
@@ -155,6 +155,10 @@ pub(crate) fn run_with(
         (
             "Q cargo's crate-build line is furniture for S2 and S6 only",
             case_cargo_furniture(&rig, mutation),
+        ),
+        (
+            "R a capture in which no test ever started",
+            case_proof_of_run(&rig, mutation),
         ),
     ] {
         executed += 1;
@@ -894,9 +898,70 @@ fn case_floor(rig: &Rig, mutation: Option<&'static str>) -> Case {
     require(
         outcome.rc() == RC_META,
         &format!(
-            "an eleven-line drive transcript under a hundred-line floor must be rc 4, got rc {}",
+            "a twelve-line drive transcript under a hundred-line floor must be rc 4, got rc {}",
             outcome.rc()
         ),
+    )
+}
+
+/// A capture that PROVES too little for a reason no line count can see.
+///
+/// The floor above answers "was this truncated"; it cannot answer "did anything
+/// run", because a complete short transcript and an empty one clear the same
+/// number. Both captures here are far above their floor (the rig seals
+/// `drive=1`), so the only thing separating them is the reporter's progress
+/// line — which is exactly the separation CI run 35464818348 had to make and
+/// could not.
+fn case_proof_of_run(rig: &Rig, mutation: Option<&'static str>) -> Case {
+    let manifest = rig.manifest()?;
+    let rules = rules_for(&manifest, Vec::new(), mutation)?;
+    let logcat = rig.write("proof.logcat.log", CLEAN_LOGCAT)?;
+    let drive = rig.write("proof.drive.log", CLEAN_DRIVE)?;
+    let outcome = scan(
+        &manifest,
+        &[sink("logcat", &[&logcat]), sink("drive", &[&drive])],
+        &rules,
+    );
+    require(
+        outcome.rc() == RC_CLEAN,
+        &format!(
+            "a complete transcript must stay clean: rc {} — {}",
+            outcome.rc(),
+            outcome
+                .problems
+                .iter()
+                .map(|p| p.message.clone())
+                .collect::<Vec<_>>()
+                .join(" | ")
+        ),
+    )?;
+
+    // The same capture with the ONE reporter line removed: every other line,
+    // both plants and every byte of furniture still there.
+    let silent = rejoin(CLEAN_DRIVE, "00:00 +0: ");
+    require(
+        silent.lines().count() + 1 == CLEAN_DRIVE.lines().count(),
+        "the mutation must remove exactly the reporter's line",
+    )?;
+    let path = rig.write("silent.drive.log", &silent)?;
+    let outcome = scan(
+        &manifest,
+        &[sink("logcat", &[&logcat]), sink("drive", &[&path])],
+        &rules,
+    );
+    require(
+        outcome.rc() == RC_META,
+        &format!(
+            "a transcript in which no test ever started must be rc 4, got rc {}",
+            outcome.rc()
+        ),
+    )?;
+    require(
+        outcome
+            .problems
+            .iter()
+            .any(|p| p.message.contains("no test ever started") && !p.message.contains('/')),
+        "the problem must name the class and no path",
     )
 }
 

@@ -145,6 +145,19 @@ pub struct SinkSpec {
     pub cargo_status: CargoStatus,
     /// Default line floor; `seal --floor <sink>=<n>` overrides it.
     pub min_lines: u64,
+    /// A line every capture of this class carries once its SUBJECT has started,
+    /// as a regex: the proof that the capture is of a run that happened.
+    ///
+    /// A line floor cannot tell a short complete capture from an empty one. How
+    /// many lines a `flutter drive` transcript holds depends on how much logcat
+    /// furniture the tool forwards and on whether the reporter's closing line
+    /// beats the driver's disconnect, so the floor that clears the shortest
+    /// COMPLETE transcript also clears a transcript in which nothing ran. The
+    /// test reporter's own progress line can tell them apart: it is written
+    /// before the first test body runs. Declared per class, because only a
+    /// class whose captures all come from one producer has such a line.
+    #[serde(default)]
+    pub proof_of_run: Option<String>,
     /// How lines are framed.
     pub entry_format: EntryFormat,
     /// Log tags this repo owns. Structural rules run only on these lines.
@@ -374,6 +387,16 @@ impl Policy {
                 _ => {}
             }
             self.validate_emitter_scopes(name, sink)?;
+            if let Some(pattern) = &sink.proof_of_run {
+                if pattern.is_empty() {
+                    return Err(format!(
+                        "sink `{name}` declares an empty proof_of_run, which every line matches and so proves nothing"
+                    ));
+                }
+                regex::Regex::new(pattern).map_err(|_| {
+                    format!("sink `{name}`'s proof_of_run is not a valid regular expression")
+                })?;
+            }
             // A sink cannot require a control the declaration channel has no way
             // to mint: without the `plant` class the harness cannot declare a
             // token, and the requirement would be permanently unsatisfiable. The
@@ -767,6 +790,83 @@ ios = { term_floor = 8, declared_plants_expected = false, structural_rules = tru
         // that skips cargo's lines still runs S1–S12 over every other one.
         assert!(policy.sinks["rust-test"].structural_rules);
         assert!(policy.sinks["soak"].structural_rules);
+    }
+
+    /// Which sinks carry a PROOF-OF-RUN line, and what it must match.
+    ///
+    /// The proof is the half of the anti-vacuity check a line count cannot be,
+    /// so it is pinned here with the renderings it has to catch: Android
+    /// forwards the reporter through logcat, `flutter test` prints it bare, and
+    /// a failing run renders `+N -M:`. It is pinned in the other direction too:
+    /// a class whose captures do NOT come from a test reporter would be
+    /// demanding a line its producer never writes, i.e. rc 4 on every green run.
+    #[test]
+    fn only_the_test_reporter_sink_declares_a_proof_of_run() {
+        let policy = Policy::load().expect("policy");
+        let pattern = policy.sinks["drive"]
+            .proof_of_run
+            .as_deref()
+            .expect("the drive class carries the proof");
+        let proof = regex::Regex::new(pattern).expect("a valid pattern");
+        for line in [
+            "I/flutter ( 4457): 00:00 +0: M7 disable: register a task then disable consent",
+            "I/flutter ( 4106): 00:08 +2: All tests passed!",
+            "00:01 +31: /home/runner/work/Haven-App/haven/test/providers/x_test.dart: ok",
+            "00:02 +12 -1: haven/test/y_test.dart: a failing test [E]",
+        ] {
+            assert!(proof.is_match(line), "must prove a test ran: {line:?}");
+        }
+        for line in [
+            "Installing ../../../../../../tmp/integration-apks/m7_worker_disable_test.apk...      1,362ms",
+            "VMServiceFlutterDriver: Connected to Flutter application.",
+            "I/Choreographer( 4457): Skipped 59 frames!  The application may be doing too much work",
+            "All tests passed.",
+            "D/WM-SystemJobScheduler( 4457): Scheduling work ID 7580a323 Job ID 5",
+        ] {
+            assert!(
+                !proof.is_match(line),
+                "the tool's own furniture is printed whether or not a test ran: {line:?}"
+            );
+        }
+        for (sink, spec) in &policy.sinks {
+            assert_eq!(
+                spec.proof_of_run.is_some(),
+                sink == "drive",
+                "`{sink}`: only a class whose every capture comes from a test reporter has such a line"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_proof_of_run_is_rejected() {
+        let text = r#"
+schema = 1
+base64_entropy_bits = 4.2
+min_term_len = 6
+furniture = []
+[classes]
+[sinks]
+drive = { term_floor = 6, declared_plants_expected = false, structural_rules = true, reassemble = false, min_lines = 1, entry_format = "plain", proof_of_run = "" }
+[ledger]
+"#;
+        let err = Policy::parse(text).expect_err("a proof every line satisfies is no proof");
+        assert!(err.contains("proves nothing"), "{err}");
+    }
+
+    #[test]
+    fn a_proof_of_run_that_is_not_a_regex_is_rejected() {
+        let text = r#"
+schema = 1
+base64_entropy_bits = 4.2
+min_term_len = 6
+furniture = []
+[classes]
+[sinks]
+drive = { term_floor = 6, declared_plants_expected = false, structural_rules = true, reassemble = false, min_lines = 1, entry_format = "plain", proof_of_run = "+[" }
+[ledger]
+"#;
+        let err = Policy::parse(text).expect_err("a proof nothing can match is rc 4 on every run");
+        assert!(err.contains("not a valid regular expression"), "{err}");
     }
 
     #[test]

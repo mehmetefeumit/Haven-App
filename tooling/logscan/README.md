@@ -490,6 +490,47 @@ instead of lowering the default, with the measured basis and the run it was
 measured from stated beside it. Lowering a default to fit the smallest lane
 would take the floor off every other one.
 
+### The proof a line count cannot be (`proof_of_run`)
+
+"Calibrated to the smallest COMPLETE capture" holds for every class whose
+captures have a deterministic length. `drive` is not one: a `flutter drive`
+transcript is the tool's own output interleaved with whatever logcat furniture
+the device happened to print (`Choreographer: Skipped N frames`,
+`ProfileInstaller`, `WM-SystemJobScheduler`) and with a closing `+N: All tests
+passed!` that races the driver's disconnect. So there is no number that clears
+every complete transcript without also clearing one in which nothing ran, and
+twice a lane found out by reddening a complete capture (a 22-line one under a
+floor of 35, then a 19-line one under 20 — CI run 35464818348).
+
+That class therefore carries a second, non-numeric half of the anti-vacuity
+check: `policy.toml`'s `proof_of_run`, a regex of which at least one line of the
+class's capture must match, or the class is rc 4 with "no test ever started".
+Per CLASS, exactly like the floor — the floor sums a class's files, this one
+ORs them, so a multi-file gate (`--sink drive=<final>,<full>`) is proven by
+whichever file carries the line, which is right because the other file is a
+retry wrapper or a mirror drive, not a second run. For
+`drive` it is the test reporter's own progress line — `HH:MM +N: <name>`,
+forwarded by Android logcat as `I/flutter ( pid): 00:00 +0: …`, bare in a
+`flutter test` transcript, and `+N -M:` when a test has failed — which the
+reporter writes **before the first test body runs**. It is the one class that
+declares one, because it is the one class whose every capture comes from a test
+reporter; a class whose producer writes no such line would be rc 4 on every
+green run. `seal --floor` tunes the line floor and can never remove it
+(`Manifest::proof_of_run` reads the sink spec, which every manifest re-reads
+from the compiled-in policy), and `scripts/ci/check_logscan_policy.sh`'s P8
+pins which class carries it and what it says.
+
+With "a test ran" proven this way, an **Android drive floor** is calibrated to
+the lines `flutter drive` prints on the HOST, which no device chatter changes:
+the `Installing …` line, the six `VMServiceFlutterDriver:` lines, the verdict,
+and `Leaving the application running.` where the lane keeps the app alive. That
+is what run-m7-background-catchup.sh's `drive=9` is, and its `--self-test` reds
+if the floor ever exceeds that skeleton again. It is so far the only floor
+derived that way: every other lane's is still measured from a whole transcript
+(an iOS one has no such skeleton at all — the simulator forwards no device
+chatter), and until each is re-derived the proof is what keeps a vacuous capture
+of theirs from reading clean.
+
 The floor of 7 that every strfry lane passes is the clearest case of what a
 floor is for: strfry's own `docker logs` dump is 14-23 lines for a full run,
 of which the first 9 are a fixed startup block, while the same command against

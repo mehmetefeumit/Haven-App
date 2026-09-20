@@ -1,5 +1,6 @@
 [Haven] startup complete for circle#a91f3c at epoch+0
 logscan-plant-dart-open-ABCDEFGHJK
+I/flutter ( 4457): 00:00 +0: the core flow settles a circle
 [LocationSharing] published to relay#0b12cc at t+0s, members bucket 2-4
 [Circle] member peer#77ab21 joined, epoch+1
 [Identity] secret loaded from the keychain, type=Keys

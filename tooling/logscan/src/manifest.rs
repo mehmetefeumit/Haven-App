@@ -176,6 +176,21 @@ impl Manifest {
             .or_else(|| self.sinks.get(class).map(|s| s.min_lines))
             .unwrap_or(0)
     }
+
+    /// The line that proves a capture of `class` is of a run that happened.
+    ///
+    /// Answered from the sink spec ALONE, which every [`read_manifest`] re-reads
+    /// from the compiled-in policy. `floors` is the caller's half of the
+    /// anti-vacuity check and `seal --floor <class>=<n>` tunes it per lane, so a
+    /// proof answered from there would be one a lane could delete with a seal
+    /// argument — and a lane whose floor is low is precisely the lane that needs
+    /// the proof.
+    #[must_use]
+    pub fn proof_of_run(&self, class: &str) -> Option<&str> {
+        self.sinks
+            .get(class)
+            .and_then(|spec| spec.proof_of_run.as_deref())
+    }
 }
 
 /// One line of a `.needles.decl` sidecar.
@@ -1155,6 +1170,36 @@ mod tests {
             policy.sinks["rust-test"].min_lines
         );
         assert_eq!(manifest.floor("drive"), policy.sinks["drive"].min_lines);
+        assert_eq!(
+            manifest.proof_of_run("drive"),
+            policy.sinks["drive"].proof_of_run.as_deref()
+        );
+    }
+
+    /// A `--floor` override tunes the line floor and cannot delete the proof.
+    ///
+    /// The two halves of the anti-vacuity check answer different questions, and
+    /// only one of them is the lane's to set: a lane whose transcripts are
+    /// legitimately short lowers its floor, and that is precisely the lane where
+    /// "did a test run at all" stops being answerable by the line count.
+    #[test]
+    fn a_floor_override_cannot_remove_a_sink_s_proof_of_run() {
+        let policy = Policy::load().expect("policy");
+        let mut inputs = inputs("m-floor");
+        inputs.floors.insert("drive".to_owned(), 1);
+        let manifest =
+            super::seal_from_declarations(&policy, &declared(&[("pubkey", A_PUBKEY)]), &inputs)
+                .expect("seals");
+        assert_eq!(manifest.floor("drive"), 1);
+        assert_eq!(
+            manifest.proof_of_run("drive"),
+            policy.sinks["drive"].proof_of_run.as_deref()
+        );
+        assert!(
+            manifest.proof_of_run("drive").is_some(),
+            "the drive class is the one that carries a proof; without it this test asserts nothing"
+        );
+        assert_eq!(manifest.proof_of_run("logcat"), None);
     }
 
     /// One host declaration per `(class, value)`, through the same door a

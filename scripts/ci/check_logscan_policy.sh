@@ -50,6 +50,15 @@
 #       names the emitter. It is the only exemption in this tree that touches
 #       the NEEDLE search (a value the run actually minted), so widening it by
 #       an emitter, a class or a sink must not be a one-line diff nobody reads.
+#   P8  PROOF-OF-RUN PINNED. `proof_of_run` — the line that proves a capture is
+#       of a run that HAPPENED — appears on exactly the sinks in PROOF_OF_RUN
+#       (today: `drive` alone, the one class whose every capture comes from a
+#       test reporter), spelled exactly as pinned there, and the README explains
+#       it. Both directions matter: dropping it from `drive` would leave that
+#       class's anti-vacuity check to a line count, which cannot tell a short
+#       COMPLETE transcript from an empty one (CI run 35464818348), and adding
+#       it to a class whose producer writes no such line would be rc 4 on every
+#       green run.
 #
 # Floors on the number of sinks and classes parsed keep a policy the parser
 # has stopped reading from passing as compliant. What the floors CANNOT see is a
@@ -117,6 +126,18 @@ declare -A EMITTER_SCOPED_OUT=(
 )
 readonly EMITTER_SCOPE_KEY='emitter_scoped_out'
 readonly EMITTER_SCOPE_DOC='com.apple.locationd.Position'
+# The sink classes that prove a capture is of a run that HAPPENED, pinned
+# verbatim with the line they prove it by. A line floor cannot make that
+# distinction — how long a `flutter drive` transcript is depends on the device
+# chatter the tool forwarded, so the floor that clears the shortest complete one
+# clears an empty one too — and the test reporter's progress line, written
+# before the first test body runs, can. Only a class whose every capture comes
+# from a test reporter may carry it; on any other class it would be rc 4 on
+# every green run. The README must explain the key.
+declare -A PROOF_OF_RUN=(
+  ['drive']="proof_of_run = '[0-9]{2}:[0-9]{2} \\+[0-9]+( -[0-9]+)?: '"
+)
+readonly PROOF_OF_RUN_KEY='proof_of_run'
 # Sinks whose DECLARED Dart plant tokens are not demanded, with the reason;
 # the README's positive-controls bullet must name each one.
 declare -A DECLARED_PLANTS_OFF=(
@@ -197,6 +218,14 @@ check_policy() { # check_policy <policy> <readme>
     elif grep -qF -- "${EMITTER_SCOPE_KEY}" <<<"${body}"; then
       violation "${rel}: sink \`${name}\` scopes a needle class out of an emitter and is not pinned here. A needle is a value the run minted; declining to search for it on some emitter's lines is the one allowance with no allowlist path, so it is listed here verbatim and explained in the README, or it does not exist."
     fi
+    # P8: the proof that a capture's subject ran at all, pinned as a literal in
+    # both directions.
+    if [[ -n "${PROOF_OF_RUN[${name}]+x}" ]]; then
+      grep -qF -- "${PROOF_OF_RUN[${name}]}" <<<"${body}" \
+        || violation "${rel}: sink \`${name}\` no longer carries the pinned proof-of-run line \`${PROOF_OF_RUN[${name}]}\`. Without it this class's only anti-vacuity check is a line count, which cannot tell a short COMPLETE capture from one in which nothing ran (CI run 35464818348). Changing what proves a run is a decision; make it here, with the reason, and in the README."
+    elif grep -qF -- "${PROOF_OF_RUN_KEY}" <<<"${body}"; then
+      violation "${rel}: sink \`${name}\` declares a proof_of_run and is not pinned here. Only a class whose every capture comes from a test reporter has a line written before the first test body; demanding one from any other producer is rc 4 on every green run. List it here with the reason, and in the README, or delete the key."
+    fi
   done <<<"${entries}"
   if (( n_sinks < MIN_SINKS )); then
     broken "${rel}: parsed ${n_sinks} sink(s) under [sinks], expected at least ${MIN_SINKS}. The section parser has stopped matching, so every verdict above is vacuous."
@@ -230,6 +259,12 @@ check_policy() { # check_policy <policy> <readme>
   # records are searched for one class less is named where the next reader looks.
   if (( ${#EMITTER_SCOPED_OUT[@]} > 0 )) && ! grep -qF -- "${EMITTER_SCOPE_DOC}" "${readme}"; then
     violation "${README_REL}: the README does not name \`${EMITTER_SCOPE_DOC}\`, the emitter the policy scopes a needle class out of. It is the only needle exemption in the tree; say there which class, why that emitter holds the value by construction, and what still catches a real leak of it."
+  fi
+
+  # …and for the proof-of-run line: the one anti-vacuity check that is not a
+  # number, so the next reader has to find it where the floors are explained.
+  if (( ${#PROOF_OF_RUN[@]} > 0 )) && ! grep -qF -- "${PROOF_OF_RUN_KEY}" "${readme}"; then
+    violation "${README_REL}: nothing explains \`${PROOF_OF_RUN_KEY}\`. It is what a line floor cannot be — the proof that a capture's subject ran at all — so say there which class carries it, which line proves it, and why a floor could not."
   fi
 
   local classes ledgers kind n_classes=0
@@ -316,7 +351,7 @@ check_all() { # check_all <policy> <allowlist> <readme> <proof-root>
 # scratch. Every rule has a fixture in both directions; the count is pinned.
 # ---------------------------------------------------------------------------
 self_test() {
-  local -r SELF_TEST_CASES=41
+  local -r SELF_TEST_CASES=46
   local tmp cases=0 failures=0
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
@@ -440,6 +475,17 @@ self_test() {
   _expect "(P7) a README that never names the scoped emitter fails" "${d}" 1 "does not name \`com.apple.locationd.Position\`"
   _expect "(P7) the shipped exemption passes (base)" "${b}" 0
 
+  # P8
+  d="${tmp}/p8a"; mut "${d}" policy.toml "/^drive = /s|, proof_of_run = '[^']*'||"
+  _expect "(P8) dropping the proof-of-run line from the test-reporter sink fails" "${d}" 1 "no longer carries the pinned proof-of-run line"
+  d="${tmp}/p8b"; mut "${d}" policy.toml "/^drive = /s|proof_of_run = '[^']*'|proof_of_run = 'ran'|"
+  _expect "(P8) a proof-of-run line rewritten to something else fails" "${d}" 1 "no longer carries the pinned proof-of-run line"
+  d="${tmp}/p8c"; mut "${d}" policy.toml "/^logcat = /s|entry_format = \"logcat\"|entry_format = \"logcat\", proof_of_run = 'x'|"
+  _expect "(P8) a second sink acquiring a proof-of-run line fails" "${d}" 1 "sink \`logcat\` declares a proof_of_run"
+  d="${tmp}/p8d"; mut "${d}" README.md 's|proof_of_run|proof-of-run-line|g'
+  _expect "(P8) a README that never explains the key fails" "${d}" 1 "nothing explains"
+  _expect "(P8) the shipped proof passes (base)" "${b}" 0
+
   # floors
   d="${tmp}/v1"; mut "${d}" policy.toml 's|^\[sinks\]|[sinks_renamed]|'
   _expect "floor: a [sinks] section the parser cannot find is BROKEN" "${d}" 2 "parsed 0 sink(s)"
@@ -481,7 +527,7 @@ main() {
     echo "and CLAUDE.md (Log anonymity, Security Rule 15)." >&2
     exit 1
   fi
-  log "OK — no deferral vocabulary, structural rules on except relay, the cargo exemption on the listed cargo-transcript sinks only and explained, the needle exemption pinned to one emitter and one class and explained, plant expectations pinned and explained, allowlist entries shaped and live, every class ledgered."
+  log "OK — no deferral vocabulary, structural rules on except relay, the cargo exemption on the listed cargo-transcript sinks only and explained, the needle exemption pinned to one emitter and one class and explained, the proof-of-run line pinned to the test-reporter class and explained, plant expectations pinned and explained, allowlist entries shaped and live, every class ledgered."
 }
 
 main "$@"
