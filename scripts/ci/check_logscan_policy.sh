@@ -130,12 +130,18 @@ readonly EMITTER_SCOPE_DOC='com.apple.locationd.Position'
 # verbatim with the line they prove it by. A line floor cannot make that
 # distinction — how long a `flutter drive` transcript is depends on the device
 # chatter the tool forwarded, so the floor that clears the shortest complete one
-# clears an empty one too — and the test reporter's progress line, written
-# before the first test body runs, can. Only a class whose every capture comes
-# from a test reporter may carry it; on any other class it would be rc 4 on
-# every green run. The README must explain the key.
+# clears an empty one too — and a line the test REPORTER writes can. Which line
+# depends on which reporter ran, so the pinned value is an alternation over the
+# renderings this tree captures: the expanded/compact progress line and the
+# github reporter's per-test `✅`/`❌` line, the latter because `test_core`
+# selects that reporter whenever `GITHUB_ACTIONS == 'true'` and its transcripts
+# carry no progress line at all. Narrowing the alternation is how a lane goes rc
+# 4 on a green run (35478132251); widening it to the skip glyph is how a
+# transcript of nothing but skipped tests would read as proof. Only a class whose
+# every capture comes from a test reporter may carry it; on any other class it
+# would be rc 4 on every green run. The README must explain the key.
 declare -A PROOF_OF_RUN=(
-  ['drive']="proof_of_run = '[0-9]{2}:[0-9]{2} \\+[0-9]+( -[0-9]+)?: '"
+  ['drive']="proof_of_run = '[0-9]{2}:[0-9]{2} \\+[0-9]+( -[0-9]+)?: |^(::group::)?(✅|❌) '"
 )
 readonly PROOF_OF_RUN_KEY='proof_of_run'
 # Sinks whose DECLARED Dart plant tokens are not demanded, with the reason;
@@ -351,7 +357,7 @@ check_all() { # check_all <policy> <allowlist> <readme> <proof-root>
 # scratch. Every rule has a fixture in both directions; the count is pinned.
 # ---------------------------------------------------------------------------
 self_test() {
-  local -r SELF_TEST_CASES=46
+  local -r SELF_TEST_CASES=48
   local tmp cases=0 failures=0
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
@@ -484,6 +490,14 @@ self_test() {
   _expect "(P8) a second sink acquiring a proof-of-run line fails" "${d}" 1 "sink \`logcat\` declares a proof_of_run"
   d="${tmp}/p8d"; mut "${d}" README.md 's|proof_of_run|proof-of-run-line|g'
   _expect "(P8) a README that never explains the key fails" "${d}" 1 "nothing explains"
+  # The two directions the alternation itself can move. Narrowing it back to the
+  # compact progress line is what reddened run 35478132251 (a github-reporter
+  # transcript has none); widening it to the skip glyph would let a transcript of
+  # nothing but skipped tests — no body run at all — read as proof.
+  d="${tmp}/p8e"; mut "${d}" policy.toml "/^drive = /s@'([^']*)\\|\\^[^']*'@'\\1'@"
+  _expect "(P8) narrowing the proof back to the compact reporter alone fails" "${d}" 1 "no longer carries the pinned proof-of-run line"
+  d="${tmp}/p8f"; mut "${d}" policy.toml '/^drive = /s@❌@❌|❎@'
+  _expect "(P8) widening the proof to the skip glyph fails" "${d}" 1 "no longer carries the pinned proof-of-run line"
   _expect "(P8) the shipped proof passes (base)" "${b}" 0
 
   # floors

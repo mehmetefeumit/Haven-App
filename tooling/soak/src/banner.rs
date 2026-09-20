@@ -295,17 +295,28 @@ mod tests {
             .max()
             .unwrap_or(0);
         assert!(longest < 32, "the banner rendered a 32-hex run: {head}");
-        assert!(banner().provenance.commit_short().len() == COMMIT_MAX_HEX);
+        assert_eq!(banner().provenance.commit_short().len(), COMMIT_MAX_HEX);
     }
 
     #[test]
     fn a_commit_that_is_not_a_sha_is_dropped_rather_than_printed() {
         // The field is a commit sha or it is unknown: anything else reaching a
-        // scanned file is a string somebody else composed.
+        // scanned file is a string somebody else composed — which is also why
+        // these are not `assert_eq!`: Rule 15 keeps a caller's string, sha or
+        // toolchain, out of a panic.
         let provenance = Provenance::new(Some("refs/heads/main"), None);
-        assert!(provenance.commit_short() == "unknown");
-        assert!(provenance.rustc() == "unknown");
-        assert!(Provenance::new(Some("  "), Some(" ")).commit_short() == "unknown");
+        assert!(
+            provenance.commit_short() == "unknown",
+            "a ref name is not a sha"
+        );
+        assert!(
+            provenance.rustc() == "unknown",
+            "an absent toolchain reads as unknown"
+        );
+        assert!(
+            Provenance::new(Some("  "), Some(" ")).commit_short() == "unknown",
+            "whitespace is not a sha"
+        );
         assert!(Provenance::default().commit_short().is_empty());
     }
 
@@ -365,7 +376,7 @@ mod tests {
         // honest answer is None, and the banner prints that rather than a zero.
         let measured = Measured::new(Duration::from_secs(3));
         let later = peak_rss_mib();
-        assert!(measured.wall.as_secs() == 3);
+        assert_eq!(measured.wall.as_secs(), 3);
         assert!(
             measured.peak_rss_mib.is_some() == later.is_some(),
             "the measurement and the reading must come from the same source"

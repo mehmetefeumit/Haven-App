@@ -508,17 +508,45 @@ class's capture must match, or the class is rc 4 with "no test ever started".
 Per CLASS, exactly like the floor — the floor sums a class's files, this one
 ORs them, so a multi-file gate (`--sink drive=<final>,<full>`) is proven by
 whichever file carries the line, which is right because the other file is a
-retry wrapper or a mirror drive, not a second run. For
-`drive` it is the test reporter's own progress line — `HH:MM +N: <name>`,
-forwarded by Android logcat as `I/flutter ( pid): 00:00 +0: …`, bare in a
-`flutter test` transcript, and `+N -M:` when a test has failed — which the
-reporter writes **before the first test body runs**. It is the one class that
-declares one, because it is the one class whose every capture comes from a test
-reporter; a class whose producer writes no such line would be rc 4 on every
-green run. `seal --floor` tunes the line floor and can never remove it
-(`Manifest::proof_of_run` reads the sink spec, which every manifest re-reads
-from the compiled-in policy), and `scripts/ci/check_logscan_policy.sh`'s P8
-pins which class carries it and what it says.
+retry wrapper or a mirror drive, not a second run.
+
+For `drive` it is a line the test REPORTER wrote, and which line that is depends
+on the reporter `flutter` picked, so the pattern is an alternation over the two
+reporters this tree captures:
+
+* **`HH:MM +N: <name>`** — the expanded/compact progress line, which the reporter
+  writes **before the first test body runs**. Bare in a `flutter test` transcript
+  and in an iOS `flutter test <file> -d <udid>` one (only because
+  `run-ios-sim-scenario.sh` pins `--reporter expanded`; without that pin a
+  hosted iOS run would be github-rendered too); forwarded by Android logcat
+  as `I/flutter ( pid): 00:00 +0: …`. `+N -M:` is its failing form, which proves
+  a test ran just as well.
+* **`✅ <path>: <name>`** — the github reporter's per-test line, for a test that
+  finished with no output; **`::group::✅ …`** when it wraps the output the test
+  printed, and `❌` when the test failed. This rendering exists because
+  `test_core`'s `defaultReporter` picks the github reporter whenever
+  `GITHUB_ACTIONS == 'true'`, which is EVERY hosted run: `coverage.yml`'s
+  `flutter test --coverage` transcript therefore has no progress line anywhere in
+  it, and CI run 35478132251 was rc 4 over 13 261 lines and 4 673 passing tests
+  for exactly that reason.
+
+The skip glyph `❎` is deliberately NOT in the alternation: a skipped test is one
+whose body did not run, so a transcript of nothing but skips is the vacuous
+capture this check exists to catch. Nor is the closing `🎉 N tests passed`
+summary, which the reporter writes whatever N is, `0` included. Both fixtures —
+`fixtures/furniture.flutter-test.log` (compact) and
+`fixtures/furniture.flutter-test-github.log` (github) — are scanned as-is and
+again with every matching line deleted, so neither branch can pass for the wrong
+reason.
+
+`drive` is the one class that declares a proof, because it is the one class whose
+every capture comes from a test reporter; a class whose producer writes no such
+line would be rc 4 on every green run. `seal --floor` tunes the line floor and
+can never remove it (`Manifest::proof_of_run` reads the sink spec, which every
+manifest re-reads from the compiled-in policy), and
+`scripts/ci/check_logscan_policy.sh`'s P8 pins which class carries it and what it
+says — in both directions, so neither narrowing it back to one reporter nor
+widening it to the skip glyph is a one-line diff nobody reads.
 
 With "a test ran" proven this way, an **Android drive floor** is calibrated to
 the lines `flutter drive` prints on the HOST, which no device chatter changes:
@@ -806,6 +834,18 @@ local Blossom server by loopback URL is NOT in the cargo corpus, because it is a
 real address that S12 is right to see and the lanes exempt it explicitly instead;
 the app lines whose alias handles the sanitiser masked are not in the Flutter
 corpus, because a masked line is not verbatim.
+
+`furniture.flutter-test-github.log` is the same class again in the OTHER
+rendering: the hosted `flutter test --coverage` transcript of CI run 35478132251,
+where `test_core` picked the github reporter because `GITHUB_ACTIONS == 'true'`,
+so the whole capture is `✅` / `::group::✅` / `::endgroup::` lines with no
+progress line anywhere. It exists because the compact corpus is a LOCAL capture
+and therefore could not represent the lane that actually runs: the proof-of-run
+pattern was validated against it, passed, and then reddened a green coverage job.
+What the JOB LOG adds is undone, because the tee'd file the lane scans has
+neither half of it: the job/step/timestamp column is stripped, and `##[group]`
+is put back to the `::group::` the reporter writes. The anchored branch depends
+on both — it matches only a line the reporter itself opened.
 
 `format.ios.log` is documented under **Sink framing** above: captured furniture
 from CI run 35280144455 for the shapes, plus written probes for the ownership

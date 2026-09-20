@@ -12,6 +12,7 @@
 //! layer's own subject and is tested there, against the frame bytes.
 
 use std::collections::HashSet;
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -128,7 +129,10 @@ impl RelayPlane for TestRelay {
         &self.url
     }
 
-    async fn apply(&mut self, fault: Fault) -> Result<(), RigError> {
+    // Not `async`: recording a fault and flipping an atomic awaits nothing,
+    // and the trait's return type is the future itself, so the double answers
+    // it with a ready one rather than an empty state machine.
+    fn apply(&mut self, fault: Fault) -> impl Future<Output = Result<(), RigError>> + Send {
         self.applied
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -138,7 +142,7 @@ impl RelayPlane for TestRelay {
             Fault::Heal => self.swallow_ok.store(false, Ordering::Release),
             _ => {}
         }
-        Ok(())
+        std::future::ready(Ok(()))
     }
 
     fn faults_applied(&self) -> usize {

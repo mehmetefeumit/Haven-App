@@ -245,8 +245,14 @@ above is a function (`soak_finalize`) reached three ways: at the end of a
 healthy run, from the runner's own TERM/INT/EXIT traps inside the 60 s kill
 grace, and once more from the lane's own `Scan the soak evidence before upload`
 step, which runs `run-soak-core.sh --scan-only <profile>` on `!cancelled()` —
-the only one of the three a SIGKILL after the grace cannot skip. The scan is
-idempotent: a second pass over a clean tree re-reads it, over a CONTAINED one
+the only one of the three a SIGKILL after the grace cannot skip. Once entered,
+the scan IGNORES TERM, INT and HUP for the rest of the process: the deadline
+signals the whole group, so it lands inside the scan as readily as before it,
+and a handler re-entering mid-pass left the tree emptied by the key-material
+floor and never contained. What can still stop it is the SIGKILL 60 s later,
+which is what the lane's own step is for. Within one process the scan runs
+once and a second call answers with the first pass's verdict; across processes
+it is idempotent: a second pass over a clean tree re-reads it, over a CONTAINED one
 reports the leak that emptied it without re-reading the harness's own note, and
 over a tree the drive never created (a build step failed above it) reports
 nothing at all rather than a second red. `check_soak_lane_reachable.sh` L7 is

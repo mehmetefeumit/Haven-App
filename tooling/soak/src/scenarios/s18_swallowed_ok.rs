@@ -435,8 +435,8 @@ mod tests {
         // A create that was rolled back crosses none, and a location send never
         // does: an arm claiming otherwise would be graded on a commit it did
         // not make.
-        assert!(ARMS[0].floor.epochs_crossed == 0);
-        assert!(ARMS[1].floor.epochs_crossed == 1);
-        assert!(ARMS[2].floor.epochs_crossed == 0);
+        assert_eq!(ARMS[0].floor.epochs_crossed, 0);
+        assert_eq!(ARMS[1].floor.epochs_crossed, 1);
+        assert_eq!(ARMS[2].floor.epochs_crossed, 0);
     }
 }

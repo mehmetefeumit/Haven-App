@@ -144,14 +144,26 @@ ios = { term_floor = 8, declared_plants_expected = false, structural_rules = tru
 # capture (the test started, tore down and passed) went rc 4 under a floor of
 # 20, while its sibling passed at 21 for carrying one more line of vendor
 # chatter and the reporter's closing line, which the driver's disconnect had
-# cut from the first. The test reporter's progress line — `HH:MM +N: <name>`,
-# forwarded by Android logcat as `I/flutter ( pid): 00:00 +0: …` and bare in a
-# `flutter test` transcript — is written BEFORE the first test body runs, so a
-# transcript without it is exactly the thing a floor was ever there to catch.
-# `( -[0-9]+)?` admits the failing-run rendering (`+3 -1:`), which proves a
-# test ran just as well. Only `drive` declares one: it is the one class whose
-# every capture comes from a test reporter.
-drive = { term_floor = 6, declared_plants_expected = true, structural_rules = true, reassemble = false, min_lines = 100, entry_format = "plain", proof_of_run = '[0-9]{2}:[0-9]{2} \+[0-9]+( -[0-9]+)?: ' }
+# cut from the first. What proves a test ran is a line the REPORTER writes, and
+# a `flutter` invocation picks its reporter from the environment, so the pattern
+# is an alternation over the renderings this tree actually captures:
+#   * the expanded/compact progress line `HH:MM +N: <name>`, written BEFORE the
+#     first test body runs — bare in a `flutter test` transcript and forwarded by
+#     Android logcat as `I/flutter ( pid): 00:00 +0: …`. `( -[0-9]+)?` admits its
+#     failing-run form (`+3 -1:`), which proves a test ran just as well;
+#   * the GITHUB reporter's per-test line, `✅ <path>: <name>` for a test with no
+#     output and `::group::✅ …` for one whose output it wraps (`❌` when the test
+#     failed). `test_core`'s `defaultReporter` selects this reporter whenever
+#     `GITHUB_ACTIONS == 'true'`, which is EVERY hosted run, so the coverage
+#     lane's transcript has no progress line at all — CI run 35478132251 was rc 4
+#     on a transcript of thousands of passing tests for exactly that reason.
+# The skip glyph `❎` is deliberately absent: a skipped test is one whose body did
+# not run, so a transcript of nothing but skips is the vacuous capture this check
+# exists to catch. The closing `🎉 N tests passed` summary is absent for the same
+# reason — the reporter writes it whatever N is, `0` included.
+# Only `drive` declares a proof: it is the one class whose every capture comes
+# from a test reporter.
+drive = { term_floor = 6, declared_plants_expected = true, structural_rules = true, reassemble = false, min_lines = 100, entry_format = "plain", proof_of_run = '[0-9]{2}:[0-9]{2} \+[0-9]+( -[0-9]+)?: |^(::group::)?(✅|❌) ' }
 rust-test = { term_floor = 6, declared_plants_expected = false, structural_rules = true, reassemble = false, min_lines = 20, entry_format = "plain", cargo_status = "exempt" }
 proxy = { term_floor = 6, declared_plants_expected = false, structural_rules = true, reassemble = false, min_lines = 5, entry_format = "plain" }
 diag = { term_floor = 6, declared_plants_expected = false, structural_rules = true, reassemble = false, min_lines = 1, entry_format = "plain" }

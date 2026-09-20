@@ -387,15 +387,15 @@ mod tests {
         // The pair that makes the arm meaningful: a prefix Haven drops on and
         // one it backs off on. Picking two of the same kind would grade one
         // behaviour twice.
-        assert!(THROTTLED_PREFIX == ClosedPrefix::RateLimited);
-        assert!(DROPPED_PREFIX != ClosedPrefix::RateLimited);
-        assert!(DROPPED_PREFIX != ClosedPrefix::AuthRequired);
+        assert_eq!(THROTTLED_PREFIX, ClosedPrefix::RateLimited);
+        assert_ne!(DROPPED_PREFIX, ClosedPrefix::RateLimited);
+        assert_ne!(DROPPED_PREFIX, ClosedPrefix::AuthRequired);
     }
 
     #[test]
     fn the_absence_windows_are_the_products_own_and_are_paid_for() {
-        assert!(ARMS[0].absence.window() == bounds::throttled_backoff_floor());
-        assert!(ARMS[2].absence.window() == bounds::silence_window());
+        assert_eq!(ARMS[0].absence.window(), bounds::throttled_backoff_floor());
+        assert_eq!(ARMS[2].absence.window(), bounds::silence_window());
         assert!(
             ARMS[1].absence == Absence::None,
             "a notice asserts no absence"

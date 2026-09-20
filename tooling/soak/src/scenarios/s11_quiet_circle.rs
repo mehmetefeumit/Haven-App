@@ -305,7 +305,7 @@ mod tests {
     #[test]
     fn the_arm_grades_the_quiet_span_and_the_resume() {
         let arm = ARMS[0];
-        assert!(arm.recovery == Recovery::Undisturbed);
+        assert_eq!(arm.recovery, Recovery::Undisturbed);
         assert!(
             arm.probe_rounds == 1,
             "the span itself is read, not probed; the resume is the probe"
@@ -318,7 +318,7 @@ mod tests {
 
     #[test]
     fn a_stamp_is_converted_once_and_truncates_toward_the_past() {
-        assert!(stamp_secs(Some(1_999)) == Some(1));
+        assert_eq!(stamp_secs(Some(1_999)), Some(1));
         assert!(stamp_secs(None).is_none());
     }
 }

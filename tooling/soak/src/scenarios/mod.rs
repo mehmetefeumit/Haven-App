@@ -991,7 +991,7 @@ mod tests {
         let rendered = Scenario::RelayOutage.to_string();
         assert!(rendered.contains("S01"), "{rendered}");
         assert!(rendered.contains("RELAY OUTAGE"), "{rendered}");
-        assert!(Scenario::with_id("S01") == Some(Scenario::RelayOutage));
+        assert_eq!(Scenario::with_id("S01"), Some(Scenario::RelayOutage));
         assert!(Scenario::with_id("S99").is_none());
     }
 

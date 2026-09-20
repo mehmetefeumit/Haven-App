@@ -1,0 +1,56 @@
+# Negative control: REAL furniture, verbatim from the `flutter test --coverage`
+# transcript of CI run 35478132251's `Coverage / Flutter Coverage` job — the
+# capture that job scans with `--rules-only`. What the JOB LOG adds is undone —
+# its job/step/timestamp column stripped, its `##[group]`/`##[endgroup]` put
+# back to the `::group::`/`::endgroup::` the reporter writes to the tee'd file.
+#
+# This is the SAME sink class as `furniture.flutter-test.log` and a DIFFERENT
+# reporter. `flutter test` picks its reporter from the environment
+# (`test_core`'s `defaultReporter` in `runner/configuration/reporters.dart`:
+# `GITHUB_ACTIONS == 'true'` wins over `compact`), so on a hosted runner there
+# is NO `HH:MM +N:` progress line anywhere in the transcript — the older fixture
+# is a local capture and carries only the compact one. Run 35478132251 was rc 4
+# on exactly that: every test passed, and the `drive` class's proof-of-run
+# pattern matched none of the transcript. These lines are what it must match:
+#   * `✅ <path>: <name>` — a test that finished, one line, no output;
+#   * `::group::✅ …` / `::endgroup::` — the same, wrapping the output the test
+#     printed, which is where every app line of a github-reporter transcript is;
+#   * `::group::❎ … (skipped)` — a test whose BODY never ran, which is why the
+#     skip glyph is deliberately NOT proof of a run.
+# The closing `🎉` summary is furniture too, and is not the proof either: the
+# reporter writes it whatever the counts are, `0 tests passed` included.
+
+✅ /home/runner/work/Haven-App/Haven-App/haven/test/e2e/pump_helpers_test.dart: tapWhenHittable taps an immediately-hittable widget
+✅ /home/runner/work/Haven-App/Haven-App/haven/test/lints/secret_bytes_scrub_test.dart: detector self-tests permits a local capture scrubbed in a finally block
+✅ /home/runner/work/Haven-App/Haven-App/haven/test/lints/ref_in_dispose_test.dart: ref-in-dispose detector does NOT flag a field-cached service accessed WITHOUT ref — the correct fix pattern (field cached in initState)
+✅ /home/runner/work/Haven-App/Haven-App/haven/test/services/key_package_maintenance_outcome_test.dart: classifyKeyPackageMaintenance — a retired malformed slot an ordinary tick never invents a retirement
+::group::✅ /home/runner/work/Haven-App/Haven-App/haven/test/services/location_sharing_service_test.dart: LocationSharingService onAppPaused aborts a fetch that was paused mid-await without repopulating caches
+[LocationService] No cached last-known rows for circle
+[LocationService] in-memory caches cleared on pause
+[LocationService] fetch aborted — paused mid-await
+::endgroup::
+✅ /home/runner/work/Haven-App/Haven-App/haven/test/services/encrypted_tile_caching_provider_test.dart: EncryptedTileCachingProvider getTile non-retina URL passes retina=false to store
+✅ /home/runner/work/Haven-App/Haven-App/haven/test/services/geolocator_location_service_test.dart: GeolocatorLocationService iOS stream route the stream comes from the native session, carrying backgroundSharingEnabled: false, and never from the plugin
+::group::✅ /home/runner/work/Haven-App/Haven-App/haven/test/providers/location_sharing_provider_test.dart: locationPublisherProvider — disclosure gate returns 0 and never calls getCurrentLocation when disclosure flag is absent
+[LocationPublish] Provider executing...
+[LocationPublish] Identity loaded
+[LocationPublish] Disclosure not accepted yet — skipping
+::endgroup::
+::group::❎ /home/runner/work/Haven-App/Haven-App/haven/test/providers/background_location_provider_test.dart: BackgroundSharingNotifier.setEnabled — permission gating Android: enable + Granted → state true, prefs true, returns Granted (skipped)
+Skip: Platform.isAndroid == false on runner — see T9 for seam version
+::endgroup::
+✅ /home/runner/work/Haven-App/Haven-App/haven/test/providers/relay_status_provider_test.dart: RelayStatusState.ringSlots any kind found (and none checking) -> ok
+✅ /home/runner/work/Haven-App/Haven-App/haven/test/widgets/map/sharing_health_banner_test.dart: accessibility a fault that appeared while away is left to the live region
+✅ /home/runner/work/Haven-App/Haven-App/haven/test/widgets/circles/circle_member_tile_test.dart: CircleMemberTile — style / subtitle / avatar regression guards self with settings display name renders title in the default (non-mono) style
+::group::❎ /home/runner/work/Haven-App/Haven-App/haven/test/l10n/pseudo_locale_sweep_test.dart: pseudo-locale sweep AboutPage does not overflow at 200% scale (skipped)
+Skip: app_en_XA.arb absent
+::endgroup::
+✅ /home/runner/work/Haven-App/Haven-App/haven/test/l10n/location_settings_copy_accuracy_test.dart: ne iOS settings copy no sentence uses a separator screen readers skip
+✅ /home/runner/work/Haven-App/Haven-App/haven/test/constants/location_test.dart: location constants kLocationUpdateInterval is 2 minutes (120 seconds)
+✅ /home/runner/work/Haven-App/Haven-App/haven/test/pages/identity_page_test.dart: IdentityPage structure renders the photo header and display-name card
+✅ /home/runner/work/Haven-App/Haven-App/haven/test/pages/circles/create_circle_page_test.dart: CreateCirclePage KeyPackage validation continue button is enabled when all members are valid
+✅ /home/runner/work/Haven-App/Haven-App/haven/test/security/image_network_ban_test.dart: no Image.network( call exists anywhere under lib/
+✅ /home/runner/work/Haven-App/Haven-App/haven/test/security/image_network_ban_test.dart: no CachedNetworkImage( call exists anywhere under lib/
+✅ /home/runner/work/Haven-App/Haven-App/haven/test/security/image_network_ban_test.dart: cached_network_image is not a pubspec dependency
+
+🎉 4673 tests passed, 5 skipped.

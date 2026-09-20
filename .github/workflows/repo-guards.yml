@@ -1994,7 +1994,10 @@ jobs:
       # interpolated into it), the fixed needle directory, the wiring pin
       # check_logscan_wired_everywhere.sh's RUNNER_PINS names, and the two paths
       # that scan a tree the drive did not finish with — the trap a reaper fires
-      # and the `--scan-only` entry the lane's own scan step uses.
+      # and the `--scan-only` entry the lane's own scan step uses — including a
+      # signal landing INSIDE the scan, the rig's verdict folded with the scan's
+      # rather than replaced by it, and a static ban on the bare `return` that
+      # bash < 5.3 resolves to the pre-trap status (this runner has 5.2).
       - name: E2E harness self-test (soak lane runner)
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash tooling/e2e/ci/run-soak-core.sh --self-test

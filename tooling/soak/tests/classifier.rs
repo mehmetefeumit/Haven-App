@@ -45,6 +45,7 @@
 
 #![allow(clippy::missing_panics_doc)]
 
+use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
@@ -147,11 +148,13 @@ impl RelayPlane for PlainRelay {
         &self.url
     }
 
-    async fn apply(&mut self, fault: Fault) -> Result<(), RigError> {
-        match fault {
+    // Not `async`: a plain relay has nothing to await, and the trait returns
+    // the future itself, so this answers with a ready one.
+    fn apply(&mut self, fault: Fault) -> impl Future<Output = Result<(), RigError>> + Send {
+        std::future::ready(match fault {
             Fault::Heal => Ok(()),
             _ => Err(RigError::Core(Step::ApplyFault)),
-        }
+        })
     }
 
     fn witnessed_ok(&self, event_id: &EventId) -> bool {

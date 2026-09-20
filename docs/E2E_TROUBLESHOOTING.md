@@ -918,11 +918,17 @@ For a **`drive` sink the line count is not what proves a test ran** — a
 transcript's length is the tool's own output plus whatever logcat furniture the
 device happened to forward, so the floor that clears the shortest COMPLETE one
 also clears a transcript in which nothing ran, which is how a complete 19-line
-capture went rc 4 under a floor of 20 in CI run 35464818348. The proof is the
-test reporter's own progress line (`HH:MM +N: <name>`, forwarded by logcat as
-`I/flutter ( pid): 00:00 +0: …`), which the scanner demands of every `drive`
+capture went rc 4 under a floor of 20 in CI run 35464818348. The proof is a line
+the test reporter itself wrote, which the scanner demands of every `drive`
 capture through `policy.toml`'s `proof_of_run`; its absence is rc 4 saying "no
-test ever started", and no `--floor` can remove it. An ANDROID drive floor is
+test ever started", and no `--floor` can remove it. Which line that is depends on
+the reporter `flutter` picked, so the pattern is an alternation: the compact
+reporter's progress line (`HH:MM +N: <name>`, forwarded by logcat as
+`I/flutter ( pid): 00:00 +0: …`), and the **github** reporter's per-test
+`✅ <path>: <name>` / `::group::✅ …`, which `test_core` selects whenever
+`GITHUB_ACTIONS == 'true'` — i.e. every hosted `flutter test`, whose transcript
+has no progress line at all, which is what made CI run 35478132251's Flutter
+coverage job rc 4 over 4 673 passing tests. An ANDROID drive floor is
 therefore calibrated to the lines `flutter drive` prints on the HOST alone — the
 `Installing …` line, the six `VMServiceFlutterDriver:` lines, the verdict and
 `Leaving the application running.` where the lane keeps the app alive (9 in

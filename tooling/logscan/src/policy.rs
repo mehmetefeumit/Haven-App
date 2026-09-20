@@ -795,11 +795,20 @@ ios = { term_floor = 8, declared_plants_expected = false, structural_rules = tru
     /// Which sinks carry a PROOF-OF-RUN line, and what it must match.
     ///
     /// The proof is the half of the anti-vacuity check a line count cannot be,
-    /// so it is pinned here with the renderings it has to catch: Android
-    /// forwards the reporter through logcat, `flutter test` prints it bare, and
-    /// a failing run renders `+N -M:`. It is pinned in the other direction too:
-    /// a class whose captures do NOT come from a test reporter would be
-    /// demanding a line its producer never writes, i.e. rc 4 on every green run.
+    /// so it is pinned here with every rendering it has to catch. Which one a
+    /// capture carries is decided by the REPORTER `flutter` picked, and that is
+    /// an environment property: `test_core`'s `defaultReporter` selects `github`
+    /// whenever `GITHUB_ACTIONS == 'true'`, so a hosted `flutter test` transcript
+    /// has no `HH:MM +N:` progress line anywhere in it (CI run 35478132251 went
+    /// rc 4 on one of 13 261 lines and 4 673 passing tests), while the compact
+    /// reporter is what a device run and every local run still print.
+    ///
+    /// It is pinned in the other direction too, on three counts: the skip glyph
+    /// is not proof (a skipped test is one whose body did not run, which is the
+    /// vacuous capture this check exists to catch), the closing `🎉` summary is
+    /// not proof (the reporter writes it whatever the counts are), and a class
+    /// whose captures do NOT come from a test reporter would be demanding a line
+    /// its producer never writes, i.e. rc 4 on every green run.
     #[test]
     fn only_the_test_reporter_sink_declares_a_proof_of_run() {
         let policy = Policy::load().expect("policy");
@@ -809,10 +818,17 @@ ios = { term_floor = 8, declared_plants_expected = false, structural_rules = tru
             .expect("the drive class carries the proof");
         let proof = regex::Regex::new(pattern).expect("a valid pattern");
         for line in [
+            // Compact/expanded: forwarded by logcat, bare, and failing.
             "I/flutter ( 4457): 00:00 +0: M7 disable: register a task then disable consent",
             "I/flutter ( 4106): 00:08 +2: All tests passed!",
             "00:01 +31: /home/runner/work/Haven-App/haven/test/providers/x_test.dart: ok",
             "00:02 +12 -1: haven/test/y_test.dart: a failing test [E]",
+            // Github: a finished test with no output, one whose output it wraps,
+            // and the failing form (always wrapped, because a failure IS output).
+            "✅ /home/runner/work/Haven-App/Haven-App/haven/test/pages/identity_page_test.dart: IdentityPage structure renders the photo header",
+            "::group::✅ /home/runner/work/Haven-App/Haven-App/haven/test/services/location_sharing_service_test.dart: onAppPaused aborts a fetch",
+            "::group::❌ /home/runner/work/Haven-App/Haven-App/haven/test/pages/map_shell_test.dart: the banner is announced (failed)",
+            "❌ haven/test/x_test.dart: a bare failure line (failed after test completion)",
         ] {
             assert!(proof.is_match(line), "must prove a test ran: {line:?}");
         }
@@ -822,6 +838,23 @@ ios = { term_floor = 8, declared_plants_expected = false, structural_rules = tru
             "I/Choreographer( 4457): Skipped 59 frames!  The application may be doing too much work",
             "All tests passed.",
             "D/WM-SystemJobScheduler( 4457): Scheduling work ID 7580a323 Job ID 5",
+            // A skipped test is a test whose BODY never ran, and the summary is
+            // written whatever the counts are: neither may stand in for a run.
+            "::group::❎ /home/runner/work/Haven-App/Haven-App/haven/test/l10n/pseudo_locale_sweep_test.dart: AboutPage has no un-extracted strings (skipped)",
+            "🎉 0 tests passed, 4673 skipped.",
+            "::error::0 tests passed, 3 failed.",
+            "::endgroup::",
+            // Timestamps, and app output that merely CONTAINS a glyph: the
+            // github branch is anchored, so only a line the reporter itself
+            // opened can satisfy it.
+            "[LocationService] ✅ encrypted OK — publishing to 1 relay(s)",
+            "09-12 20:25:12.771  1234  1301 D haven_core: settled",
+            "2026-09-20T00:12:03.8757284Z the runner's own timestamp column",
+            // `##[group]` is what the Actions LOG SERVICE renders `::group::`
+            // as; the reporter never writes it, so a capture carrying it is a
+            // downloaded job log rather than the tee'd file the lanes scan.
+            "##[group]\u{2705} haven/test/x_test.dart: a job log's rendering, not the reporter's",
+            "2026-09-12 10:00:00.000000+0000 localhost Runner(Flutter)[431:12345] <Notice>: flutter: settled",
         ] {
             assert!(
                 !proof.is_match(line),

@@ -423,18 +423,25 @@ mod tests {
             lines[1].fields["device"] == serde_json::json!("simdev#1"),
             "{text}"
         );
-        assert!(timeline.records().len() == 2);
+        assert_eq!(timeline.records().len(), 2);
     }
 
     #[test]
     fn the_artifact_directory_is_the_one_holding_the_timeline() {
         // The lane passes `--timeline-out <upload tree>/soak-timeline.log` and
         // reads the markers out of that tree, so every other artifact the run
-        // writes has to land beside it.
+        // writes has to land beside it. Not `assert_eq!`: a failure renders
+        // both operands, and Rule 15 keeps a filesystem path out of a panic.
         let dir = super::artifact_dir(std::path::Path::new("/tmp/up/soak-timeline.log"));
-        assert!(dir == std::path::Path::new("/tmp/up"));
+        assert!(
+            dir == std::path::Path::new("/tmp/up"),
+            "the artifact directory is the tree, not the file"
+        );
         let bare = super::artifact_dir(std::path::Path::new("soak-timeline.log"));
-        assert!(bare == std::path::Path::new("."));
+        assert!(
+            bare == std::path::Path::new("."),
+            "a bare name lands in the working directory"
+        );
     }
 
     #[test]
@@ -445,8 +452,12 @@ mod tests {
         assert!(timeline.ends_with("soak-timeline-000000000000002a.log"));
         assert!(snapshot.ends_with("soak-violation-000000000000002a.log"));
         // The extension is what an upload step is allowed to carry: `.ndjson`
-        // is banned outright.
-        assert!(timeline.extension().and_then(std::ffi::OsStr::to_str) == Some("log"));
+        // is banned outright. Not `assert_eq!`: Rule 15 keeps the path fragment
+        // a failure would render out of the panic.
+        assert!(
+            timeline.extension().and_then(std::ffi::OsStr::to_str) == Some("log"),
+            "the timeline is a .log"
+        );
     }
 
     #[test]
@@ -454,7 +465,7 @@ mod tests {
         let timeline = Timeline::in_memory();
         assert!(timeline.is_empty());
         timeline.record(records()[0].clone());
-        assert!(timeline.len() == 1);
+        assert_eq!(timeline.len(), 1);
         assert!(format!("{timeline:?}").contains("records: \"1\""));
     }
 
@@ -563,7 +574,7 @@ mod tests {
 
         verdicts.fold_scan(Rc::ViolationOrLeak);
         let written = write_markers(dir.path(), verdicts).expect("leak marker");
-        assert!(written.len() == 1);
+        assert_eq!(written.len(), 1);
         assert!(dir.path().join(LEAK_MARKER).exists());
         assert!(!dir.path().join(VIOLATION_MARKER).exists());
 

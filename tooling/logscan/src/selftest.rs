@@ -44,6 +44,8 @@ const FURNITURE_DRIVE: &str = include_str!("../fixtures/furniture.drive.log");
 const FURNITURE_LOGCAT: &str = include_str!("../fixtures/furniture.logcat.log");
 const FURNITURE_RUST_TEST: &str = include_str!("../fixtures/furniture.rust-test.log");
 const FURNITURE_FLUTTER: &str = include_str!("../fixtures/furniture.flutter-test.log");
+const FURNITURE_FLUTTER_GITHUB: &str =
+    include_str!("../fixtures/furniture.flutter-test-github.log");
 const IOS_FORMAT: &str = include_str!("../fixtures/format.ios.log");
 const REASSEMBLY: &str = include_str!("../fixtures/reassembly.logcat.log");
 const ALLOW_EXPIRED: &str = include_str!("../fixtures/allowlist.expired.json");
@@ -70,10 +72,12 @@ const DIRTY_CLEAN_LINES: usize = 2;
 const FURNITURE_DRIVE_LINES: u64 = 98;
 const FURNITURE_LOGCAT_LINES: u64 = 87;
 /// The unit-test transcripts' corpora, scanned as the `--rules-only` lanes scan
-/// them: a `cargo test` log and a `flutter test` log, the second carrying the
-/// reporter's carriage returns.
+/// them: a `cargo test` log and both renderings of a `flutter test` log — the
+/// compact one, carrying the reporter's carriage returns, and the github one a
+/// hosted runner produces instead. The two `flutter test` counts are summed by
+/// the scan, because they are one sink class.
 const FURNITURE_RUST_TEST_LINES: u64 = 141;
-const FURNITURE_FLUTTER_LINES: u64 = 117;
+const FURNITURE_FLUTTER_LINES: u64 = 117 + 56;
 /// Lines of `format.ios.log` whose OWNED variant must reach the rules: five of
 /// the rendering the lanes capture, three of the `<<Type>>` one, three of the
 /// columnar one, and the owned member of the emitter-scope trio (the other two
@@ -908,11 +912,19 @@ fn case_floor(rig: &Rig, mutation: Option<&'static str>) -> Case {
 ///
 /// The floor above answers "was this truncated"; it cannot answer "did anything
 /// run", because a complete short transcript and an empty one clear the same
-/// number. Both captures here are far above their floor (the rig seals
-/// `drive=1`), so the only thing separating them is the reporter's progress
-/// line — which is exactly the separation CI run 35464818348 had to make and
-/// could not.
+/// number. Every capture here is far above its floor (the rig seals `drive=1`),
+/// so the only thing separating them is the line the REPORTER wrote — which is
+/// exactly the separation CI run 35464818348 had to make and could not.
+///
+/// Which line that is depends on the reporter `flutter` picked, so the same
+/// capture is run three ways: the compact progress line, the github reporter's
+/// per-test line (what a hosted runner produces, and what run 35478132251 was
+/// rc 4 for lacking), and the github reporter's SKIP line, which is not proof —
+/// a skipped test is one whose body did not run.
 fn case_proof_of_run(rig: &Rig, mutation: Option<&'static str>) -> Case {
+    /// The one line of `clean.drive.log` the compact reporter wrote.
+    const REPORTER: &str = "I/flutter ( 4457): 00:00 +0: the core flow settles a circle";
+
     let manifest = rig.manifest()?;
     let rules = rules_for(&manifest, Vec::new(), mutation)?;
     let logcat = rig.write("proof.logcat.log", CLEAN_LOGCAT)?;
@@ -962,7 +974,50 @@ fn case_proof_of_run(rig: &Rig, mutation: Option<&'static str>) -> Case {
             .iter()
             .any(|p| p.message.contains("no test ever started") && !p.message.contains('/')),
         "the problem must name the class and no path",
-    )
+    )?;
+
+    // The same capture again with the compact line swapped for the rendering a
+    // hosted runner produces, and then for its SKIP form. Everything else —
+    // both plants, every byte of furniture — is untouched, so the glyph is the
+    // only difference between the clean verdict and rc 4.
+    for (label, replacement, want) in [
+        (
+            "a finished test",
+            "::group::\u{2705} /home/runner/work/Haven-App/Haven-App/haven/test/core_flow_test.dart: the core flow settles a circle\n::endgroup::",
+            RC_CLEAN,
+        ),
+        (
+            "a skipped test",
+            "::group::\u{274e} /home/runner/work/Haven-App/Haven-App/haven/test/core_flow_test.dart: the core flow settles a circle (skipped)\n::endgroup::",
+            RC_META,
+        ),
+    ] {
+        let body = CLEAN_DRIVE.replace(REPORTER, replacement);
+        require(
+            !body.contains(REPORTER),
+            "the mutation must remove the compact reporter's line, or the leg proves nothing",
+        )?;
+        let path = rig.write("github.drive.log", &body)?;
+        let outcome = scan(
+            &manifest,
+            &[sink("logcat", &[&logcat]), sink("drive", &[&path])],
+            &rules,
+        );
+        require(
+            outcome.rc() == want,
+            &format!(
+                "the github reporter's line for {label} must be rc {want}, got rc {} — {}",
+                outcome.rc(),
+                outcome
+                    .problems
+                    .iter()
+                    .map(|p| p.message.clone())
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            ),
+        )?;
+    }
+    Ok(())
 }
 
 /// One pass, every byte, and a printed throughput.
@@ -1081,12 +1136,22 @@ fn case_furniture(rig: &Rig, mutation: Option<&'static str>) -> Case {
     // The unit-test transcripts are a SECOND scan, with their own classes and
     // their own pinned counts: `cargo test` and `flutter test` output is not
     // the shape a `flutter drive` transcript has, and every false positive
-    // these two carry was found on the real thing.
+    // these carry was found on the real thing. `flutter test` contributes TWO
+    // captures because it has two renderings — `test_core` picks the github
+    // reporter whenever `GITHUB_ACTIONS == 'true'`, so the hosted lane's
+    // transcript is the second one and the first is what a local run prints.
     let rust_test = rig.write("furniture.rust-test.log", FURNITURE_RUST_TEST)?;
     let flutter = rig.write("furniture.flutter-test.log", FURNITURE_FLUTTER)?;
+    let flutter_github = rig.write(
+        "furniture.flutter-test-github.log",
+        FURNITURE_FLUTTER_GITHUB,
+    )?;
     let outcome = scan(
         &manifest,
-        &[sink("rust-test", &[&rust_test]), sink("drive", &[&flutter])],
+        &[
+            sink("rust-test", &[&rust_test]),
+            sink("drive", &[&flutter, &flutter_github]),
+        ],
         &rules,
     );
     let hits: Vec<String> = outcome

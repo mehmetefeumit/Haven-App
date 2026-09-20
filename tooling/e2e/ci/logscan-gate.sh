@@ -172,8 +172,15 @@ logscan_gate() {
   fi
 
   if [[ "${HAVEN_LOGSCAN:-}" != "true" ]]; then
-    scan_logs_or_contain "${files[@]}"
-    return
+    # The status is named, never inherited from a bare `return`. Runners reach
+    # this gate from TRAP handlers (the soak lane's reaper does), and bash
+    # before 5.3 resolves a bare `return` inside a handler to the status of the
+    # last command run BEFORE the handler — the reaped rig's 143 — which
+    # `worst_rc` folds to 2, so the caller reads "broken guard" where the floor
+    # said LEAK and skips containment over the capture it just flagged.
+    local floor_rc=0
+    scan_logs_or_contain "${files[@]}" || floor_rc=$?
+    return "${floor_rc}"
   fi
 
   local scan_logs="${SCAN_LOGS:-${LOGSCAN_GATE_DIR}/scan-logs.sh}"
@@ -464,7 +471,7 @@ logscan_gate_dir() {
 # seals from what each profile is given, hands every sink to the wrapper, folds
 # the two verdicts, and contains on a leak — never the scanner's patterns, which
 # are the crate's own tests.
-readonly LOGSCAN_GATE_SELF_TEST_FIXTURES=84
+readonly LOGSCAN_GATE_SELF_TEST_FIXTURES=85
 # bash-4-only: mapfile/readarray, coproc, declare -A, case conversion, |&, ;;&,
 # negative substring offsets.
 readonly LOGSCAN_GATE_BASH4_ONLY_RE='(^|[^[:alnum:]_])(mapfile|readarray|coproc)([^[:alnum:]_]|$)|declare[[:space:]]+-[a-zA-Z]*A|\$\{[A-Za-z_][A-Za-z0-9_]*(,,|\^\^)|\|&|;;&|\$\{[^}]*:([[:space:]]+-[0-9]|[0-9]+:[[:space:]]*-[0-9])'
@@ -1069,6 +1076,22 @@ a plain line no threadtime header covers'
     fail=1
   fi
 
+  # Runners call this gate from TRAP handlers, and bash before 5.3 resolves a
+  # bare `return` inside one to the status of the last command run BEFORE the
+  # handler rather than the one just run — on ubuntu-latest's 5.2 that turned a
+  # LEAK into the reaped rig's 143, which folds to 2 and skips containment. The
+  # bash that has the bug is not the bash that runs this, so the guard is
+  # static: every `return` in the library half names its status.
+  ran=$(( ran + 1 ))
+  # Materialised first: under pipefail a `grep -q` that matches exits early,
+  # SIGPIPEs the stage above it, and the pipeline then reads as a miss.
+  local library_half
+  library_half="$(sed -n '1,/^logscan_gate_self_test()/p' "${BASH_SOURCE[0]}" | grep -v '^[[:space:]]*#')"
+  if grep -qE '^[[:space:]]*return[[:space:]]*$' <<<"${library_half}"; then
+    echo "SELF-TEST FAIL (trap-safe status): a bare \`return\` is in this file's library half; reached from a trap handler on bash < 5.3 it reports the status from before the handler, not the verdict this gate arrived at" >&2
+    fail=1
+  fi
+
   if (( fail )); then
     echo "logscan-gate.sh: SELF-TEST FAILED" >&2
     return 1
@@ -1077,7 +1100,7 @@ a plain line no threadtime header covers'
     echo "logscan-gate.sh: SELF-TEST FAILED — ran ${ran} fixture(s), expected exactly ${LOGSCAN_GATE_SELF_TEST_FIXTURES}; a fixture was added or removed without moving the pin" >&2
     return 1
   fi
-  echo "logscan-gate.sh: self-test passed (${ran}/${LOGSCAN_GATE_SELF_TEST_FIXTURES} fixtures: under a pinned environment the proxy profile seals from the sidecar directory with the host needles added, exempting the lane's own endpoints and the bare loopback host without declaring them, then runs scan-logs.sh over every sink, folds the two verdicts, contains on a leak even under a failed seal, fails closed on an absent binary or sidecar, and called twice in one run seals once and scans twice; the host profile seals the host needles alone with no declared plants, treats no sidecar as clean, reuses this run's manifest and still scans; the rules profile seals nothing and runs --rules-only; logscan_seal alone seals the host argv with the caller's floors, reuses this run's manifest and is a no-op flag-off; the flag-off arm is the floor alone over every sink; usage errors run nothing; the directory walker types every *.log by name — each real relay producer as relay, an unknown relay-prefixed name and the blossom log as diag — then by CONTENT, so a threadtime slice under an unknown name is logcat, a SHORT slice whose every line is threadtime is logcat too while one plain line among them, or no line at all, makes it a diag, and a dumpsys dump and a short file holding one logcat-shaped line stay diag, omits absent classes, forwards extra seal arguments, contains on a leak and refuses an empty directory; logscan_permission_extract keeps every android.permission line byte for byte, drops the platform's install paths, signing digests and dexopt state, cannot reach S4's 32-character floor on any line it keeps, and yields the header alone at rc 0 when a dump has no permission line; logscan_http_log_summary counts a third-party server's methods, no-method lines and error keywords while reproducing no digest, npub or auth blob from them, and summarises an empty log as zero lines; no bash-4-only construct)."
+  echo "logscan-gate.sh: self-test passed (${ran}/${LOGSCAN_GATE_SELF_TEST_FIXTURES} fixtures: under a pinned environment the proxy profile seals from the sidecar directory with the host needles added, exempting the lane's own endpoints and the bare loopback host without declaring them, then runs scan-logs.sh over every sink, folds the two verdicts, contains on a leak even under a failed seal, fails closed on an absent binary or sidecar, and called twice in one run seals once and scans twice; the host profile seals the host needles alone with no declared plants, treats no sidecar as clean, reuses this run's manifest and still scans; the rules profile seals nothing and runs --rules-only; logscan_seal alone seals the host argv with the caller's floors, reuses this run's manifest and is a no-op flag-off; the flag-off arm is the floor alone over every sink; usage errors run nothing; the directory walker types every *.log by name — each real relay producer as relay, an unknown relay-prefixed name and the blossom log as diag — then by CONTENT, so a threadtime slice under an unknown name is logcat, a SHORT slice whose every line is threadtime is logcat too while one plain line among them, or no line at all, makes it a diag, and a dumpsys dump and a short file holding one logcat-shaped line stay diag, omits absent classes, forwards extra seal arguments, contains on a leak and refuses an empty directory; logscan_permission_extract keeps every android.permission line byte for byte, drops the platform's install paths, signing digests and dexopt state, cannot reach S4's 32-character floor on any line it keeps, and yields the header alone at rc 0 when a dump has no permission line; logscan_http_log_summary counts a third-party server's methods, no-method lines and error keywords while reproducing no digest, npub or auth blob from them, and summarises an empty log as zero lines; no bash-4-only construct, and no bare \`return\` in the library half, which a trap handler on bash < 5.3 would resolve to the status from before the handler)."
   return 0
 }
 

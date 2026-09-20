@@ -46,7 +46,9 @@
 # (`--scan-only`), which is the only one of the three a SIGKILL cannot skip.
 # The scan is idempotent: the second pass over a clean tree re-reads it, and
 # over a contained one reports the leak that emptied it without re-reading the
-# harness's note.
+# harness's note. Once entered it runs to completion — it ignores the signal it
+# exists to survive, so the reap cannot land between the floor scanner deleting
+# what it flagged and the tree being contained.
 #
 # ## The contract with the rig (tooling/soak)
 #
@@ -143,15 +145,28 @@ soak_profile_ok() { # soak_profile_ok <profile>
 # a SIGKILL after the grace leaves no trap to run at all.
 # ---------------------------------------------------------------------------
 
-# Set once the tree has been read, so one process cannot scan one tree twice.
-SOAK_FINALIZED=0
+# The verdict of the one pass that read the tree; empty until that pass has
+# one. `soak_on_exit` asks again in a process that already scanned, and the
+# answer to that second call is what the first pass FOUND, never a bare 0.
+SOAK_VERDICT=''
 # What the traps pass to the scan; set with them, never before.
 SOAK_PROFILE=''
 
 soak_finalize() { # soak_finalize <profile>
   local profile="${1:-}"
-  (( ! SOAK_FINALIZED )) || return 0
-  SOAK_FINALIZED=1
+  [[ -z "${SOAK_VERDICT}" ]] || return "${SOAK_VERDICT}"
+
+  # A containment path is not interruptible by the signal it exists to survive.
+  # The lane's deadline signals the whole group, so it lands inside this scan
+  # as readily as before it, and a handler that re-entered here mid-pass would
+  # leave the tree emptied by the floor scanner and never contained. Ignored,
+  # not trapped: an ignored signal is discarded rather than deferred, so
+  # nothing fires the moment this returns either. They stay ignored afterwards
+  # — everything past this point is one fold and one exit, and the reaper's
+  # signal has already been answered by the scan it asked for. SIGKILL after
+  # the kill grace is what remains, and the lane's own `--scan-only` step,
+  # which runs on every outcome, is the backstop for that.
+  trap '' TERM INT HUP
 
   local upload reports manifest spec
   upload="$(soak_upload_dir)"
@@ -167,6 +182,7 @@ soak_finalize() { # soak_finalize <profile>
   # recorded nothing.
   if [[ ! -d "${upload}" ]]; then
     soak_log "no evidence tree: nothing ran here, so there is nothing to read and nothing to publish."
+    SOAK_VERDICT=0
     return 0
   fi
 
@@ -175,11 +191,13 @@ soak_finalize() { # soak_finalize <profile>
   # file the harness wrote. The leak verdict stands, unchanged.
   if [[ -f "${upload}/${SOAK_CONTAINED_LOG}" ]]; then
     soak_err "the evidence tree was contained by an earlier scan of this run; there is nothing left here to read."
+    SOAK_VERDICT=1
     return 1
   fi
 
   spec="$(soak_sink_spec "${upload}")" || {
     soak_err "the rig left no *.log in its evidence tree; a run that recorded nothing cannot be proven clean."
+    SOAK_VERDICT=3
     return 3
   }
 
@@ -221,6 +239,7 @@ soak_finalize() { # soak_finalize <profile>
     soak_err "a capture carried a declared identifier; the evidence tree was removed on the runner."
   fi
   soak_log "scan ${scan_rc} (rig manifest ${needle_rc}, host gate ${gate_rc}, declaration floor ${meta_rc})"
+  SOAK_VERDICT="${scan_rc}"
   return "${scan_rc}"
 }
 
@@ -240,11 +259,15 @@ soak_on_signal() {
 # has read, and a leak found on the way out outranks the status that got here.
 soak_on_exit() {
   local rc=$?
-  local scan_rc=0
+  local scan_rc=0 out=0
   trap - TERM INT EXIT
   soak_finalize "${SOAK_PROFILE}" || scan_rc=$?
-  (( scan_rc == 0 )) || exit "${scan_rc}"
-  exit "${rc}"
+  # FOLDED, never substituted. The scan the drive already ran is part of what
+  # got us here, and the guard now answers with that verdict rather than 0 —
+  # so overriding `rc` with it would quietly demote a rig-reported leak to the
+  # scan's own milder code. Folding keeps whichever of the two is worse.
+  worst_rc "${rc}" "${scan_rc}" || out=$?
+  exit "${out}"
 }
 
 # The lane's own step, after the drive and before the upload, on every outcome
@@ -265,14 +288,14 @@ soak_main() { # soak_main <profile>
   local upload manifest stdout_log
   upload="$(soak_upload_dir)"
   manifest="${SOAK_NEEDLE_DIR}/$(soak_run_id)${SOAK_MANIFEST_SUFFIX}"
-  mkdir -p "${upload}"
   stdout_log="${upload}/soak-${profile}-run.log"
 
-  # Armed before the first byte of evidence exists, because from here on every
-  # way out of this process has a tree to answer for.
+  # Armed before the tree itself exists, because from the mkdir on every way
+  # out of this process has a tree to answer for.
   SOAK_PROFILE="${profile}"
   trap soak_on_signal TERM INT
   trap soak_on_exit EXIT
+  mkdir -p "${upload}"
 
   local -a rig_args=(
     --profile "${profile}"
@@ -518,6 +541,88 @@ soak_self_test() {
   rc=0
   bash "${BASH_SOURCE[0]}" --scan-only weekley >/dev/null 2>&1 || rc=$?
   _case "--scan-only with an unknown profile is a broken runner, not a default" 2 "${rc}"
+
+  # (17) THE SIGNAL THAT LANDS INSIDE THE SCAN. Fixture (10) reaps BEFORE the
+  #      scan; a process group is signalled all at once, so the same deadline
+  #      lands just as readily in the middle of it — after the floor scanner
+  #      has deleted what it flagged and before the tree is contained. A
+  #      handler that re-entered `soak_finalize` there would answer for a
+  #      verdict that did not exist yet and leave an emptied, uncontained tree
+  #      behind it. Driven for real and with no clock in the fixture: the
+  #      stubbed floor signals the group at the one instant finalize owns the
+  #      foreground, ignoring the signal itself so its own LEAK verdict
+  #      survives to be read, and appends a line per call so "the tree was read
+  #      exactly once" is counted rather than assumed.
+  local mid="${tmp}/mid-scan" midbin="${tmp}/mid-bin" midcalls="${tmp}/mid-calls" midpid
+  mkdir -p "${mid}" "${midbin}"
+  : > "${midcalls}"
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'printf "a fake rig, for the mid-scan fixture\n"' > "${midbin}/cargo"
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'trap "" TERM' \
+    'printf "read\n" >> "${SOAK_MID_CALLS}"' \
+    'kill -TERM 0' \
+    'exit 1' > "${midbin}/floor"
+  chmod +x "${midbin}/cargo" "${midbin}/floor"
+  printf 'D/keyring ( 111): Entry { secret: Some([1, 2, 3]) }\n' > "${mid}/planted.log"
+  set -m
+  PATH="${midbin}:${PATH}" HAVEN_LOGSCAN='' SECRET_SCAN="${midbin}/floor" \
+    SOAK_MID_CALLS="${midcalls}" \
+    SOAK_UPLOAD_DIR="${mid}" SOAK_REPORT_DIR="${tmp}/mid-reports" \
+    bash "${BASH_SOURCE[0]}" pr >/dev/null 2>&1 &
+  midpid=$!
+  set +m
+  rc=0; wait "${midpid}" || rc=$?
+  _eq "a signal landing inside the scan still leaves the tree contained" \
+    "${SOAK_CONTAINED_LOG}" \
+    "$(find "${mid}" -mindepth 1 -printf '%P\n' | sort | tr '\n' ' ' | sed 's/ $//')"
+  _case "...and the verdict is the leak, not the interruption" 1 "${rc}"
+  _eq "...and the tree was read exactly once" 1 "$(wc -l < "${midcalls}" | tr -d ' ')"
+
+  # (18) ...and the verdict a trap carries out of here is the one computed
+  #      here. Bash before 5.3 resolves a bare `return` inside a trap handler
+  #      to the status of the last command run BEFORE the handler, which on
+  #      this path is the reaped rig — so one anywhere a handler can reach
+  #      reports the reaping in place of the scan (run 35478132251, through
+  #      logscan-gate.sh's flag-off arm). The bash that has the bug is not the
+  #      bash that runs this, so the guard is static: every `return` outside
+  #      this self-test names its status.
+  #      Materialised first: under pipefail a `grep -q` that matches exits
+  #      early, SIGPIPEs the stage above it, and the hit then reads as a miss.
+  local runner_half
+  runner_half="$(sed -n '1,/^soak_self_test()/p' "${BASH_SOURCE[0]}" | grep -vE '^[[:space:]]*#')"
+  rc=0
+  if grep -qE '^[[:space:]]*return[[:space:]]*$' <<<"${runner_half}"; then rc=1; fi
+  _case "no bare \`return\` on a path a trap handler can reach" 0 "${rc}"
+
+  # (18b) The traps are armed before the evidence tree exists, so no way out
+  #       of `soak_main` leaves a tree that nothing answers for.
+  local armed_at tree_at
+  armed_at="$(grep -nE '^  trap soak_on_exit EXIT$' <<<"${runner_half}" | head -n 1 | cut -d: -f1)"
+  tree_at="$(grep -nE '^  mkdir -p "\$\{upload\}"$' <<<"${runner_half}" | head -n 1 | cut -d: -f1)"
+  rc=0
+  [[ -n "${armed_at}" && -n "${tree_at}" ]] && (( armed_at < tree_at )) || rc=1
+  _case "the traps are armed before the evidence tree is created" 0 "${rc}"
+
+  # (19) THE FOLD, not a substitution. `soak_on_exit` arrives with the status
+  #      that got here and then asks the scan for its verdict, and the two are
+  #      different codes: a rig that PROVED a violation (1) under a scan that
+  #      could only say "ungraded" (4) has to leave as the 1. The guard answers
+  #      with what the first pass found rather than 0, so substituting it —
+  #      which is what this line did before — publishes "proves too little"
+  #      over the violation the rig had already proven.
+  local folded="${tmp}/folded" foldbin="${tmp}/fold-bin"
+  mkdir -p "${folded}" "${foldbin}"
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'printf "a fake rig that found a violation\n"' \
+    'exit 1' > "${foldbin}/cargo"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 4' > "${foldbin}/floor"
+  chmod +x "${foldbin}/cargo" "${foldbin}/floor"
+  rc=0
+  PATH="${foldbin}:${PATH}" HAVEN_LOGSCAN='' SECRET_SCAN="${foldbin}/floor" \
+    SOAK_UPLOAD_DIR="${folded}" SOAK_REPORT_DIR="${tmp}/folded-reports" \
+    bash "${BASH_SOURCE[0]}" pr >/dev/null 2>&1 || rc=$?
+  _case "a violation the rig proved is not demoted to the scan's milder code" 1 "${rc}"
 
   if (( fails )); then
     soak_err "self-test FAILED"

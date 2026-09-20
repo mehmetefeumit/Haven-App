@@ -916,7 +916,7 @@ mod tests {
             assert!(rendered.starts_with("logsink: "), "{rendered}");
             assert!(!rendered.contains('/'), "{rendered}");
         }
-        assert!(SinkError::LoggerNotOwned.rc() == Rc::RigBroken);
-        assert!(SinkError::SealRefused(4).rc() == Rc::ProvesTooLittle);
+        assert_eq!(SinkError::LoggerNotOwned.rc(), Rc::RigBroken);
+        assert_eq!(SinkError::SealRefused(4).rc(), Rc::ProvesTooLittle);
     }
 }

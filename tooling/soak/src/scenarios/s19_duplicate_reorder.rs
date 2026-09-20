@@ -680,10 +680,10 @@ mod tests {
         // and unresolved, and the epoch moves when that commit is confirmed.
         // The other three are pure delivery faults, which advance nothing and
         // stage nothing.
-        assert!(ARMS[0].floor.epochs_crossed == 0);
-        assert!(ARMS[1].floor.epochs_crossed == 0);
-        assert!(ARMS[2].floor.epochs_crossed == 0);
-        assert!(ARMS[3].floor.epochs_crossed == 1);
+        assert_eq!(ARMS[0].floor.epochs_crossed, 0);
+        assert_eq!(ARMS[1].floor.epochs_crossed, 0);
+        assert_eq!(ARMS[2].floor.epochs_crossed, 0);
+        assert_eq!(ARMS[3].floor.epochs_crossed, 1);
         assert!(
             ARMS[3].floor.faults_applied == 0,
             "a transition of this device's own is not something a relay does"

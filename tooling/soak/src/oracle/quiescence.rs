@@ -416,7 +416,7 @@ mod tests {
              tied together without either naming the device"
         );
         assert!(format!("{:?}", reasons[6]).contains("simcircle#2"));
-        assert!(format!("{:?}", Quiescence::Quiescent) == "Quiescent");
+        assert_eq!(format!("{:?}", Quiescence::Quiescent), "Quiescent");
     }
 
     #[test]

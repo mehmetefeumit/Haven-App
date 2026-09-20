@@ -618,7 +618,7 @@ fn check_proofs_of_run(manifest: &Manifest, sinks: &[SinkArg], outcome: &mut Out
         outcome.problems.push(Problem {
             rc: RC_META,
             message: format!(
-                "sink class `{class}` carries no proof-of-run line (the test reporter's `HH:MM +N:` progress line); the capture is readable but proves too little: no test ever started"
+                "sink class `{class}` carries no line any test reporter writes per test (`HH:MM +N:` from the compact reporter, `✅` or `::group::✅` from the github one); the capture is readable but proves too little: no test ever started"
             ),
         });
     }
@@ -2449,6 +2449,70 @@ mod tests {
         );
     }
 
+    /// Both reporters a `drive` capture can come from, on the real transcripts.
+    ///
+    /// `flutter` picks its reporter from the environment — `test_core`'s
+    /// `defaultReporter` selects `github` whenever `GITHUB_ACTIONS == 'true'` —
+    /// so the hosted coverage lane's transcript carries NO `HH:MM +N:` line at
+    /// all, which is how CI run 35478132251 went rc 4 over 4 673 passing tests.
+    /// Each fixture is scanned as-is and again with every line the pattern
+    /// matches deleted, because a pattern that matched something else in the
+    /// same file would pass the first half for the wrong reason.
+    #[test]
+    fn both_test_reporters_prove_a_run_and_neither_proves_one_without_its_line() {
+        const COMPACT: &str = include_str!("../fixtures/furniture.flutter-test.log");
+        const GITHUB: &str = include_str!("../fixtures/furniture.flutter-test-github.log");
+
+        let dir = Dir::new("reporters");
+        let manifest = manifest(&[]);
+        let proof = regex::Regex::new(
+            manifest
+                .proof_of_run("drive")
+                .expect("the drive class carries the proof"),
+        )
+        .expect("a valid pattern");
+
+        for (name, body) in [("compact.drive.log", COMPACT), ("github.drive.log", GITHUB)] {
+            let path = dir.write(name, body);
+            assert!(
+                run(&manifest, "drive", &[path]).problems.is_empty(),
+                "{name}: a real transcript of a run that happened must prove it"
+            );
+
+            let mut silent = String::new();
+            for line in body.lines().filter(|l| !proof.is_match(l)) {
+                silent.push_str(line);
+                silent.push('\n');
+            }
+            assert!(
+                silent.lines().count() < body.lines().count(),
+                "{name}: the mutation removed nothing, so the scan below proves nothing"
+            );
+            let path = dir.write(&format!("silent.{name}"), &silent);
+            let outcome = run(&manifest, "drive", &[path]);
+            assert_eq!(
+                outcome.rc(),
+                RC_META,
+                "{name}: every other line of the same capture is not proof that a test ran: {:?}",
+                outcome.problems
+            );
+        }
+
+        // The regression itself: the pattern before run 35478132251 was the
+        // compact branch alone, and the hosted lane's transcript satisfies it
+        // nowhere. Written out rather than derived, so narrowing the shipped
+        // pattern back to it cannot make this test agree with the change.
+        let before = regex::Regex::new(r"[0-9]{2}:[0-9]{2} \+[0-9]+( -[0-9]+)?: ").expect("valid");
+        assert!(
+            !GITHUB.lines().any(|l| before.is_match(l)),
+            "a github-reporter transcript carries no progress line; if one appears here the fixture is no longer that lane's capture"
+        );
+        assert!(
+            COMPACT.lines().any(|l| before.is_match(l)),
+            "the compact fixture must still carry the rendering a device run and every local run print"
+        );
+    }
+
     /// A progress reporter's carriage returns are RECORD boundaries, not text.
     ///
     /// `flutter test`'s compact reporter rewrites its status line with `\r` and
@@ -2606,6 +2670,15 @@ mod tests {
                 "drive",
                 "furniture.flutter-test.log",
                 include_str!("../fixtures/furniture.flutter-test.log"),
+            ),
+            // The same lane, the other reporter: `flutter test` prints the
+            // github rendering whenever `GITHUB_ACTIONS == 'true'`, so this is
+            // what `coverage.yml` actually scans and the one above is what a
+            // local capture looks like.
+            (
+                "drive",
+                "furniture.flutter-test-github.log",
+                include_str!("../fixtures/furniture.flutter-test-github.log"),
             ),
         ] {
             let path = dir.write(name, body);
