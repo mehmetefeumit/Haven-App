@@ -12,8 +12,14 @@
 # the live-sync processor, the circle rotation stamps, and direct read/delete
 # of the OpenMLS group state inside the SQLCipher store) plus the
 # unencrypted-store constructors. Every one of those exists so a harness can
-# see state the product deliberately does not expose. A shipped build that
-# carried them would ship a door into its own MLS store.
+# see state the product deliberately does not expose.
+#
+# It is also the door to a MUTATION seam, which is worse:
+# `set_stored_message_write_fault_for_test` installs an abort trigger on the
+# engine's stored-message table in a LIVE database, so the feature can make the
+# product's own writes fail rather than merely observe them. A shipped build
+# that carried any of this would ship a door into its own MLS store — and, with
+# that one, a lever on it.
 #
 # haven-core defends that with a compile-time trap:
 #

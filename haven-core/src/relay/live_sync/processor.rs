@@ -429,6 +429,13 @@ pub struct EngineProcessor {
     /// rather than a convention: one processor serves both lifecycles over the
     /// same engine, and nothing else about a burst distinguishes them.
     background_burst: AtomicBool,
+    /// The owning session's teardown flag, when one has been attached.
+    ///
+    /// Only the redemption pass reads it, and only to stop between commits: that
+    /// pass runs under the lifecycle lock and can otherwise make a logout wait
+    /// out a cascade of relay round-trips. `None` in the test constructions that
+    /// have no session around them.
+    shutdown: Option<Arc<AtomicBool>>,
     /// How many commit-shaped things this processor has observed since the
     /// counter was last reset, and when the last one was.
     ///
@@ -473,6 +480,7 @@ impl EngineProcessor {
             in_flight_publishes: AtomicUsize::new(0),
             publish_drained: Notify::new(),
             background_burst: AtomicBool::new(false),
+            shutdown: None,
             commit_activity: Mutex::new(CommitActivity::default()),
         }
     }
@@ -499,6 +507,7 @@ impl EngineProcessor {
             in_flight_publishes: AtomicUsize::new(0),
             publish_drained: Notify::new(),
             background_burst: AtomicBool::new(false),
+            shutdown: None,
             commit_activity: Mutex::new(CommitActivity::default()),
         }
     }
@@ -738,7 +747,8 @@ impl EngineProcessor {
         // Route the drained events, then release any stored convergence + route
         // those, resolving engine publish work as we go.
         self.route_events(&ingest.effects.events, nostr_group_id, created_at_secs);
-        self.resolve_publish_work(&ingest.effects.publish).await;
+        self.resolve_publish_work(&ingest.effects.publish, created_at_secs)
+            .await;
         // Receive-side observation for the epoch-rotation repair's quiescence
         // gate (`circle::rotation`). Placed on the AUTHENTICATED batch, never on
         // the raw kind-445: an event the engine rejected is mintable by any
@@ -808,7 +818,8 @@ impl EngineProcessor {
             for gid in &pending {
                 if let Ok(more) = self.circle.session().advance_convergence(gid).await {
                     self.route_events(&more.events, nostr_group_id, event_created_at_secs);
-                    self.resolve_publish_work(&more.publish).await;
+                    self.resolve_publish_work(&more.publish, event_created_at_secs)
+                        .await;
                     self.circle.note_inbound_group_events(&more.events);
                     directory =
                         directory.max(self.circle.directory_verdict_for_events(&more.events));
@@ -823,7 +834,8 @@ impl EngineProcessor {
         directory
     }
 
-    /// Routes an engine `GroupEvent` batch onto the fan-out bus.
+    /// Routes an engine `GroupEvent` batch onto the fan-out bus, under the
+    /// AMBIENT `nostr_group_id` — the subscription this batch arrived on.
     fn route_events(
         &self,
         events: &[crate::nostr::mls::types::GroupEvent],
@@ -834,48 +846,76 @@ impl EngineProcessor {
             let Some(result) = SessionManager::location_result_from_event(group_event) else {
                 continue;
             };
-            match result {
-                LocationMessageResult::Location {
-                    sender_pubkey,
-                    content,
-                    ..
-                } => self.bus.send(LiveSyncEvent::Location {
+            self.route_one(result, nostr_group_id, event_created_at_secs);
+        }
+    }
+
+    /// [`Self::route_events`]' twin for ALREADY-FOLDED results, keyed off each
+    /// result's OWN circle.
+    ///
+    /// A publish resolution's replay is not scoped to one subscription — the
+    /// engine's effect buffers are global — so there is no ambient
+    /// `nostr_group_id` to route by, and using the triggering event's would put
+    /// one circle's peer on another circle's map. A result whose circle this
+    /// device no longer holds is dropped: the bus names circles by their public
+    /// id or it names nothing.
+    fn route_results(&self, results: Vec<LocationMessageResult>, event_created_at_secs: i64) {
+        for result in results {
+            let Some(nostr_group_id) = self.circle.nostr_group_id_for(result.group_id()) else {
+                continue;
+            };
+            self.route_one(result, &nostr_group_id, event_created_at_secs);
+        }
+    }
+
+    /// One folded result onto the bus.
+    fn route_one(
+        &self,
+        result: LocationMessageResult,
+        nostr_group_id: &[u8],
+        event_created_at_secs: i64,
+    ) {
+        match result {
+            LocationMessageResult::Location {
+                sender_pubkey,
+                content,
+                ..
+            } => self.bus.send(LiveSyncEvent::Location {
+                nostr_group_id: nostr_group_id.to_vec(),
+                sender_pubkey,
+                content,
+                event_created_at_secs,
+            }),
+            // A roster/epoch change, a join, or a superseded (invalidated)
+            // commit are all UI-only refresh signals now (the engine already
+            // applied / rolled back the change internally).
+            LocationMessageResult::GroupUpdate { .. }
+            | LocationMessageResult::Joined { .. }
+            | LocationMessageResult::Invalidated { .. } => {
+                // A roster/epoch move is the receive side's commit activity:
+                // it is what a background burst's settle window is measured
+                // from, so a peer's commit landing at the end of a burst
+                // holds the sockets open for its own convergence traffic
+                // instead of being cut off by the pause.
+                self.note_commit_activity();
+                self.bus.send(LiveSyncEvent::GroupUpdate {
                     nostr_group_id: nostr_group_id.to_vec(),
-                    sender_pubkey,
-                    content,
-                    event_created_at_secs,
-                }),
-                // A roster/epoch change, a join, or a superseded (invalidated)
-                // commit are all UI-only refresh signals now (the engine already
-                // applied / rolled back the change internally).
-                LocationMessageResult::GroupUpdate { .. }
-                | LocationMessageResult::Joined { .. }
-                | LocationMessageResult::Invalidated { .. } => {
-                    // A roster/epoch move is the receive side's commit activity:
-                    // it is what a background burst's settle window is measured
-                    // from, so a peer's commit landing at the end of a burst
-                    // holds the sockets open for its own convergence traffic
-                    // instead of being cut off by the pause.
-                    self.note_commit_activity();
-                    self.bus.send(LiveSyncEvent::GroupUpdate {
-                        nostr_group_id: nostr_group_id.to_vec(),
-                        evolution_event_json: None,
-                    });
-                }
-                // The engine has given up on this group: it will not apply or
-                // ingest further state and its one legal exit has no caller at
-                // the pinned rev. Surface the TERMINAL per-circle verdict, named
-                // by the pseudonymous `nostr_group_id` (Rule 4/8), so a consumer
-                // can stop send/mutate on that circle alone and offer the
-                // re-invite. It used to flatten into `Unprocessable`, which is a
-                // per-EVENT, self-clearing signal and named no circle — so the
-                // one state that needs a destructive repair was indistinguishable
-                // from one bad message.
-                LocationMessageResult::Unrecoverable { .. } => {
-                    self.bus.send(LiveSyncEvent::GroupUnrecoverable {
-                        nostr_group_id: nostr_group_id.to_vec(),
-                    });
-                }
+                    evolution_event_json: None,
+                });
+            }
+            // The engine has given up on this group: it will not apply or
+            // ingest further state and its one legal exit has no caller at
+            // the pinned rev. Surface the TERMINAL per-circle verdict, named
+            // by the pseudonymous `nostr_group_id` (Rule 4/8), so a consumer
+            // can stop send/mutate on that circle alone and offer the
+            // re-invite. It used to flatten into `Unprocessable`, which is a
+            // per-EVENT, self-clearing signal and named no circle — so the
+            // one state that needs a destructive repair was indistinguishable
+            // from one bad message.
+            LocationMessageResult::Unrecoverable { .. } => {
+                self.bus.send(LiveSyncEvent::GroupUnrecoverable {
+                    nostr_group_id: nostr_group_id.to_vec(),
+                });
             }
         }
     }
@@ -892,6 +932,13 @@ impl EngineProcessor {
         } else {
             ReceiveAutoCommitPolicy::Publish
         }
+    }
+
+    /// Attaches the owning session's teardown flag, so the redemption pass can
+    /// stop between commits instead of holding the lifecycle lock through a
+    /// cascade of relay round-trips.
+    pub fn set_shutdown_signal(&mut self, shutdown: Arc<AtomicBool>) {
+        self.shutdown = Some(shutdown);
     }
 
     /// Records which lifecycle this processor is serving — see
@@ -925,7 +972,7 @@ impl EngineProcessor {
     /// commit, because nothing is on the wire — which is also what lets the
     /// pause proceed immediately instead of waiting for a publish that will not
     /// happen.
-    async fn resolve_publish_work(&self, work: &[PublishWork]) {
+    async fn resolve_publish_work(&self, work: &[PublishWork], event_created_at_secs: i64) {
         // An auto-commit in this batch is commit activity, and it is recorded
         // BEFORE the publish so a settle that begins while the OK is still in
         // flight already knows the burst is not quiet.
@@ -936,8 +983,16 @@ impl EngineProcessor {
         for _ in 0..commits {
             self.note_commit_activity();
         }
-        match &self.publisher {
-            Some(publisher) => {
+        let Some(publisher) = &self.publisher else {
+            let ingest = park_or_rollback_receive_publish_work(&self.circle, work).await;
+            // No publisher, so a proposal cannot leave this device — but the
+            // rollbacks' locations are already persisted by the core and the UI
+            // still has to see them.
+            self.route_results(ingest.results, event_created_at_secs);
+            return;
+        };
+        {
+            {
                 let policy = self.auto_commit_policy();
                 // Rule 13: the gauge is raised BEFORE the publisher call and
                 // lowered by a drop guard, so a background pause that reads it
@@ -951,7 +1006,7 @@ impl EngineProcessor {
                     self.in_flight_publishes.fetch_add(1, Ordering::AcqRel);
                     PublishGauge(&self.in_flight_publishes, &self.publish_drained)
                 });
-                let deferred = resolve_receive_publish_work_with_policy(
+                let (deferred, ingest) = resolve_receive_publish_work_with_policy(
                     &self.circle,
                     publisher.as_ref(),
                     work,
@@ -964,8 +1019,29 @@ impl EngineProcessor {
                          (OD4-c)"
                     );
                 }
+                self.route_results(ingest.results, event_created_at_secs);
+                self.publish_proposals(publisher.as_ref(), &ingest.proposals)
+                    .await;
             }
-            None => park_or_rollback_receive_publish_work(&self.circle, work).await,
+        }
+    }
+
+    /// Publishes bare proposals a resolution handed back — the local user's own
+    /// re-proposed leave.
+    ///
+    /// A proposal opens no publish-before-apply window: there is nothing to
+    /// confirm and nothing to roll back, and an unacked one is re-minted by the
+    /// next commit this device applies. Dropping it, on the other hand, leaves
+    /// the device behind the engine's leave send gate with nothing in flight.
+    async fn publish_proposals(&self, publisher: &dyn AutoCommitPublisher, proposals: &[Event]) {
+        for proposal in proposals {
+            let relays = self
+                .circle
+                .relays_for_commit_event(proposal)
+                .unwrap_or_default();
+            if !relays.is_empty() {
+                let _acked = publisher.publish_auto_commit(proposal, &relays).await;
+            }
         }
     }
 
@@ -1001,7 +1077,7 @@ impl EngineProcessor {
         let _gauge = PublishGauge(&self.in_flight_publishes, &self.publish_drained);
         let confirmed = self
             .circle
-            .redeem_removal_deferrals(publisher.as_ref())
+            .redeem_removal_deferrals(publisher.as_ref(), self.shutdown.as_deref())
             .await;
         if confirmed > 0 {
             log::info!("foreground published the deferred removal commit(s) (OD4-c)");

@@ -402,10 +402,16 @@ class _ThrowingCircleService implements CircleService {
   }) async => throw UnimplementedError();
 
   @override
-  Future<void> confirmPendingCommit(PendingCommitToken pending) async {}
+  Future<DecryptLocationOutcome> confirmPendingCommit(
+    PendingCommitToken pending,
+  ) async =>
+      const DecryptLocationOutcome(results: [], autoCommits: [], proposals: []);
 
   @override
-  Future<void> failPendingCommit(PendingCommitToken pending) async {}
+  Future<DecryptLocationOutcome> failPendingCommit(
+    PendingCommitToken pending,
+  ) async =>
+      const DecryptLocationOutcome(results: [], autoCommits: [], proposals: []);
 
   @override
   Future<String> signDeletionEvent({
@@ -596,10 +602,16 @@ class _ThrowingErrorCircleService implements CircleService {
   }) async => throw UnimplementedError();
 
   @override
-  Future<void> confirmPendingCommit(PendingCommitToken pending) async {}
+  Future<DecryptLocationOutcome> confirmPendingCommit(
+    PendingCommitToken pending,
+  ) async =>
+      const DecryptLocationOutcome(results: [], autoCommits: [], proposals: []);
 
   @override
-  Future<void> failPendingCommit(PendingCommitToken pending) async {}
+  Future<DecryptLocationOutcome> failPendingCommit(
+    PendingCommitToken pending,
+  ) async =>
+      const DecryptLocationOutcome(results: [], autoCommits: [], proposals: []);
 
   @override
   Future<String> signDeletionEvent({

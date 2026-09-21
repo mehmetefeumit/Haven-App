@@ -7,7 +7,12 @@
 //! `SQLCipher` database — none of them plants a row to "reach" the state it
 //! asserts.
 //!
-//! The five seams and what each is for:
+//! Five are READ seams, and the sixth is not: `set_stored_message_write_fault_
+//! for_test` MUTATES a live database so a harness can make a write the engine
+//! performs mid-call fail. It is listed last and marked, because "a harness can
+//! see state the product does not expose" is not a true description of it.
+//!
+//! The six seams and what each is for:
 //!
 //! 1. `SessionManager::process_event_typed_for_test` — one ingest of one event
 //!    that keeps BOTH pre-authentication screens and hands back the engine's own
@@ -24,6 +29,13 @@
 //! 5. `openmls_group_keys_for_test` / `delete_openmls_group_state_for_test` —
 //!    the only honest way to induce hydration quarantine, which the engine sets
 //!    at session open and offers no API to trigger.
+//! 6. `set_stored_message_write_fault_for_test` — the one WRITE seam, and the
+//!    only deterministic way to make an in-flight engine call fail after it has
+//!    already emitted: it installs a `BEFORE UPDATE` abort trigger on the
+//!    engine's stored-message table, in a LIVE database, so a replay can be
+//!    aborted between the event buffer and the durable row. Unlike the other
+//!    five it changes what the engine does rather than revealing it, which is
+//!    why it is armed and disarmed around one call and never left in place.
 //!
 //! # Rule 15 over this file
 //!
@@ -40,7 +52,8 @@ use std::sync::{Arc, Mutex};
 use haven_core::circle::{CircleConfig, CircleManager, MemberKeyPackage};
 use haven_core::location::LocationMessage;
 use haven_core::nostr::mls::storage::{
-    delete_openmls_group_state_for_test, openmls_group_keys_for_test, OpenMlsGroupKey,
+    delete_openmls_group_state_for_test, openmls_group_keys_for_test,
+    set_stored_message_write_fault_for_test, OpenMlsGroupKey,
 };
 use haven_core::nostr::mls::types::{
     EpochId, GroupId, IngestOutcome, LocationMessageResult, MessageId, MessageState,
@@ -63,7 +76,7 @@ const GROUP_RELAY: &str = "wss://seams.example.com";
 struct Device {
     manager: Arc<CircleManager>,
     keys: Keys,
-    _dir: TempDir,
+    dir: TempDir,
 }
 
 impl Device {
@@ -72,11 +85,12 @@ impl Device {
         let keys = Keys::generate();
         let manager =
             Arc::new(CircleManager::new_unencrypted(dir.path(), &keys).expect("open a session"));
-        Self {
-            manager,
-            keys,
-            _dir: dir,
-        }
+        Self { manager, keys, dir }
+    }
+
+    /// The device's own data directory, for a seam that opens a second handle.
+    fn dir_path(&self) -> &std::path::Path {
+        self.dir.path()
     }
 
     async fn key_package(&self) -> MemberKeyPackage {
@@ -740,6 +754,98 @@ async fn create_confirmed_circle(
         .await
         .expect("confirm the create");
     result.circle.mls_group_id
+}
+
+// ── Seam 6: the write fault ─────────────────────────────────────────────────
+
+/// The one MUTATION seam: arming it makes the engine's own stored-message write
+/// fail, and disarming it restores the call it broke.
+///
+/// This is the only way to reach the shape that matters for Rule 12 — an engine
+/// call that has ALREADY handed a decrypted peer message to the application and
+/// then fails before its durable row is written. Both directions are asserted,
+/// because a fault that could not be lifted would make every later test in the
+/// same database a fiction, and a fault that never bit would make the tests it
+/// exists for vacuous.
+#[tokio::test]
+async fn the_write_fault_breaks_exactly_one_engine_write_and_then_lets_go() {
+    let c = two_member_circle("write fault").await;
+    // ALICE's database, because the seam is only useful against a LIVE session:
+    // the write it breaks is one the engine makes in the middle of a call.
+    let db = StorageConfig::new(c.alice.dir_path()).database_path();
+    let key = StorageConfig::test_sqlcipher_key().expect("the test key");
+
+    let first = c
+        .bob
+        .manager
+        .encrypt_location(
+            &c.mls_group_id,
+            &c.bob.keys.public_key(),
+            &LocationMessage::new(51.5, -0.12),
+            60,
+        )
+        .await
+        .expect("bob sends");
+
+    set_stored_message_write_fault_for_test(&db, &key, true).expect("arm the fault");
+    assert!(
+        c.alice
+            .manager
+            .session()
+            .process_event(&first.0)
+            .await
+            .is_err(),
+        "armed, the engine's own stored-message write must fail the ingest — the \
+         seam is useless if the call it is aimed at still succeeds"
+    );
+    set_stored_message_write_fault_for_test(&db, &key, false).expect("disarm the fault");
+
+    let second = c
+        .bob
+        .manager
+        .encrypt_location(
+            &c.mls_group_id,
+            &c.bob.keys.public_key(),
+            &LocationMessage::new(48.85, 2.35),
+            60,
+        )
+        .await
+        .expect("bob sends again");
+    assert!(
+        c.alice
+            .manager
+            .session()
+            .process_event(&second.0)
+            .await
+            .is_ok(),
+        "disarmed, the same call must succeed again: a fault that outlived its \
+         own scope would make every later assertion in this database a fiction"
+    );
+}
+
+/// The seam does not exist without the feature that gates it.
+///
+/// Structural rather than behavioural, because a test cannot compile against a
+/// symbol that is not there: what is asserted is that the declaration carries
+/// the gate, in the same file the shipped build compiles.
+#[test]
+fn the_write_fault_is_gated_by_the_test_utils_feature() {
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/nostr/mls/storage.rs"),
+    )
+    .expect("read the storage module");
+    let declaration = source
+        .find("pub fn set_stored_message_write_fault_for_test")
+        .expect("the seam is declared here");
+    let gate = source[..declaration]
+        .rfind("#[cfg(any(test, feature = \"test-utils\"))]")
+        .expect("and it carries a gate");
+    assert!(
+        !source[gate..declaration].contains("pub fn "),
+        "the gate must be the seam's OWN attribute, not one belonging to an \
+         earlier item — a mutation seam in a shipped build is a lever on the \
+         user's MLS store"
+    );
 }
 
 /// A database the engine never wrote is refused, loudly, instead of reporting an

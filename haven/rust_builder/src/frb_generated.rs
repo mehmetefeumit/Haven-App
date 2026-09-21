@@ -8304,7 +8304,6 @@ fn wire__crate__api__RelayManagerFfi_run_catchup_all_circles_impl(
             let api_circle = <RustOpaqueMoi<
                 flutter_rust_bridge::for_generated::RustAutoOpaqueInner<CircleManagerFfi>,
             >>::sse_decode(&mut deserializer);
-            let api_own_pubkey_hex = <String>::sse_decode(&mut deserializer);
             let api_max_duration_secs = <u64>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| async move {
@@ -8343,7 +8342,6 @@ fn wire__crate__api__RelayManagerFfi_run_catchup_all_circles_impl(
                         let output_ok = crate::api::RelayManagerFfi::run_catchup_all_circles(
                             &*api_that_guard,
                             &*api_circle_guard,
-                            api_own_pubkey_hex,
                             api_max_duration_secs,
                         )
                         .await?;
@@ -9845,9 +9843,11 @@ impl SseDecode for crate::api::DecryptLocationOutcomeFfi {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut var_results = <Vec<crate::api::LocationMessageResultFfi>>::sse_decode(deserializer);
         let mut var_autoCommits = <Vec<crate::api::CommitToPublishFfi>>::sse_decode(deserializer);
+        let mut var_proposals = <Vec<String>>::sse_decode(deserializer);
         return crate::api::DecryptLocationOutcomeFfi {
             results: var_results,
             auto_commits: var_autoCommits,
+            proposals: var_proposals,
         };
     }
 }
@@ -12225,6 +12225,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::DecryptLocationOutcomeFfi {
         [
             self.results.into_into_dart().into_dart(),
             self.auto_commits.into_into_dart().into_dart(),
+            self.proposals.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -13583,6 +13584,7 @@ impl SseEncode for crate::api::DecryptLocationOutcomeFfi {
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <Vec<crate::api::LocationMessageResultFfi>>::sse_encode(self.results, serializer);
         <Vec<crate::api::CommitToPublishFfi>>::sse_encode(self.auto_commits, serializer);
+        <Vec<String>>::sse_encode(self.proposals, serializer);
     }
 }
 

@@ -776,6 +776,9 @@ Event (445/1059) → event_to_transport_message → session.ingest(msg).await
 - **`IngestOutcome::Processed`** — applied; advance your receive cursor.
 - **`IngestOutcome::Buffered { group_id, epoch }`** — future-epoch/out-of-order; the engine
   persisted it durably and will replay it. **Never advance the cursor past a Buffered event.**
+  The replay comes back in the batch of whatever call RELEASED it — a `confirm_published`, a
+  `publish_failed`, an `advance_convergence`, or the convergence settle inside the next `send` —
+  and it comes back **once**; see "What a resolved publish hands back" below.
 - **`IngestOutcome::Stale { reason }`** — non-error terminal:
   `StaleReason::{AlreadySeen, AlreadyAtEpoch, NotForThisClient, UnknownGroup, OwnEcho,
   PeelFailed, SelfEvicted, Quarantined}`. Advance the cursor.
@@ -792,6 +795,13 @@ Application-visible results arrive as an **ordered `GroupEvent` stream** in `eff
 | `GroupUnrecoverable` | Fork/quarantine terminal state — UI must block send/mutate | `Unrecoverable` |
 | `PendingCommitRecovered` | Crash between publish and confirm; staged commit cleared at hydrate | **mandatory resync** (Rule 13) |
 | `GroupCreated`, fork-recovery bookkeeping (`ForkRecovered`, `CommitRolledBack`) | Bookkeeping | `None` |
+
+A `GroupStateChanged` whose removed member is THIS device (`realize_self_eviction`,
+`ingest.rs:1536-1545`) carries the same `GroupUpdate` folding as any other roster move: the fold
+is by variant, not by whose leaf went. Every receive plane therefore renders a self-eviction as a
+generic refresh signal rather than as "you were removed"; the circle still stops sending, because
+the engine's own gate refuses it. Known coarseness, pre-existing on every plane, and deliberately
+not special-cased.
 
 ### Publish-before-apply (Rule 13)
 
@@ -856,6 +866,49 @@ Full analysis: `docs/POWER_EFFICIENCY_PLAN.md` §4 OD4-c and §5.4; the owner's 
 `merge_pending_commit`/`clear_pending_commit`/staged-commit-marker machinery is deleted — the
 typed `PendingStateRef` lifecycle owns it.
 
+#### What a resolved publish hands BACK
+
+`confirm_published` and `publish_failed` do not resolve a ref and stop. Both end in
+`replay_buffered_messages` (`cgka-engine/src/publish.rs:255` and `:331`), and both return a full
+`SessionEffects` — which is **a one-shot drain of GLOBAL engine buffers**: `events` (every
+`MessageReceived` the window buffered, plus the epoch change), `pending_convergence`, `publish`
+and `queued`. Dropped means gone; nothing re-requests any of it.
+
+- **A replayed `MessageReceived` is delivered AT MOST ONCE**, and the engine writes the content
+  row `Processed` in the same breath (`message_processor/ingest.rs:760-771`), after which every
+  redelivery answers `Stale { AlreadySeen }` (`message_processor/store.rs:24-39`). There is no
+  application-acknowledgement boundary, so a caller that folds the batch without persisting loses
+  the fix for good. Haven persists INSIDE the call
+  (`CircleManager::persist_locations_from_events`), keyed off each event's OWN `group_id`: the
+  buffers are global, so one batch can span circles and an ambient id would file a peer under a
+  circle they are not in.
+- **A peer `SelfRemove` buffered behind a staged commit surfaces on the ROLLBACK rung, never on
+  the confirm.** A confirm merges first, so its replay runs at epoch N+1 and a proposal bound to
+  epoch N is already dead; `publish_failed` discards the staged commit and replays at the
+  ORIGINAL epoch, where the proposal still applies. It arrives as `pending_convergence = [group]`
+  with an **empty** `publish` — the eviction `AutoPublish` only materialises on the following
+  `advance_convergence` — so a caller that drops `pending_convergence` strands the leave with
+  nobody committing it. Haven drains it in the same call
+  (`CircleManager::fold_resolved_publish`), with one bounded re-tick budget per call because the
+  engine's auto-commit due time is a real `Instant`.
+- **An `Err` from `confirm_published` can mean "applied, replay failed".** The durable merge and
+  `epoch_manager.confirm_publish` both PRECEDE the replay, and `cgka-session` propagates the
+  replay's `?` before `collect_effects` runs — so the caller gets an error and **no** effects
+  while everything already emitted sits in the engine's buffers. Never `publish_failed` after it
+  and never retry: both act on a commit the group may already hold. Haven drains the stranded
+  buffer (`SessionManager::drain`), folds and persists it, and returns the original error
+  unchanged.
+- **The send path is the same drop at higher frequency.** `do_send` settles stored convergence
+  before it encrypts (`should_queue_outbound_intent` → `advance_convergence_inputs_until_settled`
+  → `retry_deferred_peels`), so a peer message that could not be peeled when it arrived is
+  re-ingested into THAT send's own batch. Haven persists it there too
+  (`CircleManager::note_send_drain`, called by all four `take_*` extractors) — which is why a
+  location publish cycle is a receive path as well as a send one. An eviction `AutoPublish` the
+  same drain co-surfaces (always another circle's — a same-circle staging answers `Queued` and
+  takes the deferred branch) is recorded as OWED and not handed to the caller; the engine never
+  re-emits it, so `redeem_removal_deferrals` on a foreground live-sync open is its only publisher.
+  Residual and the flag-off hole: `haven-core/SECURITY.md`.
+
 ### Convergence (the concurrent-commit cure)
 
 The engine owns what Haven used to hand-roll (settle windows, `commit_order_key`, the #633
@@ -881,6 +934,12 @@ un-poison workaround — all deleted):
   can grow durable storage with future-epoch messages. Haven mitigates with intake backpressure
   (Rule 12: rate-limit, NEVER silently drop legitimate offline backlog), but an intake cap
   throttles only — it cannot bound engine storage. #757 closure is the real fix.
+- **`replay_buffered_messages` retires only `PeelDeferred` rows** (`message_processor/mod.rs`
+  `:890-900`): a raw `Retryable` row stays `Retryable` after its content has been applied, and it
+  is that row a catch-up cursor is pinned behind. So a resolved publish delivering the buffered
+  location does **not** move the cursor, and a green "the fix surfaces on confirm" test must not
+  be read as having unpinned it. MDK-side, unreported; owner directive is to leave MDK alone at
+  this pin.
 
 ### Leave / SelfRemove
 

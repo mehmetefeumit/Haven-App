@@ -6,7 +6,7 @@
 import 'frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `build_relay_list_event_for`, `build_relay_list_unpublish_for`, `commit_event_to_json`, `convert_commit_to_publish`, `convert_deferred_send`, `convert_location_result`, `current_cache`, `current_picture_hash`, `delete_circles_db_files`, `delete_db_files`, `delete_legacy_mls_db_files`, `delete_mls_session_db_files`, `delete_superseded_kp`, `delete_tile_db_files`, `ensure_own_identity`, `from_cached`, `from_report`, `from_state`, `get_or_create_circle_db_key`, `get_or_create_tiles_db_key`, `hex_to_npub`, `keys_from_secret_bytes`, `live_event_to_ffi`, `live_session_core`, `maintain_relay_list_category`, `maintenance_now_secs`, `mark_kp_slot_retirement_done`, `max_log_level`, `nip65_relay_list_urls`, `no_network`, `now_ms`, `now_secs`, `platform_init_keyring`, `profile_now_secs`, `profile_picture_delay`, `profile_stamp_lists`, `profile_view`, `purge_key_package_past_not_after`, `record_retired_slot`, `redact_directory_err`, `redact_profile_err`, `reinstall_after_timed_out_stop`, `relay_list_urls_for`, `relay_list_urls`, `relay_list_wire_kind`, `remove_circles_db_key`, `remove_file_strict`, `remove_keyring_key`, `remove_mls_session_db_key`, `remove_tiles_db_key`, `republish_key_package`, `retire_malformed_kp_slot`, `retract_kp_slots`, `run_blocking`, `sync_reason_to_ffi`, `tile_err_to_string`, `unknown`, `usable_profile_pool`
+// These functions are ignored because they are not marked as `pub`: `build_relay_list_event_for`, `build_relay_list_unpublish_for`, `commit_event_to_json`, `convert_commit_to_publish`, `convert_deferred_send`, `convert_ingest`, `convert_location_result`, `current_cache`, `current_picture_hash`, `delete_circles_db_files`, `delete_db_files`, `delete_legacy_mls_db_files`, `delete_mls_session_db_files`, `delete_superseded_kp`, `delete_tile_db_files`, `ensure_own_identity`, `from_cached`, `from_report`, `from_state`, `get_or_create_circle_db_key`, `get_or_create_tiles_db_key`, `hex_to_npub`, `keys_from_secret_bytes`, `live_event_to_ffi`, `live_session_core`, `logscan_plant_token`, `maintain_relay_list_category`, `maintenance_now_secs`, `mark_kp_slot_retirement_done`, `max_log_level`, `nip65_relay_list_urls`, `no_network`, `now_ms`, `now_secs`, `platform_init_keyring`, `profile_now_secs`, `profile_picture_delay`, `profile_stamp_lists`, `profile_view`, `purge_key_package_past_not_after`, `record_retired_slot`, `redact_directory_err`, `redact_profile_err`, `reinstall_after_timed_out_stop`, `relay_list_urls_for`, `relay_list_urls`, `relay_list_wire_kind`, `remove_circles_db_key`, `remove_file_strict`, `remove_keyring_key`, `remove_mls_session_db_key`, `remove_tiles_db_key`, `republish_key_package`, `retire_malformed_kp_slot`, `retract_kp_slots`, `run_blocking`, `sync_reason_to_ffi`, `tile_err_to_string`, `unknown`, `usable_profile_pool`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `InMemoryStorage`, `KpPublishPlan`, `KpRetirementInputs`, `KpRetirementTick`, `ProfileStampLists`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`, `default`
@@ -664,7 +664,10 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// Adds a relay to one category (idempotent).
   ///
   /// The URL is normalized via `nostr::RelayUrl::parse`; duplicates are
-  /// silent no-ops. `ws://` and credential-bearing URLs are rejected.
+  /// silent no-ops. `ws://` and credential-bearing URLs are rejected with a
+  /// `CircleError::InvalidRelayInput`, whose `RelayInputRejection` sentence
+  /// reaches Dart verbatim and is what `_mapStorageError` routes the
+  /// user-facing message on — the sentence itself is never displayed.
   Future<void> addUserRelay({
     required String url,
     required RelayTypeFfi relayType,
@@ -748,7 +751,15 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// optimistic-merge forks (Rule 13, security F13). Pass the `pending` token
   /// carried in a [`CircleCreationResultFfi`] / [`AddMembersResultFfi`] /
   /// [`CommitToPublishFfi`].
-  Future<void> confirmPublished({required PendingStateRefFfi pending});
+  ///
+  /// Returns everything the engine replayed out of the buffer it filled while
+  /// that commit was in flight — peer locations included. The locations are
+  /// already persisted by the core; the caller routes them for DISPLAY, and
+  /// must run [`DecryptLocationOutcomeFfi::auto_commits`] through this same
+  /// ladder and publish its `proposals`.
+  Future<DecryptLocationOutcomeFfi> confirmPublished({
+    required PendingStateRefFfi pending,
+  });
 
   /// Creates a new circle with gift-wrapped Welcome events.
   ///
@@ -1107,7 +1118,10 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// for the [`update_circle_relays`](Self::update_circle_relays) flow
   /// (members converge via the receive path). Pass the `pending` token from
   /// the [`CommitToPublishFfi`] and the circle's `mls_group_id`.
-  Future<void> finalizeRelayUpdate({
+  ///
+  /// Returns the confirm's replayed outcome, exactly as
+  /// [`confirm_published`](Self::confirm_published) does.
+  Future<DecryptLocationOutcomeFfi> finalizeRelayUpdate({
     required PendingStateRefFfi pending,
     required List<int> mlsGroupId,
   });
@@ -1405,8 +1419,11 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// commit and returns the group to `Stable` at the prior epoch.
   ///
   /// The publish-failure counterpart to [`confirm_published`](Self::confirm_published);
-  /// pass the same `pending` token.
-  Future<void> publishFailed({required PendingStateRefFfi pending});
+  /// pass the same `pending` token. It replays the same buffer, so it returns
+  /// the same outcome — a no-ack must not cost the peer's fix either.
+  Future<DecryptLocationOutcomeFfi> publishFailed({
+    required PendingStateRefFfi pending,
+  });
 
   /// The local member directory in picker order: current co-members first,
   /// then people who shared a circle within the retention window, each block
@@ -1526,8 +1543,12 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// Removes a relay from one category.
   ///
   /// Returns `true` when a row was removed, `false` when the URL was not
-  /// in the user's list. Refuses to delete the last relay in a category
-  /// (returns `Err` so the UI can show "you need at least one relay").
+  /// in the user's list. Refuses to delete the last relay in a category with
+  /// `CircleError::InvalidRelayInput(RelayInputRejection::LastInCategory)`,
+  /// whose sentence — "At least one relay is required per category" — is the
+  /// `Err(String)` Dart's `_mapStorageError` routes its own user-facing
+  /// message on. It is the one `CircleError` payload that survives the
+  /// flattening, because it is Haven-authored and value-free.
   Future<bool> removeUserRelay({
     required String url,
     required RelayTypeFfi relayType,
@@ -2536,7 +2557,6 @@ abstract class RelayManagerFfi implements RustOpaqueInterface {
   /// [`CatchupResultFfi`] (counters).
   Future<CatchupResultFfi> runCatchupAllCircles({
     required CircleManagerFfi circle,
-    required String ownPubkeyHex,
     required BigInt maxDurationSecs,
   });
 
@@ -3109,22 +3129,28 @@ class ConvergenceSweepFfi {
           settled == other.settled;
 }
 
-/// The folded outcome of ingesting one received `kind:445` — FFI mirror of
+/// What the engine folded out of one call — FFI mirror of
 /// `haven_core::circle::DecryptedIngest`.
 ///
-/// Carries the folded location results AND any receive-side auto-commit the
-/// engine staged (a peer `SelfRemove` eviction). Publish-before-apply (Rule 13 /
-/// security F13): for EACH [`Self::auto_commits`] entry, publish
-/// `commit_event_json` to the circle's relays, then
+/// Two origins, one shape: ingesting one received `kind:445`
+/// ([`CircleManagerFfi::decrypt_location_collecting_commits`]), and RESOLVING a
+/// staged commit ([`CircleManagerFfi::confirm_published`] /
+/// [`CircleManagerFfi::publish_failed`] / [`CircleManagerFfi::finalize_relay_update`]),
+/// which replays everything the engine buffered while that commit was in flight.
+///
+/// Carries the folded location results, any receive-side auto-commit the engine
+/// staged (a peer `SelfRemove` eviction), and any bare proposal.
+/// Publish-before-apply (Rule 13 / security F13): for EACH [`Self::auto_commits`]
+/// entry, publish `commit_event_json` to the circle's relays, then
 /// [`CircleManagerFfi::confirm_published`] on a ≥1-relay ACK (or
 /// [`CircleManagerFfi::publish_failed`] on failure) — exactly like the
 /// [`CommitToPublishFfi`] returned by remove / relay-update. NEVER confirm before
 /// a relay ACKs, and NEVER drop an entry silently (that re-forks the group the
 /// leaver departed).
 ///
-/// Both fields carry redacting `Debug` impls (`LocationMessageResultFfi` /
-/// `CommitToPublishFfi`), so the derived `Debug` here cannot leak group ids or
-/// coordinates.
+/// Every location it carries is ALREADY persisted to the last-known store by the
+/// core before the call returns; the caller routes them for DISPLAY and for the
+/// receive-liveness stamp, never for durability.
 class DecryptLocationOutcomeFfi {
   /// The folded location-facing results (locations, joins, updates, …).
   final List<LocationMessageResultFfi> results;
@@ -3132,13 +3158,21 @@ class DecryptLocationOutcomeFfi {
   /// Receive-side auto-commits the caller MUST publish then confirm/fail.
   final List<CommitToPublishFfi> autoCommits;
 
+  /// JSON-serialized bare proposal events to publish (no confirm), mirroring
+  /// [`DeferredSendFfi::proposals`]: publish-or-lose, and recoverable — a
+  /// re-proposed `SelfRemove` is driven by the durable leave request, so a
+  /// later convergence pass re-emits it.
+  final List<String> proposals;
+
   const DecryptLocationOutcomeFfi({
     required this.results,
     required this.autoCommits,
+    required this.proposals,
   });
 
   @override
-  int get hashCode => results.hashCode ^ autoCommits.hashCode;
+  int get hashCode =>
+      results.hashCode ^ autoCommits.hashCode ^ proposals.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -3146,7 +3180,8 @@ class DecryptLocationOutcomeFfi {
       other is DecryptLocationOutcomeFfi &&
           runtimeType == other.runtimeType &&
           results == other.results &&
-          autoCommits == other.autoCommits;
+          autoCommits == other.autoCommits &&
+          proposals == other.proposals;
 }
 
 /// Decrypted location from a peer (FFI-friendly).

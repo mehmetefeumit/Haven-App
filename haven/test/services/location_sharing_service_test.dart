@@ -27,7 +27,11 @@ import '../mocks/mock_relay_service.dart';
 List<LocationEventResult> fakeDecrypt({
   DecryptedLocation? location,
   bool groupUpdated = false,
-  List<int> mlsGroupId = const [],
+  // `[1, 2, 3, 4]` is `TestCircleFactory.createCircle()`'s own default
+  // `mlsGroupId` — the ambient circle nearly every caller in this file
+  // resolves against; `mlsGroupId` is never empty in production (Rust's
+  // `convert_location_result` sets it on every variant).
+  List<int> mlsGroupId = const [1, 2, 3, 4],
   LocationEventKind? kind,
 }) {
   final resolvedKind =
@@ -613,7 +617,8 @@ void main() {
               ..decryptLocationResults = [noDecryptResult]
               ..decryptLocationAutoCommits[0] = [
                 PendingAutoCommit(
-                  commitEventJson: '{"id":"commitEvt","kind":445}',
+                  commitEventJson:
+                      '{"id":"cEvt","kind":445,"tags":[["h","05060708"]]}',
                   pendingToken: PendingCommitToken(BigInt.from(7)),
                 ),
               ];
@@ -627,7 +632,9 @@ void main() {
 
             expect(
               mockRelay.publishedEvents,
-              contains('{"id":"commitEvt","kind":445}'),
+              contains(
+                  '{"id":"cEvt","kind":445,"tags":[["h","05060708"]]}',
+              ),
             );
             expect(mockCircle.confirmPendingCommitCalls, [
               PendingCommitToken(BigInt.from(7)),
@@ -649,7 +656,8 @@ void main() {
               ..decryptLocationResults = [noDecryptResult]
               ..decryptLocationAutoCommits[0] = [
                 PendingAutoCommit(
-                  commitEventJson: '{"id":"commitEvt","kind":445}',
+                  commitEventJson:
+                      '{"id":"cEvt","kind":445,"tags":[["h","05060708"]]}',
                   pendingToken: PendingCommitToken(BigInt.from(9)),
                 ),
               ];
@@ -665,7 +673,9 @@ void main() {
             // the confirm/fail branch depends on the outcome.
             expect(
               mockRelay.publishedEvents,
-              contains('{"id":"commitEvt","kind":445}'),
+              contains(
+                  '{"id":"cEvt","kind":445,"tags":[["h","05060708"]]}',
+              ),
             );
             expect(mockCircle.confirmPendingCommitCalls, isEmpty);
             expect(
@@ -700,7 +710,8 @@ void main() {
               ..decryptLocationResults = [noDecryptResult]
               ..decryptLocationAutoCommits[0] = [
                 PendingAutoCommit(
-                  commitEventJson: '{"id":"commitEvt","kind":445}',
+                  commitEventJson:
+                      '{"id":"cEvt","kind":445,"tags":[["h","05060708"]]}',
                   pendingToken: PendingCommitToken(BigInt.from(3)),
                 ),
               ];
@@ -770,7 +781,8 @@ void main() {
               ..decryptLocationResults = [noDecryptResult]
               ..decryptLocationAutoCommits[0] = [
                 PendingAutoCommit(
-                  commitEventJson: '{"id":"commitEvt2","kind":445}',
+                  commitEventJson:
+                      '{"id":"cEvt2","kind":445,"tags":[["h","05060708"]]}',
                   pendingToken: PendingCommitToken(BigInt.from(11)),
                 ),
               ];
@@ -784,7 +796,9 @@ void main() {
 
             expect(
               mockRelay.publishedEvents,
-              contains('{"id":"commitEvt2","kind":445}'),
+              contains(
+                  '{"id":"cEvt2","kind":445,"tags":[["h","05060708"]]}',
+              ),
             );
             expect(mockCircle.confirmPendingCommitCalls, [
               PendingCommitToken(BigInt.from(11)),
@@ -812,7 +826,8 @@ void main() {
               ..decryptLocationResults = [noDecryptResult]
               ..decryptLocationAutoCommits[0] = [
                 PendingAutoCommit(
-                  commitEventJson: '{"id":"commitEvt3","kind":445}',
+                  commitEventJson:
+                      '{"id":"cEvt3","kind":445,"tags":[["h","05060708"]]}',
                   pendingToken: PendingCommitToken(BigInt.from(13)),
                 ),
               ];
@@ -863,7 +878,8 @@ void main() {
               ..decryptLocationResults = [noDecryptResult]
               ..decryptLocationAutoCommits[0] = [
                 PendingAutoCommit(
-                  commitEventJson: '{"id":"commitEvt4","kind":445}',
+                  commitEventJson:
+                      '{"id":"cEvt4","kind":445,"tags":[["h","05060708"]]}',
                   pendingToken: PendingCommitToken(BigInt.from(17)),
                 ),
               ];
@@ -1400,6 +1416,7 @@ void main() {
                   timestamp: now,
                   expiresAt: now.add(const Duration(hours: 23)),
                 ),
+                mlsGroupId: circleB.mlsGroupId,
               ),
             ];
 
@@ -1425,6 +1442,7 @@ void main() {
                 timestamp: now.subtract(const Duration(hours: 2)),
                 expiresAt: now.subtract(const Duration(hours: 1)),
               ),
+              mlsGroupId: circleA.mlsGroupId,
             ),
           ];
           mockRelay.replaceAll(['{"id":"evtA","kind":445,"content":"stale"}']);
@@ -1845,8 +1863,14 @@ void main() {
       buildSeededService() async {
         final mockCircle = MockCircleService()
           ..decryptLocationResults = [
-            fakeDecrypt(location: locFor('alicepubkey')),
-            fakeDecrypt(location: locFor('bobpubkey')),
+            fakeDecrypt(
+              location: locFor('alicepubkey'),
+              mlsGroupId: evictionCircle.mlsGroupId,
+            ),
+            fakeDecrypt(
+              location: locFor('bobpubkey'),
+              mlsGroupId: evictionCircle.mlsGroupId,
+            ),
           ];
         final relay = _MutableMockRelayService(
           initialMessages: [
@@ -2295,10 +2319,30 @@ void main() {
             relayService: mockRelay,
           );
 
+          int snapshotCalls() => mockCircle.methodCalls
+              .where((c) => c == 'snapshotLastKnownForCircle')
+              .length;
+
           // First fetch hydrates.
           final first = await svc.fetchMemberLocations(circle: testCircle);
           expect(first.locations, hasLength(1));
           expect(first.locations.first.latitude, 41.0);
+
+          // Hydration is ONCE PER CIRCLE PER SESSION, and the reads that keep
+          // the map alive between polls must not re-run it. Without these
+          // intervening reads the count below is 2 whether or not the pause
+          // reset anything, i.e. the test would pass while proving nothing:
+          // it is the 1 here that makes the 2 afterwards evidence.
+          for (var i = 0; i < 4; i++) {
+            await svc.cachedLocations(testCircle);
+          }
+          expect(
+            snapshotCalls(),
+            1,
+            reason: 'a merge-from-store on every read would also undo the '
+                'stale-eviction and departed-member bounds the two guards '
+                'below pin',
+          );
 
           svc.onAppPaused();
           expect(svc.debugCachedLocationCount, 0);
@@ -2308,12 +2352,100 @@ void main() {
           expect(second.locations, hasLength(1));
           expect(second.locations.first.latitude, 41.0);
 
-          // snapshotLastKnownForCircle called twice — once per fetch — proving
-          // _hydratedCircles was genuinely reset by onAppPaused.
-          final snapshotCalls = mockCircle.methodCalls
-              .where((c) => c == 'snapshotLastKnownForCircle')
-              .length;
-          expect(snapshotCalls, 2);
+          // snapshotLastKnownForCircle called twice — once per session —
+          // proving _hydratedCircles was genuinely reset by onAppPaused.
+          expect(snapshotCalls(), 2);
+        },
+      );
+
+      test(
+        'an entry past the eviction grace stays evicted, even though the '
+        'store still holds it',
+        () async {
+          // The store keeps a row to `purge_after` (24 h); the in-memory cache
+          // drops it at `expiresAt + cacheEvictionGrace`. That bound on how
+          // much plaintext location a long-running session accumulates only
+          // holds while hydration is once-per-session — a merge on every read
+          // would put the row straight back.
+          final now = DateTime.utc(2026, 9, 20, 12);
+          final stale = DecryptedLocation(
+            senderPubkey: 'sender-stale',
+            latitude: 41,
+            longitude: -74,
+            geohash: 'dr5r',
+            timestamp: now.subtract(const Duration(hours: 3)),
+            expiresAt: now.subtract(const Duration(hours: 2)),
+          );
+          final mockCircle = MockCircleService()
+            ..snapshotLastKnownRows = [stale];
+          final svc = LocationSharingService(
+            circleService: mockCircle,
+            relayService: MockRelayService(),
+            now: () => now,
+          );
+
+          expect(await svc.cachedLocations(testCircle), isEmpty);
+          expect(
+            mockCircle.snapshotLastKnownRows,
+            hasLength(1),
+            reason: 'anti-vacuity: the STORE still has the row, so the empty '
+                'read above is eviction rather than an empty store',
+          );
+          expect(
+            await svc.cachedLocations(testCircle),
+            isEmpty,
+            reason: 'a second read must not resurrect it either',
+          );
+        },
+      );
+
+      test(
+        'a departed member whose store row could not be deleted does not come '
+        'back on the next read',
+        () async {
+          // `_evictDepartedMembers` prunes cache AND store, but the store half
+          // is best-effort. The in-memory eviction is what bounds the visible
+          // window when the disk delete fails — and it only bounds anything
+          // while the cache is not re-merged from that undeleted row.
+          final departed = DecryptedLocation(
+            senderPubkey: 'sender-departed',
+            latitude: 41,
+            longitude: -74,
+            geohash: 'dr5r',
+            timestamp: DateTime.now().subtract(const Duration(minutes: 1)),
+            expiresAt: DateTime.now().add(const Duration(hours: 1)),
+          );
+          final mockCircle = MockCircleService()
+            ..snapshotLastKnownRows = [departed]
+            ..shouldThrowOnRemoveLastKnownMember = true
+            // The post-commit roster no longer has the sender.
+            ..getMembersResults = [const []]
+            ..decryptLocationResults = [
+              fakeDecrypt(groupUpdated: true),
+            ];
+          final svc = LocationSharingService(
+            circleService: mockCircle,
+            relayService: MockRelayService(
+              groupMessages: const [
+                '{"id":"evtLeave","kind":445,"content":"x"}',
+              ],
+            ),
+          );
+
+          final fetched = await svc.fetchMemberLocations(circle: testCircle);
+          expect(fetched.groupUpdated, isTrue);
+          expect(
+            mockCircle.removeLastKnownMemberCalls.map((c) => c.senderPubkey),
+            ['sender-departed'],
+            reason: 'anti-vacuity: the store delete really was attempted, and '
+                'really did throw',
+          );
+          expect(
+            await svc.cachedLocations(testCircle),
+            isEmpty,
+            reason: "a removed member's pin must not return from the row the "
+                'failed delete left behind (Security Rule 10)',
+          );
         },
       );
 
@@ -2541,7 +2673,11 @@ class _ThrowOnFirstDecryptService
           timestamp: DateTime.now(),
           expiresAt: DateTime.now().add(const Duration(hours: 23)),
         ),
-        mlsGroupId: const [],
+        // `testCircle`'s default `mlsGroupId` — both call sites below decrypt
+        // against a `testCircle` ambient. `mlsGroupId` is never empty in
+        // production (Rust's `convert_location_result` sets it on every
+        // variant).
+        mlsGroupId: const [1, 2, 3, 4],
         epoch: 0,
       ),
     ];
@@ -2555,8 +2691,11 @@ class _ThrowOnFirstDecryptService
   @override
   Future<DecryptLocationOutcome> decryptLocationCollectingCommits({
     required String eventJson,
-  }) async =>
-      DecryptLocationOutcome(results: _decryptOrThrow(), autoCommits: const []);
+  }) async => DecryptLocationOutcome(
+    results: _decryptOrThrow(),
+    autoCommits: const [],
+    proposals: const [],
+  );
 
   @override
   Future<EncryptLocationOutcome> encryptLocation({

@@ -7,17 +7,20 @@
 //! haven-core's own doc is unambiguous that "acked" means a relay returned
 //! `OK` — never merely "sent" — so the rig confirms only after a relay plane's
 //! client-facing stream witnessed one, and rolls back otherwise. There is
-//! exactly one function in this crate that resolves a pending state
-//! ([`publish_and_resolve`]), which is what makes the invariant checkable by
-//! reading rather than by hoping.
+//! exactly one RUNG in this crate that resolves a pending state (`resolve_one`),
+//! reached only through [`publish_and_resolve`] and the ladder
+//! [`resolve_ingest`] that drains what a resolution's own replay hands back,
+//! which is what makes the invariant checkable by reading rather than by
+//! hoping.
 
 use std::fmt;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
-use haven_core::circle::{CircleConfig, MemberKeyPackage};
+use haven_core::circle::{CircleConfig, DecryptedIngest, MemberKeyPackage};
 use haven_core::nostr::mls::types::{GroupId, PendingStateRef};
+use haven_core::relay::auto_commit::RESOLVE_RUNAWAY_CAP;
 use haven_core::relay::live_sync::CircleSpec;
 use haven_core::relay::maintenance::build_kp_maintenance_events;
 use nostr::{Event, TagKind};
@@ -211,21 +214,90 @@ pub async fn publish_and_resolve<R: RelayPlane>(
     pending: PendingStateRef,
     events: &[Event],
 ) -> Result<(PublishVerdict, Option<Duration>), RigError> {
+    let (verdict, latency, ingest) = resolve_one(device, relays, pending, events).await?;
+    resolve_ingest(device, relays, ingest).await?;
+    Ok((verdict, latency))
+}
+
+/// One rung of the ladder: publish, resolve, and hand back what the engine's
+/// replay released.
+async fn resolve_one<R: RelayPlane>(
+    device: &SimDevice,
+    relays: &[R],
+    pending: PendingStateRef,
+    events: &[Event],
+) -> Result<(PublishVerdict, Option<Duration>, DecryptedIngest), RigError> {
     let witnessed = publish_witnessed(device, relays, events).await?;
     let manager = device.manager()?;
     if let Some(latency) = witnessed {
-        manager
+        let ingest = manager
             .confirm_published(pending)
             .await
             .map_err(|_| RigError::Core(Step::ConfirmPublished))?;
-        Ok((PublishVerdict::Confirmed, Some(latency)))
+        Ok((PublishVerdict::Confirmed, Some(latency), ingest))
     } else {
-        manager
+        let ingest = manager
             .publish_failed(pending)
             .await
             .map_err(|_| RigError::Core(Step::RollBackPublish))?;
-        Ok((PublishVerdict::RolledBack, None))
+        Ok((PublishVerdict::RolledBack, None, ingest))
     }
+}
+
+/// Resolves everything a confirm or a rollback handed back, through the SAME
+/// Rule-13 ladder that produced it.
+///
+/// haven-core ends both rungs in the engine's replay, so a resolution can carry
+/// the next eviction in a cascade and the local user's own re-proposed leave.
+/// Those are not droppable: a staged commit nobody resolves forks the group, and
+/// a dropped leave proposal leaves the device behind the engine's send gate with
+/// nothing in flight.
+///
+/// The batch's `results` ARE dropped, and that is the whole disposition: the rig
+/// has no UI, and every location among them is already in the device's
+/// last-known store — which is where this crate reads them back from
+/// (S11's and S19's store reads).
+///
+/// The generation bound is the PRODUCT's own, so a change to haven-core's
+/// ladder moves this one with it rather than leaving a constant of the rig's
+/// choosing behind. Exceeding it leaves refs unresolved, which is the rig being
+/// broken, so it is an error and not a finding.
+///
+/// # Errors
+///
+/// [`RigError::Core`] if a rung's confirm or rollback is refused, or if the
+/// ladder did not finish inside the product's own generation bound.
+pub async fn resolve_ingest<R: RelayPlane>(
+    device: &SimDevice,
+    relays: &[R],
+    ingest: DecryptedIngest,
+) -> Result<(), RigError> {
+    let mut pending_work = ingest;
+    for _ in 0..RESOLVE_RUNAWAY_CAP {
+        if pending_work.auto_commits.is_empty() && pending_work.proposals.is_empty() {
+            return Ok(());
+        }
+        let mut next = DecryptedIngest::default();
+        for proposal in std::mem::take(&mut pending_work.proposals) {
+            // A bare proposal opens no publish-before-apply window: there is
+            // nothing to confirm and nothing to roll back, so the witness is
+            // read for its own sake and no verdict turns on it.
+            let _ = publish_witnessed(device, relays, std::slice::from_ref(&proposal)).await?;
+        }
+        for commit in std::mem::take(&mut pending_work.auto_commits) {
+            let (_, _, batch) = resolve_one(
+                device,
+                relays,
+                commit.pending,
+                std::slice::from_ref(&commit.commit_event),
+            )
+            .await?;
+            next.auto_commits.extend(batch.auto_commits);
+            next.proposals.extend(batch.proposals);
+        }
+        pending_work = next;
+    }
+    Err(RigError::Core(Step::ConfirmPublished))
 }
 
 /// Creates one circle: the admin device invites every other device, the

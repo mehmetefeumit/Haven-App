@@ -36,12 +36,15 @@
 library;
 
 import 'dart:async';
+import 'dart:io';
 import 'dart:math';
+import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/background_location_manager.dart';
+import 'package:haven/src/services/location_auto_commit.dart';
 import 'package:haven/src/services/location_service.dart';
 import 'package:haven/src/services/publish_stagger.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -75,10 +78,19 @@ EncryptLocationOutcomeFfi deferralWith({
   ),
 );
 
-CommitToPublishFfi stagedCommit(int token) => CommitToPublishFfi(
-  commitEventJson: '{"id":"staged-$token","kind":445}',
-  pending: PendingStateRefFfi(token: BigInt.from(token)),
-);
+/// [circleFixture(seed: 1)]'s `nostrGroupId` — the ambient circle nearly
+/// every `stagedCommit` fixture in this file resolves against by default.
+final List<int> _seed1NostrGroupId = Uint8List(32)..fillRange(0, 32, 101);
+
+/// A staged commit whose `h` names [nostrGroupId] (default:
+/// `circleFixture(seed: 1)`'s own).
+CommitToPublishFfi stagedCommit(int token, {List<int>? nostrGroupId}) {
+  final h = hexOf(nostrGroupId ?? _seed1NostrGroupId);
+  return CommitToPublishFfi(
+    commitEventJson: '{"id":"staged-$token","kind":445,"tags":[["h","$h"]]}',
+    pending: PendingStateRefFfi(token: BigInt.from(token)),
+  );
+}
 
 /// The kind-445 payload [FakeCircleManager.sentOutcomeFor] produces for
 /// [circle], so a published event can be tied back to the circle it came from.
@@ -461,6 +473,434 @@ void main() {
         reason: 'losing a proposal costs a cycle, so it must not abort one',
       );
     });
+
+    test(
+      "a peer fix the confirm REPLAYED reaches this isolate's own sharing "
+      'service',
+      () async {
+        // Resolving the staged commit makes the engine replay everything it
+        // buffered while that commit was in flight. The engine delivers a
+        // buffered message exactly once and writes it `Processed` in the same
+        // breath, so a replay this isolate drops is a fix nobody ever sees.
+        final circle = circleFixture(seed: 1);
+        final harness = await BackgroundTaskHarness.start(circles: [circle]);
+        harness.manager.encryptOutcome = (_) =>
+            deferralWith(commits: [stagedCommit(7)]);
+        harness.manager.replayOnResolve[BigInt.from(7)] =
+            DecryptLocationOutcomeFfi(
+            results: [
+              LocationMessageResultFfi(
+                kind: LocationMessageResultKindFfi.location,
+                location: DecryptedLocationFfi(
+                  senderPubkey: 'dd' * 32,
+                  latitude: 52.37,
+                  longitude: 4.89,
+                  geohash: 'u173',
+                  timestamp: 1800000000,
+                  expiresAt: 1800000228,
+                ),
+                mlsGroupId: Uint8List.fromList(circle.circle.mlsGroupId),
+                epoch: BigInt.from(9),
+              ),
+            ],
+            autoCommits: const [],
+            proposals: const [],
+          );
+
+        await harness.tick(DateTime.now());
+
+        expect(harness.manager.confirmedTokens, [BigInt.from(7)]);
+        expect(
+          harness.sharing.ingested.map((i) => i.decrypted.senderPubkey),
+          ['dd' * 32],
+          reason: 'the store row is already written Rust-side, but the '
+              'isolate-local cache and the receive-liveness stamp are this '
+              "side's — and `ingestStreamedLocation` is the one funnel that "
+              'reaches both',
+        );
+        expect(
+          harness.sharing.ingested.single.decrypted.latitude,
+          52.37,
+        );
+      },
+    );
+
+    test('a commit the confirm surfaced takes the same ladder', () async {
+      // The second leaver's eviction, staged by the replay of the first one's
+      // resolution. It carries the identical Rule-13 obligation, so it is
+      // published and confirmed rather than left staged.
+      final circle = circleFixture(seed: 1);
+      final harness = await BackgroundTaskHarness.start(circles: [circle]);
+      harness.manager.encryptOutcome = (_) =>
+          deferralWith(commits: [stagedCommit(7)]);
+      harness.manager.replayOnResolve[BigInt.from(7)] =
+          DecryptLocationOutcomeFfi(
+            results: const [],
+            autoCommits: [stagedCommit(8)],
+            proposals: const [],
+          );
+
+      await harness.tick(DateTime.now());
+
+      expect(
+        harness.relay.published.map((e) => e.eventJson).toList(),
+        [stagedCommit(7).commitEventJson, stagedCommit(8).commitEventJson],
+      );
+      expect(harness.manager.confirmedTokens, [
+        BigInt.from(7),
+        BigInt.from(8),
+      ]);
+      expect(harness.manager.rolledBackTokens, isEmpty);
+    });
+
+    test('a proposal the confirm replayed is published', () async {
+      final circle = circleFixture(seed: 1);
+      final h = hexOf(circle.circle.nostrGroupId);
+      final proposal = '{"id":"replayedLeave","kind":445,"tags":[["h","$h"]]}';
+      final harness = await BackgroundTaskHarness.start(circles: [circle]);
+      harness.manager.encryptOutcome = (_) =>
+          deferralWith(commits: [stagedCommit(7)]);
+      harness.manager.replayOnResolve[BigInt.from(7)] =
+          DecryptLocationOutcomeFfi(
+            results: const [],
+            autoCommits: const [],
+            proposals: [proposal],
+          );
+
+      await harness.tick(DateTime.now());
+
+      expect(
+        harness.relay.published.map((e) => e.eventJson).toList(),
+        [stagedCommit(7).commitEventJson, proposal],
+        reason: "a replayed proposal is the user's own re-proposed leave; "
+            'nothing else in the system notices it being dropped',
+      );
+    });
+
+    test(
+      'a replayed fix for ANOTHER circle is ingested under THAT circle',
+      () async {
+        // The engine's buffers are global, so the batch a confirm replays is
+        // not one circle's. Filing it under the circle whose commit was being
+        // resolved puts one circle's member on another circle's map.
+        final circle = circleFixture(seed: 1);
+        final other = circleFixture(seed: 2);
+        final harness = await BackgroundTaskHarness.start(
+          circles: [circle, other],
+        );
+        harness.manager.encryptOutcome = (_) =>
+            deferralWith(commits: [stagedCommit(7)]);
+        harness.manager.replayOnResolve[BigInt.from(7)] =
+            DecryptLocationOutcomeFfi(
+              results: [
+                LocationMessageResultFfi(
+                  kind: LocationMessageResultKindFfi.location,
+                  location: DecryptedLocationFfi(
+                    senderPubkey: 'dd' * 32,
+                    latitude: 52.37,
+                    longitude: 4.89,
+                    geohash: 'u173',
+                    timestamp: 1800000000,
+                    expiresAt: 1800000228,
+                  ),
+                  mlsGroupId: Uint8List.fromList(other.circle.mlsGroupId),
+                  epoch: BigInt.from(9),
+                ),
+              ],
+              autoCommits: const [],
+              proposals: const [],
+            );
+
+        await harness.tick(DateTime.now());
+
+        expect(harness.sharing.ingested, hasLength(1));
+        expect(
+          hexOf(harness.sharing.ingested.single.circle.nostrGroupId),
+          hexOf(other.circle.nostrGroupId),
+          reason: 'the fix belongs to the circle its own result names',
+        );
+      },
+    );
+
+    test('a replayed fix for a circle this device does not hold is dropped',
+        () async {
+      final circle = circleFixture(seed: 1);
+      final harness = await BackgroundTaskHarness.start(circles: [circle]);
+      harness.manager.encryptOutcome = (_) =>
+          deferralWith(commits: [stagedCommit(7)]);
+      harness.manager.replayOnResolve[BigInt.from(7)] =
+          DecryptLocationOutcomeFfi(
+            results: [
+              LocationMessageResultFfi(
+                kind: LocationMessageResultKindFfi.location,
+                location: DecryptedLocationFfi(
+                  senderPubkey: 'dd' * 32,
+                  latitude: 52.37,
+                  longitude: 4.89,
+                  geohash: 'u173',
+                  timestamp: 1800000000,
+                  expiresAt: 1800000228,
+                ),
+                mlsGroupId: Uint8List(32)..fillRange(0, 32, 9),
+                epoch: BigInt.from(9),
+              ),
+            ],
+            autoCommits: const [],
+            proposals: const [],
+          );
+
+      await harness.tick(DateTime.now());
+
+      expect(
+        harness.sharing.ingested,
+        isEmpty,
+        reason: 'an unknown group is skipped, never filed under the ambient '
+            'circle as a fallback',
+      );
+      expect(
+        harness.manager.confirmedTokens,
+        [BigInt.from(7)],
+        reason: 'anti-vacuity: the resolution DID run and DID replay',
+      );
+    });
+
+    test('a replayed proposal goes to the relays its own `h` tag names',
+        () async {
+      final circle = circleFixture(seed: 1);
+      final other = circleFixture(
+        seed: 2,
+        relays: const ['wss://other.relay.example'],
+      );
+      final otherH = hexOf(other.circle.nostrGroupId);
+      final proposal = '{"id":"leave","kind":445,"tags":[["h","$otherH"]]}';
+      const orphan = '{"id":"orphan","kind":445,"tags":[["h","beef"]]}';
+      final harness = await BackgroundTaskHarness.start(
+        circles: [circle, other],
+      );
+      harness.manager.encryptOutcome = (_) =>
+          deferralWith(commits: [stagedCommit(7)]);
+      harness.manager.replayOnResolve[BigInt.from(7)] =
+          DecryptLocationOutcomeFfi(
+            results: const [],
+            autoCommits: const [],
+            proposals: [proposal, orphan],
+          );
+
+      await harness.tick(DateTime.now());
+
+      final sent = harness.relay.published
+          .where((e) => e.eventJson == proposal)
+          .toList();
+      expect(sent, hasLength(1));
+      expect(
+        sent.single.relays,
+        other.circle.relays,
+        reason: "a replayed leave goes to ITS group's relays; the resolving "
+            "circle's operators must not learn of the other group",
+      );
+      expect(
+        harness.relay.published.map((e) => e.eventJson),
+        isNot(contains(orphan)),
+        reason: 'fail closed: an `h` naming no circle we hold publishes '
+            'nowhere',
+      );
+    });
+
+    test(
+      'a resolution-surfaced commit for ANOTHER circle is published to that '
+      "circle's relays and confirmed only on its own ack",
+      () async {
+        final circle = circleFixture(seed: 1);
+        final other = circleFixture(
+          seed: 2,
+          relays: const ['wss://other.relay.example'],
+        );
+        final foreignCommit = stagedCommit(
+          9,
+          nostrGroupId: other.circle.nostrGroupId,
+        );
+        final harness = await BackgroundTaskHarness.start(
+          circles: [circle, other],
+        );
+        harness.manager.encryptOutcome = (_) =>
+            deferralWith(commits: [stagedCommit(7)]);
+        harness.manager.replayOnResolve[BigInt.from(7)] =
+            DecryptLocationOutcomeFfi(
+              results: const [],
+              autoCommits: [foreignCommit],
+              proposals: const [],
+            );
+
+        await harness.tick(DateTime.now());
+
+        final sent = harness.relay.published
+            .where((e) => e.eventJson == foreignCommit.commitEventJson)
+            .toList();
+        expect(
+          sent,
+          hasLength(1),
+          reason: 'anti-vacuity: the ladder really ran',
+        );
+        expect(sent.single.relays, other.circle.relays);
+        expect(
+          sent.single.relays,
+          isNot(contains(circle.circle.relays.first)),
+          reason: "circle X's relay operators must not learn of circle Y's "
+              'eviction',
+        );
+        expect(harness.manager.confirmedTokens, contains(BigInt.from(9)));
+      },
+    );
+
+    test(
+      'a resolution-surfaced commit whose `h` names no held circle is '
+      'published nowhere and never confirmed',
+      () async {
+        final circle = circleFixture(seed: 1);
+        final orphanCommit = CommitToPublishFfi(
+          commitEventJson: '{"id":"orphan","kind":445,"tags":[["h","beef"]]}',
+          pending: PendingStateRefFfi(token: BigInt.from(9)),
+        );
+        final harness = await BackgroundTaskHarness.start(circles: [circle]);
+        harness.manager.encryptOutcome = (_) =>
+            deferralWith(commits: [stagedCommit(7)]);
+        harness.manager.replayOnResolve[BigInt.from(7)] =
+            DecryptLocationOutcomeFfi(
+              results: const [],
+              autoCommits: [orphanCommit],
+              proposals: const [],
+            );
+
+        await harness.tick(DateTime.now());
+
+        expect(
+          harness.relay.published.map((e) => e.eventJson),
+          isNot(contains(orphanCommit.commitEventJson)),
+          reason: 'fail closed: an `h` naming no held circle publishes '
+              'nowhere',
+        );
+        expect(
+          harness.relay.published,
+          isNotEmpty,
+          reason: 'anti-vacuity: the ladder DID publish this cycle (the '
+              "deferral's own generation-0 commit)",
+        );
+        expect(
+          harness.manager.confirmedTokens,
+          isNot(contains(BigInt.from(9))),
+        );
+        expect(harness.manager.rolledBackTokens, contains(BigInt.from(9)));
+      },
+    );
+
+    test('the ladder stops at the runaway cap and REPORTS what it did not run',
+        () async {
+      // Each resolution surfaces the next commit, forever — the runaway the
+      // cap exists for. The un-run one takes the fail-report rung rather than
+      // being abandoned: this isolate dies at the end of the cycle, and the
+      // report both drains that resolution's replay and leaves the removal
+      // owed exactly as walking away would.
+      final circle = circleFixture(seed: 1);
+      final harness = await BackgroundTaskHarness.start(circles: [circle]);
+      harness.manager.encryptOutcome = (_) =>
+          deferralWith(commits: [stagedCommit(7)]);
+      for (var token = 7; token < 7 + resolveRunawayCap + 1; token++) {
+        harness.manager.replayOnResolve[BigInt.from(token)] =
+            DecryptLocationOutcomeFfi(
+              results: const [],
+              autoCommits: [stagedCommit(token + 1)],
+              proposals: const [],
+            );
+      }
+
+      await harness.tick(DateTime.now());
+
+      expect(
+        harness.manager.confirmedTokens,
+        hasLength(resolveRunawayCap),
+        reason: 'the cap bounds generations; each one here resolves one '
+            'commit',
+      );
+      expect(
+        harness.manager.rolledBackTokens,
+        [BigInt.from(7 + resolveRunawayCap)],
+        reason: 'the commit the cap stopped short of is REPORTED, not '
+            'silently abandoned — the same rung the foreground ladder takes',
+      );
+    });
+
+    test('the isolate routes a replay through NO provider', () {
+      // The behavioural half above proves the replay lands on the injected
+      // service. This is the isolate half: `background_location_task.dart`
+      // runs in a separate Dart isolate with its own service instances, where
+      // a Riverpod container does not exist — reaching for one would crash the
+      // wake rather than refresh a map nobody is looking at.
+      final code = File('lib/src/services/background_location_task.dart')
+          .readAsStringSync()
+          .split('\n')
+          .where((line) => !line.trimLeft().startsWith('//'))
+          .join('\n');
+      for (final symbol in const [
+        'flutter_riverpod',
+        'ProviderContainer',
+        'ref.read',
+        'ref.watch',
+        'ref.invalidate',
+      ]) {
+        expect(
+          code,
+          isNot(contains(symbol)),
+          reason: 'the foreground-service isolate must not reach for `$symbol`'
+              ' — it has no provider container of its own, and the foreground'
+              " container belongs to another isolate's memory",
+        );
+      }
+    });
+  });
+
+  group('Rule 15', () {
+    test(
+      'the fail-closed cross-circle commit rung puts no identifier in any '
+      'log line',
+      () async {
+        // Exercises the new routing this same file's "a resolution-surfaced
+        // commit whose `h` names no held circle" test proves behaviourally —
+        // this one proves the fail-closed rung it takes never names the
+        // circle, the relay, or the unresolvable `h` it declined to route to.
+        final circle = circleFixture(
+          seed: 1,
+          relays: const ['wss://circle.needlehost.example'],
+        );
+        final harness = await BackgroundTaskHarness.start(circles: [circle]);
+        harness.manager.encryptOutcome = (_) =>
+            deferralWith(commits: [stagedCommit(7)]);
+        harness.manager.replayOnResolve[BigInt.from(7)] =
+            DecryptLocationOutcomeFfi(
+              results: const [],
+              autoCommits: [
+                CommitToPublishFfi(
+                  commitEventJson:
+                      '{"id":"orphan","kind":445,"tags":[["h","cafe1234"]]}',
+                  pending: PendingStateRefFfi(token: BigInt.from(9)),
+                ),
+              ],
+              proposals: const [],
+            );
+
+        final capture = LogCapture.install();
+        await harness.tick(DateTime.now());
+
+        capture
+          ..restore()
+          ..assertContains('[BackgroundTask]')
+          ..assertNoNeedles([
+            'wss://circle.needlehost.example',
+            'cafe1234',
+            hexOf(circle.circle.mlsGroupId),
+            hexOf(circle.circle.nostrGroupId),
+          ]);
+      },
+    );
   });
 
   group('the two publish planes take different ladders', () {

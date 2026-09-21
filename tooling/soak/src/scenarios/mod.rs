@@ -673,19 +673,22 @@ pub(crate) async fn relay_update<T: TimelineSink, L: LogDrain>(
     let witnessed = world
         .publish_witnessed(device, std::slice::from_ref(&event))
         .await?;
-    let verdict = if witnessed.is_some() {
-        manager
+    // Either rung ends in the engine's replay, so either can hand back work.
+    // It goes down the rig's one Rule-13 ladder rather than on the floor.
+    let (verdict, ingest) = if witnessed.is_some() {
+        let ingest = manager
             .finalize_relay_update(staged.pending, circle.mls_group_id())
             .await
             .map_err(|_| RigError::Core(Step::ConfirmPublished))?;
-        PublishVerdict::Confirmed
+        (PublishVerdict::Confirmed, ingest)
     } else {
-        manager
+        let ingest = manager
             .publish_failed(staged.pending)
             .await
             .map_err(|_| RigError::Core(Step::RollBackPublish))?;
-        PublishVerdict::RolledBack
+        (PublishVerdict::RolledBack, ingest)
     };
+    world.resolve_ingest(device, ingest).await?;
     drop(guard);
     Ok((event, verdict))
 }

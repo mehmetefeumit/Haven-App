@@ -1033,6 +1033,19 @@ impl SessionManager {
             .map_err(map_mls_err)
     }
 
+    /// Drains whatever the engine has buffered but not yet handed back.
+    ///
+    /// The engine's effect buffers are global and one-shot, and a call that
+    /// fails MID-WAY leaves everything it already emitted stranded in them:
+    /// `confirm_published` / `publish_failed` propagate a replay error BEFORE
+    /// `collect_effects` runs, so the caller gets an `Err` and no effects while
+    /// a peer location the replay already delivered sits in the buffer with its
+    /// durable row written `Processed`. This is how that batch is recovered —
+    /// never as a retry, which would apply a commit twice.
+    pub async fn drain(&self) -> SessionEffects {
+        self.session.lock().await.drain()
+    }
+
     // ── Stuck convergence inputs (the outbound send gate) ────────────────────
 
     /// Gives a terminal disposition to every stored convergence input that the

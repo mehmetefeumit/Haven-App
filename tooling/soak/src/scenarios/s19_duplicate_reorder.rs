@@ -33,6 +33,7 @@ use tokio::sync::broadcast::error::TryRecvError;
 use tokio::sync::broadcast::Receiver;
 use tokio::time::{Instant, MissedTickBehavior};
 
+use crate::clock::WallNow;
 use crate::nemesis::types::Fault;
 use crate::oracle::undecryptable::{self, StoredRow};
 use crate::oracle::vacuity::{ExpectationFloor, Observed};
@@ -109,7 +110,7 @@ pub const ARMS: [Arm; 4] = [
             // The commit itself. An arm that crossed no epoch has no gap.
             epochs_crossed: 1,
             deliveries_observed: 1,
-            canaries_caught: 3,
+            canaries_caught: 5,
         },
     },
 ];
@@ -399,14 +400,24 @@ async fn cross_eose<T: TimelineSink, L: LogDrain>(
 /// that rejected it. The same sender mints the same shape again once the commit
 /// is confirmed, and that one MUST apply.
 ///
-/// # What this arm deliberately does not claim
+/// # Where the held message goes
 ///
-/// It does not claim the held message is later delivered. Measured at this pin:
-/// the gap leaves no gating row, and neither `advance_convergence` nor a later
-/// ingest hands it back afterwards. Where a message named `CommitGap` goes is a
-/// question for the phase that owns the engine's own retry tick; asserting a
-/// re-delivery this rig cannot observe would be reporting coverage it does not
-/// have.
+/// It is RELEASED by the resolution itself. `confirm_published` ends in the
+/// engine's replay, which re-ingests everything the window buffered — and the
+/// engine delivers that at most once, writing the content row terminal in the
+/// same breath, so a resolution that folded the batch without persisting would
+/// lose the fix for good. Canary 4 reads the device's own last-known store
+/// immediately afterwards, which is the surface a caller reads a peer's
+/// position from.
+///
+/// What it still does not claim is a re-delivery through the SUBSCRIPTION
+/// plane: nothing re-requests the event, and the gap leaves no gating row for a
+/// cursor to be read against (which is why the S6 row is structural-only).
+///
+/// Canary 5 is the other half of the same resolution. A confirm discharges any
+/// removal obligation it applies, and a session that ends still owing one
+/// reports the circle as unrecoverable — so an arm that left one behind would
+/// be manufacturing the very wedge the obligation exists to make loud.
 async fn commit_gap<T: TimelineSink, L: LogDrain>(
     world: &mut ScenarioWorld<T, L>,
     stager: DeviceTag,
@@ -463,22 +474,55 @@ async fn commit_gap<T: TimelineSink, L: LogDrain>(
     if witnessed.is_none() {
         // Nothing was acked, so the commit rolls back and the transition never
         // ends — the arm would be grading a world it did not reach.
-        world
+        let ingest = world
             .device(stager)?
             .manager()?
             .publish_failed(pending.pending)
             .await
             .map_err(|_| RigError::Core(Step::RollBackPublish))?;
+        // Abandoning the arm does not abandon the group: a rollback replays too,
+        // and anything it stages is resolved before this returns.
+        world.resolve_ingest(stager, ingest).await?;
         drop(outstanding);
         return Err(RigError::WelcomeNeverAcked);
     }
-    world
+    let ingest = world
         .device(stager)?
         .manager()?
         .finalize_relay_update(pending.pending, &group)
         .await
         .map_err(|_| RigError::Core(Step::ConfirmPublished))?;
+    world.resolve_ingest(stager, ingest).await?;
     drop(outstanding);
+
+    // 4. The held message is RELEASED by the resolution, and it is released to
+    //    the surface a caller reads a peer's position from. The engine hands a
+    //    replayed message back exactly once, so "later" is not an option: if it
+    //    is not in the store the instant the confirm returns, it is gone.
+    let ngid = *world.circle(circle_tag)?.nostr_group_id();
+    let speaker_hex = world.device(speaker)?.keys.public_key().to_hex();
+    let released = world
+        .device(stager)?
+        .manager()?
+        .snapshot_last_known_for_circle(&ngid, WallNow::now().secs())
+        .map_err(|_| RigError::Core(Step::OpenStore))?
+        .iter()
+        .any(|row| row.sender_pubkey == speaker_hex);
+    if released {
+        canaries += 1;
+    }
+
+    // 5. …and the resolution left nobody owing a removal publish. An obligation
+    //    a dead session cannot redeem is reported as an unrecoverable circle, so
+    //    an arm that manufactured one would be handing the user a rebuild it
+    //    does not need.
+    if world.devices().iter().all(|device| {
+        device
+            .manager()
+            .is_ok_and(|m| m.orphaned_removal_deferrals().is_empty())
+    }) {
+        canaries += 1;
+    }
 
     // 3. The control: the same sender, the same shape, once the transition is
     //    over. This one must APPLY, or the gap above said nothing about the
@@ -689,9 +733,11 @@ mod tests {
             "a transition of this device's own is not something a relay does"
         );
         assert!(
-            ARMS[3].floor.canaries_caught == 3,
-            "the named gap, nothing handed to the application, and the same \
-             shape applying once the transition ends"
+            ARMS[3].floor.canaries_caught == 5,
+            "the named gap, nothing handed to the application while it stands, \
+             the held message RELEASED into the last-known store the instant \
+             the transition ends, nobody left owing a removal publish, and the \
+             same shape applying afterwards"
         );
     }
 }

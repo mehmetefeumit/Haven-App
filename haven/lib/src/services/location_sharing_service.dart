@@ -15,6 +15,7 @@ import 'package:haven/src/services/clock_skew_detector.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/location_auto_commit.dart';
 import 'package:haven/src/services/relay_service.dart';
+import 'package:haven/src/utils/event_tags.dart';
 import 'package:haven/src/utils/log_alias.dart';
 
 /// A circle member's location.
@@ -342,11 +343,11 @@ class LocationSharingService {
   /// non-null for the life of the process, and its reader waits on that future
   /// without a bound — a burst teardown that never ends, which is a worse
   /// outcome than the fork it was protecting against.
-  Future<void> _awaitCommitCritical(Future<void> commitCritical) async {
+  Future<T> _awaitCommitCritical<T>(Future<T> commitCritical) async {
     _commitCriticalCount++;
     _commitCriticalQuiescent ??= Completer<void>();
     try {
-      await commitCritical;
+      return await commitCritical;
     } finally {
       _commitCriticalCount--;
       if (_commitCriticalCount == 0) {
@@ -508,6 +509,10 @@ class LocationSharingService {
     required LocationSendDeferred deferred,
     required List<int> mlsGroupId,
   }) async {
+    // Captured before the ladder's round trip so a pause landing inside it is
+    // detectable — the same fence the two poll loops apply around their own
+    // `resolveAutoCommits` call.
+    final startGen = _pauseGeneration;
     debugPrint(
       '[LocationService] send DEFERRED by the MLS engine — '
       'gating=${magnitudeBucket(deferred.unresolvedInputs)}, '
@@ -536,7 +541,7 @@ class LocationSharingService {
     // Registered as commit-critical for its whole duration: this ladder rides
     // the SHARED publish pool, and on the iOS background branch the burst
     // teardown shuts that pool without one — see [inFlightCommitCritical].
-    await _awaitCommitCritical(
+    final resolved = await _awaitCommitCritical(
       resolveAutoCommits(
         relayService: _relayService,
         circleService: _circleService,
@@ -545,12 +550,43 @@ class LocationSharingService {
       ),
     );
 
+    // The ladder awaited a full publish→confirm round trip, long enough for a
+    // pause to land inside it — the same window the two poll loops fence
+    // around their own `resolveAutoCommits` call. Writing plaintext
+    // coordinates into the cache `onAppPaused` just cleared is the memory-bound
+    // leak that fence exists to prevent.
+    if (circle != null && _pauseGeneration == startGen) {
+      // Whatever those resolutions replayed goes through the same ingest
+      // funnel as a poll's results: the store row is already written
+      // Rust-side, but the map's cache and the receive-liveness stamp are
+      // this side's.
+      await _ingestResults(
+        circle: circle,
+        circleKey: _circleKey(circle.nostrGroupId),
+        results: resolved.results,
+        ownPubkeyHex: await _resolveOwnPubkey(),
+        origin: '[LocationService] deferred-send resolution',
+      );
+    } else if (circle != null) {
+      debugPrint(
+        '[LocationService] deferred-send resolution aborted — paused '
+        'mid-ladder',
+      );
+    }
+
+    // The deferral's OWN proposals belong to the circle this send was for —
+    // the engine minted them in this call, for this group. The ones a
+    // resolution REPLAYED can belong to any group, so they route by `h`.
     if (deferred.proposals.isNotEmpty && circle != null) {
       publishedProposals = await _publishDeferredProposals(
         proposals: deferred.proposals,
         relays: circle.relays,
       );
     }
+    await _publishReplayedProposals(
+      resolved.proposals,
+      '[LocationService] deferred-send resolution',
+    );
 
     return LocationPublishDeferred(
       unresolvedInputs: deferred.unresolvedInputs,
@@ -559,6 +595,50 @@ class LocationSharingService {
       stagedCommits: deferred.commits.length,
       publishedProposals: publishedProposals,
     );
+  }
+
+  /// Publishes proposals a publish RESOLUTION replayed, each to the relays of
+  /// the circle its own `h` tag names.
+  ///
+  /// Not the ambient circle's relays: a replayed proposal is the local user's
+  /// re-proposed leave for whatever group the drain re-minted it in, and
+  /// sending it to another circle's relay set both tells those operators this
+  /// device participates in a second group and may never reach the members the
+  /// leave is addressed to. Every Rust plane routes on the same tag
+  /// (`catchup.rs`, `live_sync/processor.rs`, `manager.rs`).
+  ///
+  /// Fails CLOSED: an `h` naming no circle this device holds — or no `h` at
+  /// all — publishes nowhere. A proposal is recoverable (the durable leave
+  /// request re-mints it); a mis-addressed one is not.
+  Future<void> _publishReplayedProposals(
+    List<String> proposals,
+    String origin,
+  ) async {
+    if (proposals.isEmpty) return;
+    List<Circle> held;
+    try {
+      held = await _circleService.getVisibleCircles();
+    } on Object catch (e) {
+      debugPrint('$origin → proposal routing failed: ${e.runtimeType}');
+      return;
+    }
+    for (final eventJson in proposals) {
+      final h = hTagOf(eventJson);
+      final target = held
+          .where((c) => _circleKey(c.nostrGroupId) == h)
+          .firstOrNull;
+      if (target == null) {
+        debugPrint(
+          '$origin → replayed proposal names a circle this device does not '
+          'hold — not published',
+        );
+        continue;
+      }
+      await _publishDeferredProposals(
+        proposals: [eventJson],
+        relays: target.relays,
+      );
+    }
   }
 
   /// Publishes bare proposal events, returning how many reached ≥1 relay.
@@ -775,6 +855,125 @@ class LocationSharingService {
     } on Object catch (e) {
       debugPrint('[LocationService] removeCircle failed: ${e.runtimeType}');
     }
+  }
+
+  /// Whether [results] carries any roster-changing result, i.e. whether the
+  /// caller must reconcile the cached pins against the engine's new roster.
+  static bool _anyGroupState(List<LocationEventResult> results) =>
+      results.any((r) => r.kind != LocationEventKind.location);
+
+  /// Folds one batch of folded engine results into the cache + store, returning
+  /// how many peer locations it persisted.
+  ///
+  /// The ONE ingest funnel for every batch that reaches Dart, whatever produced
+  /// it: the foreground poll, the evolution poll, and the publish resolutions
+  /// `resolveAutoCommits` runs (which replay everything the engine buffered
+  /// while a staged commit was in flight — the peer fixes that used to be lost
+  /// there). [origin] prefixes the per-result log lines; it is an alias handle
+  /// or a plane name, never an identifier.
+  ///
+  /// A persist failure is logged and the batch continues: the rest of the
+  /// results are unrelated to it, and the caller has already marked the event
+  /// seen.
+  Future<int> _ingestResults({
+    required Circle circle,
+    required String circleKey,
+    required List<LocationEventResult> results,
+    required String? ownPubkeyHex,
+    required String origin,
+  }) async {
+    // One lookup per distinct foreign group per batch (normally zero).
+    final resolved = <String, Circle?>{};
+    var persisted = 0;
+    for (final result in results) {
+      switch (result.kind) {
+        case LocationEventKind.joined:
+        case LocationEventKind.groupUpdate:
+        case LocationEventKind.invalidated:
+          debugPrint('$origin → ${result.kind.name}');
+        case LocationEventKind.unrecoverable:
+          debugPrint('$origin → unrecoverable (circle blocked)');
+        case LocationEventKind.location:
+          final decrypted = result.location;
+          if (decrypted == null) {
+            // Decrypted but the inner content did not parse as a location
+            // (e.g. a legacy `haven-avatar-*` chunk from a pre-migration
+            // client) — not a decrypt failure (plan D8).
+            continue;
+          }
+          // Skip echoed self-broadcasts: never persist our own location to the
+          // local last-known store, and never surface it on the map as a peer
+          // marker. Lowercase compare is defensive.
+          if (ownPubkeyHex != null &&
+              decrypted.senderPubkey.toLowerCase() == ownPubkeyHex) {
+            debugPrint('$origin → location (self-echo, dropped)');
+            continue;
+          }
+          final target = await _circleForResult(
+            result.mlsGroupId,
+            circle,
+            resolved,
+          );
+          if (target == null) {
+            debugPrint(
+              '$origin → location for a circle this device does not hold '
+              '(dropped)',
+            );
+            continue;
+          }
+          debugPrint(
+            '$origin → location '
+            '(sender=${_peerHandle(decrypted.senderPubkey)})',
+          );
+          try {
+            await _persistDecryptedLocation(
+              circle: target,
+              circleKey: _circleKey(target.nostrGroupId),
+              decrypted: decrypted,
+              ownPubkeyHex: ownPubkeyHex,
+            );
+            persisted++;
+          } on Object catch (e) {
+            debugPrint('$origin → persist failed: ${e.runtimeType}');
+          }
+      }
+    }
+    return persisted;
+  }
+
+  /// The circle a folded result belongs to, resolved from the result's OWN
+  /// group id, or `null` when this device holds no circle for it.
+  ///
+  /// A publish resolution replays the engine's GLOBAL buffer, so one batch is
+  /// not one circle: filing every result under the plane's ambient circle puts
+  /// one circle's member on another circle's map, and in that circle's
+  /// `last_known_location` row until `purge_after` (24 h). Rust routes per
+  /// event for exactly this reason (`nostr_group_id_for` / `route_results`),
+  /// and skips a group it holds no circle for rather than falling back to the
+  /// nearest one — so does this.
+  ///
+  /// `mlsGroupId` is never empty in production — `convert_location_result`
+  /// (`rust_builder/src/api.rs`) sets it on every variant — so there is no
+  /// "ambient" shortcut here: every result is routed by its own id.
+  Future<Circle?> _circleForResult(
+    List<int> mlsGroupId,
+    Circle ambient,
+    Map<String, Circle?> memo,
+  ) async {
+    final key = _hexId(mlsGroupId);
+    if (key == _hexId(ambient.mlsGroupId)) return ambient;
+    if (memo.containsKey(key)) return memo[key];
+    Circle? found;
+    try {
+      found = await _circleService.getCircle(mlsGroupId);
+    } on Object catch (e) {
+      debugPrint(
+        '[LocationService] replayed-result circle lookup failed: '
+        '${e.runtimeType}',
+      );
+    }
+    memo[key] = found;
+    return found;
   }
 
   /// Persists a peer-decrypted location into both the in-memory cache
@@ -1079,13 +1278,33 @@ class LocationSharingService {
           eventJson: eventJson,
         );
         if (outcome.autoCommits.isNotEmpty) {
-          await _awaitCommitCritical(
+          final resolved = await _awaitCommitCritical(
             resolveAutoCommits(
               relayService: _relayService,
               circleService: _circleService,
               autoCommits: outcome.autoCommits,
               circle: circle,
             ),
+          );
+          // The ladder awaited a full publish→confirm round trip, which is
+          // long enough for a pause to land inside it. Writing plaintext
+          // coordinates into the cache `onAppPaused` just cleared is the
+          // memory-bound leak that fence exists to prevent.
+          if (_pauseGeneration != startGen) {
+            debugPrint('[LocationService] fetch aborted — paused mid-ladder');
+            return const LocationFetchResult(locations: []);
+          }
+          newEvents += await _ingestResults(
+            circle: circle,
+            circleKey: circleKey,
+            results: resolved.results,
+            ownPubkeyHex: ownPubkeyHex,
+            origin: '[LocationService] publish-resolution',
+          );
+          groupUpdated |= _anyGroupState(resolved.results);
+          await _publishReplayedProposals(
+            resolved.proposals,
+            '[LocationService] publish-resolution',
           );
         }
 
@@ -1106,54 +1325,14 @@ class LocationSharingService {
           _enforceSeenEventIdsCap();
         }
 
-        for (final result in results) {
-          switch (result.kind) {
-            case LocationEventKind.joined:
-            case LocationEventKind.groupUpdate:
-            case LocationEventKind.invalidated:
-              groupUpdated = true;
-              debugPrint(
-                '[LocationService] evt=${_evtHandle(eventId)} → '
-                '${result.kind.name}',
-              );
-            case LocationEventKind.unrecoverable:
-              groupUpdated = true;
-              debugPrint(
-                '[LocationService] evt=${_evtHandle(eventId)} → unrecoverable '
-                '(circle blocked)',
-              );
-            case LocationEventKind.location:
-              final decrypted = result.location;
-              if (decrypted == null) {
-                // Decrypted but the inner content did not parse as a
-                // location (e.g. a legacy `haven-avatar-*` chunk from a
-                // pre-migration client) — not a decrypt failure (plan D8).
-                continue;
-              }
-              // Skip echoed self-broadcasts: never persist our own location
-              // to the local last-known store, and never surface it on the
-              // map as a peer marker. Lowercase compare is defensive.
-              if (ownPubkeyHex != null &&
-                  decrypted.senderPubkey.toLowerCase() == ownPubkeyHex) {
-                debugPrint(
-                  '[LocationService] evt=${_evtHandle(eventId)} → location '
-                  '(self-echo, dropped)',
-                );
-                continue;
-              }
-              debugPrint(
-                '[LocationService] evt=${_evtHandle(eventId)} → location '
-                '(sender=${_peerHandle(decrypted.senderPubkey)})',
-              );
-              newEvents++;
-              await _persistDecryptedLocation(
-                circle: circle,
-                circleKey: circleKey,
-                decrypted: decrypted,
-                ownPubkeyHex: ownPubkeyHex,
-              );
-          }
-        }
+        newEvents += await _ingestResults(
+          circle: circle,
+          circleKey: circleKey,
+          results: results,
+          ownPubkeyHex: ownPubkeyHex,
+          origin: '[LocationService] evt=${_evtHandle(eventId)}',
+        );
+        groupUpdated |= _anyGroupState(results);
       } on Object catch (e) {
         decryptFailed++;
         debugPrint('[LocationService] Decrypt failed: ${e.runtimeType}');
@@ -1611,13 +1790,40 @@ class LocationSharingService {
         // handle, so `resolveAutoCommits` runs the publish-then-confirm
         // dance.
         if (outcome.autoCommits.isNotEmpty) {
-          await _awaitCommitCritical(
+          final resolved = await _awaitCommitCritical(
             resolveAutoCommits(
               relayService: _relayService,
               circleService: _circleService,
               autoCommits: outcome.autoCommits,
               circle: circle,
             ),
+          );
+          // Same fence as the location poll's: the ladder's round trip is a
+          // window a pause can land in, and what follows writes the cache.
+          if (_pauseGeneration != startGen) {
+            debugPrint('[EvolutionPoller] aborted — paused mid-ladder');
+            return false;
+          }
+          // The resolution replays whatever the engine buffered behind that
+          // staged commit — peer locations included, and this is the plane
+          // that owns the map's cache for them.
+          if (await _ingestResults(
+                circle: circle,
+                circleKey: circleKey,
+                results: resolved.results,
+                ownPubkeyHex: ownPubkeyHex,
+                origin: '[EvolutionPoller] publish-resolution',
+              ) >
+              0) {
+            anyLocationPersisted = true;
+          }
+          if (_anyGroupState(resolved.results)) {
+            anyGroupUpdated = true;
+            circleGroupUpdated = true;
+          }
+          await _publishReplayedProposals(
+            resolved.proposals,
+            '[EvolutionPoller] publish-resolution',
           );
         }
 
@@ -1632,59 +1838,24 @@ class LocationSharingService {
         // to publish/finalize (contrast the pre-migration receiver-side
         // auto-commit dance). Fully processed regardless of how many — if
         // any — folded results came back, so mark seen unconditionally.
-        for (final result in results) {
-          switch (result.kind) {
-            case LocationEventKind.joined:
-            case LocationEventKind.groupUpdate:
-            case LocationEventKind.invalidated:
-            case LocationEventKind.unrecoverable:
-              anyGroupUpdated = true;
-              circleGroupUpdated = true;
-              debugPrint(
-                '[EvolutionPoller] evt=${_evtHandle(eventId)} → '
-                '${result.kind.name}',
-              );
-            case LocationEventKind.location:
-              // Location decoded inside the evolution poll path — common
-              // when the poller's 60-second tick beats the 30-second
-              // location-fetch tick for a given event id. Persisting here
-              // (rather than just logging) is mandatory: this loop and
-              // `fetchMemberLocations` share `_seenEventIds`, so once
-              // either marks an id seen the other short-circuits the
-              // decrypt-and-persist work. Without the persist call below,
-              // any event the poller observed first would be marked seen
-              // but never reach `_locationCache`, and
-              // `memberLocationsProvider` would never surface the peer's
-              // location to the UI.
-              final decrypted = result.location;
-              if (decrypted == null) continue;
-              if (ownPubkeyHex != null &&
-                  decrypted.senderPubkey.toLowerCase() == ownPubkeyHex) {
-                debugPrint(
-                  '[EvolutionPoller] evt=${_evtHandle(eventId)} → location '
-                  '(self-echo, dropped)',
-                );
-                continue;
-              }
-              try {
-                await _persistDecryptedLocation(
-                  circle: circle,
-                  circleKey: circleKey,
-                  decrypted: decrypted,
-                  ownPubkeyHex: ownPubkeyHex,
-                );
-                anyLocationPersisted = true;
-                debugPrint(
-                  '[EvolutionPoller] evt=${_evtHandle(eventId)} → location '
-                  'persisted (sender=${_peerHandle(decrypted.senderPubkey)})',
-                );
-              } on Object catch (e) {
-                debugPrint(
-                  '[EvolutionPoller] evt=${_evtHandle(eventId)} → persist '
-                  'failed: ${e.runtimeType}',
-                );
-              }
-          }
+        //
+        // Persisting a location here (rather than just logging it) is
+        // mandatory: this loop and `fetchMemberLocations` share
+        // `_seenEventIds`, so once either marks an id seen the other
+        // short-circuits the decrypt-and-persist work.
+        if (await _ingestResults(
+              circle: circle,
+              circleKey: circleKey,
+              results: results,
+              ownPubkeyHex: ownPubkeyHex,
+              origin: '[EvolutionPoller] evt=${_evtHandle(eventId)}',
+            ) >
+            0) {
+          anyLocationPersisted = true;
+        }
+        if (_anyGroupState(results)) {
+          anyGroupUpdated = true;
+          circleGroupUpdated = true;
         }
 
         if (eventId != null) {
@@ -1793,7 +1964,10 @@ class LocationSharingService {
   }
 
   /// Converts a `nostrGroupId` to a hex string for use as a map key.
-  static String _circleKey(List<int> nostrGroupId) {
-    return nostrGroupId.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
-  }
+  static String _circleKey(List<int> nostrGroupId) => _hexId(nostrGroupId);
+
+  /// Lowercase hex of a raw id: the per-circle cache key ([_circleKey]) and
+  /// the memo key a replayed result's MLS group id is resolved under.
+  static String _hexId(List<int> id) =>
+      id.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
 }

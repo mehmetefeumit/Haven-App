@@ -770,8 +770,13 @@ abstract class RelayService {
   /// persisted staged-commit marker and never authors/merges/converges a
   /// commit). Best-effort — returns a [CatchupResult.empty] on failure rather
   /// than throwing. `circle` is the circle-manager FFI handle (from
-  /// [CircleService.getCircleManagerFfi]) and `ownPubkeyHex` is the user's
-  /// public key (to drop self-echoes).
+  /// [CircleService.getCircleManagerFfi]).
+  ///
+  /// `ownPubkeyHex` no longer crosses the FFI: the sweep drops self-echoes
+  /// against the MLS-authenticated identity it reads off the session, which is
+  /// the only value that can be trusted for that comparison. It stays on this
+  /// interface as the caller's identity gate — `CatchupService` sweeps nothing
+  /// when there is no identity to sweep for.
   Future<CatchupResult> runCatchup({
     required CircleManagerFfi circle,
     required String ownPubkeyHex,

@@ -40,7 +40,11 @@ List<LocationEventResult> _fakeDecrypt({
     LocationEventResult(
       kind: kind,
       location: kind == LocationEventKind.location ? location : null,
-      mlsGroupId: const [],
+      // `_makeCircle()`'s own default `mlsGroupId` — every caller in this
+      // file polls a `_makeCircle()`-shaped circle. `mlsGroupId` is never
+      // empty in production (Rust's `convert_location_result` sets it on
+      // every variant).
+      mlsGroupId: const [1, 2, 3, 4],
       epoch: 0,
     ),
   ];

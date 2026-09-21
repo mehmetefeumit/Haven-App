@@ -1156,7 +1156,6 @@ Future<_SweepResult> _sweep(
 ) async {
   final r = await relayManager.runCatchupAllCircles(
     circle: bob.user.circleManager,
-    ownPubkeyHex: bob.pubkeyHex,
     maxDurationSecs: BigInt.from(maxSecs),
   );
   final counters = (

@@ -161,6 +161,19 @@ pub struct CircleManager {
     /// signal: a durable row this map does not know is an obligation a previous
     /// session took and never discharged.
     removal_deferrals: Mutex<HashMap<[u8; 32], CommitToPublish>>,
+    /// How many convergence re-ticks the publish-resolution fold has SLEPT for
+    /// over this manager's life.
+    ///
+    /// The only observable that separates "this confirm did not sleep" from
+    /// "this confirm slept and happened to be quick", which is what makes the
+    /// quiet-path guarantee (a circle with nothing pending pays no delay) a
+    /// testable promise rather than a wall-clock guess.
+    ///
+    /// Compiled into shipped builds for a `cfg(test)`-only reader, deliberately:
+    /// one relaxed `fetch_add` on a path that is about to sleep 20 ms is cheaper
+    /// than a `cfg`-split field, and a field that exists only under test is a
+    /// field the shipped code path is not the one being measured.
+    convergence_reticks: std::sync::atomic::AtomicUsize,
     pub(crate) storage: CircleStorage,
 }
 
@@ -225,6 +238,7 @@ impl CircleManager {
             directory_flight: Mutex::new(DirectoryFlight::default()),
             unrecoverable_groups: Mutex::new(HashSet::new()),
             removal_deferrals: Mutex::new(HashMap::new()),
+            convergence_reticks: std::sync::atomic::AtomicUsize::new(0),
             storage,
         })
     }
@@ -355,6 +369,7 @@ impl CircleManager {
             directory_flight: Mutex::new(DirectoryFlight::default()),
             unrecoverable_groups: Mutex::new(HashSet::new()),
             removal_deferrals: Mutex::new(HashMap::new()),
+            convergence_reticks: std::sync::atomic::AtomicUsize::new(0),
             storage,
         })
     }
@@ -572,7 +587,7 @@ impl CircleManager {
         // The engine returns gift-wrapped 1059 welcomes + a PendingStateRef under
         // GroupCreated. Extract BEFORE persisting any storage row, so a
         // (defensive) extraction failure leaves storage untouched.
-        let (welcomes, pending) = take_group_created(effects.effects)?;
+        let (welcomes, pending) = self.take_group_created(effects.effects).await?;
 
         let now = chrono::Utc::now().timestamp();
         let circle = Circle {
@@ -618,6 +633,9 @@ impl CircleManager {
             match self.route_welcomes_with_cascade(members, welcomes, creator_fallback_relays) {
                 Ok(events) => events,
                 Err(e) => {
+                    // The rollback's own batch is discarded: this create was
+                    // staged microseconds ago and has buffered nothing, and the
+                    // caller is being handed an error rather than an ingest.
                     let _ = self.publish_failed(pending).await;
                     return Err(e);
                 }
@@ -884,7 +902,7 @@ impl CircleManager {
             .update_admin_policy(mls_group_id, &admins)
             .await
             .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
-        let (commit_event, _welcomes, pending) = take_group_evolution(effects)?;
+        let (commit_event, _welcomes, pending) = self.take_group_evolution(effects).await?;
         Ok(CommitToPublish {
             commit_event,
             pending,
@@ -940,7 +958,7 @@ impl CircleManager {
             .update_relays(mls_group_id, canonical)
             .await
             .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
-        let (commit_event, _welcomes, pending) = take_group_evolution(effects)?;
+        let (commit_event, _welcomes, pending) = self.take_group_evolution(effects).await?;
         Ok(CommitToPublish {
             commit_event,
             pending,
@@ -999,15 +1017,15 @@ impl CircleManager {
         &self,
         pending: PendingStateRef,
         mls_group_id: &GroupId,
-    ) -> Result<()> {
-        self.confirm_published(pending).await?;
+    ) -> Result<DecryptedIngest> {
+        let ingest = self.confirm_published(pending).await?;
         if let Err(e) = self.resync_circle_relays_from_mdk(mls_group_id).await {
             log::warn!(
                 "finalize_relay_update: relay re-sync failed (will self-heal): {}",
                 e.code()
             );
         }
-        Ok(())
+        Ok(ingest)
     }
 
     /// Step 2 of admin handoff (or the sole step on the `AdminDemote` path):
@@ -1050,7 +1068,7 @@ impl CircleManager {
             .update_admin_policy(mls_group_id, &admins)
             .await
             .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
-        let (commit_event, _welcomes, pending) = take_group_evolution(effects)?;
+        let (commit_event, _welcomes, pending) = self.take_group_evolution(effects).await?;
         Ok(CommitToPublish {
             commit_event,
             pending,
@@ -1266,10 +1284,13 @@ impl CircleManager {
             PublishWork::GroupEvolution { pending, .. } => Some(*pending),
             _ => None,
         });
-        match take_group_evolution(effects) {
+        match self.take_group_evolution(effects).await {
             Ok((commit_event, _welcomes, pending)) => Ok((commit_event, pending)),
             Err(e) => {
                 if let Some(pending) = staged_pending {
+                    // Discarded like the create rollback above: the rotation was
+                    // staged in the call that just failed, and this function's
+                    // contract is an error, not an ingest.
                     let _ = self.publish_failed(pending).await;
                 }
                 Err(e)
@@ -1349,7 +1370,7 @@ impl CircleManager {
             .leave_group(mls_group_id)
             .await
             .map_err(CircleError::from)?;
-        let event = take_proposal(effects)?;
+        let event = self.take_proposal(effects).await?;
         // Recorded only once the engine has accepted the departure, and durably,
         // because a peer may commit this `SelfRemove` before the local teardown
         // runs — possibly in another process. From that commit onward the
@@ -1439,10 +1460,22 @@ impl CircleManager {
     /// "Acked" MUST mean a relay returned OK — never merely "sent" — to avoid
     /// optimistic-merge forks (Rule 13, security F13).
     ///
+    /// # What it hands back, and why it cannot be `()`
+    ///
+    /// The engine ends `do_confirm_published` in `replay_buffered_messages`,
+    /// which re-ingests everything that arrived while the commit was staged —
+    /// peer locations, peer commits, a re-proposed leave. Every one of those is
+    /// delivered AT MOST ONCE. Locations are persisted before this returns; the
+    /// rest comes back in the [`DecryptedIngest`] for the caller to route and
+    /// publish.
+    ///
     /// # Errors
     ///
     /// Returns an error if the pending ref is unknown or the engine rejects it.
-    pub async fn confirm_published(&self, pending: PendingStateRef) -> Result<()> {
+    /// The error is returned UNCHANGED even though a batch may have been
+    /// recovered from it: a confirm that failed after the durable merge must
+    /// never be retried and must never be turned into a `publish_failed`.
+    pub async fn confirm_published(&self, pending: PendingStateRef) -> Result<DecryptedIngest> {
         let result = self
             .session
             .confirm_published(pending)
@@ -1458,14 +1491,43 @@ impl CircleManager {
         let rotation = self.take_rotation_pending(pending);
         let effects = match result {
             Ok(effects) => effects,
-            Err(e) => return Err(e),
+            Err(e) => {
+                // The engine aborted mid-replay: `cgka-session` propagates the
+                // `?` BEFORE `collect_effects`, so nothing came back with the
+                // error while everything already emitted sits in the engine's
+                // buffers with its durable row written. Fold that, then return
+                // the ORIGINAL error — the merge may already have happened, so
+                // a retry would apply the commit twice and a `publish_failed`
+                // would discard a commit the group has.
+                let stranded = self.session.drain().await;
+                if !stranded.is_empty() {
+                    // The fold's own products are dropped on purpose: there is
+                    // no caller to hand them to on an error return, and every
+                    // auto-commit it surfaced is already PARKED with its
+                    // obligation recorded, so the next foreground redemption
+                    // pass picks it up. The locations, which cannot be
+                    // re-delivered, are persisted by the fold itself.
+                    let _ = self
+                        .fold_resolved_publish(stranded, BatchOrigin::Drained)
+                        .await;
+                    log::warn!(
+                        "a failed publish resolution stranded engine work; it was folded \
+                         and the failure stands"
+                    );
+                }
+                return Err(e);
+            }
         };
         // An APPLIED commit is the obligation discharged. Every plane records a
         // removal-bearing auto-commit before it publishes, so without this each
         // peer-leave would leave a durable row behind and the next foreground
-        // open would report a perfectly healthy circle unrecoverable. Only on
-        // success: a rejected confirm leaves the commit exactly as staged as it
-        // was, and the obligation with it.
+        // open would report a perfectly healthy circle unrecoverable. What
+        // carries the safety is the SCOPE, not the position: matching on the
+        // REF clears this commit's obligation and never the second-generation
+        // one the fold below may record for the same circle (the map holds one
+        // entry per circle, and recording overwrites it). Only on success: a
+        // rejected confirm leaves the commit exactly as staged as it was, and
+        // the obligation with it.
         self.discharge_owed_removal_publish(pending);
         let _ = self.take_create_pending(pending);
         // A repair rotation spends its circle's 24-hour rate limit HERE, not
@@ -1486,10 +1548,17 @@ impl CircleManager {
             }
         }
         // Confirming is the first moment an announced membership is APPLIED
-        // rather than projected, so it is a directory write site.
+        // rather than projected, so it is a directory write site. Read BEFORE
+        // the fold: it carries `note_epoch_changes`, which belongs to the
+        // top-level batch alone.
         let mode = self.publish_outcome_verdict(&effects.events);
+        let (ingest, drained) = self
+            .fold_resolved_publish(effects, BatchOrigin::TopLevel)
+            .await;
+        // ONE reconcile, after everything the drain could add to the verdict.
+        let mode = drained.map_or(mode, |drained| mode.max(drained));
         self.reconcile_member_directory_best_effort(mode).await;
-        Ok(())
+        Ok(ingest)
     }
 
     /// Reports that a staged publish failed; the engine discards the staged
@@ -1512,12 +1581,22 @@ impl CircleManager {
     /// session that dies still owing one reports the circle
     /// ([`Self::orphaned_removal_deferrals`]).
     ///
+    /// # What it hands back
+    ///
+    /// The same [`DecryptedIngest`] [`Self::confirm_published`] returns, and for
+    /// the same reason: `do_publish_failed` also ends in
+    /// `replay_buffered_messages`. It replays at the ORIGINAL epoch, which is
+    /// what makes this the rung where a peer's buffered `SelfRemove` proposal is
+    /// still applicable and reaches its auto-commit. The kept-owed early return
+    /// above hands back an EMPTY ingest: no engine call was made, so there is
+    /// honestly no batch.
+    ///
     /// # Errors
     ///
     /// Returns an error if the pending ref is unknown.
-    pub async fn publish_failed(&self, pending: PendingStateRef) -> Result<()> {
+    pub async fn publish_failed(&self, pending: PendingStateRef) -> Result<DecryptedIngest> {
         if self.keeps_its_removal_publish_owed(pending) {
-            return Ok(());
+            return Ok(DecryptedIngest::default());
         }
         let result = self
             .session
@@ -1536,7 +1615,21 @@ impl CircleManager {
         let _ = self.take_rotation_pending(pending);
         let effects = match result {
             Ok(effects) => effects,
-            Err(e) => return Err(e),
+            Err(e) => {
+                // Same stranded-buffer recovery as `confirm_published` — see
+                // there for why the original error is returned unchanged.
+                let stranded = self.session.drain().await;
+                if !stranded.is_empty() {
+                    let _ = self
+                        .fold_resolved_publish(stranded, BatchOrigin::Drained)
+                        .await;
+                    log::warn!(
+                        "a failed publish resolution stranded engine work; it was folded \
+                         and the failure stands"
+                    );
+                }
+                return Err(e);
+            }
         };
         if let Some(group_id) = self.take_create_pending(pending) {
             if let Err(e) = self.storage.delete_circle(&group_id) {
@@ -1549,8 +1642,279 @@ impl CircleManager {
         // Restores anyone [`Self::remove_members`] optimistically deleted for the
         // commit that was just discarded.
         let mode = self.publish_outcome_verdict(&effects.events);
+        let (ingest, drained) = self
+            .fold_resolved_publish(effects, BatchOrigin::TopLevel)
+            .await;
+        let mode = drained.map_or(mode, |drained| mode.max(drained));
         self.reconcile_member_directory_best_effort(mode).await;
-        Ok(())
+        Ok(ingest)
+    }
+
+    /// Folds a resolved publish's engine batch — and everything draining it
+    /// releases — into the work its caller has to do.
+    ///
+    /// Iterative over an explicit worklist rather than recursive: a recursive
+    /// `async fn` would need boxing, and the generation bound would be a
+    /// call-stack depth rather than a number anyone can read.
+    ///
+    /// What each pass does, in this order: PERSIST the batch's locations (first,
+    /// because nothing after it may fail before the durable write), fold the
+    /// events into results, record the inbound observation the origin allows
+    /// (R2), accumulate the directory verdict, and dispose of the publish work.
+    /// Then the groups the batch left pending are advanced, and what comes back
+    /// goes on the worklist as a DRAINED batch.
+    ///
+    /// The re-tick budget is ONE per call — not per batch and not per
+    /// generation — and a batch with nothing pending sleeps not at all. The
+    /// engine's `SelfRemove` auto-commit due time is a real `Instant`, so the
+    /// delay has to be real time; capping it per call is what stops a cascade
+    /// of leaves from multiplying it.
+    ///
+    /// # Rule 15, for every diagnostic in this function and in the resolve
+    /// ladder it feeds
+    ///
+    /// NEVER add a `log_alias` circle handle to these lines. Each is a
+    /// per-circle ACTIVITY signal the moment one is attached — "circle#a91f3c
+    /// had a peer location replayed" and "circle#a91f3c re-ticked six times"
+    /// say that a peer just moved and that a peer just left, which is exactly
+    /// what a handle is supposed to make unsayable. Magnitudes stay bucketed
+    /// and instants stay absent for the same reason. A later "just add the
+    /// circle for debuggability" is a review stop, not a judgement call.
+    async fn fold_resolved_publish(
+        &self,
+        seed: SessionEffects,
+        origin: BatchOrigin,
+    ) -> (DecryptedIngest, Option<DirectoryReconcile>) {
+        let mut worklist: std::collections::VecDeque<(SessionEffects, BatchOrigin)> =
+            std::collections::VecDeque::new();
+        worklist.push_back((seed, origin));
+        let mut convergence: Vec<GroupId> = Vec::new();
+        // No `PendingStateRef` is resolved twice in one call: a ref rolled back
+        // in one generation must never be rolled back again in the next.
+        let mut resolved: HashSet<PendingStateRef> = HashSet::new();
+        let mut out = DecryptedIngest::default();
+        let mut verdict: Option<DirectoryReconcile> = None;
+        let mut ticks_left = crate::relay::auto_commit::MAX_CONVERGENCE_RETICKS;
+        let mut batches = 0_usize;
+        // Whether a re-advance has already run in this call.
+        let mut advanced = false;
+        let mut capped = false;
+
+        loop {
+            while let Some((effects, origin)) = worklist.pop_front() {
+                batches += 1;
+                // The cap stops the fold GENERATING work — no further advance,
+                // no further re-tick — and stops nothing else. A batch the
+                // engine has already handed back is still folded here, because
+                // dropping one is precisely the loss this fold exists to
+                // prevent: its replayed locations are delivered at most once
+                // (their rows are written `Processed` as they are pushed), and
+                // its staged commits carry live refs that nothing but
+                // `dispose_publish_work` records an obligation for.
+                //
+                // The drain still terminates. The only batch a disposal can
+                // release is a rollback's, each rollback resolves a ref
+                // `resolved` will not hand out twice, and each engine cycle
+                // consumes one scheduled `SelfRemove` — of which there is at
+                // most one per member per epoch, and `publish_failed` does not
+                // re-arm it.
+                if batches > MAX_FOLD_BATCHES {
+                    capped = true;
+                }
+
+                out.results
+                    .extend(self.persist_and_fold(&effects.events).await);
+                match origin {
+                    BatchOrigin::TopLevel => {
+                        self.note_inbound_arrival_for_message_received(&effects.events);
+                    }
+                    BatchOrigin::Drained => self.note_inbound_group_events(&effects.events),
+                }
+                verdict = verdict.max(self.directory_verdict_for_events(&effects.events));
+
+                for item in effects.publish {
+                    if let Some(more) = self
+                        .dispose_publish_work(item, origin, &mut out, &mut resolved)
+                        .await
+                    {
+                        worklist.push_back((more, BatchOrigin::Drained));
+                    }
+                }
+
+                for group_id in effects.pending_convergence {
+                    if !convergence.contains(&group_id) {
+                        convergence.push(group_id);
+                    }
+                }
+            }
+
+            if capped || convergence.is_empty() || ticks_left == 0 {
+                break;
+            }
+            // A group that is STILL pending after the round that advanced it is
+            // waiting on the engine's jitter-delayed auto-commit due time, which
+            // reads a real `Instant`. Re-advancing it without waiting would spin
+            // the CPU through the whole jitter window, so the delay is paid here
+            // — once per re-advance, never before the first one (a commit whose
+            // time has come surfaces with no delay at all) and never when
+            // nothing pends.
+            if advanced {
+                ticks_left -= 1;
+                self.convergence_reticks
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                tokio::time::sleep(crate::relay::auto_commit::CONVERGENCE_RETICK_DELAY).await;
+            }
+            advanced = true;
+            for group_id in std::mem::take(&mut convergence) {
+                match self.session.advance_convergence(&group_id).await {
+                    Ok(more) => worklist.push_back((more, BatchOrigin::Drained)),
+                    // Re-added rather than dropped: the group still owes an
+                    // advance, and the next tick retries it.
+                    Err(e) => {
+                        log::warn!(
+                            "publish resolution: advancing convergence failed: {}",
+                            e.code()
+                        );
+                        convergence.push(group_id);
+                    }
+                }
+            }
+        }
+        if capped {
+            // A runaway guard, not a business bound. Nothing is dangling and
+            // nothing is lost: every batch already handed back was folded, so
+            // every auto-commit in one is surfaced with its obligation recorded
+            // and every replayed location is persisted. The groups that never
+            // got their advance are NAMED rather than dropped in silence — no
+            // schedule is lost either, the engine keeps its own `SelfRemove`
+            // schedule and re-marks the group pending on the next advance — but
+            // a cap that reported only half of what it stood down from would
+            // understate the bug that reached it.
+            log::warn!(
+                "publish resolution stopped generating at the batch cap; owed commits stand, \
+                 everything already handed back was folded and {} group(s) still await an advance",
+                bucket(convergence.len())
+            );
+        } else if ticks_left < crate::relay::auto_commit::MAX_CONVERGENCE_RETICKS {
+            log::debug!(
+                "publish resolution drained convergence after {} re-tick(s)",
+                bucket(crate::relay::auto_commit::MAX_CONVERGENCE_RETICKS - ticks_left)
+            );
+        }
+        (out, verdict)
+    }
+
+    /// One [`PublishWork`] item's disposition inside the fold, returning any
+    /// batch a rollback produced for the caller's worklist.
+    ///
+    /// `resolved` is the call's set of pending refs already dealt with. A ref
+    /// cannot legitimately be handed out twice by one engine — the buffers are
+    /// one-shot drains — so a repeat is a bug, and resolving it again would
+    /// either roll back a commit the first pass surfaced or surface a commit the
+    /// first pass rolled back.
+    #[deny(clippy::wildcard_enum_match_arm)]
+    async fn dispose_publish_work(
+        &self,
+        item: PublishWork,
+        origin: BatchOrigin,
+        out: &mut DecryptedIngest,
+        resolved: &mut HashSet<PendingStateRef>,
+    ) -> Option<SessionEffects> {
+        if let Some(pending) = pending_ref_of(&item) {
+            if !resolved.insert(pending) {
+                log::warn!("publish resolution saw a pending ref twice; the repeat is ignored");
+                return None;
+            }
+        }
+        match item {
+            PublishWork::AutoPublish { msg, pending } => {
+                self.surface_auto_commit(&msg, pending, &mut out.auto_commits)
+                    .await
+            }
+            // A released queued intent, whose durable row the engine has
+            // already deleted — rolling it back would destroy it. Only a
+            // DRAINED batch can carry one; at top level `collect_effects` is
+            // called with no send results, so this is unreachable there and
+            // fails closed with everything else that cannot happen.
+            PublishWork::GroupEvolution {
+                msg,
+                welcomes,
+                pending,
+            } if origin == BatchOrigin::Drained => {
+                if !welcomes.is_empty() {
+                    // O3: `CommitToPublish` carries no welcomes, so they are not
+                    // published here. Pre-existing, and said out loud rather
+                    // than becoming silent.
+                    log::warn!("a drained commit carried welcome(s) that are not published here");
+                }
+                match SessionManager::transport_message_to_event(&msg) {
+                    Ok(commit_event) => {
+                        out.auto_commits.push(CommitToPublish {
+                            commit_event,
+                            pending,
+                        });
+                        None
+                    }
+                    Err(_) => self.rollback_unfolded(pending).await,
+                }
+            }
+            PublishWork::GroupEvolution { pending, .. }
+            | PublishWork::GroupCreated { pending, .. } => self.rollback_unfolded(pending).await,
+            // The local user's own re-proposed leave (a peer commit landing
+            // while a leave request stands re-mints it for the accepted epoch).
+            // Dropping it wedges the leave behind the engine's send gate.
+            PublishWork::Proposal { msg } => {
+                match SessionManager::transport_message_to_event(&msg) {
+                    Ok(event) => out.proposals.push(event),
+                    Err(e) => log::warn!(
+                        "publish resolution: dropping an unserializable proposal: {}",
+                        e.code()
+                    ),
+                }
+                None
+            }
+            // Argued drop: a location intent released by the drain is superseded
+            // by the fresher fix the next cadence tick sends, and publishing a
+            // stale one would put an out-of-date pin on every peer's map.
+            PublishWork::ApplicationMessage { .. } => {
+                log::debug!(
+                    "publish resolution observed an application message it does not publish"
+                );
+                None
+            }
+        }
+    }
+
+    /// Rolls a staged commit back WITHOUT folding its own batch, handing that
+    /// batch to the caller instead.
+    ///
+    /// NEVER promote this to [`Self::publish_failed`]. `remove_members` reaches
+    /// this line while holding `directory_lock` — a non-reentrant tokio mutex —
+    /// through `take_group_evolution` → `surface_co_drained_auto_commits` →
+    /// `surface_auto_commit`, and `publish_failed` ends in a directory
+    /// reconcile that takes the same lock. The deadlock would be silent and
+    /// would look like a hung Remove Member.
+    ///
+    /// The owed-guard is kept: a removal-bearing commit this device owes a
+    /// publish for is never discarded, from here any more than from
+    /// [`Self::publish_failed`]. Unreachable for such a ref today (the
+    /// serialization that would send us here fails before the obligation is
+    /// recorded), and the guard stays anyway so a later reordering cannot turn
+    /// this into a silent removal drop.
+    async fn rollback_unfolded(&self, pending: PendingStateRef) -> Option<SessionEffects> {
+        if self.keeps_its_removal_publish_owed(pending) {
+            return None;
+        }
+        self.session.publish_failed(pending).await.ok()
+    }
+
+    /// How many convergence re-ticks this manager's publish resolutions have
+    /// slept for — the quiet-path budget, observable.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[must_use]
+    pub fn convergence_reticks(&self) -> usize {
+        self.convergence_reticks
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// The directory verdict a resolved publish implies — at least a rewrite,
@@ -1634,7 +1998,7 @@ impl CircleManager {
             .collect();
 
         let effects = self.add_members(mls_group_id, &key_package_events).await?;
-        let (commit_event, welcomes, pending) = take_group_evolution(effects)?;
+        let (commit_event, welcomes, pending) = self.take_group_evolution(effects).await?;
         let welcome_events =
             self.route_welcomes_with_cascade(&members, welcomes, creator_fallback_relays)?;
 
@@ -1674,7 +2038,7 @@ impl CircleManager {
             .remove_members(mls_group_id, member_pubkeys)
             .await
             .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
-        let (commit_event, _welcomes, pending) = take_group_evolution(effects)?;
+        let (commit_event, _welcomes, pending) = self.take_group_evolution(effects).await?;
 
         // Owner decision D3, the "you remove them" direction: the row goes at
         // STAGING time, deliberately not waiting for a relay ack. Erring toward
@@ -2123,6 +2487,43 @@ impl CircleManager {
     ///   the same fold for our OWN confirm/rollback, which is why that path
     ///   calls [`Self::note_epoch_changes`] and not this.
     pub(crate) fn note_inbound_group_events(&self, events: &[GroupEvent]) {
+        self.note_inbound_arrivals(events);
+        self.note_epoch_changes(events);
+    }
+
+    /// The arrival half of [`Self::note_inbound_group_events`], WITHOUT the
+    /// epoch-change write.
+    ///
+    /// Split out for the publish-resolution funnel, which reaches both facts by
+    /// different routes: a DRAINED batch is ordinary inbound traffic and takes
+    /// this plus `note_epoch_changes`, while the TOP-LEVEL batch of a confirm
+    /// already records its own epoch change through
+    /// [`Self::publish_outcome_verdict`]. Keeping each fact to exactly one
+    /// write site per path is what stops a plane doing both from recording it
+    /// twice.
+    fn note_inbound_arrivals(&self, events: &[GroupEvent]) {
+        self.note_arrivals(events.iter());
+    }
+
+    /// [`Self::note_inbound_arrivals`] over the `MessageReceived` events alone.
+    ///
+    /// The top-level rule (R2): a peer message replayed out of the
+    /// publish-before-apply window is MLS-authenticated evidence that the peer
+    /// is active, and is indistinguishable from the same message arriving a
+    /// moment later — so it stamps the quiescence gate. Nothing else in that
+    /// batch may: an `EpochChanged` there is this device's OWN commit being
+    /// applied, and stamping on it would let every local repair hold the gate
+    /// shut for itself.
+    fn note_inbound_arrival_for_message_received(&self, events: &[GroupEvent]) {
+        self.note_arrivals(
+            events
+                .iter()
+                .filter(|event| matches!(event, GroupEvent::MessageReceived { .. })),
+        );
+    }
+
+    /// One arrival stamp per distinct circle named in `events`.
+    fn note_arrivals<'a>(&self, events: impl Iterator<Item = &'a GroupEvent>) {
         let now_ms = chrono::Utc::now().timestamp_millis();
         let mut stamped: HashSet<&GroupId> = HashSet::new();
         for event in events {
@@ -2146,7 +2547,6 @@ impl CircleManager {
                 ),
             }
         }
-        self.note_epoch_changes(events);
     }
 
     /// Records the wall-clock instant of every `EpochChanged` in `events`.
@@ -2402,6 +2802,10 @@ impl CircleManager {
     /// Publishes every owed eviction commit under the Rule-13 ladder and clears
     /// the ones that land. Returns how many were confirmed.
     ///
+    /// `interrupt`, when supplied, is polled once per commit: a caller that holds
+    /// a lifecycle lock across this pass can stop it rather than make a teardown
+    /// wait out a cascade of relay round-trips.
+    ///
     /// Call this from a FOREGROUND pass only: the whole point of the obligation
     /// is that the publish happens where the process is not about to be
     /// suspended. A commit that gets no relay ack STAYS owed — it is never rolled
@@ -2414,31 +2818,69 @@ impl CircleManager {
     /// recorded by a session that has since died is unredeemable by construction
     /// (see [`Self::orphaned_removal_deferrals`]) — which is why a plane running
     /// in a short-lived isolate must publish rather than park.
+    ///
+    /// # Why it is a worklist and not a pass over a snapshot
+    ///
+    /// A confirm here ends in the engine's replay, which can surface the NEXT
+    /// eviction in a cascade. This pass owns a publisher, so it runs that one
+    /// too rather than leaving a commit staged for a foreground open that has
+    /// already happened.
     pub async fn redeem_removal_deferrals(
         &self,
         publisher: &dyn crate::relay::auto_commit::AutoCommitPublisher,
+        interrupt: Option<&std::sync::atomic::AtomicBool>,
     ) -> usize {
-        let owed: Vec<([u8; 32], Event, PendingStateRef)> = {
+        let mut worklist: std::collections::VecDeque<CommitToPublish> = {
             let deferrals = self
                 .removal_deferrals
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             deferrals
-                .iter()
-                .map(|(ngid, commit)| (*ngid, commit.commit_event.clone(), commit.pending))
+                .values()
+                .map(|commit| CommitToPublish {
+                    commit_event: commit.commit_event.clone(),
+                    pending: commit.pending,
+                })
                 .collect()
         };
+        let mut resolved: HashSet<PendingStateRef> = HashSet::new();
         let mut confirmed = 0;
-        for (ngid, commit_event, pending) in owed {
+        while let Some(commit) = worklist.pop_front() {
+            // The caller holds a lifecycle lock across this whole pass, and a
+            // cascade can be a cap's worth of relay round-trips — long enough
+            // for a logout to look hung. What is abandoned here keeps its
+            // durable row: this session's ref dies with it, so the circle is
+            // REPORTED at the next foreground open instead of published. That
+            // is the right trade against blocking a teardown the user asked
+            // for, and it is the only place this pass gives anything up.
+            if interrupt.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire)) {
+                log::info!("removal redemption yielded to a teardown; owed commits stand");
+                break;
+            }
+            if !resolved.insert(commit.pending) {
+                continue;
+            }
+            if resolved.len() > MAX_REDEMPTION_STEPS {
+                // Everything still queued keeps its durable row and its live
+                // ref, so the next foreground pass redeems it; nothing here is
+                // rolled back and nothing is discarded.
+                log::warn!(
+                    "removal redemption stopped at the runaway cap; {} commit(s) stand owed",
+                    bucket(worklist.len() + 1)
+                );
+                break;
+            }
             let relays = self
-                .relays_for_commit_event(&commit_event)
+                .relays_for_commit_event(&commit.commit_event)
                 .unwrap_or_default();
-            let acked =
-                !relays.is_empty() && publisher.publish_auto_commit(&commit_event, &relays).await;
+            let acked = !relays.is_empty()
+                && publisher
+                    .publish_auto_commit(&commit.commit_event, &relays)
+                    .await;
             if !acked {
                 continue;
             }
-            if self.confirm_published(pending).await.is_err() {
+            let Ok(ingest) = self.confirm_published(commit.pending).await else {
                 // STAYS owed. A confirm can fail with the staged commit still
                 // attached: the engine's durable transaction propagates a lock
                 // blip BEFORE its in-memory state-machine transition, which is
@@ -2451,9 +2893,26 @@ impl CircleManager {
                 // foreground open until that circle's next successful send
                 // discharges the row.
                 continue;
-            }
-            self.clear_removal_deferral(&ngid);
+            };
+            // The obligation was discharged BY REF inside the confirm, at the
+            // one scope that is correct. An ngid-scoped clear here would delete
+            // a SECOND-generation obligation the confirm's own replay has just
+            // recorded (the map holds one entry per circle), leaving a staged,
+            // unpublished, no-longer-owed and no-longer-reported eviction — this
+            // very wedge, re-armed and invisible.
             confirmed += 1;
+            // `ingest.results` are already persisted and this pass has no UI
+            // surface to route them to.
+            for proposal in ingest.proposals {
+                let relays = self.relays_for_commit_event(&proposal).unwrap_or_default();
+                if !relays.is_empty() {
+                    // A bare proposal opens no publish-before-apply window:
+                    // nothing to confirm, nothing to roll back, and an unacked
+                    // one is re-minted by the next commit this device applies.
+                    let _ = publisher.publish_auto_commit(&proposal, &relays).await;
+                }
+            }
+            worklist.extend(ingest.auto_commits);
         }
         confirmed
     }
@@ -2827,11 +3286,16 @@ impl CircleManager {
         // publish work" — the opaque error every Dart caller dropped into a
         // `debugPrint` while the device silently stopped sharing.
         if !effects.queued.is_empty() {
+            // The deferred branch drains the same buffers the successful one
+            // does, and it reaches `take_app_message` never — so the peer
+            // locations this send replayed are persisted HERE. The publish half
+            // is `collect_deferred_work`'s, which records its own obligations.
+            self.note_send_drain(&effects.events).await;
             return Err(self
                 .deferred_send_outcome(mls_group_id, effects.publish, now_secs())
                 .await);
         }
-        let event = take_app_message(effects)?;
+        let event = self.take_app_message(effects).await?;
         // The engine accepted an outbound message, so this group is `Stable` and
         // holds no staged commit — the only positive proof that a deferred
         // eviction is no longer owed. See
@@ -2945,9 +3409,20 @@ impl CircleManager {
 
         match self.session.advance_convergence(mls_group_id).await {
             Ok(effects) => {
-                let advanced = self.collect_deferred_work(&effects.publish).await;
-                work.commits.extend(advanced.commits);
+                // Through the FOLD, not a bare publish scan: this batch is a
+                // drained one, so it carries whatever the release re-ingested —
+                // peer locations (persisted by the fold, which is the point) and
+                // the local user's own re-proposed leave, which must keep
+                // reaching `work.proposals` or the leave wedges behind the
+                // engine's send gate.
+                let (advanced, verdict) = self
+                    .fold_resolved_publish(effects, BatchOrigin::Drained)
+                    .await;
+                work.commits.extend(advanced.auto_commits);
                 work.proposals.extend(advanced.proposals);
+                if let Some(mode) = verdict {
+                    self.reconcile_member_directory_best_effort(mode).await;
+                }
             }
             Err(e) => log::warn!("deferred send: advancing convergence failed: {}", e.code()),
         }
@@ -2978,6 +3453,12 @@ impl CircleManager {
     /// that must still be resolved here, because there is no event for a caller
     /// to publish: it is rolled back (`publish_failed`) rather than left
     /// staged, which matches [`Self::collect_auto_commits`] on the receive path.
+    ///
+    /// Each of the three rollbacks keeps its OWN batch
+    /// ([`Self::absorb_rollback`]): the engine replays on the way out of
+    /// `publish_failed` too, so even this corner releases peer locations
+    /// (persisted by the resolution itself) and can stage the next commit in a
+    /// cascade.
     async fn collect_deferred_work(&self, work: &[PublishWork]) -> DeferredWork {
         let mut out = DeferredWork::default();
         for item in work {
@@ -3004,9 +3485,7 @@ impl CircleManager {
                             }
                             out.commits.push(commit);
                         }
-                        Err(_) => {
-                            let _ = self.publish_failed(*pending).await;
-                        }
+                        Err(_) => self.absorb_rollback(*pending, &mut out).await,
                     }
                 }
                 PublishWork::GroupEvolution { msg, pending, .. } => {
@@ -3015,9 +3494,7 @@ impl CircleManager {
                             commit_event,
                             pending: *pending,
                         }),
-                        Err(_) => {
-                            let _ = self.publish_failed(*pending).await;
-                        }
+                        Err(_) => self.absorb_rollback(*pending, &mut out).await,
                     }
                 }
                 // A create can never surface on a send path for an existing
@@ -3025,7 +3502,7 @@ impl CircleManager {
                 // to publish here (welcomes only), so roll it back rather than
                 // silently pin the group.
                 PublishWork::GroupCreated { pending, .. } => {
-                    let _ = self.publish_failed(*pending).await;
+                    self.absorb_rollback(*pending, &mut out).await;
                 }
                 PublishWork::Proposal { msg } => {
                     match SessionManager::transport_message_to_event(msg) {
@@ -3040,6 +3517,21 @@ impl CircleManager {
             }
         }
         out
+    }
+
+    /// Rolls a staged item back and keeps what the rollback itself released.
+    ///
+    /// The engine replays its buffer on the way out of `publish_failed`, so even
+    /// this corner — an item whose transport message will not serialize — hands
+    /// back peer locations (already persisted), the next eviction in a cascade,
+    /// and any re-proposed leave. Folding them here is what stops the rollback
+    /// from being a second drop site.
+    async fn absorb_rollback(&self, pending: PendingStateRef, out: &mut DeferredWork) {
+        let Ok(batch) = self.publish_failed(pending).await else {
+            return;
+        };
+        out.commits.extend(batch.auto_commits);
+        out.proposals.extend(batch.proposals);
     }
 
     /// Discards the circle's queued location intents, or `0` if the store
@@ -3155,10 +3647,7 @@ impl CircleManager {
             .await
             .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
         let Some(ingest) = screened.ingested() else {
-            return Ok(DecryptedIngest {
-                results: Vec::new(),
-                auto_commits: Vec::new(),
-            });
+            return Ok(DecryptedIngest::default());
         };
 
         // This plane folds to results rather than routing raw events, so it is
@@ -3167,8 +3656,12 @@ impl CircleManager {
         self.note_inbound_group_events(&ingest.effects.events);
         let mut results = fold_group_events(&ingest.effects.events);
         let mut auto_commits = Vec::new();
-        self.collect_auto_commits(&ingest.effects.publish, &mut auto_commits)
-            .await;
+        for rolled in self
+            .collect_auto_commits(&ingest.effects.publish, &mut auto_commits)
+            .await
+        {
+            results.extend(fold_group_events(&rolled.events));
+        }
 
         // Release any queued work + buffered inbound now safe to apply, re-ticking
         // a group that stays pending until its jitter-delayed `SelfRemove`
@@ -3186,8 +3679,12 @@ impl CircleManager {
                 if let Ok(more) = self.session.advance_convergence(gid).await {
                     self.note_inbound_group_events(&more.events);
                     results.extend(fold_group_events(&more.events));
-                    self.collect_auto_commits(&more.publish, &mut auto_commits)
-                        .await;
+                    for rolled in self
+                        .collect_auto_commits(&more.publish, &mut auto_commits)
+                        .await
+                    {
+                        results.extend(fold_group_events(&rolled.events));
+                    }
                     next.extend(more.pending_convergence);
                 }
             }
@@ -3227,6 +3724,10 @@ impl CircleManager {
         Ok(DecryptedIngest {
             results,
             auto_commits,
+            // This plane has no publish-resolution batch of its own, so the
+            // only proposal shape it could see — the local re-proposed leave —
+            // reaches it through the confirm/fail funnel instead.
+            proposals: Vec::new(),
         })
     }
 
@@ -3243,33 +3744,54 @@ impl CircleManager {
     /// publish-before-apply window survivable — a process killed mid-publish
     /// leaves the row, and their no-ack `publishFailed` keeps the removal owed
     /// instead of dropping it (see [`Self::owe_removal_publish`]).
-    async fn collect_auto_commits(&self, work: &[PublishWork], out: &mut Vec<CommitToPublish>) {
+    /// Returns the batch of every rollback it had to perform, for the caller to
+    /// fold — a rolled-back ref's effects are engine work like any other, and
+    /// dropping them is the defect this whole path exists to close.
+    async fn collect_auto_commits(
+        &self,
+        work: &[PublishWork],
+        out: &mut Vec<CommitToPublish>,
+    ) -> Vec<SessionEffects> {
+        let mut rolled_back = Vec::new();
         for item in work {
             if let PublishWork::AutoPublish { msg, pending } = item {
-                match SessionManager::transport_message_to_event(msg) {
-                    Ok(commit_event) => {
-                        let commit = CommitToPublish {
-                            commit_event,
-                            pending: *pending,
-                        };
-                        if !self.owe_removal_publish(&commit) {
-                            // Not recordable (the circle row is gone, or the DB
-                            // refused the write). Said out loud rather than
-                            // assumed away: this is the one shape in which the
-                            // caller's own no-ack path can still roll the
-                            // eviction back.
-                            log::warn!(
-                                "receive-side eviction commit surfaced with no recorded \
-                                 obligation: an unacked publish will roll it back"
-                            );
-                        }
-                        out.push(commit);
-                    }
-                    Err(_) => {
-                        let _ = self.publish_failed(*pending).await;
-                    }
+                if let Some(effects) = self.surface_auto_commit(msg, *pending, out).await {
+                    rolled_back.push(effects);
                 }
             }
+        }
+        rolled_back
+    }
+
+    /// One [`PublishWork::AutoPublish`] surfaced as a [`CommitToPublish`] with
+    /// its obligation recorded, or rolled back when the wrapped message will not
+    /// serialize — in which case its batch comes back for the caller to fold.
+    async fn surface_auto_commit(
+        &self,
+        msg: &TransportMessage,
+        pending: PendingStateRef,
+        out: &mut Vec<CommitToPublish>,
+    ) -> Option<SessionEffects> {
+        match SessionManager::transport_message_to_event(msg) {
+            Ok(commit_event) => {
+                let commit = CommitToPublish {
+                    commit_event,
+                    pending,
+                };
+                if !self.owe_removal_publish(&commit) {
+                    // Not recordable (the circle row is gone, or the DB refused
+                    // the write). Said out loud rather than assumed away: this
+                    // is the one shape in which the caller's own no-ack path can
+                    // still roll the eviction back.
+                    log::warn!(
+                        "receive-side eviction commit surfaced with no recorded \
+                         obligation: an unacked publish will roll it back"
+                    );
+                }
+                out.push(commit);
+                None
+            }
+            Err(_) => self.rollback_unfolded(pending).await,
         }
     }
 
@@ -3297,16 +3819,142 @@ impl CircleManager {
     ///
     /// Returns an error only for a hard ingest failure.
     pub async fn decrypt_location(&self, event: &Event) -> Result<Vec<LocationMessageResult>> {
-        let ingest = self.decrypt_location_collecting_commits(event).await?;
-        for commit in ingest.auto_commits {
+        let mut ingest = self.decrypt_location_collecting_commits(event).await?;
+        for commit in std::mem::take(&mut ingest.auto_commits) {
             // No relay plane here — never apply an unpublished eviction commit,
-            // and never discard it either: this leaves it staged and owed.
-            let _ = self.publish_failed(commit.pending).await;
+            // and never discard it either: this leaves it staged and owed. The
+            // report's OWN batch is merged rather than dropped: the kept-owed
+            // rung returns an empty one, but the rung that actually rolls back
+            // replays, and a peer location it replays is deliverable once.
+            if let Ok(nested) = self.publish_failed(commit.pending).await {
+                ingest.results.extend(nested.results);
+            }
         }
         Ok(ingest.results)
     }
 
     // ==================== Last-Known Location Cache ====================
+
+    /// The circle's public `nostr_group_id` for an MLS group id, or `None` when
+    /// this device holds no circle row for it.
+    pub(crate) fn nostr_group_id_for(&self, group_id: &GroupId) -> Option<[u8; 32]> {
+        self.storage
+            .get_circle(group_id)
+            .ok()
+            .flatten()
+            .map(|circle| circle.nostr_group_id)
+    }
+
+    /// Persists every decrypted peer location in an engine batch as a
+    /// last-known-location row.
+    ///
+    /// The ONE persist site every receive plane shares, and the reason it is
+    /// shared: the engine delivers `MessageReceived` AT MOST ONCE and writes
+    /// the content row `Processed` in the same breath, with no
+    /// application-acknowledgement boundary — a plane that folds the batch
+    /// without persisting loses the fix permanently.
+    ///
+    /// Three filters, in this order:
+    ///
+    /// * the ngid comes from each event's OWN `group_id`, never an ambient one:
+    ///   a `SessionEffects` drains GLOBAL engine buffers, so one batch can span
+    ///   circles and an ambient key would file a peer under the wrong one;
+    /// * a self-echo is dropped against the non-locking
+    ///   [`SessionManager::identity_pubkey`], which is byte-identical to the
+    ///   MLS-authenticated `sender` and lowercase-hex on both sides;
+    /// * a sender the circle's CURRENT roster no longer names is skipped — the
+    ///   departed-member pin Haven already evicts everywhere else. If the roster
+    ///   read itself FAILS the location is persisted anyway: a transient read
+    ///   error must never cost a legitimate offline backlog (Rule 12), and the
+    ///   display layer still gates.
+    async fn persist_locations_from_events(&self, events: &[GroupEvent]) -> RosterDeclined {
+        let mut declined = RosterDeclined::default();
+        let own_hex = self.session.identity_pubkey().to_hex();
+        // One roster read per distinct group per batch. `None` records a read
+        // that FAILED, which is the fail-open case, not an empty roster.
+        let mut rosters: HashMap<GroupId, Option<HashSet<String>>> = HashMap::new();
+        for event in events {
+            let Some(LocationMessageResult::Location {
+                sender_pubkey,
+                content,
+                group_id,
+                ..
+            }) = SessionManager::location_result_from_event(event)
+            else {
+                continue;
+            };
+            if sender_pubkey == own_hex {
+                continue;
+            }
+            let Some(nostr_group_id) = self.nostr_group_id_for(&group_id) else {
+                continue;
+            };
+            if !rosters.contains_key(&group_id) {
+                let roster = self
+                    .session
+                    .member_pubkeys(&group_id)
+                    .await
+                    .ok()
+                    .map(|members| members.into_iter().collect::<HashSet<String>>());
+                rosters.insert(group_id.clone(), roster);
+            }
+            if rosters
+                .get(&group_id)
+                .and_then(Option::as_ref)
+                .is_some_and(|roster| !roster.contains(&sender_pubkey))
+            {
+                // Recorded, not merely skipped: the CALLER has to drop the same
+                // one from what it hands back, or the pin this refused to write
+                // arrives across the FFI and is written by the other side.
+                declined.reject(&group_id, &sender_pubkey);
+                continue;
+            }
+            let Ok(msg) = serde_json::from_str::<LocationMessage>(&content) else {
+                continue;
+            };
+            let row = super::LastKnownLocation {
+                nostr_group_id,
+                sender_pubkey,
+                latitude: msg.latitude,
+                longitude: msg.longitude,
+                geohash: msg.geohash,
+                display_name: msg.display_name,
+                timestamp: msg.timestamp.timestamp(),
+                expires_at: msg.expires_at.timestamp(),
+                purge_after: 0, // recomputed authoritatively by upsert
+                updated_at: chrono::Utc::now().timestamp(),
+            };
+            if let Err(e) = self.upsert_last_known_location(&row) {
+                log::warn!("replayed peer location not persisted: {}", e.code());
+            }
+        }
+        declined
+    }
+
+    /// [`Self::persist_and_fold`]'s persist half, for a plane that routes raw
+    /// engine events and folds no results of its own (the catch-up sweep).
+    ///
+    /// The roster refusals go with it: there is no second half here for them to
+    /// be applied to.
+    pub(crate) async fn persist_replayed_locations(&self, events: &[GroupEvent]) {
+        let _ = self.persist_locations_from_events(events).await;
+    }
+
+    /// Persists a batch's locations and folds the batch, with the ROSTER
+    /// decision applied once to both halves.
+    ///
+    /// One decision, one place. Filtering only the persist would leave the
+    /// departed member's fix in the results the caller hands across the FFI,
+    /// where the other side writes it to its own store — the filter undone one
+    /// layer up. Fail-OPEN is preserved exactly: a roster read that FAILED
+    /// declines nothing, so the location is both persisted and returned.
+    async fn persist_and_fold(&self, events: &[GroupEvent]) -> Vec<LocationMessageResult> {
+        let declined = self.persist_locations_from_events(events).await;
+        fold_group_events(events)
+            .into_iter()
+            .filter(|result| !declined.rejects(result))
+            .collect()
+    }
 
     /// Persists a last-known-location row (authoritative retention-window and
     /// display-name sanitization enforcement point).
@@ -4215,67 +4863,143 @@ fn note_dropped_resync_events(events: &[GroupEvent]) {
 
 /// Extracts the `GroupCreated { welcomes, pending }` publish work from a
 /// create-group's effects.
-fn take_group_created(effects: SessionEffects) -> Result<(Vec<TransportMessage>, PendingStateRef)> {
-    note_dropped_resync_events(&effects.events);
-    for work in effects.publish {
-        if let PublishWork::GroupCreated { welcomes, pending } = work {
-            return Ok((welcomes, pending));
-        }
+impl CircleManager {
+    /// Everything a SEND drained besides the item it was after.
+    ///
+    /// `do_send` settles stored convergence before it encrypts: a peer message that
+    /// could not be peeled when it arrived is re-ingested there and lands in THIS
+    /// send's own batch — delivered at most once, with its durable row written. So
+    /// the locations are persisted here, at the highest-frequency instance of that
+    /// drop there is (every publish cycle).
+    ///
+    /// The folded results are not returned: the send's contract is the event it
+    /// produced, every location in them is already in the last-known store, and
+    /// widening it would change the FFI shape for a signal the receive path already
+    /// drives. Deliberately NO convergence drain either — a send is not a
+    /// resolution, and what it leaves pending the next receive pass picks up.
+    ///
+    /// # What is still dropped here, and the design deviation that leaves it so
+    ///
+    /// The LOCATIONS are persisted; the RESYNC SIGNALS are not surfaced.
+    /// `PendingCommitRecovered` / `GroupHydrationRecovered` in a send's batch get
+    /// [`note_dropped_resync_events`]' bucketed note and nothing else, and
+    /// Rule 13 calls the first of those a MANDATORY resync. The reviewed plan
+    /// for this work specified deleting that function on the premise that the
+    /// fold would surface the events instead; it was kept, because surfacing
+    /// them means
+    /// widening `encrypt_location`'s return across the FFI for a signal the
+    /// RECEIVE path already drives authoritatively (catch-up runs first after
+    /// every open, and its fold maps both events to a `GroupUpdate`). What would
+    /// close it is that same FFI widening. Recorded rather than assumed away:
+    /// a deviation from an approved design is not a detail.
+    async fn note_send_drain(&self, events: &[GroupEvent]) {
+        note_dropped_resync_events(events);
+        self.persist_replayed_locations(events).await;
     }
-    Err(CircleError::Mls(
-        "create_group produced no GroupCreated publish work".to_string(),
-    ))
-}
 
-/// Extracts the `GroupEvolution { commit, welcomes, pending }` publish work from
-/// an invite/remove/update's effects, converting the commit to a signed Event.
-fn take_group_evolution(
-    effects: SessionEffects,
-) -> Result<(Event, Vec<TransportMessage>, PendingStateRef)> {
-    note_dropped_resync_events(&effects.events);
-    for work in effects.publish {
-        if let PublishWork::GroupEvolution {
-            msg,
-            welcomes,
-            pending,
-        } = work
-        {
-            let commit = SessionManager::transport_message_to_event(&msg)
-                .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
-            return Ok((commit, welcomes, pending));
+    /// Records the obligation for any eviction auto-commit a send co-drained.
+    ///
+    /// It is never the item a `take_*` is after, and dropping it with a live
+    /// `PendingStateRef` is how a removal goes silent. Recording it is the whole
+    /// disposition: the commit stays staged and OWED.
+    ///
+    /// # Its only recovery is the redemption pass — NOT that circle's next send
+    ///
+    /// The ref is always a DIFFERENT circle's: a same-circle staging puts the
+    /// group in `PendingPublish`, so the send answers `Queued` and takes the
+    /// deferred branch instead of reaching here. And that other circle's next
+    /// send does not recover it either — it comes back `SendDeferred`, but
+    /// [`Self::collect_deferred_work`] reads only that call's own publish
+    /// vector, and the engine never re-emits the `AutoPublish` (the schedule is
+    /// consumed before staging and `publish_failed` does not re-arm it, which is
+    /// what [`Self::orphaned_removal_deferrals`] is built on). So
+    /// [`Self::redeem_removal_deferrals`] — a FOREGROUND live-sync open — is the
+    /// one path that publishes it, and in a `HAVEN_LIVE_SYNC=false` build
+    /// nothing does. See `haven-core/SECURITY.md` for the full residual; closing
+    /// it means widening `encrypt_location`'s return with what it collected.
+    async fn surface_co_drained_auto_commits(&self, publish: &[PublishWork]) {
+        let mut surfaced = Vec::new();
+        for item in publish {
+            if let PublishWork::AutoPublish { msg, pending } = item {
+                // The rollback arm's batch is dropped: it is only reached for a
+                // message the engine built moments ago and could not re-serialize.
+                let _ = self.surface_auto_commit(msg, *pending, &mut surfaced).await;
+            }
         }
     }
-    Err(CircleError::Mls(
-        "operation produced no GroupEvolution publish work".to_string(),
-    ))
-}
 
-/// Extracts the bare `Proposal { msg }` (`SelfRemove`) transport event.
-fn take_proposal(effects: SessionEffects) -> Result<Event> {
-    note_dropped_resync_events(&effects.events);
-    for work in effects.publish {
-        if let PublishWork::Proposal { msg } = work {
-            return SessionManager::transport_message_to_event(&msg)
-                .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())));
+    /// Extracts the `GroupCreated { welcomes, pending }` publish work from a
+    /// create-group's effects.
+    async fn take_group_created(
+        &self,
+        effects: SessionEffects,
+    ) -> Result<(Vec<TransportMessage>, PendingStateRef)> {
+        self.note_send_drain(&effects.events).await;
+        self.surface_co_drained_auto_commits(&effects.publish).await;
+        for work in effects.publish {
+            if let PublishWork::GroupCreated { welcomes, pending } = work {
+                return Ok((welcomes, pending));
+            }
         }
+        Err(CircleError::Mls(
+            "create_group produced no GroupCreated publish work".to_string(),
+        ))
     }
-    Err(CircleError::Mls(
-        "leave produced no Proposal publish work".to_string(),
-    ))
-}
 
-/// Extracts the `ApplicationMessage { msg }` (location) transport event.
-fn take_app_message(effects: SessionEffects) -> Result<Event> {
-    note_dropped_resync_events(&effects.events);
-    for work in effects.publish {
-        if let PublishWork::ApplicationMessage { msg } = work {
-            return SessionManager::transport_message_to_event(&msg)
-                .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())));
+    /// Extracts the `GroupEvolution { commit, welcomes, pending }` publish work from
+    /// an invite/remove/update's effects, converting the commit to a signed Event.
+    async fn take_group_evolution(
+        &self,
+        effects: SessionEffects,
+    ) -> Result<(Event, Vec<TransportMessage>, PendingStateRef)> {
+        self.note_send_drain(&effects.events).await;
+        self.surface_co_drained_auto_commits(&effects.publish).await;
+        for work in effects.publish {
+            if let PublishWork::GroupEvolution {
+                msg,
+                welcomes,
+                pending,
+            } = work
+            {
+                let commit = SessionManager::transport_message_to_event(&msg)
+                    .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
+                return Ok((commit, welcomes, pending));
+            }
         }
+        Err(CircleError::Mls(
+            "operation produced no GroupEvolution publish work".to_string(),
+        ))
     }
-    Err(CircleError::Mls(
-        "send produced no ApplicationMessage publish work".to_string(),
-    ))
+
+    /// Extracts the bare `Proposal { msg }` (`SelfRemove`) transport event.
+    async fn take_proposal(&self, effects: SessionEffects) -> Result<Event> {
+        self.note_send_drain(&effects.events).await;
+        self.surface_co_drained_auto_commits(&effects.publish).await;
+        for work in effects.publish {
+            if let PublishWork::Proposal { msg } = work {
+                return SessionManager::transport_message_to_event(&msg)
+                    .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())));
+            }
+        }
+        Err(CircleError::Mls(
+            "leave produced no Proposal publish work".to_string(),
+        ))
+    }
+
+    /// Extracts the `ApplicationMessage { msg }` (location) transport event.
+    async fn take_app_message(&self, effects: SessionEffects) -> Result<Event> {
+        self.note_send_drain(&effects.events).await;
+        self.surface_co_drained_auto_commits(&effects.publish).await;
+        for work in effects.publish {
+            if let PublishWork::ApplicationMessage { msg } = work {
+                return SessionManager::transport_message_to_event(&msg)
+                    .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())));
+            }
+        }
+        Err(CircleError::Mls(
+            "send produced no ApplicationMessage publish work".to_string(),
+        ))
+    }
 }
 
 /// The circle an engine [`GroupEvent`] is about.
@@ -4381,8 +5105,12 @@ pub struct CommitToPublish {
     pub pending: PendingStateRef,
 }
 
-/// The folded outcome of ingesting one received `kind:445`
-/// ([`CircleManager::decrypt_location_collecting_commits`]).
+/// The folded outcome of one engine batch.
+///
+/// Either a received `kind:445`
+/// ([`CircleManager::decrypt_location_collecting_commits`]) or the replay a
+/// resolved publish releases ([`CircleManager::confirm_published`],
+/// [`CircleManager::publish_failed`], [`CircleManager::finalize_relay_update`]).
 ///
 /// Carries the location-facing results AND any receive-side auto-commit the
 /// engine staged (a peer `SelfRemove` eviction). Publish-before-apply (Rule 13):
@@ -4390,11 +5118,25 @@ pub struct CommitToPublish {
 /// then confirmed on a ≥1-relay ack, else reported as failed — which for these
 /// commits keeps the publish OWED rather than rolling it back
 /// ([`CircleManager::owe_removal_publish`]).
+#[derive(Default)]
 pub struct DecryptedIngest {
     /// The folded location-facing results (locations, joins, updates, …).
     pub results: Vec<LocationMessageResult>,
     /// Receive-side auto-commits the caller must publish then confirm/fail.
     pub auto_commits: Vec<CommitToPublish>,
+    /// Bare proposals to publish — no pending ref, nothing to confirm. At MDK
+    /// `e391adc` this is the local user's own re-proposed leave, re-minted for
+    /// the epoch a peer's commit just accepted; dropping it leaves the device
+    /// behind the engine's leave send gate with no proposal in flight.
+    ///
+    /// Usually empty, and NOT dead code. The fold is not atomic — it takes and
+    /// releases the session mutex once per call — so a `Leave` another task
+    /// proposes between a resolution and the fold's next `advance_convergence`
+    /// lands in the engine's global auto-proposal buffer, of which this fold is
+    /// the one drain. Narrow window, real one, and a silently dropped user leave
+    /// is the worse failure (Rule 12). See the "NOT TESTED, and why" note in
+    /// `tests/commit_gap_replay_e2e.rs` before deleting this.
+    pub proposals: Vec<Event>,
 }
 
 impl std::fmt::Debug for DecryptedIngest {
@@ -4402,7 +5144,99 @@ impl std::fmt::Debug for DecryptedIngest {
         f.debug_struct("DecryptedIngest")
             .field("results", &bucket(self.results.len()))
             .field("auto_commits", &bucket(self.auto_commits.len()))
+            .field("proposals", &bucket(self.proposals.len()))
             .finish()
+    }
+}
+
+/// Where a batch reaching the publish-resolution fold came from.
+///
+/// The only thing the fold's inbound observation (R2) and its `GroupEvolution`
+/// disposition (a released queued intent, whose durable row the engine has
+/// already deleted) need to differ on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BatchOrigin {
+    /// The batch `confirm_published` / `publish_failed` returned.
+    TopLevel,
+    /// A batch an `advance_convergence` or a rollback inside the fold produced.
+    Drained,
+}
+
+/// The (circle, sender) pairs a persist declined because the circle's CURRENT
+/// roster no longer names the sender.
+///
+/// Carried back out rather than kept private so the ROSTER decision is made
+/// once and applied to both halves of the same batch — the rows written and the
+/// results handed to the caller. Only roster refusals are recorded: a self-echo,
+/// an unknown circle or an unparseable payload are not the caller's business,
+/// and a roster read that FAILED declines nothing at all (Rule 12's fail-open).
+#[derive(Default)]
+struct RosterDeclined(HashSet<(Vec<u8>, String)>);
+
+impl RosterDeclined {
+    fn reject(&mut self, group_id: &GroupId, sender_pubkey: &str) {
+        self.0
+            .insert((group_id.as_slice().to_vec(), sender_pubkey.to_owned()));
+    }
+
+    /// Whether `result` is one of the refusals.
+    fn rejects(&self, result: &LocationMessageResult) -> bool {
+        let LocationMessageResult::Location {
+            sender_pubkey,
+            group_id,
+            ..
+        } = result
+        else {
+            return false;
+        };
+        self.0
+            .contains(&(group_id.as_slice().to_vec(), sender_pubkey.clone()))
+    }
+}
+
+/// How many engine batches one publish resolution generates work from before it
+/// stops.
+///
+/// A runaway guard, not a business bound: a resolution's replay releases a
+/// handful of batches, and anything near this is a bug in the engine or in the
+/// fold. Crossing it stops the advances and the re-ticks and NOTHING else —
+/// every batch already handed back is still folded, so no ref dangles, no
+/// obligation goes unrecorded and no replayed location is dropped — and it loses
+/// no schedule either: the groups that never got their advance keep theirs in
+/// the engine, which re-marks them pending on the next advance.
+///
+/// **No production path reaches it**, which is a property of the engine's
+/// buffers rather than a bound anyone chose. A fold's convergence set is seeded
+/// by `replay_buffered_messages`, which is single-group, and `collect_effects`
+/// empties the engine's global pending-convergence buffer on the way out of
+/// EVERY call — so nothing accumulates groups across calls, the stored-message
+/// write fault included (it breaks the terminal row write of an
+/// application-message ingest, which schedules no convergence at all). Measured
+/// over this tree's whole suite: three batches and one re-tick, at the most. The
+/// disposition is therefore driven where the fold can be handed its batch
+/// directly, by
+/// `tests::the_batch_cap_stops_generating_without_dropping_what_it_holds`.
+const MAX_FOLD_BATCHES: usize = 32;
+
+/// How many owed commits one redemption pass publishes before it stops.
+///
+/// The same runaway guard as [`MAX_FOLD_BATCHES`], on the pass that has a
+/// publisher. Its disposition is a PAUSE, not a loss: what it does not reach
+/// keeps its durable row and its live ref, so the next foreground pass redeems
+/// it, and nothing is rolled back.
+pub const MAX_REDEMPTION_STEPS: usize = 32;
+
+/// The pending ref a publish item owns, if any.
+///
+/// Exhaustive so a new `PublishWork` variant carrying a ref cannot slip past the
+/// fold's resolved-once rule.
+#[deny(clippy::wildcard_enum_match_arm)]
+const fn pending_ref_of(item: &PublishWork) -> Option<PendingStateRef> {
+    match item {
+        PublishWork::AutoPublish { pending, .. }
+        | PublishWork::GroupEvolution { pending, .. }
+        | PublishWork::GroupCreated { pending, .. } => Some(*pending),
+        PublishWork::ApplicationMessage { .. } | PublishWork::Proposal { .. } => None,
     }
 }
 
@@ -7413,8 +8247,8 @@ mod tests {
         crate::assert_debug_redacted!(&work, "DeferredWork", &[PROPOSAL_CONTENT, PROPOSAL_H_TAG]);
     }
 
-    #[test]
-    fn decrypted_ingest_debug_redacts_the_fold_it_carries() {
+    #[tokio::test]
+    async fn decrypted_ingest_debug_redacts_the_fold_it_carries() {
         // The fold it carries holds a sender pubkey, the decrypted location
         // JSON and the MLS group id; only the magnitude may render, and
         // bucketed, because a result count is how many peers just moved.
@@ -7427,15 +8261,23 @@ mod tests {
                 epoch: 14,
             }],
             auto_commits: vec![],
+            proposals: vec![leaky_proposal()],
         };
         crate::assert_debug_redacted!(
             &ingest,
             "DecryptedIngest",
-            &[sender, "37.7749", "122.4194", &hex::encode([0x7Au8; 32])]
+            &[
+                sender,
+                "37.7749",
+                "122.4194",
+                &hex::encode([0x7Au8; 32]),
+                PROPOSAL_CONTENT,
+                PROPOSAL_H_TAG
+            ]
         );
         assert_eq!(
             format!("{ingest:?}"),
-            "DecryptedIngest { results: \"1\", auto_commits: \"0\" }"
+            "DecryptedIngest { results: \"1\", auto_commits: \"0\", proposals: \"1\" }"
         );
     }
 
@@ -8743,6 +9585,462 @@ mod tests {
         assert!(res.is_err());
     }
 
+    /// The `GroupCreated` publish item, for the two fixtures that drive a bare
+    /// [`SessionManager`] and so cannot call `CircleManager`'s draining
+    /// extractors.
+    fn first_group_created(effects: SessionEffects) -> (Vec<TransportMessage>, PendingStateRef) {
+        effects
+            .publish
+            .into_iter()
+            .find_map(|work| match work {
+                PublishWork::GroupCreated { welcomes, pending } => Some((welcomes, pending)),
+                _ => None,
+            })
+            .expect("create_group stages a GroupCreated")
+    }
+
+    /// [`first_group_created`]'s evolution twin.
+    fn first_group_evolution(effects: SessionEffects) -> (Event, PendingStateRef) {
+        effects
+            .publish
+            .into_iter()
+            .find_map(|work| match work {
+                PublishWork::GroupEvolution { msg, pending, .. } => Some((
+                    SessionManager::transport_message_to_event(&msg).expect("commit event"),
+                    pending,
+                )),
+                _ => None,
+            })
+            .expect("an evolution stages a GroupEvolution")
+    }
+
+    /// A `MessageReceived` carrying a Haven location rumor, as the engine emits
+    /// it — the one shape `persist_locations_from_events` acts on.
+    fn location_event(group_id: &GroupId, sender_hex: &str, lat: f64, lon: f64) -> GroupEvent {
+        let content = LocationMessage::new(lat, lon)
+            .to_string()
+            .expect("serialize");
+        let rumor = serde_json::json!({
+            "kind": crate::nostr::KIND_LOCATION_UPDATE,
+            "content": content,
+        });
+        GroupEvent::MessageReceived {
+            group_id: group_id.clone(),
+            sender: crate::nostr::mls::types::MemberId::new(
+                hex::decode(sender_hex).expect("sender hex"),
+            ),
+            epoch: crate::nostr::mls::types::EpochId(1),
+            payload: serde_json::to_vec(&rumor).expect("rumor bytes"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_co_drained_auto_commit_on_the_send_path_is_recorded_not_dropped() {
+        // The engine's publish buffer is global, so a send can drain an eviction
+        // auto-commit it was not after. Dropping it would leave a live
+        // `PendingStateRef` with nothing recording the debt — the silent wedge —
+        // while rolling it back would discard a peer's removal permanently. The
+        // disposition is neither: record the obligation and leave the commit
+        // staged, so the next foreground redemption publishes it.
+        let tp = setup_two_party_circle().await;
+        let proposal = tp
+            .bob
+            .propose_leave(&tp.mls_group_id)
+            .await
+            .expect("bob proposes leave");
+        tp.alice
+            .session()
+            .process_event(&proposal)
+            .await
+            .expect("alice ingests the proposal");
+        let mut staged = None;
+        for _ in 0..40 {
+            let effects = tp
+                .alice
+                .session()
+                .advance_convergence(&tp.mls_group_id)
+                .await
+                .expect("advance convergence");
+            if let Some(item) = effects
+                .publish
+                .into_iter()
+                .find(|w| matches!(w, PublishWork::AutoPublish { .. }))
+            {
+                staged = Some(item);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        let item = staged.expect("the eviction auto-commit surfaces within the jitter window");
+
+        tp.alice
+            .surface_co_drained_auto_commits(std::slice::from_ref(&item))
+            .await;
+
+        assert!(
+            tp.alice.owed_removal_commits().contains(&tp.nostr_group_id),
+            "the obligation is RECORDED, so a session that dies here reports the \
+             wedge instead of hiding it"
+        );
+        assert!(
+            tp.alice.orphaned_removal_deferrals().is_empty(),
+            "and this session still holds the ref that can publish it"
+        );
+        assert!(
+            tp.alice
+                .encrypt_location(
+                    &tp.mls_group_id,
+                    &tp.alice_keys.public_key(),
+                    &LocationMessage::new(1.0, 2.0),
+                    60,
+                )
+                .await
+                .is_err(),
+            "nothing was rolled back: the commit is still staged, which is what \
+             keeps the removal from being dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_send_extractor_itself_records_a_co_drained_eviction() {
+        // The test above proves the DISPOSITION; this one proves the send path
+        // actually asks for it. `take_app_message` is the one extractor every
+        // location publish goes through, and the engine's publish buffer is
+        // global, so an eviction for another circle rides back in the same
+        // vector. Deleting that one call leaves a live `PendingStateRef` with no
+        // durable row behind it — invisible to `orphaned_removal_deferrals`, so
+        // the wedge stops being reportable — while every other test on this path
+        // stays green, because the helper it calls still works when called
+        // directly.
+        let tp = setup_two_party_circle().await;
+        let proposal = tp
+            .bob
+            .propose_leave(&tp.mls_group_id)
+            .await
+            .expect("bob proposes leave");
+        tp.alice
+            .session()
+            .process_event(&proposal)
+            .await
+            .expect("alice ingests the proposal");
+        let mut staged = None;
+        for _ in 0..40 {
+            let effects = tp
+                .alice
+                .session()
+                .advance_convergence(&tp.mls_group_id)
+                .await
+                .expect("advance convergence");
+            if let Some(item) = effects
+                .publish
+                .into_iter()
+                .find(|w| matches!(w, PublishWork::AutoPublish { .. }))
+            {
+                staged = Some(item);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        let item = staged.expect("the eviction auto-commit surfaces within the jitter window");
+        assert!(
+            tp.alice.owed_removal_commits().is_empty(),
+            "precondition: nothing is owed yet, so the assertion below is this \
+             call's doing"
+        );
+
+        // The shape a send is handed when the buffer held someone else's
+        // eviction and no location of its own: the extractor must still have
+        // recorded the obligation before it reports the miss.
+        let co_drained = SessionEffects {
+            events: Vec::new(),
+            publish: vec![item],
+            queued: Vec::new(),
+            pending_convergence: Vec::new(),
+        };
+        tp.alice
+            .take_app_message(co_drained)
+            .await
+            .expect_err("there was no application message to extract");
+
+        assert!(
+            tp.alice.owed_removal_commits().contains(&tp.nostr_group_id),
+            "the send extractor records the obligation for a commit it did not \
+             ask for, so the ref it leaves staged is one a redemption pass can \
+             still publish"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_drained_group_evolution_is_surfaced_with_its_welcomes_noted() {
+        // O3. A queued Invite released by a convergence drain comes back as a
+        // `GroupEvolution` carrying WELCOMES, and `CommitToPublish` has nowhere
+        // to put them — pre-existing, and the one thing this fold must not do is
+        // make it silent. So the commit is surfaced (never rolled back: that
+        // would discard a membership change the engine has already queued and
+        // whose durable row it has already deleted), and the dropped welcomes
+        // get a bucketed warn. The warn's own emission is pinned at source by
+        // `security_rule_gates::drained_group_evolution_welcomes_are_never_dropped_silently`.
+        let tp = setup_two_party_circle().await;
+        let invitee = make_member_with_relays(tp.relays.clone(), vec![]).await;
+        let effects = tp
+            .alice
+            .session()
+            .add_members(
+                &tp.mls_group_id,
+                parse_key_packages(&[invitee.key_package_event]).unwrap(),
+            )
+            .await
+            .expect("stage an add");
+        let item = effects
+            .publish
+            .into_iter()
+            .find(|w| matches!(w, PublishWork::GroupEvolution { .. }))
+            .expect("an add stages a GroupEvolution");
+        let PublishWork::GroupEvolution {
+            welcomes, pending, ..
+        } = &item
+        else {
+            unreachable!("just matched")
+        };
+        assert!(
+            !welcomes.is_empty(),
+            "precondition: an add really does carry welcomes, or the arm under \
+             test is about nothing"
+        );
+        let pending = *pending;
+
+        let mut out = DecryptedIngest::default();
+        let mut resolved = HashSet::new();
+        let rolled_back = tp
+            .alice
+            .dispose_publish_work(item, BatchOrigin::Drained, &mut out, &mut resolved)
+            .await;
+
+        assert!(
+            rolled_back.is_none(),
+            "a drained evolution is NOT rolled back: the engine deleted its queued \
+             row when it released it, so a rollback destroys the change"
+        );
+        assert_eq!(
+            out.auto_commits.len(),
+            1,
+            "it is handed to the caller to publish"
+        );
+        assert_eq!(out.auto_commits[0].pending, pending);
+        // Leave the group sendable for the fixture's drop.
+        let _ = tp.alice.publish_failed(pending).await;
+    }
+
+    /// The batch cap stops the fold GENERATING work — it never drops a batch
+    /// the engine has already handed back.
+    ///
+    /// Dropping one would be this whole packet's defect one layer down: the
+    /// `AutoPublish` inside carries a live `PendingStateRef` that nothing but
+    /// [`CircleManager::surface_auto_commit`] records an obligation for, so a
+    /// cap that returned early would leave a staged, unpublished, unrecorded
+    /// and unreported eviction — invisible, and permanent for that session.
+    /// Everything else in the pop rides the same decision: `persist_and_fold`
+    /// is its first statement, so a disposal that ran is a pop that ran whole.
+    ///
+    /// # Why the batch is handed in rather than produced by a plane
+    ///
+    /// No production path reaches this cap. A fold's convergence set is seeded
+    /// by `replay_buffered_messages`, which is SINGLE-group, and every engine
+    /// call drains the global pending-convergence buffer on its way out — so
+    /// one fold walks one group's batch plus that group's own re-pends
+    /// (measured over this tree's entire suite: never past three batches, never
+    /// past one re-tick). Reaching thirty-three means handing the fold a batch
+    /// that names thirty-three groups. The circles here are real and the
+    /// advances are real; only the seed is built by hand.
+    ///
+    /// The circle whose batch lands PAST the cap goes last, and it is the only
+    /// one whose advance produces anything — a one-member circle advances to an
+    /// empty batch, which is what makes thirty-two of them cost half a second.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_batch_cap_stops_generating_without_dropping_what_it_holds() {
+        let tp = setup_two_party_circle().await;
+        // Ingested and left scheduled: the engine's jitter-delayed due time is
+        // long past by the time the circles below are built, so the advance
+        // inside the fold stages the eviction with no waiting and no polling.
+        let proposal = tp
+            .bob
+            .propose_leave(&tp.mls_group_id)
+            .await
+            .expect("bob proposes leave");
+        tp.alice
+            .session()
+            .process_event(&proposal)
+            .await
+            .expect("alice ingests the proposal");
+
+        let mut pending_convergence = Vec::with_capacity(MAX_FOLD_BATCHES + 1);
+        for index in 0..MAX_FOLD_BATCHES {
+            let filler = tp
+                .alice
+                .create_circle(
+                    &tp.alice_keys,
+                    vec![],
+                    &CircleConfig::new(format!("Cap Filler {index}"))
+                        .with_relays(tp.relays.clone()),
+                    &tp.relays,
+                )
+                .await
+                .expect("create a filler circle");
+            tp.alice
+                .confirm_published(filler.pending)
+                .await
+                .expect("confirm the filler create");
+            pending_convergence.push(filler.circle.mls_group_id.clone());
+        }
+        // Nothing the setup left in the engine's buffers may ride into the
+        // fold: the seed has to be exactly what this test names.
+        let _ = tp.alice.session().drain().await;
+        pending_convergence.push(tp.mls_group_id.clone());
+
+        let seed = SessionEffects {
+            events: Vec::new(),
+            publish: Vec::new(),
+            queued: Vec::new(),
+            pending_convergence,
+        };
+        // Seed + one advance per group = MAX_FOLD_BATCHES + 2 pops, so the cap
+        // falls on the second-to-last and the eviction's batch is the one after
+        // it. Before this fix both were discarded unread.
+        let (out, _) = tp
+            .alice
+            .fold_resolved_publish(seed, BatchOrigin::Drained)
+            .await;
+
+        assert_eq!(
+            out.auto_commits.len(),
+            1,
+            "the batch past the cap was still folded, so the eviction it carried \
+             reaches the caller instead of vanishing with a live ref"
+        );
+        assert!(
+            tp.alice.owed_removal_commits().contains(&tp.nostr_group_id),
+            "and it was surfaced through the obligation, not around it: a staged \
+             removal commit with no durable row is a wedge nothing reports"
+        );
+        assert!(
+            tp.alice.orphaned_removal_deferrals().is_empty(),
+            "the obligation is this session's to redeem, not an orphan"
+        );
+        assert!(
+            !tp.alice
+                .session()
+                .member_pubkeys(&tp.mls_group_id)
+                .await
+                .expect("the projected roster reads")
+                .contains(&tp.bob_keys.public_key().to_hex()),
+            "and nothing was rolled back to tidy up: the leaver stays out, which \
+             is the only disposition that does not drop the removal for good"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_replayed_location_is_filtered_against_the_circles_current_roster() {
+        // Haven's own second line behind the engine's sender attribution. A pin
+        // for somebody the circle no longer holds is a location the user is
+        // shown for a person who cannot see theirs — the asymmetry `remove` is
+        // supposed to close (Rule 10).
+        let tp = setup_two_party_circle().await;
+        let bob_hex = tp.bob_keys.public_key().to_hex();
+        let stranger_hex = "11".repeat(32);
+
+        let results = tp
+            .alice
+            .persist_and_fold(&[
+                location_event(&tp.mls_group_id, &bob_hex, 51.5, -0.12),
+                location_event(&tp.mls_group_id, &stranger_hex, 48.85, 2.35),
+            ])
+            .await;
+
+        // The SAME decision governs both halves. Filtering only the store would
+        // hand the stranger's fix to a caller across the FFI, which writes it to
+        // its own — the filter undone one layer up.
+        let returned = |hex: &str| {
+            results.iter().any(|r| {
+                matches!(r, LocationMessageResult::Location { sender_pubkey, .. }
+                    if sender_pubkey == hex)
+            })
+        };
+        assert!(
+            returned(&bob_hex),
+            "precondition: a member of the circle IS returned"
+        );
+        assert!(
+            !returned(&stranger_hex),
+            "a sender the roster does not name is not handed to the caller either"
+        );
+
+        let rows = tp
+            .alice
+            .snapshot_last_known_for_circle(&tp.nostr_group_id, chrono::Utc::now().timestamp())
+            .expect("snapshot");
+        assert!(
+            rows.iter().any(|r| r.sender_pubkey == bob_hex),
+            "precondition: a member of the circle IS persisted, so the absence \
+             below is the filter and not a dead helper"
+        );
+        assert!(
+            !rows.iter().any(|r| r.sender_pubkey == stranger_hex),
+            "a sender the circle's roster does not name gets no pin"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_roster_read_failure_still_persists_the_replayed_location() {
+        // Rule 12 outranks a transient read error: a roster this device cannot
+        // read is not evidence that the sender left, and dropping a legitimate
+        // offline backlog over it loses the fix permanently — the engine
+        // delivers it exactly once. The display layer still gates.
+        let tp = setup_two_party_circle().await;
+        // A circle row whose MLS group the engine does not hold, so the roster
+        // read genuinely FAILS rather than returning an empty roster.
+        let unreadable = GroupId::from_slice(&[0xB1; 32]);
+        let ngid = [0xB2u8; 32];
+        tp.alice
+            .storage
+            .save_circle(&Circle {
+                mls_group_id: unreadable.clone(),
+                nostr_group_id: ngid,
+                display_name: "Unreadable".to_string(),
+                circle_type: CircleType::LocationSharing,
+                relays: vec!["wss://relay.test.com".to_string()],
+                created_at: 0,
+                updated_at: 0,
+            })
+            .expect("save the circle row");
+        assert!(
+            tp.alice.get_members(&unreadable).await.is_err(),
+            "precondition: the roster read really does fail for this group"
+        );
+
+        let bob_hex = tp.bob_keys.public_key().to_hex();
+        let results = tp
+            .alice
+            .persist_and_fold(&[location_event(&unreadable, &bob_hex, 35.68, 139.69)])
+            .await;
+
+        let rows = tp
+            .alice
+            .snapshot_last_known_for_circle(&ngid, chrono::Utc::now().timestamp())
+            .expect("snapshot");
+        assert!(
+            rows.iter().any(|r| r.sender_pubkey == bob_hex),
+            "a failed roster read must fail OPEN"
+        );
+        assert!(
+            results.iter().any(|r| {
+                matches!(r, LocationMessageResult::Location { sender_pubkey, .. }
+                    if *sender_pubkey == bob_hex)
+            }),
+            "and fail open on BOTH halves: a read error must not silently stop \
+             the fix reaching the caller either"
+        );
+    }
+
     #[tokio::test]
     async fn get_members_nonexistent_group_fails() {
         let (manager, _keys, _dir) = create_test_manager();
@@ -9212,7 +10510,7 @@ mod tests {
             .await
             .expect("create a circle declaring the fixture's retention policy");
         let mls_group_id = creation.group_id.clone();
-        let (welcomes, pending) = take_group_created(creation.effects).expect("group created");
+        let (welcomes, pending) = first_group_created(creation.effects);
         creator.confirm_published(pending).await.expect("confirm");
 
         let welcome_event =
@@ -9485,8 +10783,7 @@ mod tests {
             )
             .await
             .expect("relay update");
-        let (commit_event, _welcomes, pending) =
-            take_group_evolution(effects).expect("group evolution");
+        let (commit_event, pending) = first_group_evolution(effects);
         joined
             .creator
             .confirm_published(pending)
@@ -9986,7 +11283,7 @@ mod tests {
         let publisher = AckingPublisher {
             published: Mutex::new(Vec::new()),
         };
-        let confirmed = manager.redeem_removal_deferrals(&publisher).await;
+        let confirmed = manager.redeem_removal_deferrals(&publisher, None).await;
 
         assert_eq!(
             publisher

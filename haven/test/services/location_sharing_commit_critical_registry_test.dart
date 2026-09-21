@@ -100,8 +100,10 @@ void main() {
     relays: const [relay],
   );
 
+  // The `h` names `circle` above (`nostrGroupId` `[9,9]`), the ambient
+  // circle every test in this file resolves the staged commit against.
   PendingAutoCommit stagedCommit(int token) => PendingAutoCommit(
-    commitEventJson: '{"id":"staged-$token","kind":445}',
+    commitEventJson: '{"id":"staged-$token","kind":445,"tags":[["h","0909"]]}',
     pendingToken: PendingCommitToken(BigInt.from(token)),
   );
 

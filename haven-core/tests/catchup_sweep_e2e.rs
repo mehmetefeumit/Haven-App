@@ -239,7 +239,7 @@ async fn a_peer_location_is_applied_persisted_and_moves_the_cursor() {
     // (`chrono::Utc::now().timestamp()`), so the interval below is exact and
     // carries no rounding slack in either direction.
     let swept_from = chrono::Utc::now().timestamp();
-    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 20).await;
+    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, 20).await;
     let swept_to = chrono::Utc::now().timestamp();
 
     assert!(
@@ -305,7 +305,7 @@ async fn a_peer_location_is_applied_persisted_and_moves_the_cursor() {
     // repeated sweeps ever park the cursor above the local wall clock, where
     // `since_for_stream` pins every subsequent REQ floor at `now`.
     let again_from = chrono::Utc::now().timestamp();
-    let _ = run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 20).await;
+    let _ = run_catchup_all_circles(&fx.alice, &relay_mgr, 20).await;
     let again_to = chrono::Utc::now().timestamp();
     let cursor_again = fx.alice_cursor().expect("the cursor is still readable");
     assert!(
@@ -344,7 +344,7 @@ async fn an_own_echo_is_never_persisted_as_a_peer_row() {
         .await
         .expect("alice's own location reaches the relay");
 
-    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 20).await;
+    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, 20).await;
 
     assert_eq!(out.circles_swept, 1);
     let rows = fx.alice_peer_locations();
@@ -366,7 +366,7 @@ async fn an_unreachable_relay_is_tallied_and_holds_the_cursor() {
     let fx = build_two_member_circle(vec![dead]).await;
     let relay_mgr = RelayManager::new();
 
-    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 20).await;
+    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, 20).await;
 
     assert_eq!(out.circles_swept, 1, "the circle was attempted");
     assert!(
@@ -389,7 +389,7 @@ async fn an_expired_deadline_sweeps_nothing_and_reports_it() {
     let (_relay, url, relay_mgr) = relay_under_test().await;
     let fx = build_two_member_circle(vec![url]).await;
 
-    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 0).await;
+    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, 0).await;
 
     assert!(out.deadline_hit, "a zero budget is an immediate deadline");
     assert_eq!(out.circles_swept, 0);
@@ -410,7 +410,7 @@ async fn no_circles_is_a_clean_no_op() {
     let keys = Keys::generate();
     let mgr = CircleManager::new_unencrypted(dir.path(), &keys).unwrap();
 
-    let out = run_catchup_all_circles(&mgr, &RelayManager::new(), &keys.public_key(), 20).await;
+    let out = run_catchup_all_circles(&mgr, &RelayManager::new(), 20).await;
 
     assert_eq!(out, haven_core::relay::CatchupOutcome::default());
 }
@@ -454,7 +454,7 @@ async fn a_peer_leave_is_committed_and_re_broadcast_by_the_sweep() {
     // costs half a second and makes the count a fact rather than a coin flip.
     wait_until_after(i64::try_from(proposal.created_at.as_secs()).expect("created_at fits")).await;
 
-    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 20).await;
+    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, 20).await;
 
     assert_eq!(out.events_applied, 1, "the proposal itself is applied");
     assert!(
@@ -508,8 +508,7 @@ async fn a_peer_leave_is_committed_and_re_broadcast_by_the_sweep() {
         .epoch(&fx.mls_group_id)
         .await
         .expect("epoch");
-    let again =
-        run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 20).await;
+    let again = run_catchup_all_circles(&fx.alice, &relay_mgr, 20).await;
     assert_eq!(again.events_deferred, 0, "nothing should be left pending");
     assert_eq!(
         fx.alice
@@ -567,7 +566,7 @@ async fn an_uningestable_event_defers_and_holds_the_cursor() {
         .expect("the junk event reaches the relay");
     let junk_secs = i64::try_from(junk.created_at.as_secs()).expect("created_at fits");
 
-    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 20).await;
+    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, 20).await;
 
     assert_eq!(out.circles_swept, 1);
     assert_eq!(
@@ -585,8 +584,7 @@ async fn an_uningestable_event_defers_and_holds_the_cursor() {
     );
 
     // The property that actually matters: the next sweep still sees it.
-    let again =
-        run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 20).await;
+    let again = run_catchup_all_circles(&fx.alice, &relay_mgr, 20).await;
     assert_eq!(
         again.events_deferred, 1,
         "the un-applied event must be re-fetched by the next sweep — that is \
@@ -1118,7 +1116,7 @@ async fn a_window_larger_than_one_page_is_retrieved_whole_and_then_advances() {
     relay.seed(&window).await;
 
     let swept_from = chrono::Utc::now().timestamp();
-    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 60).await;
+    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, 60).await;
     let swept_to = chrono::Utc::now().timestamp();
 
     assert!(
@@ -1200,7 +1198,7 @@ async fn an_ancient_paging_boundary_cannot_curtail_another_relays_backlog() {
     assert_eq!(poisoned_window.len(), PAGE_LIMIT);
     poisoned.seed(&poisoned_window).await;
 
-    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 60).await;
+    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, 60).await;
 
     assert_eq!(
         out.events_rejected_pre_auth,
@@ -1257,7 +1255,7 @@ async fn a_relay_that_clamps_our_limit_still_gets_fully_drained() {
     let oldest_secs = i64::try_from(window[0].created_at.as_secs()).expect("created_at fits");
     relay.seed(&window).await;
 
-    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 60).await;
+    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, 60).await;
 
     assert_eq!(
         out.events_rejected_pre_auth, backlog,
@@ -1331,7 +1329,7 @@ async fn a_chase_page_that_is_never_served_holds_the_cursor() {
     let window = unparseable_window(&hex::encode(fx.nostr_group_id), backlog, newest_secs);
     relay.seed(&window).await;
 
-    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 60).await;
+    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, 60).await;
 
     assert_eq!(
         out.events_rejected_pre_auth, PAGE_LIMIT,
@@ -1378,7 +1376,7 @@ async fn a_flood_of_future_dated_events_cannot_freeze_the_cursor() {
     relay.seed(&unparseable_window(&h, 3, now - 120)).await;
 
     let swept_from = chrono::Utc::now().timestamp();
-    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 60).await;
+    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, 60).await;
     let swept_to = chrono::Utc::now().timestamp();
 
     assert_eq!(
@@ -1438,7 +1436,7 @@ async fn a_window_the_pager_cannot_finish_holds_the_cursor_and_says_so() {
 
     // Terminating at all is half the property: an `until` chain that trusted the
     // relay to descend would re-request this same second forever.
-    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 60).await;
+    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, 60).await;
 
     assert_eq!(
         out.windows_truncated, 1,
@@ -1491,7 +1489,7 @@ async fn a_relay_that_caps_below_our_page_size_still_gets_fully_drained() {
     let oldest_secs = i64::try_from(window[0].created_at.as_secs()).expect("created_at fits");
     relay.seed(&window).await;
 
-    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 60).await;
+    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, 60).await;
 
     assert_eq!(
         out.events_rejected_pre_auth, backlog,
@@ -1552,7 +1550,7 @@ async fn a_fetch_cut_off_by_its_own_timeout_is_not_read_as_a_complete_window() {
         .seed(&unparseable_window(&h, each, newest_secs))
         .await;
 
-    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 60).await;
+    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, 60).await;
 
     assert_eq!(
         out.events_rejected_pre_auth,
@@ -1903,13 +1901,7 @@ async fn a_confirming_page_cut_off_before_the_relay_finished_holds_the_cursor() 
             .await;
     }
 
-    let severed = run_catchup_all_circles(
-        &severed_fx.alice,
-        &relay_mgr,
-        &severed_fx.alice_keys.public_key(),
-        60,
-    )
-    .await;
+    let severed = run_catchup_all_circles(&severed_fx.alice, &relay_mgr, 60).await;
     assert_eq!(
         severed.events_rejected_pre_auth, backlog,
         "precondition: the whole window really was retrieved, so the cut landed \
@@ -1930,13 +1922,7 @@ async fn a_confirming_page_cut_off_before_the_relay_finished_holds_the_cursor() 
     // The control, without which the assertions above would pass just as well
     // for an implementation that never advances anything.
     let opened_at = chrono::Utc::now().timestamp();
-    let whole = run_catchup_all_circles(
-        &whole_fx.alice,
-        &relay_mgr,
-        &whole_fx.alice_keys.public_key(),
-        60,
-    )
-    .await;
+    let whole = run_catchup_all_circles(&whole_fx.alice, &relay_mgr, 60).await;
     let closed_at = chrono::Utc::now().timestamp();
     assert_eq!(
         whole.events_rejected_pre_auth, backlog,
@@ -1977,7 +1963,7 @@ async fn a_relay_that_finished_cannot_vouch_for_one_that_was_cut_off() {
     honest.seed(&unparseable_window(&h, each, newest)).await;
     flaky.seed(&unparseable_window(&h, each, newest)).await;
 
-    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 60).await;
+    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, 60).await;
 
     assert_eq!(
         out.events_rejected_pre_auth,
@@ -2039,8 +2025,7 @@ async fn a_relay_cut_off_on_every_sweep_holds_the_cursor_but_not_for_ever() {
     let mut advanced_on: Option<usize> = None;
     let mut still_unfinished = false;
     for sweep in 1..=6 {
-        let out =
-            run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 25).await;
+        let out = run_catchup_all_circles(&fx.alice, &relay_mgr, 25).await;
         if sweep == 1 {
             assert_eq!(
                 fx.alice_cursor(),
@@ -2143,7 +2128,7 @@ async fn a_relay_that_answers_only_a_later_page_cannot_complete_the_window() {
     late.seed(&below).await;
     late.seed(&above).await;
 
-    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 60).await;
+    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, 60).await;
 
     assert_eq!(
         out.events_rejected_pre_auth,
@@ -2266,7 +2251,7 @@ async fn two_dependent_commits_split_across_pages_converge_on_the_next_sweep() {
         .await;
     wait_until_after(newest_filler).await;
 
-    let out = run_catchup_all_circles(&fx.bob, &relay_mgr, &fx.bob_keys.public_key(), 60).await;
+    let out = run_catchup_all_circles(&fx.bob, &relay_mgr, 60).await;
 
     assert_eq!(out.circles_swept, 1);
     assert_eq!(
@@ -2320,7 +2305,7 @@ async fn two_dependent_commits_split_across_pages_converge_on_the_next_sweep() {
     // sweep's floor is `GROUP_RESUBSCRIBE_BUFFER_SECS` below the cursor, so both
     // commits are re-requested — and this time the predecessor is already
     // applied, so the successor peels.
-    let again = run_catchup_all_circles(&fx.bob, &relay_mgr, &fx.bob_keys.public_key(), 60).await;
+    let again = run_catchup_all_circles(&fx.bob, &relay_mgr, 60).await;
     assert_eq!(
         again.events_applied, 2,
         "precondition: the pair really was re-fetched rather than resolved out \
@@ -2381,7 +2366,7 @@ async fn a_relay_unreachable_for_the_first_page_does_not_freeze_the_window() {
     let window = unparseable_window(&hex::encode(fx.nostr_group_id), 3, newest_secs);
     relay.seed(&window).await;
 
-    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 60).await;
+    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, 60).await;
 
     assert_eq!(
         out.relay_errors, 1,
@@ -2465,7 +2450,7 @@ async fn a_chase_that_spends_the_wake_budget_still_applies_what_it_fetched() {
     );
     relay.seed(&window).await;
 
-    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 3).await;
+    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, 3).await;
 
     assert!(
         out.deadline_hit,
@@ -2531,7 +2516,7 @@ async fn a_fetch_that_outlives_the_whole_budget_still_applies_one_event() {
     );
     relay.seed(&window).await;
 
-    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 1).await;
+    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, 1).await;
 
     assert!(
         out.deadline_hit,
@@ -2602,7 +2587,7 @@ async fn a_genuine_location_in_a_later_page_is_still_applied_and_persisted() {
         .await;
     wait_until_after(newest_junk).await;
 
-    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 60).await;
+    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, 60).await;
 
     assert_eq!(
         out.events_applied, 1,
@@ -2756,7 +2741,7 @@ async fn a_backlog_bigger_than_one_sweep_is_walked_down_to_its_oldest_event() {
     let mut finished_at: Option<i64> = None;
     for sweep in 1..=MAX_SWEEPS {
         let resumed_at = fx.alice_floor();
-        run_catchup_all_circles(&fx.alice, relay_mgr, &fx.alice_keys.public_key(), 60).await;
+        run_catchup_all_circles(&fx.alice, relay_mgr, 60).await;
         if reached_on.is_none() && !fx.alice_peer_locations().is_empty() {
             reached_on = Some(sweep);
         }
@@ -2837,7 +2822,7 @@ async fn a_backlog_bigger_than_one_sweep_is_walked_down_to_its_oldest_event() {
     );
     let mut caught_up = false;
     for _ in 1..=MAX_SWEEPS {
-        run_catchup_all_circles(&fx.alice, relay_mgr, &fx.alice_keys.public_key(), 60).await;
+        run_catchup_all_circles(&fx.alice, relay_mgr, 60).await;
         if fx.alice_cursor().is_some_and(|ms| ms > newest_secs * 1000) {
             caught_up = true;
             break;
@@ -2865,7 +2850,7 @@ async fn the_same_backlog_is_never_reached_when_the_resume_point_is_discarded() 
     let (fx, relay_mgr) = (&backlogged.fx, &backlogged.relay_mgr);
 
     for _ in 0..MAX_SWEEPS {
-        run_catchup_all_circles(&fx.alice, relay_mgr, &fx.alice_keys.public_key(), 60).await;
+        run_catchup_all_circles(&fx.alice, relay_mgr, 60).await;
         fx.alice
             .clear_backfill_floor(&fx.cursor_stream())
             .expect("discard the resume point");
@@ -2927,8 +2912,7 @@ async fn a_forged_timestamp_cannot_drag_the_backfill_floor_out_of_our_own_band()
         .seed(&unparseable_window(&h, 1, now + 86_400))
         .await;
 
-    let first =
-        run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 60).await;
+    let first = run_catchup_all_circles(&fx.alice, &relay_mgr, 60).await;
 
     assert_eq!(
         first.events_rejected_pre_auth, 10,
@@ -2960,7 +2944,7 @@ async fn a_forged_timestamp_cannot_drag_the_backfill_floor_out_of_our_own_band()
 
     // The second sweep resumes, and the forged bottom is no more able to pull the
     // floor down on a resumed pass than on the first one.
-    run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 60).await;
+    run_catchup_all_circles(&fx.alice, &relay_mgr, 60).await;
     let resumed = fx
         .alice_floor()
         .expect("the descent is still unfinished, so it still has a resume point");
@@ -3021,7 +3005,7 @@ async fn a_resume_point_the_cursor_has_passed_is_refused_and_repaired() {
         .lower_backfill_floor(&stream, stale_floor)
         .expect("a resume point from an earlier, lower cursor");
 
-    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 60).await;
+    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, 60).await;
 
     assert_eq!(
         out.windows_truncated, 1,
@@ -3043,7 +3027,7 @@ async fn a_resume_point_the_cursor_has_passed_is_refused_and_repaired() {
     // The repair is what the next sweep needs: it resumes into the fresh point
     // and drives the descent below it, which is the behaviour the stale floor
     // had been blocking.
-    run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 60).await;
+    run_catchup_all_circles(&fx.alice, &relay_mgr, 60).await;
     let descended = fx.alice_floor();
     assert!(
         descended.is_none_or(|f| f < repaired),
@@ -3086,7 +3070,7 @@ async fn a_clamped_pile_up_at_the_boundary_cannot_hide_the_backlog_under_it() {
         .seed(&unparseable_window(&h, beneath, boundary_secs - 1))
         .await;
 
-    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 60).await;
+    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, 60).await;
 
     assert_eq!(
         out.events_rejected_pre_auth,
@@ -3107,8 +3091,7 @@ async fn a_clamped_pile_up_at_the_boundary_cannot_hide_the_backlog_under_it() {
     // The second sweep resumes below where this one ran out of budget and
     // finishes the band, which is what turns the hold above into a delay rather
     // than a stall.
-    let again =
-        run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 60).await;
+    let again = run_catchup_all_circles(&fx.alice, &relay_mgr, 60).await;
     assert_eq!(again.windows_truncated, 0, "the resumed descent finished");
     assert!(
         fx.alice_cursor().is_some(),

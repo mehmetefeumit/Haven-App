@@ -335,14 +335,10 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use nostr::{Event, EventId, PublicKey, Timestamp};
+use nostr::{Event, EventId, Timestamp};
 
 use crate::circle::CircleManager;
-use crate::location::LocationMessage;
-use crate::nostr::mls::types::{
-    GroupId, IngestOutcome, LocationMessageResult, PublishWork, ScreenedIngest,
-};
-use crate::nostr::mls::SessionManager;
+use crate::nostr::mls::types::{GroupId, IngestOutcome, PublishWork, ScreenedIngest};
 use crate::relay::auto_commit::{CONVERGENCE_RETICK_DELAY, MAX_CONVERGENCE_RETICKS};
 use crate::relay::cursor::{since_for_stream, SubscribePhase};
 use crate::relay::live_sync::group_cursor_stream;
@@ -962,8 +958,6 @@ async fn ingest_one(
     circle_mgr: &CircleManager,
     relay_mgr: &RelayManager,
     ev: &Event,
-    ngid: &[u8; 32],
-    own_hex: &str,
 ) -> ReceiveOnlyOutcome {
     // An `Err` is an ENGINE-side ingest failure (the envelope parsed and the
     // engine took the message), so something at this position is genuinely
@@ -983,7 +977,9 @@ async fn ingest_one(
         ScreenedIngest::Ingested(effects) => effects,
     };
 
-    persist_locations(circle_mgr, &ingest.effects.events, ngid, own_hex);
+    circle_mgr
+        .persist_replayed_locations(&ingest.effects.events)
+        .await;
     resolve_publish_work(circle_mgr, relay_mgr, &ingest.effects.publish).await;
     // Receive-side observation for the epoch-rotation repair's quiescence gate
     // (`circle::rotation`), on the AUTHENTICATED batch only — see the same call
@@ -1004,7 +1000,7 @@ async fn ingest_one(
         let mut next: Vec<GroupId> = Vec::new();
         for gid in &pending {
             if let Ok(more) = circle_mgr.session().advance_convergence(gid).await {
-                persist_locations(circle_mgr, &more.events, ngid, own_hex);
+                circle_mgr.persist_replayed_locations(&more.events).await;
                 resolve_publish_work(circle_mgr, relay_mgr, &more.publish).await;
                 circle_mgr.note_inbound_group_events(&more.events);
                 directory = directory.max(circle_mgr.directory_verdict_for_events(&more.events));
@@ -1031,43 +1027,6 @@ async fn ingest_one(
     match ingest.outcome {
         IngestOutcome::Buffered { .. } => ReceiveOnlyOutcome::Deferred,
         IngestOutcome::Processed | IngestOutcome::Stale { .. } => ReceiveOnlyOutcome::Applied,
-    }
-}
-
-/// Persists each decrypted location application-message as a last-known-location
-/// row (never a self-echo — the engine also filters own echoes as `Stale`).
-fn persist_locations(
-    circle_mgr: &CircleManager,
-    events: &[crate::nostr::mls::types::GroupEvent],
-    ngid: &[u8; 32],
-    own_hex: &str,
-) {
-    for ge in events {
-        if let Some(LocationMessageResult::Location {
-            sender_pubkey,
-            content,
-            ..
-        }) = SessionManager::location_result_from_event(ge)
-        {
-            if sender_pubkey == own_hex {
-                continue;
-            }
-            if let Ok(msg) = serde_json::from_str::<LocationMessage>(&content) {
-                let row = crate::circle::LastKnownLocation {
-                    nostr_group_id: *ngid,
-                    sender_pubkey,
-                    latitude: msg.latitude,
-                    longitude: msg.longitude,
-                    geohash: msg.geohash,
-                    display_name: msg.display_name,
-                    timestamp: msg.timestamp.timestamp(),
-                    expires_at: msg.expires_at.timestamp(),
-                    purge_after: 0, // recomputed authoritatively by upsert
-                    updated_at: chrono::Utc::now().timestamp(),
-                };
-                let _ = circle_mgr.upsert_last_known_location(&row);
-            }
-        }
     }
 }
 
@@ -1098,8 +1057,9 @@ fn persist_locations(
 /// and the sweep pays the two costs that come with it:
 ///
 /// * it records the obligation BEFORE the publish
-///   ([`CircleManager::owe_removal_publish`], inside
-///   [`crate::relay::auto_commit::resolve_receive_publish_work`]), so a wake
+///   ([`CircleManager::owe_removal_publish`], on the publishing arm of the
+///   ladder [`crate::relay::auto_commit::resolve_receive_publish_work`] runs),
+///   so a wake
 ///   window the OS ends mid-publish leaves a durable row and the next foreground
 ///   LIVE-SYNC open REPORTS the wedge instead of it being invisible. The
 ///   qualifier is load-bearing: both the redeemer and the reporter are reached
@@ -1112,7 +1072,24 @@ async fn resolve_publish_work(
     relay_mgr: &RelayManager,
     work: &[PublishWork],
 ) {
-    crate::relay::auto_commit::resolve_receive_publish_work(circle_mgr, relay_mgr, work).await;
+    let ingest =
+        crate::relay::auto_commit::resolve_receive_publish_work(circle_mgr, relay_mgr, work).await;
+    // `ingest.results` are DROPPED, and the reason is what makes it safe rather
+    // than convenient: the core persisted every location in them to the
+    // last-known store before it returned, and this sweep has no UI surface to
+    // route them to — the foreground reads the store, not a bus.
+    for proposal in ingest.proposals {
+        let relays = circle_mgr
+            .relays_for_commit_event(&proposal)
+            .unwrap_or_default();
+        if !relays.is_empty() {
+            // A bare proposal opens no publish-before-apply window: nothing to
+            // confirm, nothing to roll back, and an unacked one is re-minted by
+            // the next commit this device applies. Dropping it would leave the
+            // user's own leave wedged behind the engine's send gate.
+            let _ = relay_mgr.publish_event(&proposal, &relays).await;
+        }
+    }
 }
 
 /// Runs a cursor-anchored catch-up sweep over every visible circle.
@@ -1123,12 +1100,10 @@ async fn resolve_publish_work(
 pub async fn run_catchup_all_circles(
     circle_mgr: &CircleManager,
     relay_mgr: &RelayManager,
-    own_pubkey: &PublicKey,
     max_duration_secs: u64,
 ) -> CatchupOutcome {
     let mut out = CatchupOutcome::default();
     let deadline = Instant::now() + Duration::from_secs(max_duration_secs);
-    let own_hex = own_pubkey.to_hex();
 
     // Fail-closed: storage unavailable (e.g. locked device) ⇒ clean no-op.
     let Ok(circles) = circle_mgr.get_visible_circles().await else {
@@ -1150,7 +1125,6 @@ pub async fn run_catchup_all_circles(
             relay_mgr,
             cwm.circle.nostr_group_id,
             &relays,
-            &own_hex,
             deadline,
             &mut out,
         )
@@ -1206,7 +1180,6 @@ async fn sweep_one_circle(
     relay_mgr: &RelayManager,
     ngid: [u8; 32],
     relays: &[String],
-    own_hex: &str,
     deadline: Instant,
     out: &mut CatchupOutcome,
 ) {
@@ -1220,10 +1193,8 @@ async fn sweep_one_circle(
     let sweep = CircleSweep {
         circle_mgr,
         relay_mgr,
-        ngid,
         ngid_hex,
         relays,
-        own_hex,
         deadline,
         started_out_of_time: Instant::now() >= deadline,
         ingested_any: AtomicBool::new(false),
@@ -1400,12 +1371,10 @@ async fn sweep_one_circle(
 struct CircleSweep<'a> {
     circle_mgr: &'a CircleManager,
     relay_mgr: &'a RelayManager,
-    ngid: [u8; 32],
-    /// The same id in hex: the PUBLIC `nostr_group_id` every page filters `#h`
-    /// on (Security Rule 4 — never the MLS group id).
+    /// The PUBLIC `nostr_group_id` in hex, which every page filters `#h` on
+    /// (Security Rule 4 — never the MLS group id).
     ngid_hex: String,
     relays: &'a [String],
-    own_hex: &'a str,
     deadline: Instant,
     /// The wake budget was ALREADY gone when this circle was entered, so this
     /// sweep never had time to spend and the progress floor in [`ingest_page`]
@@ -1662,14 +1631,7 @@ impl CircleSweep<'_> {
                 return;
             }
             let secs = created_secs(ev);
-            let outcome = ingest_one(
-                self.circle_mgr,
-                self.relay_mgr,
-                ev,
-                &self.ngid,
-                self.own_hex,
-            )
-            .await;
+            let outcome = ingest_one(self.circle_mgr, self.relay_mgr, ev).await;
             self.ingested_any.store(true, Ordering::Relaxed);
             match outcome {
                 ReceiveOnlyOutcome::Applied => out.events_applied += 1,
@@ -2663,7 +2625,6 @@ mod tests {
             &relay_mgr,
             ngid,
             std::slice::from_ref(&url),
-            &keys.public_key().to_hex(),
             std::time::Instant::now(),
             &mut out,
         )
@@ -2732,11 +2693,10 @@ mod tests {
         let relay_mgr = RelayManager::new();
         let ngid = [0x8Au8; 32];
         let h = hex::encode(ngid);
-        let own = keys.public_key().to_hex();
 
         let expired = unauthenticated_445(&h, true);
         assert_eq!(
-            ingest_one(&mgr, &relay_mgr, &expired, &ngid, &own).await,
+            ingest_one(&mgr, &relay_mgr, &expired).await,
             ReceiveOnlyOutcome::NoEvidence,
             "an event screened before authentication must contribute NO cursor \
              evidence — reporting `Applied` here is the defect, and reporting \
@@ -2766,7 +2726,6 @@ mod tests {
         let relay_mgr = RelayManager::new();
         let ngid = [0x8Au8; 32];
         let h = hex::encode(ngid);
-        let own = keys.public_key().to_hex();
 
         let malformed = malformed_445(&h);
         assert!(
@@ -2774,7 +2733,7 @@ mod tests {
             "precondition: this envelope must really fail the PRE-ENGINE parse"
         );
         assert_eq!(
-            ingest_one(&mgr, &relay_mgr, &malformed, &ngid, &own).await,
+            ingest_one(&mgr, &relay_mgr, &malformed).await,
             ReceiveOnlyOutcome::NoEvidence,
             "an unparseable envelope was screened before authentication, so it \
              must contribute no cursor evidence — reporting `Deferred` would sell \
@@ -2794,11 +2753,10 @@ mod tests {
         let relay_mgr = RelayManager::new();
         let ngid = [0x8Au8; 32];
         let h = hex::encode(ngid);
-        let own = keys.public_key().to_hex();
 
         let unexpired = unauthenticated_445(&h, false);
         assert_ne!(
-            ingest_one(&mgr, &relay_mgr, &unexpired, &ngid, &own).await,
+            ingest_one(&mgr, &relay_mgr, &unexpired).await,
             ReceiveOnlyOutcome::NoEvidence,
             "only Haven's own pre-auth screen may produce `NoEvidence`"
         );
@@ -2853,9 +2811,7 @@ mod tests {
         alice_keys: Keys,
         bob: CircleManager,
         _bob_dir: TempDir,
-        bob_keys: Keys,
         mls_group_id: GroupId,
-        nostr_group_id: [u8; 32],
         relays: Vec<String>,
     }
 
@@ -2888,7 +2844,6 @@ mod tests {
             .expect("confirm create");
 
         let mls_group_id = creation.circle.mls_group_id.clone();
-        let nostr_group_id = creation.circle.nostr_group_id;
 
         let welcome = creation.welcome_events.first().expect("one welcome");
         bob.process_gift_wrapped_invitation(&bob_keys, &welcome.event)
@@ -2904,9 +2859,7 @@ mod tests {
             alice_keys,
             bob,
             _bob_dir: bob_dir,
-            bob_keys,
             mls_group_id,
-            nostr_group_id,
             relays,
         }
     }
@@ -2919,7 +2872,6 @@ mod tests {
         // through this call.
         let fx = setup_alice_bob().await;
         let relay_mgr = RelayManager::new();
-        let bob_own_hex = fx.bob_keys.public_key().to_hex();
         let carol = make_member_with_relays(fx.relays.clone()).await;
         let carol_hex = carol.key_package_event.pubkey.to_hex();
 
@@ -2942,14 +2894,7 @@ mod tests {
             .await
             .expect("confirm add");
 
-        let outcome = ingest_one(
-            &fx.bob,
-            &relay_mgr,
-            &add.commit_event,
-            &fx.nostr_group_id,
-            &bob_own_hex,
-        )
-        .await;
+        let outcome = ingest_one(&fx.bob, &relay_mgr, &add.commit_event).await;
         assert_eq!(
             outcome,
             ReceiveOnlyOutcome::Applied,
@@ -2980,7 +2925,6 @@ mod tests {
 
         let fx = setup_alice_bob().await;
         let relay_mgr = RelayManager::new();
-        let bob_own_hex = fx.bob_keys.public_key().to_hex();
         let alice_hex = fx.alice_keys.public_key().to_hex();
 
         assert!(
@@ -3006,13 +2950,13 @@ mod tests {
         );
 
         let loc = LocationMessage::new(3.0, 4.0);
-        let (event, ngid, _relays) = fx
+        let (event, _ngid, _relays) = fx
             .alice
             .encrypt_location(&fx.mls_group_id, &fx.alice_keys.public_key(), &loc, 60)
             .await
             .expect("alice encrypts");
 
-        let outcome = ingest_one(&fx.bob, &relay_mgr, &event, &ngid, &bob_own_hex).await;
+        let outcome = ingest_one(&fx.bob, &relay_mgr, &event).await;
         assert_eq!(
             outcome,
             ReceiveOnlyOutcome::Applied,

@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+use haven_core::circle::DecryptedIngest;
 use haven_core::nostr::mls::storage::is_session_live;
 use haven_core::nostr::mls::types::{ConvergedRoster, PendingStateRef};
 use haven_core::relay::live_sync::processor::group_cursor_stream;
@@ -20,7 +21,9 @@ use sha2::{Digest, Sha256};
 use crate::clock::WallNow;
 use crate::nemesis::types::{DeviceOp, Fault, Op, Schedule, ScheduledOp};
 use crate::profiles::WorldShape;
-use crate::rig::circle::{build_circle, publish_and_resolve, publish_witnessed, PublishVerdict};
+use crate::rig::circle::{
+    build_circle, publish_and_resolve, publish_witnessed, resolve_ingest, PublishVerdict,
+};
 use crate::rig::declare::DeclareSink;
 use crate::rig::plane::{CapturedLine, LogDrain, RelayPlane, TimelineRecord, TimelineSink};
 use crate::rig::{
@@ -592,8 +595,9 @@ impl<R: RelayPlane, T: TimelineSink, L: LogDrain> SimWorld<R, T, L> {
         publish_witnessed(self.device(device)?, &self.relays, events).await
     }
 
-    /// The crate's only Rule-13 resolution: publish, then confirm on a
-    /// witnessed ack or roll back without one.
+    /// The crate's Rule-13 resolution: publish, then confirm on a witnessed ack
+    /// or roll back without one — and drain whatever that resolution's own
+    /// replay handed back, through the same rung.
     ///
     /// # Errors
     ///
@@ -616,6 +620,27 @@ impl<R: RelayPlane, T: TimelineSink, L: LogDrain> SimWorld<R, T, L> {
             events: sim_magnitude(events.len()),
         });
         Ok(verdict)
+    }
+
+    /// [`crate::rig::circle::resolve_ingest`] against this world's relay planes.
+    ///
+    /// The callers that resolve a pending ref through haven-core DIRECTLY —
+    /// because they need a step `publish_and_confirm` does not have, such as the
+    /// relay-update finalize — still owe the batch a disposition, and this is
+    /// the one they owe it to.
+    ///
+    /// # Errors
+    ///
+    /// [`RigError::Core`] if a rung of the ladder is refused.
+    pub async fn resolve_ingest(
+        &self,
+        device: DeviceTag,
+        ingest: DecryptedIngest,
+    ) -> Result<(), RigError> {
+        let guard = self.note_pending_staged();
+        let outcome = resolve_ingest(self.device(device)?, &self.relays, ingest).await;
+        drop(guard);
+        outcome
     }
 
     /// The last tick this world reached.

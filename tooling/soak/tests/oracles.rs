@@ -23,6 +23,7 @@
 
 use std::time::Duration;
 
+use haven_core::circle::DecryptedIngest;
 use haven_core::location::LOCATION_MESSAGE_RETENTION_SECS;
 use haven_core::nostr::mls::types::{GroupId, OpenMlsContentKind, UNRESOLVABLE_INPUT_MAX_AGE_SECS};
 use haven_core::relay::live_sync::config::{
@@ -36,7 +37,7 @@ use haven_soak::nemesis::types::{Fault, Schedule};
 use haven_soak::oracle::quiescence::{self, PendingReason, Quiescence, Settled};
 use haven_soak::oracle::undecryptable::{self, StoredRow};
 use haven_soak::oracle::vacuity::{grade, ExpectationFloor, FloorTerm, Observed};
-use haven_soak::oracle::{bounds, Finding, Invariant, Reach, Recovery, Round, Verdict};
+use haven_soak::oracle::{bounds, Finding, Invariant, ProbeToken, Reach, Recovery, Round, Verdict};
 use haven_soak::profiles::{ProfileName, ProfileSpec, WorldShape};
 use haven_soak::rc::Rc;
 use haven_soak::relay::SimRelay;
@@ -369,7 +370,7 @@ async fn o2_holds_on_a_converged_world_and_fails_while_a_commit_is_staged_and_un
     );
 
     drop(outstanding);
-    world
+    let ingest = world
         .device(alice)
         .expect("alice")
         .manager()
@@ -377,6 +378,11 @@ async fn o2_holds_on_a_converged_world_and_fails_while_a_commit_is_staged_and_un
         .publish_failed(staged.pending)
         .await
         .expect("the staged commit rolls back");
+    assert!(
+        ingest.auto_commits.is_empty() && ingest.proposals.is_empty(),
+        "nothing was buffered behind this commit, so its rollback has nothing \
+         further to publish; work here would be a ref nobody resolves"
+    );
 
     assert!(
         Invariant::SendPathLiveness
@@ -466,12 +472,17 @@ async fn same_epoch_race(name_the_row: bool) -> Vec<undecryptable::Verdict> {
                 .is_some(),
             "Rule 13: a commit is confirmed only on an acknowledgement that reached us"
         );
-        device
+        let ingest = device
             .manager()
             .expect("a manager")
             .finalize_relay_update(staged.pending, &group)
             .await
             .expect("the commit confirms");
+        assert!(
+            ingest.auto_commits.is_empty() && ingest.proposals.is_empty(),
+            "no window was open behind this commit, so its confirm stages \
+             nothing further"
+        );
         drop(outstanding);
         commits.push(staged.commit_event);
     }
@@ -1244,4 +1255,81 @@ fn every_registered_scenario_has_a_mis_configuration_control() {
             "every registered scenario has a control that must report rc 3"
         );
     }
+}
+
+/// The rig's ladder resolves what a resolution hands back, rather than leaving
+/// a staged commit for nobody.
+///
+/// haven-core ends both Rule-13 rungs in the engine's replay, so a confirm can
+/// hand back the NEXT staged commit. The rig has one ladder for that
+/// (`rig::circle::resolve_ingest`), and its whole job is that a ref arriving
+/// that way is published and resolved like any other — a commit left staged
+/// forks the group, which is the state every oracle in this file assumes away.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_rigs_ladder_resolves_a_commit_a_resolution_handed_back() {
+    let world = build_shaped_world(&pr_spec().world).await;
+    let group = world.circles()[0].mls_group_id().clone();
+    let admin = world.devices()[0].tag;
+    let mut relays = world.relay_urls();
+    relays.push("wss://ladder.example.com".to_string());
+    let relays = relays;
+
+    let staged = world
+        .device(admin)
+        .expect("the admin")
+        .manager()
+        .expect("a manager")
+        .update_circle_relays(&group, &relays)
+        .await
+        .expect("a relay-list commit stages");
+    assert!(
+        world
+            .device(admin)
+            .expect("the admin")
+            .manager()
+            .expect("a manager")
+            .encrypt_location(
+                &group,
+                &world.device(admin).expect("the admin").keys.public_key(),
+                &ProbeToken::mint(0, 1).as_location(),
+                LOCATION_MESSAGE_RETENTION_SECS,
+            )
+            .await
+            .is_err(),
+        "precondition: the staged commit really does hold the circle in a \
+         publish-before-apply transition"
+    );
+
+    // Handed to the ladder the way a resolution's own replay hands one back.
+    world
+        .resolve_ingest(
+            admin,
+            DecryptedIngest {
+                results: Vec::new(),
+                auto_commits: vec![staged],
+                proposals: Vec::new(),
+            },
+        )
+        .await
+        .expect("the ladder resolves it");
+
+    assert!(
+        world
+            .device(admin)
+            .expect("the admin")
+            .manager()
+            .expect("a manager")
+            .encrypt_location(
+                &group,
+                &world.device(admin).expect("the admin").keys.public_key(),
+                &ProbeToken::mint(0, 2).as_location(),
+                LOCATION_MESSAGE_RETENTION_SECS,
+            )
+            .await
+            .is_ok(),
+        "the circle sends again, which only a RESOLVED pending state allows — a \
+         ladder that dropped it would leave the group staged for ever"
+    );
+
+    world.teardown().await.expect("teardown");
 }

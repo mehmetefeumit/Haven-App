@@ -3,9 +3,9 @@
 # scripts/ci/check_generated_bridge_pinned.sh. Never hand-edit: a pin
 # updated without a regeneration is the exact state this file exists to
 # make visible.
-5b6cca7179da6b78e3e74bb01da0983d935a6dee3e26964dcefbc6ca8e4442d7  haven/lib/src/rust/api.dart
-0fe24893fdcfc27eb9d809169bb881be983f06d7f410e91c6bf04e40911d4ddf  haven/lib/src/rust/frb_generated.dart
+a1509d0f59fe106a0e62dce0d43554e193ce91f061b933ff22b85913e71744a7  haven/lib/src/rust/api.dart
+7eab99c2c2f9f9f97d8972b5c088ce61bdc71b3dc4ad8f160d4c6b1757358b66  haven/lib/src/rust/frb_generated.dart
 82ebc3008dcf12536d1bd7df15b5124f330faf9fa796445628ae7b2a8e97ab41  haven/lib/src/rust/frb_generated.io.dart
 82947f25b468a1d15f3c1857c0f6813d2e277cc99924e92e2e63198b9b13dde6  haven/lib/src/rust/frb_generated.web.dart
 60fbb35399217c7346d173ff55689fb75d02e98ced37c254c9989d47158d06fe  haven/lib/src/rust/location/types.dart
-aef3f39ead15bd294486edbe8533767d6166b1e6489ea7d93f7ffaacf49dea21  haven/rust_builder/src/frb_generated.rs
+781fda18306c26ba05506aa55332135aad3e25780c1228676ebe591ae0a69e48  haven/rust_builder/src/frb_generated.rs

@@ -47,6 +47,7 @@ pub mod types;
 pub use contamination::ContaminationSource;
 pub use error::{CircleError, RelayInputRejection, Result};
 pub use leave::LeavePlan;
+pub use manager::MAX_REDEMPTION_STEPS;
 pub use manager::{
     AddMembersResult, CircleCreationResult, CircleManager, CommitToPublish, DecryptedIngest,
     DeferredWork, DirectoryReconcile, RepairRotationOutcome,

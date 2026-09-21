@@ -1391,6 +1391,9 @@ class BackgroundLocationTaskHandler extends TaskHandler {
     return forceReleaseLiveSession();
   }
 
+  /// The replayed fixes the ladder accumulates are plaintext coordinates held
+  /// only until the loop below ingests them — one cycle, never a field.
+  ///
   /// Registers [publishStagedCommits] as [_inFlightCommitCritical] for the
   /// same reason a fetch is: abandoning it between `publishEvent` and
   /// `confirmPublished` leaves a commit that is neither confirmed nor rolled
@@ -1410,9 +1413,50 @@ class BackgroundLocationTaskHandler extends TaskHandler {
       circle: circle,
       deferred: deferred,
     );
+    // The registry field is `Future<void>?`, so the typed future is held
+    // separately: assigning it and then awaiting the field would hand back
+    // `void` and lose every replayed fix.
     _inFlightCommitCritical = work;
     try {
-      await work;
+      final replayed = await work;
+      // Resolving those commits made the engine replay what it buffered behind
+      // them. The rows are already persisted Rust-side; this feeds the
+      // isolate's OWN service so the cache and the receive-liveness stamp
+      // (`notePeerEvent`) see them too. NO provider is touched — there is no
+      // Riverpod container in this isolate.
+      //
+      // Each fix is filed under the circle its OWN group id names, never
+      // under the circle whose commit was being resolved: the engine's
+      // buffers are global, so one resolution replays several groups, and the
+      // ambient attribution would put one circle's member on another's map.
+      // A group this device holds no circle for is skipped, as Rust's
+      // `route_results` does.
+      final sharing = _locationSharingService;
+      final circleService = _circleService;
+      if (sharing != null && circleService != null) {
+        for (final fix in replayed) {
+          Circle? target;
+          try {
+            target = await circleService.getCircle(fix.mlsGroupId);
+          } on Object catch (e) {
+            debugPrint(
+              '[BackgroundTask] replayed fix circle lookup failed: '
+              '${e.runtimeType}',
+            );
+          }
+          if (target == null) {
+            debugPrint(
+              '[BackgroundTask] replayed fix names a circle this device does '
+              'not hold — dropped',
+            );
+            continue;
+          }
+          await sharing.ingestStreamedLocation(
+            circle: target,
+            decrypted: fix.decrypted,
+          );
+        }
+      }
     } finally {
       _inFlightCommitCritical = null;
     }

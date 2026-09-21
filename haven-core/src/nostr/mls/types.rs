@@ -365,6 +365,25 @@ pub enum LocationMessageResult {
     },
 }
 
+impl LocationMessageResult {
+    /// The circle this result is about.
+    ///
+    /// Exhaustive on purpose: a folded batch is not single-group (the engine's
+    /// effect buffers are global), so every consumer that has to name a circle
+    /// reads it from the RESULT, and a new variant without one breaks
+    /// compilation here instead of silently inheriting an ambient id.
+    #[must_use]
+    pub const fn group_id(&self) -> &GroupId {
+        match self {
+            Self::Location { group_id, .. }
+            | Self::Joined { group_id }
+            | Self::GroupUpdate { group_id }
+            | Self::Invalidated { group_id }
+            | Self::Unrecoverable { group_id } => group_id,
+        }
+    }
+}
+
 impl std::fmt::Debug for LocationMessageResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

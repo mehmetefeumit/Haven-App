@@ -721,21 +721,68 @@ class MockCircleService implements CircleService {
       return DecryptLocationOutcome(
         results: results,
         autoCommits: decryptLocationAutoCommits[index] ?? const [],
+        proposals: const [],
       );
     }
-    return const DecryptLocationOutcome(results: [], autoCommits: []);
+    return const DecryptLocationOutcome(
+      results: [],
+      autoCommits: [],
+      proposals: [],
+    );
   }
 
+  /// What a [confirmPendingCommit] replays, keyed by the (0-based) index of
+  /// that call — i.e. `confirmPendingCommitOutcomes[0]` is what the FIRST
+  /// confirm hands back. Mirrors [decryptLocationAutoCommits]: unset indices
+  /// replay nothing, so existing tests are unaffected.
+  ///
+  /// This is the commit-gap surface: resolving a staged commit makes the
+  /// engine replay everything it buffered while that commit was in flight.
+  final Map<int, DecryptLocationOutcome> confirmPendingCommitOutcomes = {};
+
+  /// The [failPendingCommit] twin of [confirmPendingCommitOutcomes] — the
+  /// engine replays its buffer on a no-ack too.
+  final Map<int, DecryptLocationOutcome> failPendingCommitOutcomes = {};
+
+  /// When set, [confirmPendingCommit] throws it (the Rule-8 path: the FFI
+  /// failed and the service must surface a generic exception).
+  Exception? confirmPendingCommitThrows;
+
+  /// When set, [failPendingCommit] throws it.
+  Exception? failPendingCommitThrows;
+
   @override
-  Future<void> confirmPendingCommit(PendingCommitToken pending) async {
+  Future<DecryptLocationOutcome> confirmPendingCommit(
+    PendingCommitToken pending,
+  ) async {
     methodCalls.add('confirmPendingCommit');
+    final index = confirmPendingCommitCalls.length;
     confirmPendingCommitCalls.add(pending);
+    final boom = confirmPendingCommitThrows;
+    if (boom != null) throw boom;
+    return confirmPendingCommitOutcomes[index] ??
+        const DecryptLocationOutcome(
+          results: [],
+          autoCommits: [],
+          proposals: [],
+        );
   }
 
   @override
-  Future<void> failPendingCommit(PendingCommitToken pending) async {
+  Future<DecryptLocationOutcome> failPendingCommit(
+    PendingCommitToken pending,
+  ) async {
     methodCalls.add('failPendingCommit');
+    final index = failPendingCommitCalls.length;
     failPendingCommitCalls.add(pending);
+    final boom = failPendingCommitThrows;
+    if (boom != null) throw boom;
+    return failPendingCommitOutcomes[index] ??
+        const DecryptLocationOutcome(
+          results: [],
+          autoCommits: [],
+          proposals: [],
+        );
   }
 
   // NOTE: `signKeyPackageEvent` / `recordPublishedKeyPackages` were removed

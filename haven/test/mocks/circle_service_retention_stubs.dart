@@ -104,12 +104,23 @@ mixin CircleServiceRetentionStubs {
   }) async => const AddMemberResult(welcomesSent: 1, welcomesTotal: 1);
 
   // Receive-side auto-commit surface (Rule 13) — inert no-op defaults for
-  // fakes that do not exercise the peer-`SelfRemove`-eviction path.
+  // fakes that do not exercise the peer-`SelfRemove`-eviction path. A
+  // resolution replays nothing here, which is what an empty outcome says.
   Future<DecryptLocationOutcome> decryptLocationCollectingCommits({
     required String eventJson,
-  }) async => const DecryptLocationOutcome(results: [], autoCommits: []);
+  }) async => const DecryptLocationOutcome(
+    results: [],
+    autoCommits: [],
+    proposals: [],
+  );
 
-  Future<void> confirmPendingCommit(PendingCommitToken pending) async {}
+  Future<DecryptLocationOutcome> confirmPendingCommit(
+    PendingCommitToken pending,
+  ) async =>
+      const DecryptLocationOutcome(results: [], autoCommits: [], proposals: []);
 
-  Future<void> failPendingCommit(PendingCommitToken pending) async {}
+  Future<DecryptLocationOutcome> failPendingCommit(
+    PendingCommitToken pending,
+  ) async =>
+      const DecryptLocationOutcome(results: [], autoCommits: [], proposals: []);
 }

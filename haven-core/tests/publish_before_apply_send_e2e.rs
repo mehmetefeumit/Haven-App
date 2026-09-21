@@ -437,7 +437,7 @@ async fn create_circle_confirms_only_on_an_ack() {
             .expect("the invitee's gift-wrapped Welcome");
 
         let publisher = OutcomePublisher::new(outcome);
-        let confirmed = publish_then_resolve(
+        let (confirmed, _ingest) = publish_then_resolve(
             &alice,
             &publisher,
             &welcome.event,
@@ -488,7 +488,7 @@ async fn add_members_confirms_only_on_an_ack() {
             .expect("stage the add");
 
         let publisher = OutcomePublisher::new(outcome);
-        let confirmed = publish_then_resolve(
+        let (confirmed, _ingest) = publish_then_resolve(
             &fx.alice,
             &publisher,
             &staged.commit_event,
@@ -532,7 +532,7 @@ async fn remove_members_confirms_only_on_an_ack() {
             .expect("stage the removal");
 
         let publisher = OutcomePublisher::new(outcome);
-        let confirmed = publish_then_resolve(
+        let (confirmed, _ingest) = publish_then_resolve(
             &fx.alice,
             &publisher,
             &staged.commit_event,
@@ -580,7 +580,7 @@ async fn update_circle_relays_confirms_only_on_an_ack() {
         targets.extend(new_relays.clone());
 
         let publisher = OutcomePublisher::new(outcome);
-        let confirmed = publish_then_resolve(
+        let (confirmed, _ingest) = publish_then_resolve(
             &fx.alice,
             &publisher,
             &staged.commit_event,

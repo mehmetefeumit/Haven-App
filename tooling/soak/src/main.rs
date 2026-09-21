@@ -656,12 +656,15 @@ async fn case_o5(logs: &SoakLogs) -> Result<bool, Refusal> {
         {
             return Err(Refusal::Rig(RigError::PublishNeverAcked));
         }
-        world
+        let ingest = world
             .device(tag)?
             .manager()?
             .finalize_relay_update(staged.pending, &group)
             .await
             .map_err(|_| RigError::Core(haven_soak::rig::Step::ConfirmPublished))?;
+        // The confirm's own replay can stage further work; the self-test is a
+        // real world and leaving a ref unresolved in it would fork the group.
+        world.resolve_ingest(tag, ingest).await?;
         drop(outstanding);
         commits.push(staged.commit_event);
     }

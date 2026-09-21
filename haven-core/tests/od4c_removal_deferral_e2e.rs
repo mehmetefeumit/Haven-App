@@ -1650,7 +1650,7 @@ async fn a_burst_rolls_back_send_side_work_instead_of_parking_it() {
     // item's ref is one the engine never issued: both patterns of the arm must be
     // walked, and a ref that resolves to nothing must not stop the loop.
     let publisher = FakePublisher::new(true);
-    let deferred = resolve_receive_publish_work_with_policy(
+    let (deferred, _ingest) = resolve_receive_publish_work_with_policy(
         &fx.alice,
         &publisher,
         &[
@@ -1711,7 +1711,7 @@ async fn a_burst_skips_work_that_carries_no_pending_ref() {
     let bob_hex = fx.bob_keys.public_key().to_hex();
 
     let publisher = FakePublisher::new(true);
-    let deferred = resolve_receive_publish_work_with_policy(
+    let (deferred, _ingest) = resolve_receive_publish_work_with_policy(
         &fx.alice,
         &publisher,
         &[
@@ -1767,7 +1767,7 @@ async fn a_burst_rolls_back_an_auto_commit_it_cannot_serialize() {
     msg.payload = b"not a transport-wrapped nostr event".to_vec();
 
     let publisher = FakePublisher::new(true);
-    let deferred = resolve_receive_publish_work_with_policy(
+    let (deferred, _ingest) = resolve_receive_publish_work_with_policy(
         &fx.alice,
         &publisher,
         &[PublishWork::AutoPublish { msg, pending }],
@@ -1824,7 +1824,7 @@ async fn a_burst_that_cannot_park_falls_through_to_the_publish_ladder() {
         .expect("the local circle row is removed");
 
     let publisher = FakePublisher::new(true);
-    let deferred = resolve_receive_publish_work_with_policy(
+    let (deferred, _ingest) = resolve_receive_publish_work_with_policy(
         &fx.alice,
         &publisher,
         &[PublishWork::AutoPublish { msg, pending }],

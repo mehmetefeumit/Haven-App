@@ -17,7 +17,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/background_location_task.dart';
-import 'package:haven/src/services/circle_service.dart' show Circle;
+import 'package:haven/src/services/circle_service.dart'
+    show Circle, DecryptedLocation;
 import 'package:haven/src/services/geolocator_location_service.dart';
 import 'package:haven/src/services/location_service.dart';
 import 'package:haven/src/services/location_sharing_service.dart';
@@ -129,6 +130,15 @@ class FakeCircleManager implements CircleManagerFfi {
     return List.of(circles);
   }
 
+  /// The single-circle read `NostrCircleService.getCircle` delegates to — how
+  /// the FGS resolves which circle a REPLAYED result belongs to.
+  @override
+  Future<CircleWithMembersFfi?> getCircle({
+    required List<int> mlsGroupId,
+  }) async => circles
+      .where((c) => hexOf(c.circle.mlsGroupId) == hexOf(mlsGroupId))
+      .firstOrNull;
+
   @override
   Future<EncryptLocationOutcomeFfi> encryptLocation({
     required List<int> mlsGroupId,
@@ -155,13 +165,36 @@ class FakeCircleManager implements CircleManagerFfi {
     required int atMs,
   }) async => acks.add(AckStamp(nostrGroupId: nostrGroupId, atMs: atMs));
 
-  @override
-  Future<void> confirmPublished({required PendingStateRefFfi pending}) async =>
-      confirmedTokens.add(pending.token);
+  /// What each resolution REPLAYS, keyed by the pending token being resolved:
+  /// resolving a staged commit makes the engine replay everything it buffered
+  /// while that commit was in flight. Unset tokens replay nothing.
+  final Map<BigInt, DecryptLocationOutcomeFfi> replayOnResolve = {};
 
   @override
-  Future<void> publishFailed({required PendingStateRefFfi pending}) async =>
-      rolledBackTokens.add(pending.token);
+  Future<DecryptLocationOutcomeFfi> confirmPublished({
+    required PendingStateRefFfi pending,
+  }) async {
+    confirmedTokens.add(pending.token);
+    return _replayFor(pending.token);
+  }
+
+  @override
+  Future<DecryptLocationOutcomeFfi> publishFailed({
+    required PendingStateRefFfi pending,
+  }) async {
+    rolledBackTokens.add(pending.token);
+    return _replayFor(pending.token);
+  }
+
+  /// One-shot: a token's replay is handed back by the FIRST resolution of it,
+  /// exactly as the engine's buffer is drained once.
+  DecryptLocationOutcomeFfi _replayFor(BigInt token) =>
+      replayOnResolve.remove(token) ??
+      const DecryptLocationOutcomeFfi(
+        results: [],
+        autoCommits: [],
+        proposals: [],
+      );
 
   @override
   Future<int> pruneExpiredLastKnown({required int nowUnixSecs}) async {
@@ -322,6 +355,20 @@ class FakeLocationSharingService extends Fake
   FutureOr<void> Function(Circle circle)? onFetch;
 
   final List<Circle> fetched = [];
+
+  /// Every location handed to [ingestStreamedLocation], with the circle it
+  /// was routed under.
+  ///
+  /// The FGS isolate has no provider container, so this service IS the only
+  /// place a received fix can land: a replay that never reaches it is a fix
+  /// the engine already wrote `Processed` and nobody ever sees.
+  final List<({Circle circle, DecryptedLocation decrypted})> ingested = [];
+
+  @override
+  Future<void> ingestStreamedLocation({
+    required Circle circle,
+    required DecryptedLocation decrypted,
+  }) async => ingested.add((circle: circle, decrypted: decrypted));
 
   @override
   Future<LocationFetchResult> fetchMemberLocations({

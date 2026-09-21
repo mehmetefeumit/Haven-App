@@ -379,6 +379,119 @@ engine owns its durable storage, so Haven **cannot bound engine storage**.
 Closure of upstream #757 is the real fix; until then this is an accepted
 insider-threat storage-DoS exposure.
 
+#### Publish resolution: what the engine replays, and what Haven owes it
+
+Rule 12's "never silently drop legitimate backlog" has a second edge, and it is
+not on the intake side. Between staging a commit and resolving it the engine
+BUFFERS everything that arrives for that group, and both resolutions —
+`confirm_published` and `publish_failed` — end in the engine's replay. That
+replay is delivered **at most once**: the engine marks the content row processed
+in the same breath as handing it to the application, with no acknowledgement
+boundary, so every redelivery afterwards is terminal. A caller that resolved the
+ref and discarded the batch lost the peer's position permanently — no re-fetch,
+no later convergence pass and no restart brings it back. Haven therefore
+persists inside the call, before the resolution returns, and keys the write off
+each event's own group id because the engine's buffers are process-global and
+one batch can span circles. The same replay carries the next eviction in a leave
+cascade and the local user's own re-proposed leave, so publish work is folded
+back into the plane's own Rule-13 ladder rather than dropped; an `Err` from a
+confirm is returned unchanged after the stranded buffer is drained, because at
+this pin the merge precedes the replay and a retry or a rollback would act on a
+commit the group may already hold. Contract and evidence:
+`MARMOT_PROTOCOL_KNOWLEDGE.md`, "What a resolved publish hands back".
+
+**Accepted residuals.** Each is stated where the code makes it, and none is
+optional to record:
+
+- **A send-path co-drained eviction commit is recorded as owed, not handed to
+  the caller, and `redeem_removal_deferrals` is its ONLY recovery.** A send
+  drains the same global publish buffer, so it can surface an `AutoPublish` it
+  was not after — always for a DIFFERENT circle, because a same-circle staging
+  puts the group in `PendingPublish` and the send comes back `Queued` down the
+  deferred branch instead. Haven records the obligation
+  (`CircleManager::surface_co_drained_auto_commits`) and leaves the commit
+  staged rather than dropping a live `PendingStateRef`, which is what keeps the
+  removal from going silent.
+
+  It is not surfaced across the FFI, and **that circle's next send does not
+  recover it**: the send does come back `SendDeferred`, but
+  `CircleManager::collect_deferred_work` reads only that call's own publish
+  vector, and the engine never re-emits the `AutoPublish` — the schedule entry
+  is consumed before staging and `publish_failed` does not re-arm it, which is
+  the same fact `CircleManager::orphaned_removal_deferrals` is built on. The one
+  production driver is
+  `EngineProcessor::redeem_removal_deferrals`, gated on a FOREGROUND live-sync
+  open.
+
+  So: in the Android foreground service and the iOS burst the in-memory ref dies
+  with the isolate while the durable row survives, and the next foreground
+  live-sync open reports the circle — honest, not silent. In a
+  `HAVEN_LIVE_SYNC=false` build **neither the redeemer nor the reporter is
+  compiled in**: that circle is left unsendable, owed and unreported beyond the
+  generic "sharing is stalled" signal its own publish cycle raises. It cannot
+  manufacture a false report — the obligation is only recorded for a commit the
+  engine has genuinely staged, so the circle really cannot send, and a circle
+  that recovers clears the row on its next successful send or on an
+  `EpochChanged`. It is still a strict improvement on the behaviour it replaced,
+  which dropped the ref with no durable row at all and left the wedge invisible
+  everywhere. Closing it means widening `encrypt_location`'s FFI return with the
+  commits it collected.
+- **A send drain still drops the engine's RESYNC signals.**
+  `PendingCommitRecovered` / `GroupHydrationRecovered` arriving in a send's own
+  batch get a bucketed note (`note_dropped_resync_events`) and are not surfaced,
+  even though Rule 13 calls the first a MANDATORY resync. The reviewed plan for
+  this work specified deleting that function once the fold surfaced the events;
+  it was kept instead, because surfacing them means widening
+  `encrypt_location`'s FFI return for a signal the RECEIVE path already drives
+  authoritatively — catch-up runs first after every open and folds both events
+  to a `GroupUpdate`. The deviation is recorded here and at the function itself;
+  the same FFI widening closes it.
+- **A sender-declared `timestamp` is not bounded from above.** The last-known
+  store's newer-wins guard compares sender-supplied instants, so a peer with a
+  fast or hostile clock can pin its own marker until that timestamp passes.
+  Pre-existing on every receive path, not introduced by the replay work, and a
+  clamp would reject fixes from legitimately clock-skewed peers — **owner
+  decision**. Do not describe the monotonic guard as a defence against it.
+- **A drained `GroupEvolution`'s welcomes are not published.** `CommitToPublish`
+  carries no welcomes, so a queued invite released by a convergence drain hands
+  back a commit whose invitees receive nothing. Pre-existing in
+  `CircleManager::collect_deferred_work`; the fold now emits a bucketed warning
+  every time it happens rather than letting it be silent, pinned by
+  `security_rule_gates::drained_group_evolution_welcomes_are_never_dropped_silently`.
+- **The publish-resolution fold's BATCH cap is unreachable in production, so its
+  disposition is driven in-crate rather than end to end.** `MAX_FOLD_BATCHES`
+  bounds how many engine batches one fold GENERATES work from; reaching it needs
+  33 groups in a single `pending_convergence` drain, and nothing accumulates
+  them: `collect_effects` empties that buffer on the way out of every engine
+  call, and the only scheduler a publish resolution reaches
+  (`replay_buffered_messages`) is single-group. The stored-message write fault
+  does not accumulate them either — it breaks the terminal row write of an
+  application-message ingest, which schedules no convergence. Measured over the
+  whole suite, a fold walks at most three batches and spends at most one
+  re-tick. The disposition is therefore pinned where the fold can be handed its
+  batch directly, by
+  `circle::manager::tests::the_batch_cap_stops_generating_without_dropping_what_it_holds`:
+  crossing the cap stops the advances and the re-ticks and nothing else, so a
+  batch already handed back is still folded, its eviction still surfaced with
+  its obligation recorded, and its replayed locations still persisted. What that
+  test does NOT cover is the Rule-15 capture of the cap's own warn — the fold is
+  private, so no integration test can reach it, and the library test binary's
+  single `log` slot belongs to `relay::manager`'s capture; the warn interpolates
+  nothing but a bucketed count and is covered statically by
+  `scripts/ci/check_no_identifier_logging.sh`. The identical disposition on the
+  pass that has a publisher (`MAX_REDEMPTION_STEPS`) IS driven end to end, and
+  the fold's cap loses no schedule: the groups that never got their advance keep
+  theirs in the engine, which re-marks them pending on the next advance. Both
+  caps name what they stand down from in their own warn rather than stopping
+  silently.
+  The receive LADDER's cap (`RESOLVE_RUNAWAY_CAP`) is tested end to end —
+  through many small circles rather than a deep cascade, because it bounds the
+  WORK one call does and a k-deep cascade costs O(k³) in the harness (measured:
+  116 s at nine leavers, past fifteen minutes at seventeen). That measurement is
+  recorded in `haven-core/tests/receive_ladder_e2e.rs` beside the test it shaped.
+- **The cursor stays pinned behind the row the replay does not retire.** An
+  MDK-side residual, recorded in `MARMOT_PROTOCOL_KNOWLEDGE.md` beside #757.
+
 ### Post-Compromise Security window from polling cadence
 
 Since M11 (live-sync enabled by default) Haven holds a **persistent foreground

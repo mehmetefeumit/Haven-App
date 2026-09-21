@@ -40,6 +40,7 @@ import 'package:haven/src/rust/api.dart' as frb_api;
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/fresh_secret.dart';
 import 'package:haven/src/services/leaver_backstop.dart';
+import 'package:haven/src/services/location_auto_commit.dart';
 import 'package:haven/src/services/mls_session_handover.dart'
     show HandoverOutcome, appIsForegrounded;
 import 'package:haven/src/services/nostr_relay_service.dart';
@@ -47,6 +48,7 @@ import 'package:haven/src/services/pending_leave_service.dart';
 import 'package:haven/src/services/publish_stagger.dart'
     show kMaxCirclesPerAccount;
 import 'package:haven/src/services/relay_service.dart';
+import 'package:haven/src/utils/event_tags.dart';
 import 'package:haven/src/utils/log_alias.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -758,11 +760,12 @@ class NostrCircleService implements CircleService {
       final sentCount = welcomeResults.where((ok) => ok).length;
       final anySent = total == 0 || sentCount > 0;
 
+      final DecryptLocationOutcomeFfi resolved;
       try {
         if (anySent) {
-          await manager.confirmPublished(pending: result.pending);
+          resolved = await manager.confirmPublished(pending: result.pending);
         } else {
-          await manager.publishFailed(pending: result.pending);
+          resolved = await manager.publishFailed(pending: result.pending);
         }
       } on Object catch (e) {
         debugPrint(
@@ -771,6 +774,9 @@ class NostrCircleService implements CircleService {
         );
         throw const CircleServiceException('Failed to create circle');
       }
+      // Bookkeeping only, run OUTSIDE the verdict-deciding try above: a throw
+      // here must never recolour a confirm/rollback that already succeeded.
+      await _absorbPublishResolutionSafely(resolved, '[Circle] Create');
       if (!anySent) {
         throw const CircleServiceException('Failed to create circle');
       }
@@ -1332,19 +1338,26 @@ class NostrCircleService implements CircleService {
 
       if (!published) {
         try {
-          await manager.publishFailed(pending: staged.pending);
+          final rolledBack = await manager.publishFailed(
+            pending: staged.pending,
+          );
+          await _absorbPublishResolutionSafely(rolledBack, 'add member');
         } on Object catch (e) {
           debugPrint('add member: publishFailed failed: ${e.runtimeType}');
         }
         throw const CircleServiceException('Failed to add member');
       }
 
+      final DecryptLocationOutcomeFfi confirmed;
       try {
-        await manager.confirmPublished(pending: staged.pending);
+        confirmed = await manager.confirmPublished(pending: staged.pending);
       } on Object catch (e) {
         debugPrint('add member: confirmPublished failed: ${e.runtimeType}');
         throw const CircleServiceException('Failed to add member');
       }
+      // Bookkeeping only, run OUTSIDE the verdict-deciding try above: a throw
+      // here must never recolour a confirm that already succeeded.
+      await _absorbPublishResolutionSafely(confirmed, 'add member');
 
       final total = staged.welcomeEvents.length;
       final results = await Future.wait(
@@ -1413,6 +1426,7 @@ class NostrCircleService implements CircleService {
         opKind: 'update circle relays',
       );
 
+      final DecryptLocationOutcomeFfi resolved;
       try {
         if (published) {
           // finalizeRelayUpdate confirms the pending state AND re-syncs the
@@ -1425,12 +1439,12 @@ class NostrCircleService implements CircleService {
           // self-heals idempotently: the next commit the admin processes runs
           // the decrypt_location re-sync hook, and a restart re-derives the
           // row from the engine. So the throw below is safe to surface.
-          await manager.finalizeRelayUpdate(
+          resolved = await manager.finalizeRelayUpdate(
             pending: result.pending,
             mlsGroupId: groupId,
           );
         } else {
-          await manager.publishFailed(pending: result.pending);
+          resolved = await manager.publishFailed(pending: result.pending);
         }
       } on Object catch (e) {
         debugPrint(
@@ -1440,6 +1454,9 @@ class NostrCircleService implements CircleService {
         );
         throw const CircleServiceException('Failed to update circle relays');
       }
+      // Bookkeeping only, run OUTSIDE the verdict-deciding try above: a throw
+      // here must never recolour a confirm/rollback that already succeeded.
+      await _absorbPublishResolutionSafely(resolved, 'update circle relays');
 
       if (!published) {
         throw const CircleServiceException('Failed to update circle relays');
@@ -1593,11 +1610,12 @@ class NostrCircleService implements CircleService {
       relays,
       opKind: opKind,
     );
+    final DecryptLocationOutcomeFfi resolved;
     try {
       if (published) {
-        await manager.confirmPublished(pending: pending);
+        resolved = await manager.confirmPublished(pending: pending);
       } else {
-        await manager.publishFailed(pending: pending);
+        resolved = await manager.publishFailed(pending: pending);
       }
     } on Object catch (e) {
       debugPrint(
@@ -1606,6 +1624,9 @@ class NostrCircleService implements CircleService {
       );
       return false;
     }
+    // Bookkeeping only, run OUTSIDE the verdict-deciding try above: a throw
+    // here must never recolour a confirm/rollback that already succeeded.
+    await _absorbPublishResolutionSafely(resolved, opKind);
     return published;
   }
 
@@ -1750,23 +1771,9 @@ class NostrCircleService implements CircleService {
     if (r.kind == LocationMessageResultKindFfi.unrecoverable) {
       markCircleBlocked(r.mlsGroupId.toList());
     }
-    final loc = r.location;
     return LocationEventResult(
       kind: _convertLocationEventKind(r.kind),
-      location: loc == null
-          ? null
-          : DecryptedLocation(
-              senderPubkey: loc.senderPubkey,
-              latitude: loc.latitude,
-              longitude: loc.longitude,
-              geohash: loc.geohash,
-              timestamp: DateTime.fromMillisecondsSinceEpoch(
-                loc.timestamp * 1000,
-              ),
-              expiresAt: DateTime.fromMillisecondsSinceEpoch(
-                loc.expiresAt * 1000,
-              ),
-            ),
+      location: peerLocationFromFfi(r),
       mlsGroupId: r.mlsGroupId.toList(),
       epoch: r.epoch.toInt(),
     );
@@ -1812,29 +1819,147 @@ class NostrCircleService implements CircleService {
       final outcome = await manager.decryptLocationCollectingCommits(
         eventJson: eventJson,
       );
-      return DecryptLocationOutcome(
-        results: outcome.results.map(_convertLocationEventResult).toList(),
-        autoCommits: outcome.autoCommits
-            .map(
-              (c) => PendingAutoCommit(
-                commitEventJson: c.commitEventJson,
-                pendingToken: PendingCommitToken(c.pending.token),
-              ),
-            )
-            .toList(),
-      );
+      return _convertDecryptOutcome(outcome);
     } on Object catch (_) {
       debugPrint('[Circle] Location decryption failed');
       throw const CircleServiceException('Failed to decrypt location');
     }
   }
 
+  /// Absorbs a publish resolution's replayed outcome at a MODAL, user-initiated
+  /// flow (create / add / relay update / remove / leave / epoch repair).
+  ///
+  /// Converted, never dropped raw: the conversion is what fires
+  /// [markCircleBlocked] for a `GroupUnrecoverable` the engine replayed inside
+  /// this batch (Rule 8). The locations are then discarded on purpose — the
+  /// Rust core has already persisted every one of them, so only the DISPLAY is
+  /// stale, and only until the next delivery from that peer or the next resume
+  /// rehydrate. These flows own no location cache to push into.
+  ///
+  /// The staged WORK is not discarded. A peer leaving while the user taps one
+  /// of these buttons stages an eviction inside that confirm's own fold, and
+  /// it arrives here already OWED: the only thing that ever redeems or reports
+  /// an owed commit is the foreground live-sync burst, so in a
+  /// `HAVEN_LIVE_SYNC=false` build dropping it leaves the circle permanently
+  /// unsendable and silent. Both it and any replayed proposal therefore go
+  /// through the SAME Rule-13 ladder the poll planes use, routed by their own
+  /// `h` tag (§Rule 4: that is the only group id on the wire).
+  Future<void> _absorbPublishResolution(
+    DecryptLocationOutcomeFfi outcome,
+  ) async {
+    final replayed = _convertDecryptOutcome(outcome);
+    if (replayed.autoCommits.isEmpty && replayed.proposals.isEmpty) return;
+
+    final held = await _heldCircles();
+    // Group by the circle each commit's own `h` names — a resolution's batch
+    // is not one circle's. An unresolvable one lands in the `null` group,
+    // where the ladder's no-relay rung reports it and leaves it owed rather
+    // than publishing it to some other circle's relays.
+    final byCircle = <Circle?, List<PendingAutoCommit>>{};
+    for (final commit in replayed.autoCommits) {
+      byCircle
+          .putIfAbsent(_circleForEvent(held, commit.commitEventJson), () => [])
+          .add(commit);
+    }
+
+    final proposals = [...replayed.proposals];
+    for (final entry in byCircle.entries) {
+      final resolved = await resolveAutoCommits(
+        relayService: _relayService,
+        circleService: this,
+        autoCommits: entry.value,
+        circle: entry.key,
+      );
+      proposals.addAll(resolved.proposals);
+    }
+
+    for (final eventJson in proposals) {
+      final target = _circleForEvent(held, eventJson);
+      if (target == null) {
+        debugPrint(
+          '[Circle] replayed proposal names a circle this device does not '
+          'hold — not published',
+        );
+        continue;
+      }
+      await _publishEvolutionEvent(
+        eventJson,
+        target.relays,
+        opKind: 'replayed proposal',
+      );
+    }
+  }
+
+  /// Runs [_absorbPublishResolution] without letting a failure there recolour
+  /// the caller's already-decided verdict.
+  ///
+  /// Every call site resolves a `PendingStateRef` (confirm or roll back) FIRST
+  /// and only calls this once that verdict is settled, so a throw here — none
+  /// is reachable today, [_absorbPublishResolution] guards every step — must
+  /// still never turn a commit that WAS published and confirmed into a
+  /// reported "Failed to …" for the caller.
+  Future<void> _absorbPublishResolutionSafely(
+    DecryptLocationOutcomeFfi outcome,
+    String opKind,
+  ) async {
+    try {
+      await _absorbPublishResolution(outcome);
+    } on Object catch (e) {
+      debugPrint(
+        '[Circle] $opKind: post-resolution bookkeeping failed: '
+        '${e.runtimeType}',
+      );
+    }
+  }
+
+  /// The circles this device holds, or an empty list when the read fails —
+  /// which routes every replayed item to its fail-closed rung.
+  Future<List<Circle>> _heldCircles() async {
+    try {
+      return await getVisibleCircles();
+    } on Object catch (e) {
+      debugPrint('[Circle] replayed work routing failed: ${e.runtimeType}');
+      return const [];
+    }
+  }
+
+  /// The circle a group event belongs to, by its own `h` tag, or `null`.
+  Circle? _circleForEvent(List<Circle> held, String eventJson) {
+    final h = hTagOf(eventJson);
+    return held
+        .where((c) => _hexGroupId(c.nostrGroupId) == h)
+        .firstOrNull;
+  }
+
+  /// Converts one FFI folded outcome — from an ingest OR from a publish
+  /// resolution — to the service-level type.
+  DecryptLocationOutcome _convertDecryptOutcome(
+    DecryptLocationOutcomeFfi outcome,
+  ) {
+    return DecryptLocationOutcome(
+      results: outcome.results.map(_convertLocationEventResult).toList(),
+      autoCommits: outcome.autoCommits
+          .map(
+            (c) => PendingAutoCommit(
+              commitEventJson: c.commitEventJson,
+              pendingToken: PendingCommitToken(c.pending.token),
+            ),
+          )
+          .toList(),
+      proposals: outcome.proposals,
+    );
+  }
+
   @override
-  Future<void> confirmPendingCommit(PendingCommitToken pending) async {
+  Future<DecryptLocationOutcome> confirmPendingCommit(
+    PendingCommitToken pending,
+  ) async {
     final manager = await _ensureInitialized();
     try {
-      await manager.confirmPublished(
-        pending: PendingStateRefFfi(token: pending.value),
+      return _convertDecryptOutcome(
+        await manager.confirmPublished(
+          pending: PendingStateRefFfi(token: pending.value),
+        ),
       );
     } on Object catch (e) {
       debugPrint('[Circle] auto-commit confirm failed: ${e.runtimeType}');
@@ -1843,11 +1968,15 @@ class NostrCircleService implements CircleService {
   }
 
   @override
-  Future<void> failPendingCommit(PendingCommitToken pending) async {
+  Future<DecryptLocationOutcome> failPendingCommit(
+    PendingCommitToken pending,
+  ) async {
     final manager = await _ensureInitialized();
     try {
-      await manager.publishFailed(
-        pending: PendingStateRefFfi(token: pending.value),
+      return _convertDecryptOutcome(
+        await manager.publishFailed(
+          pending: PendingStateRefFfi(token: pending.value),
+        ),
       );
     } on Object catch (e) {
       // Best-effort (interface contract): the caller already knows the
@@ -1857,6 +1986,13 @@ class NostrCircleService implements CircleService {
       // itself fails self-heals on the next ingest of the same buffered
       // proposal (a fresh jittered auto-commit attempt is scheduled).
       debugPrint('[Circle] auto-commit rollback failed: ${e.runtimeType}');
+      // Nothing was replayed, because the call did not complete — an empty
+      // outcome is the honest report, not a swallowed one.
+      return const DecryptLocationOutcome(
+        results: [],
+        autoCommits: [],
+        proposals: [],
+      );
     }
   }
 
@@ -2255,4 +2391,24 @@ class NostrCircleService implements CircleService {
       throw const CircleServiceException('Failed to set nickname');
     }
   }
+}
+
+/// The peer location one FFI folded result carries, or `null` when it is not a
+/// parsed location (a group-state result, or a decrypted-but-unparseable
+/// inner).
+///
+/// Top-level so the Android foreground-service isolate — which routes an FFI
+/// outcome without a [CircleService] in hand — converts a replayed fix through
+/// exactly this arithmetic rather than a second copy of it.
+DecryptedLocation? peerLocationFromFfi(LocationMessageResultFfi r) {
+  final loc = r.location;
+  if (loc == null) return null;
+  return DecryptedLocation(
+    senderPubkey: loc.senderPubkey,
+    latitude: loc.latitude,
+    longitude: loc.longitude,
+    geohash: loc.geohash,
+    timestamp: DateTime.fromMillisecondsSinceEpoch(loc.timestamp * 1000),
+    expiresAt: DateTime.fromMillisecondsSinceEpoch(loc.expiresAt * 1000),
+  );
 }

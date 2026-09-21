@@ -364,13 +364,20 @@ async fn an_event_ingested_during_a_publish_before_apply_transition_is_a_commit_
 
     // Left staged on purpose until here, and resolved now: a pending state that
     // is neither confirmed nor rolled back forks the group.
-    world
+    let ingest = world
         .admin()
         .manager()
         .expect("manager")
         .publish_failed(staged.pending)
         .await
         .expect("the staged commit rolls back");
+    // The rollback replays what the window buffered — here one location and
+    // nothing else. Asserted rather than discarded: publish work coming back
+    // from THIS rollback would be a staged commit with nobody to resolve it.
+    assert!(
+        ingest.auto_commits.is_empty() && ingest.proposals.is_empty(),
+        "a rollback of a bare relay-list commit stages nothing further"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

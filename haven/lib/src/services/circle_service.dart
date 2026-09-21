@@ -588,17 +588,27 @@ final class LocationSendDeferred extends EncryptLocationOutcome {
   final List<String> proposals;
 }
 
-/// The folded outcome of ingesting one received `kind:445` via
-/// [CircleService.decryptLocationCollectingCommits] — the folded
-/// location-facing results AND any receive-side auto-commit the caller MUST
-/// publish then confirm/fail (Rule 13). Dart-native mirror of
+/// What the engine folded out of one call — the folded location-facing results,
+/// any receive-side auto-commit the caller MUST publish then confirm/fail
+/// (Rule 13), and any bare proposal to publish. Dart-native mirror of
 /// `DecryptLocationOutcomeFfi`.
+///
+/// Two origins, one shape: ingesting one received `kind:445`
+/// ([CircleService.decryptLocationCollectingCommits]), and RESOLVING a staged
+/// commit ([CircleService.confirmPendingCommit] /
+/// [CircleService.failPendingCommit]), which replays everything the engine
+/// buffered while that commit was in flight.
+///
+/// Every location it carries is ALREADY persisted to the last-known store by
+/// the Rust core before the call returns; the caller routes them for DISPLAY
+/// and for the receive-liveness stamp, never for durability.
 @immutable
 class DecryptLocationOutcome {
   /// Creates a [DecryptLocationOutcome].
   const DecryptLocationOutcome({
     required this.results,
     required this.autoCommits,
+    required this.proposals,
   });
 
   /// The folded location-facing results (locations, joins, updates, …).
@@ -606,6 +616,11 @@ class DecryptLocationOutcome {
 
   /// Receive-side auto-commits the caller MUST publish then confirm/fail.
   final List<PendingAutoCommit> autoCommits;
+
+  /// JSON-serialized bare proposal events to publish (no confirm) — the local
+  /// user's own re-proposed leave. Publish-or-lose, and recoverable: the
+  /// durable leave request makes a later convergence pass re-emit it.
+  final List<String> proposals;
 }
 
 /// Abstract interface for circle management services.
@@ -862,16 +877,27 @@ abstract class CircleService {
   /// Confirms a [PendingAutoCommit] after ≥1 relay acknowledged its publish
   /// (Rule 13). See [decryptLocationCollectingCommits].
   ///
+  /// Returns what the engine replayed out of the buffer it filled while that
+  /// commit was in flight: peer locations to surface, further auto-commits to
+  /// run through this same ladder, and proposals to publish. Dropping any of
+  /// them costs display freshness, a stalled eviction, or a wedged leave.
+  ///
   /// Throws [CircleServiceException] if the confirm fails.
-  Future<void> confirmPendingCommit(PendingCommitToken pending);
+  Future<DecryptLocationOutcome> confirmPendingCommit(
+    PendingCommitToken pending,
+  );
 
   /// Rolls back a [PendingAutoCommit] after a publish failure/timeout
   /// (Rule 13). See [decryptLocationCollectingCommits].
   ///
+  /// Returns the same replayed outcome [confirmPendingCommit] does — the
+  /// engine replays its buffer on both verdicts, so a no-ack must not cost a
+  /// peer's fix.
+  ///
   /// Best-effort: implementations should swallow rollback failures rather
   /// than throw, since the caller has already determined the publish did
-  /// not succeed.
-  Future<void> failPendingCommit(PendingCommitToken pending);
+  /// not succeed; an outcome with nothing in it is the honest report then.
+  Future<DecryptLocationOutcome> failPendingCommit(PendingCommitToken pending);
 
   /// Records that [mlsGroupId] entered the MLS `Unrecoverable` state (Rule 8).
   ///

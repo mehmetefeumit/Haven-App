@@ -2788,28 +2788,53 @@ fn convert_location_result(
     }
 }
 
-/// The folded outcome of ingesting one received `kind:445` — FFI mirror of
+/// What the engine folded out of one call — FFI mirror of
 /// `haven_core::circle::DecryptedIngest`.
 ///
-/// Carries the folded location results AND any receive-side auto-commit the
-/// engine staged (a peer `SelfRemove` eviction). Publish-before-apply (Rule 13 /
-/// security F13): for EACH [`Self::auto_commits`] entry, publish
-/// `commit_event_json` to the circle's relays, then
+/// Two origins, one shape: ingesting one received `kind:445`
+/// ([`CircleManagerFfi::decrypt_location_collecting_commits`]), and RESOLVING a
+/// staged commit ([`CircleManagerFfi::confirm_published`] /
+/// [`CircleManagerFfi::publish_failed`] / [`CircleManagerFfi::finalize_relay_update`]),
+/// which replays everything the engine buffered while that commit was in flight.
+///
+/// Carries the folded location results, any receive-side auto-commit the engine
+/// staged (a peer `SelfRemove` eviction), and any bare proposal.
+/// Publish-before-apply (Rule 13 / security F13): for EACH [`Self::auto_commits`]
+/// entry, publish `commit_event_json` to the circle's relays, then
 /// [`CircleManagerFfi::confirm_published`] on a ≥1-relay ACK (or
 /// [`CircleManagerFfi::publish_failed`] on failure) — exactly like the
 /// [`CommitToPublishFfi`] returned by remove / relay-update. NEVER confirm before
 /// a relay ACKs, and NEVER drop an entry silently (that re-forks the group the
 /// leaver departed).
 ///
-/// Both fields carry redacting `Debug` impls (`LocationMessageResultFfi` /
-/// `CommitToPublishFfi`), so the derived `Debug` here cannot leak group ids or
-/// coordinates.
-#[derive(Debug)]
+/// Every location it carries is ALREADY persisted to the last-known store by the
+/// core before the call returns; the caller routes them for DISPLAY and for the
+/// receive-liveness stamp, never for durability.
 pub struct DecryptLocationOutcomeFfi {
     /// The folded location-facing results (locations, joins, updates, …).
     pub results: Vec<LocationMessageResultFfi>,
     /// Receive-side auto-commits the caller MUST publish then confirm/fail.
     pub auto_commits: Vec<CommitToPublishFfi>,
+    /// JSON-serialized bare proposal events to publish (no confirm), mirroring
+    /// [`DeferredSendFfi::proposals`]: publish-or-lose, and recoverable — a
+    /// re-proposed `SelfRemove` is driven by the durable leave request, so a
+    /// later convergence pass re-emits it.
+    pub proposals: Vec<String>,
+}
+
+impl std::fmt::Debug for DecryptLocationOutcomeFfi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `proposals` is raw event JSON — it carries the `h` tag (the
+        // nostr_group_id) and an ephemeral pubkey (Rules 4/6) — and a count of
+        // folded results or staged commits tells one circle from another
+        // (Rule 15), so every field renders as a presence bit, exactly as
+        // `DeferredSendFfi` does.
+        f.debug_struct("DecryptLocationOutcomeFfi")
+            .field("has_results", &!self.results.is_empty())
+            .field("has_auto_commits", &!self.auto_commits.is_empty())
+            .field("has_proposals", &!self.proposals.is_empty())
+            .finish()
+    }
 }
 
 /// Discriminator for [`LeavePlanFfi`].
@@ -3433,6 +3458,9 @@ impl CircleManagerFfi {
         {
             Ok(events) => events,
             Err(e) => {
+                // The batch that rollback replays is discarded here: the core
+                // has already persisted every location in it, and this error
+                // path returns no outcome to route the rest through.
                 let _ = self.inner.publish_failed(pending_ref).await;
                 return Err(e);
             }
@@ -3635,6 +3663,56 @@ impl CircleManagerFfi {
 
     // ==================== Publish-before-apply (Rule 13) ====================
 
+    /// Converts a core `DecryptedIngest` into its FFI mirror, rolling every
+    /// staged auto-commit back if any item fails to serialize.
+    ///
+    /// F3: a convert failure MUST NOT drop the OTHER surfaced auto-commit
+    /// pendings on the floor. Every pending is collected up-front so a
+    /// mid-stream failure rolls each staged receive-side auto-commit back
+    /// item-by-item (`publish_failed`) instead of leaking them — otherwise a
+    /// group the leaver departed silently re-forks (Rule 13 / security F13).
+    async fn convert_ingest(
+        &self,
+        ingest: haven_core::circle::DecryptedIngest,
+    ) -> Result<DecryptLocationOutcomeFfi, String> {
+        let haven_core::circle::DecryptedIngest {
+            results,
+            auto_commits,
+            proposals,
+        } = ingest;
+        let results: Vec<LocationMessageResultFfi> =
+            results.into_iter().map(convert_location_result).collect();
+        let all_pendings: Vec<PendingStateRef> = auto_commits.iter().map(|c| c.pending).collect();
+        let converted = auto_commits
+            .into_iter()
+            .map(convert_commit_to_publish)
+            .collect::<Result<Vec<_>, String>>()
+            .and_then(|commits| {
+                proposals
+                    .iter()
+                    .map(commit_event_to_json)
+                    .collect::<Result<Vec<_>, String>>()
+                    .map(|proposals| (commits, proposals))
+            });
+        match converted {
+            Ok((auto_commits, proposals)) => Ok(DecryptLocationOutcomeFfi {
+                results,
+                auto_commits,
+                proposals,
+            }),
+            Err(e) => {
+                for pending in all_pendings {
+                    // Each rollback's own batch is discarded for the same
+                    // reason: the core persisted its locations before
+                    // returning, and this path hands the caller an error
+                    // rather than an outcome.
+                    let _ = self.inner.publish_failed(pending).await;
+                }
+                Err(e)
+            }
+        }
+    }
+
     /// Confirms a staged commit was published (≥1-relay OK-ack) so the engine
     /// applies it and advances the epoch.
     ///
@@ -3642,23 +3720,40 @@ impl CircleManagerFfi {
     /// optimistic-merge forks (Rule 13, security F13). Pass the `pending` token
     /// carried in a [`CircleCreationResultFfi`] / [`AddMembersResultFfi`] /
     /// [`CommitToPublishFfi`].
-    pub async fn confirm_published(&self, pending: PendingStateRefFfi) -> Result<(), String> {
-        self.inner
+    ///
+    /// Returns everything the engine replayed out of the buffer it filled while
+    /// that commit was in flight — peer locations included. The locations are
+    /// already persisted by the core; the caller routes them for DISPLAY, and
+    /// must run [`DecryptLocationOutcomeFfi::auto_commits`] through this same
+    /// ladder and publish its `proposals`.
+    pub async fn confirm_published(
+        &self,
+        pending: PendingStateRefFfi,
+    ) -> Result<DecryptLocationOutcomeFfi, String> {
+        let ingest = self
+            .inner
             .confirm_published(pending.into())
             .await
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+        self.convert_ingest(ingest).await
     }
 
     /// Reports that a staged publish FAILED; the engine discards the staged
     /// commit and returns the group to `Stable` at the prior epoch.
     ///
     /// The publish-failure counterpart to [`confirm_published`](Self::confirm_published);
-    /// pass the same `pending` token.
-    pub async fn publish_failed(&self, pending: PendingStateRefFfi) -> Result<(), String> {
-        self.inner
+    /// pass the same `pending` token. It replays the same buffer, so it returns
+    /// the same outcome — a no-ack must not cost the peer's fix either.
+    pub async fn publish_failed(
+        &self,
+        pending: PendingStateRefFfi,
+    ) -> Result<DecryptLocationOutcomeFfi, String> {
+        let ingest = self
+            .inner
             .publish_failed(pending.into())
             .await
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+        self.convert_ingest(ingest).await
     }
 
     // ==================== Member Management ====================
@@ -4050,16 +4145,21 @@ impl CircleManagerFfi {
     /// for the [`update_circle_relays`](Self::update_circle_relays) flow
     /// (members converge via the receive path). Pass the `pending` token from
     /// the [`CommitToPublishFfi`] and the circle's `mls_group_id`.
+    ///
+    /// Returns the confirm's replayed outcome, exactly as
+    /// [`confirm_published`](Self::confirm_published) does.
     pub async fn finalize_relay_update(
         &self,
         pending: PendingStateRefFfi,
         mls_group_id: Vec<u8>,
-    ) -> Result<(), String> {
+    ) -> Result<DecryptLocationOutcomeFfi, String> {
         let group_id = GroupId::from_slice(&mls_group_id);
-        self.inner
+        let ingest = self
+            .inner
             .finalize_relay_update(pending.into(), &group_id)
             .await
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+        self.convert_ingest(ingest).await
     }
 
     // ==================== Location Sharing ====================
@@ -4438,47 +4538,15 @@ impl CircleManagerFfi {
             .await
             .map_err(|e| haven_core::nostr::mls::redact_hex_sequences(&e.to_string()))?;
 
-        let results: Vec<LocationMessageResultFfi> = ingest
-            .results
-            .into_iter()
-            .map(convert_location_result)
-            .collect();
-        // F3: a convert failure MUST NOT drop the OTHER surfaced auto-commit
-        // pendings on the floor. Collect every pending up-front so a mid-stream
-        // failure rolls each staged receive-side auto-commit back item-by-item
-        // (`publish_failed`) instead of leaking them — otherwise a group the
-        // leaver departed silently re-forks (Rule 13 / security F13).
-        let all_pendings: Vec<PendingStateRef> =
-            ingest.auto_commits.iter().map(|c| c.pending).collect();
-        let mut auto_commits: Vec<CommitToPublishFfi> =
-            Vec::with_capacity(ingest.auto_commits.len());
-        let mut convert_err: Option<String> = None;
-        for commit in ingest.auto_commits {
-            match convert_commit_to_publish(commit) {
-                Ok(ffi) => auto_commits.push(ffi),
-                Err(e) => {
-                    convert_err = Some(e);
-                    break;
-                }
-            }
-        }
-        if let Some(e) = convert_err {
-            for pending in all_pendings {
-                let _ = self.inner.publish_failed(pending).await;
-            }
-            return Err(e);
-        }
+        let outcome = self.convert_ingest(ingest).await?;
 
         log::debug!(
             "[FFI decrypt] {event_handle} ingested (any_result={}, any_auto_commit={})",
-            !results.is_empty(),
-            !auto_commits.is_empty()
+            !outcome.results.is_empty(),
+            !outcome.auto_commits.is_empty()
         );
 
-        Ok(DecryptLocationOutcomeFfi {
-            results,
-            auto_commits,
-        })
+        Ok(outcome)
     }
 
     // ==================== Sync Cursors ====================
@@ -8347,16 +8415,12 @@ impl RelayManagerFfi {
     pub async fn run_catchup_all_circles(
         &self,
         circle: &CircleManagerFfi,
-        own_pubkey_hex: String,
         max_duration_secs: u64,
     ) -> Result<CatchupResultFfi, String> {
         let circle_mgr = circle.inner.clone();
-        let own_pk = nostr::PublicKey::parse(&own_pubkey_hex)
-            .map_err(|e| format!("invalid own pubkey: {e}"))?;
         let outcome = haven_core::relay::catchup::run_catchup_all_circles(
             &circle_mgr,
             &self.inner,
-            &own_pk,
             max_duration_secs,
         )
         .await;
@@ -16099,11 +16163,11 @@ mod log_anonymity_tests {
 
     use super::{
         AddMembersResultFfi, BuiltRelayListEventFfi, BuiltUnpublishFfi, CircleFfi, CircleMemberFfi,
-        CircleWithMembersFfi, CommitToPublishFfi, ContactFfi, DecryptedLocationFfi,
-        DeferredSendFfi, DirectoryEntryFfi, DirectoryTierFfi, EncryptLocationOutcomeFfi,
-        EncryptedLocationFfi, FfiRelayEvent, FfiRelayEventKind, FfiSyncStatusReason,
-        GiftWrappedWelcomeFfi, HavenTargetFilter, InMemoryStorage, InvitationFfi,
-        LastKnownLocationFfi, LeavePlanFfi, LeavePlanKindFfi, LocationMessage,
+        CircleWithMembersFfi, CommitToPublishFfi, ContactFfi, DecryptLocationOutcomeFfi,
+        DecryptedLocationFfi, DeferredSendFfi, DirectoryEntryFfi, DirectoryTierFfi,
+        EncryptLocationOutcomeFfi, EncryptedLocationFfi, FfiRelayEvent, FfiRelayEventKind,
+        FfiSyncStatusReason, GiftWrappedWelcomeFfi, HavenTargetFilter, InMemoryStorage,
+        InvitationFfi, LastKnownLocationFfi, LeavePlanFfi, LeavePlanKindFfi, LocationMessage,
         LocationMessageResultFfi, LocationMessageResultKindFfi, LogAliasClassFfi,
         MemberKeyPackageFfi, NostrIdentityManager, PendingStateRefFfi, ProfileMetadataFfi,
         ProfilePictureRefFfi, PublicIdentity, RelayConnectionStatusFfi, RelayEventCheckFfi,
@@ -16656,6 +16720,28 @@ mod log_anonymity_tests {
             epoch: 1_757_000_123,
         };
         assert_debug_redacted!(result, "LocationMessageResultFfi", NEEDLES);
+    }
+
+    #[test]
+    fn decrypt_location_outcome_ffi_debug_redacts_every_magnitude() {
+        let outcome = |items: usize| DecryptLocationOutcomeFfi {
+            results: (0..items)
+                .map(|_| LocationMessageResultFfi {
+                    kind: LocationMessageResultKindFfi::Location,
+                    location: Some(decrypted()),
+                    mls_group_id: group_id_bytes(),
+                    epoch: 1_757_000_123,
+                })
+                .collect(),
+            auto_commits: (0..items).map(|_| commit()).collect(),
+            proposals: vec![format!(r#"{{"tags":[["h","{HEX_ID}"]]}}"#); items],
+        };
+        assert_debug_redacted!(outcome(3), "DecryptLocationOutcomeFfi", NEEDLES);
+        assert_magnitude_invisible(
+            &format!("{:?}", outcome(1)),
+            &format!("{:?}", outcome(5)),
+            "DecryptLocationOutcomeFfi",
+        );
     }
 
     #[test]

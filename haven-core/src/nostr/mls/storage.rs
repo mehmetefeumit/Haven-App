@@ -527,8 +527,56 @@ pub fn delete_openmls_group_state_for_test(
     .map_err(|_| storage_err("delete openmls_values"))
 }
 
-/// A plain `rusqlite` connection onto a CLOSED MLS database, keyed the way
+/// Arms or disarms a `BEFORE UPDATE` abort trigger on the engine's stored
+/// message table.
+///
+/// Test-only fault injection, and the only deterministic way to make an
+/// in-flight `replay_buffered_messages` fail: the engine writes each replayed
+/// message's terminal state through that table, AFTER it has already pushed the
+/// decrypted content to its event buffer. With the trigger armed, a confirm /
+/// rollback therefore returns `Err` with a peer location stranded in the
+/// engine's buffer — the exact shape a `ForkedEpoch` mid-replay abort produces,
+/// reachable without building two sibling commits.
+///
+/// Unlike the `openmls_values` injectors above this runs against a LIVE
+/// database: the trigger has to be installed between staging a commit and
+/// resolving it. Disarm it as soon as the assertion is made.
+///
+/// If `cgka_messages` can no longer be found, MDK renamed it at the pinned rev
+/// — the invariant under test is unchanged, only the injection needs re-aiming.
+///
+/// # Errors
+///
+/// Returns [`NostrError::StorageError`] if the database cannot be opened,
+/// decrypted, or written.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn set_stored_message_write_fault_for_test(
+    db_path: &Path,
+    key: &SqlCipherKey,
+    armed: bool,
+) -> Result<()> {
+    let conn = open_tamper_connection(db_path, key)?;
+    let sql = if armed {
+        "CREATE TRIGGER haven_stored_message_write_fault
+         BEFORE UPDATE ON cgka_messages
+         BEGIN SELECT RAISE(ABORT, 'injected stored-message write fault'); END;"
+    } else {
+        "DROP TRIGGER IF EXISTS haven_stored_message_write_fault;"
+    };
+    conn.execute_batch(sql)
+        .map_err(|_| storage_err("set the stored-message write fault"))
+}
+
+/// A second plain `rusqlite` connection onto an MLS database, keyed the way
 /// `storage-sqlite` keys its own.
+///
+/// The `openmls_values` injectors above require the database to be CLOSED — they
+/// delete state a live session holds in memory, so a live one would not see the
+/// deletion and would write its cached copy back. The stored-message write
+/// fault is the opposite: it is only useful against a LIVE session, because the
+/// call it has to break is one the engine is in the middle of. `SQLite` permits
+/// both; which one a caller needs is the caller's contract, not this
+/// function's.
 #[cfg(any(test, feature = "test-utils"))]
 fn open_tamper_connection(db_path: &Path, key: &SqlCipherKey) -> Result<rusqlite::Connection> {
     let conn =

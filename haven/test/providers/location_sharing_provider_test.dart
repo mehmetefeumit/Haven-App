@@ -84,6 +84,7 @@ void main() {
     Circle? circle,
   }) async {
     final mockIdentityService = _MockIdentityService(identity: identity);
+    final selectedCircle = circle ?? TestCircleFactory.createCircle();
 
     // Prime the mock circle service with decrypt results so that
     // LocationSharingService.fetchMemberLocations returns [locations].
@@ -110,7 +111,9 @@ void main() {
                   timestamp: loc.timestamp,
                   expiresAt: loc.expiresAt,
                 ),
-                mlsGroupId: const [],
+                // The ambient circle's own id — never empty in production
+                // (Rust's `convert_location_result` sets it on every variant).
+                mlsGroupId: selectedCircle.mlsGroupId,
                 epoch: 0,
               ),
             ],
@@ -121,8 +124,6 @@ void main() {
       circleService: mockCircle,
       relayService: mockRelay,
     );
-
-    final selectedCircle = circle ?? TestCircleFactory.createCircle();
 
     // Seed the in-memory cache so the flag-on `cachedLocations` read path
     // returns [locations] (see the doc comment above). Idempotent w.r.t. the
@@ -702,6 +703,100 @@ void main() {
           1,
           reason: 'the blocked circle must never reach encryptLocation',
         );
+      },
+    );
+  });
+
+  // ---------------------------------------------------------------------------
+  // Group: a fix that only ever arrived on a publish resolution
+  // ---------------------------------------------------------------------------
+
+  group('memberLocationsProvider — commit-gap replay', () {
+    test(
+      'surfaces a location that arrived ONLY on a confirm outcome, under '
+      'either live-sync setting',
+      () async {
+        // The one event the poll fetches stages an auto-commit and folds NO
+        // result of its own: the peer's fix exists only in the buffer the
+        // engine replays when that commit is confirmed. Written to hold under
+        // BOTH compile-time branches of `liveSyncEnabled` — the flag-on read
+        // takes `cachedLocations`, the flag-off read re-polls and returns the
+        // same cache — because the flag is a `bool.fromEnvironment` const and
+        // the coverage gate runs the suite in both configurations.
+        final peerFix = DecryptedLocation(
+          senderPubkey: _otherPubkey,
+          latitude: 51.5,
+          longitude: -0.12,
+          geohash: 'gcpv',
+          timestamp: DateTime.now(),
+          expiresAt: DateTime.now().add(const Duration(hours: 1)),
+        );
+        final selectedCircle = TestCircleFactory.createCircle();
+        final mockRelay = MockRelayService(
+          groupMessages: const [
+            '{"id":"evtStaging","kind":445,"content":"enc"}',
+          ],
+        );
+        final mockCircle = MockCircleService()
+          ..decryptLocationResults = [const []]
+          ..decryptLocationAutoCommits[0] = [
+            PendingAutoCommit(
+              // The `h` names `selectedCircle` (nostrGroupId `[5,6,7,8]`), the
+              // ambient circle this commit resolves against.
+              commitEventJson:
+                  '{"id":"commit","kind":445,"tags":[["h","05060708"]]}',
+              pendingToken: PendingCommitToken(BigInt.from(5)),
+            ),
+          ]
+          ..confirmPendingCommitOutcomes[0] = DecryptLocationOutcome(
+            results: [
+              LocationEventResult(
+                kind: LocationEventKind.location,
+                location: peerFix,
+                mlsGroupId: selectedCircle.mlsGroupId,
+                epoch: 0,
+              ),
+            ],
+            autoCommits: const [],
+            proposals: const [],
+          );
+
+        final locationService = LocationSharingService(
+          circleService: mockCircle,
+          relayService: mockRelay,
+        );
+        // The receive pass that resolves the staged commit. In production this
+        // is the poll cycle (flag-off) or the deferred-send plane (flag-on);
+        // either way it runs on the service, not in the provider.
+        await locationService.fetchMemberLocations(circle: selectedCircle);
+
+        final container = ProviderContainer(
+          overrides: [
+            identityServiceProvider.overrideWithValue(
+              _MockIdentityService(
+                identity: Identity(
+                  pubkeyHex: _selfPubkey,
+                  npub: 'npub1self',
+                  createdAt: DateTime(2025),
+                ),
+              ),
+            ),
+            locationSharingServiceProvider.overrideWithValue(locationService),
+            selectedCircleProvider.overrideWithValue(selectedCircle),
+            profileServiceProvider.overrideWithValue(MockProfileService()),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        final result = await container.read(memberLocationsProvider.future);
+
+        expect(
+          result.map((loc) => loc.pubkey),
+          [_otherPubkey],
+          reason: 'the engine delivers a buffered message once; a replay the '
+              'provider never sees is a pin that never appears',
+        );
+        expect(result.single.latitude, 51.5);
       },
     );
   });

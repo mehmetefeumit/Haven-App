@@ -252,13 +252,16 @@ void main() {
       expect(
         code,
         contains(
-          'if (published) { await circleManager.confirmPublished(pending: '
-          'commit.pending); } else { await circleManager.publishFailed('
-          'pending: commit.pending); }',
+          'if (published) { resolved = await circleManager.confirmPublished( '
+          'pending: commit.pending, ); } else { resolved = await '
+          'circleManager.publishFailed( pending: commit.pending, ); }',
         ),
         reason:
             'confirm on a >=1-relay ACK, roll back otherwise — never the '
-            'other way round, and never neither',
+            'other way round, and never neither. Both arms now BIND the '
+            'resolution: it carries the peer locations the engine replayed '
+            'out of the buffer that commit was blocking, and a binding that '
+            'went back to `await …;` would drop them again',
       );
     });
   });

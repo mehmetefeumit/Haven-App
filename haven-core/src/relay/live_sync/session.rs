@@ -736,11 +736,14 @@ impl LiveSyncCore {
         // cheaply cloneable (internally `Arc`-backed).
         let publisher: Arc<dyn crate::relay::auto_commit::AutoCommitPublisher> =
             Arc::new(client.clone());
-        let processor = Arc::new(EngineProcessor::with_publisher(
-            Arc::clone(&circle),
-            bus.clone(),
-            publisher,
-        ));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let mut processor =
+            EngineProcessor::with_publisher(Arc::clone(&circle), bus.clone(), publisher);
+        // The redemption pass runs under the lifecycle lock; without this it
+        // would hold it through a cascade of relay round-trips and a logout
+        // would look hung.
+        processor.set_shutdown_signal(Arc::clone(&shutdown));
+        let processor = Arc::new(processor);
         Self {
             client,
             circle,
@@ -749,7 +752,7 @@ impl LiveSyncCore {
             bus,
             own_pubkey,
             salt: generate_session_salt(),
-            shutdown: Arc::new(AtomicBool::new(false)),
+            shutdown,
             tasks: StdMutex::new(Vec::new()),
             cancel_tx: watch::channel(false).0,
             active: Arc::new(RwLock::new(None)),

@@ -17,6 +17,33 @@ library;
 import 'package:flutter/foundation.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/relay_service.dart';
+import 'package:haven/src/utils/event_tags.dart';
+import 'package:haven/src/utils/log_alias.dart';
+
+/// Runaway guard on the resolve ladder, mirroring Rust's
+/// `haven_core::relay::auto_commit::RESOLVE_RUNAWAY_CAP` one-for-one.
+///
+/// NOT the normal exit: the ladder runs until its worklist is empty, because a
+/// commit surfaced by a confirm has exactly the same Rule-13 obligation as the
+/// one that surfaced it, and nothing else in a poll-only build ever redeems it
+/// (`redeem_removal_deferrals` has one production driver, and it is the
+/// live-sync session). Reaching this cap means a bug, and the disposition is
+/// the fail-report rung below — never a silent discard.
+///
+/// It counts commits resolved per CALL, and 16 is safe only because that
+/// breadth is bounded elsewhere: an account holds at most
+/// `kMaxCirclesPerAccount` (10, `publish_stagger.dart`) circles, so a batch in
+/// which every circle loses a member still stays under this — raise that
+/// bound past this one and an ordinary mass-leave reaches the cap, where in a
+/// short-lived isolate the unresolved work is terminal.
+const int resolveRunawayCap = 16;
+
+/// Nothing replayed — the shape every rung that resolved no batch returns.
+const DecryptLocationOutcome emptyDecryptOutcome = DecryptLocationOutcome(
+  results: [],
+  autoCommits: [],
+  proposals: [],
+);
 
 /// Publishes every [autoCommits] entry and resolves its staged state.
 ///
@@ -61,13 +88,22 @@ import 'package:haven/src/services/relay_service.dart';
 ///
 /// Best-effort per entry: a failure is logged, never thrown, so one bad
 /// auto-commit cannot abort the surrounding decrypt/persist loop.
-Future<void> resolveAutoCommits({
+///
+/// ## Why this is a LOOP
+///
+/// Resolving a commit makes the engine replay everything it buffered while that
+/// commit was in flight, and that replay can stage the NEXT eviction — a second
+/// leaver whose `SelfRemove` was buffered behind the first. Those come back on
+/// the resolution's own outcome, carry the same Rule-13 obligation, and are
+/// re-fed here until the worklist is empty. Returns everything the replays
+/// folded: peer locations for the caller to surface, and proposals to publish.
+Future<DecryptLocationOutcome> resolveAutoCommits({
   required RelayService relayService,
   required CircleService circleService,
   required List<PendingAutoCommit> autoCommits,
   required Circle? circle,
 }) async {
-  if (autoCommits.isEmpty) return;
+  if (autoCommits.isEmpty) return emptyDecryptOutcome;
 
   var relays = circle?.relays ?? const <String>[];
   if (circle != null) {
@@ -83,31 +119,134 @@ Future<void> resolveAutoCommits({
     }
   }
 
-  for (final commit in autoCommits) {
-    if (relays.isEmpty) {
-      debugPrint(
-        '[LocationService] auto-commit: no relays available — leaving it owed',
-      );
-      try {
-        // NOT a rollback: Rust refuses to discard a removal-bearing commit, so
-        // this reports "no relay acked" and the removal stays owed for the next
-        // foreground redemption. Discarding it would evict nobody and still
-        // wedge the circle — see this library's doc.
-        await circleService.failPendingCommit(commit.pendingToken);
-      } on Object catch (e) {
-        debugPrint(
-          '[LocationService] auto-commit fail-report failed: '
-          '${e.runtimeType}',
-        );
-      }
-      continue;
-    }
-    await _publishAndConfirmAutoCommit(
-      relayService: relayService,
-      circleService: circleService,
-      commit: commit,
-      relays: relays,
+  if (relays.isEmpty) {
+    debugPrint(
+      '[LocationService] auto-commit: no relays available — leaving it owed',
     );
+  }
+
+  final results = <LocationEventResult>[];
+  final proposals = <String>[];
+  // A ref resolved once is never resolved again: the second call would be
+  // against a token the engine has already retired.
+  final resolvedTokens = <BigInt>{};
+  var worklist = autoCommits;
+
+  for (var generation = 0; worklist.isNotEmpty; generation++) {
+    if (generation == resolveRunawayCap) {
+      // Rule 15: never add a circle handle here. "circle#a91f3c ran a
+      // cascade" is a per-circle activity signal — that a peer just left it.
+      debugPrint(
+        '[LocationService] auto-commit ladder stopped at the runaway cap; '
+        '${magnitudeBucket(worklist.length)} commit(s) stand owed',
+      );
+      for (final commit in worklist) {
+        final outcome = await _reportUnacked(circleService, commit);
+        results.addAll(outcome.results);
+        proposals.addAll(outcome.proposals);
+      }
+      break;
+    }
+
+    final next = <PendingAutoCommit>[];
+    for (final commit in worklist) {
+      if (!resolvedTokens.add(commit.pendingToken.value)) continue;
+      final target = await _relaysForCommit(
+        circleService: circleService,
+        commitEventJson: commit.commitEventJson,
+        ambient: circle,
+        ambientRelays: relays,
+      );
+      final outcome = target.isEmpty
+          ? await _reportUnacked(circleService, commit)
+          : await _publishAndConfirmAutoCommit(
+              relayService: relayService,
+              circleService: circleService,
+              commit: commit,
+              relays: target,
+            );
+      results.addAll(outcome.results);
+      proposals.addAll(outcome.proposals);
+      next.addAll(outcome.autoCommits);
+    }
+    worklist = next;
+  }
+
+  return DecryptLocationOutcome(
+    results: results,
+    autoCommits: const [],
+    proposals: proposals,
+  );
+}
+
+/// The relays one staged commit must be published to: the circle its own `h`
+/// tag names.
+///
+/// [ambientRelays] (the caller's circle, freshly re-read) is the answer for the
+/// common case — an `h` naming that same circle, which is every
+/// first-generation commit, since the ingest that staged it was that circle's.
+/// A commit a RESOLUTION surfaced can belong to another group, because the
+/// engine's buffers are global; sending it to the ambient relay set would tell
+/// those operators about the second group and might never reach the members it
+/// evicts. A missing `h` — a production kind-445 commit never omits one — or
+/// one naming no circle this device holds yields NO relays, which takes the
+/// fail-report rung — the commit stays owed rather than being published to
+/// the wrong place, or to the ambient circle on a guess.
+Future<List<String>> _relaysForCommit({
+  required CircleService circleService,
+  required String commitEventJson,
+  required Circle? ambient,
+  required List<String> ambientRelays,
+}) async {
+  final h = hTagOf(commitEventJson);
+  if (h == null) {
+    debugPrint(
+      '[LocationService] auto-commit carries no `h` tag — leaving it owed',
+    );
+    return const [];
+  }
+  if (ambient != null && _hexOf(ambient.nostrGroupId) == h) {
+    return ambientRelays;
+  }
+  try {
+    final held = await circleService.getVisibleCircles();
+    final target = held
+        .where((c) => _hexOf(c.nostrGroupId) == h)
+        .firstOrNull;
+    if (target != null) return target.relays;
+  } on Object catch (e) {
+    debugPrint(
+      '[LocationService] auto-commit routing lookup failed: ${e.runtimeType}',
+    );
+  }
+  debugPrint(
+    '[LocationService] auto-commit names a circle this device does not hold '
+    '— leaving it owed',
+  );
+  return const [];
+}
+
+/// Lowercase hex of a raw id, for matching an `h` tag against a circle.
+String _hexOf(List<int> id) =>
+    id.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+
+/// Reports "no relay acked" for one commit, returning whatever that resolution
+/// replayed.
+///
+/// NOT a rollback: Rust refuses to discard a removal-bearing commit, so this
+/// leaves the removal owed for the next foreground redemption. Discarding it
+/// would evict nobody and still wedge the circle — see this library's doc.
+Future<DecryptLocationOutcome> _reportUnacked(
+  CircleService circleService,
+  PendingAutoCommit commit,
+) async {
+  try {
+    return await circleService.failPendingCommit(commit.pendingToken);
+  } on Object catch (e) {
+    debugPrint(
+      '[LocationService] auto-commit fail-report failed: ${e.runtimeType}',
+    );
+    return emptyDecryptOutcome;
   }
 }
 
@@ -117,7 +256,10 @@ Future<void> resolveAutoCommits({
 /// which for a removal-bearing commit leaves it OWED rather than rolling it
 /// back (see this library's doc for the retry that actually exists). Never
 /// throws.
-Future<void> _publishAndConfirmAutoCommit({
+///
+/// Returns what the resolution replayed, so the caller can surface the peer
+/// locations that were buffered behind this commit and run the next generation.
+Future<DecryptLocationOutcome> _publishAndConfirmAutoCommit({
   required RelayService relayService,
   required CircleService circleService,
   required PendingAutoCommit commit,
@@ -143,17 +285,17 @@ Future<void> _publishAndConfirmAutoCommit({
 
   try {
     if (published) {
-      await circleService.confirmPendingCommit(commit.pendingToken);
-    } else {
-      // The removal stays owed — Rust will not discard a peer's eviction, and
-      // the obligation it recorded before this commit crossed the FFI is what
-      // the next foreground live-sync open publishes.
-      await circleService.failPendingCommit(commit.pendingToken);
+      return await circleService.confirmPendingCommit(commit.pendingToken);
     }
+    // The removal stays owed — Rust will not discard a peer's eviction, and
+    // the obligation it recorded before this commit crossed the FFI is what
+    // the next foreground live-sync open publishes.
+    return await circleService.failPendingCommit(commit.pendingToken);
   } on Object catch (e) {
     debugPrint(
       '[LocationService] auto-commit '
       '${published ? "confirm" : "fail-report"} failed: ${e.runtimeType}',
     );
+    return emptyDecryptOutcome;
   }
 }

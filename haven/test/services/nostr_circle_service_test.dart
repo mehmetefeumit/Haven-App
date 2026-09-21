@@ -18,6 +18,7 @@ library;
 import 'dart:async';
 
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/rust/api.dart';
@@ -1135,6 +1136,487 @@ void main() {
       );
     });
   });
+
+  _publishResolutionTests();
+}
+
+/// What a publish resolution hands back, and what this service does with it.
+///
+/// Resolving a staged commit replays everything the engine buffered while that
+/// commit was in flight. Two promises live on this side of the boundary: the
+/// results are CONVERTED (which is what records a replayed `Unrecoverable` as
+/// a blocked circle, Rule 8), and a throwing FFI still reaches the caller as a
+/// generic exception rather than as the engine's own error text (Rule 8 again,
+/// and Rule 15 — that text can carry group ids).
+void _publishResolutionTests() {
+  DecryptLocationOutcomeFfi outcome({
+    List<LocationMessageResultFfi> results = const [],
+    List<String> proposals = const [],
+  }) => DecryptLocationOutcomeFfi(
+    results: results,
+    autoCommits: const [],
+    proposals: proposals,
+  );
+
+  LocationMessageResultFfi unrecoverable(List<int> mlsGroupId) =>
+      LocationMessageResultFfi(
+        kind: LocationMessageResultKindFfi.unrecoverable,
+        mlsGroupId: Uint8List.fromList(mlsGroupId),
+        epoch: BigInt.zero,
+      );
+
+  LocationMessageResultFfi peerLocation(List<int> mlsGroupId) =>
+      LocationMessageResultFfi(
+        kind: LocationMessageResultKindFfi.location,
+        location: DecryptedLocationFfi(
+          senderPubkey: 'ab' * 32,
+          latitude: 12.5,
+          longitude: -3.25,
+          geohash: 'ezs42',
+          timestamp: 1800000000,
+          expiresAt: 1800000228,
+        ),
+        mlsGroupId: Uint8List.fromList(mlsGroupId),
+        epoch: BigInt.from(4),
+      );
+
+  group('confirmPendingCommit / failPendingCommit', () {
+    const groupId = [9, 8, 7, 6];
+
+    test('returns the converted outcome, locations and proposals intact',
+        () async {
+      final manager = _ResolutionManager(
+        onConfirm: outcome(
+          results: [peerLocation(groupId)],
+          proposals: const ['{"id":"leave","kind":445}'],
+        ),
+      );
+      final service = NostrCircleService.withInjectedManager(
+        relayService: _StubRelayService(),
+        injectedManager: manager,
+      );
+
+      final resolved = await service.confirmPendingCommit(
+        PendingCommitToken(BigInt.from(3)),
+      );
+
+      expect(resolved.results.single.location?.senderPubkey, 'ab' * 32);
+      expect(resolved.results.single.location?.latitude, 12.5);
+      expect(
+        resolved.results.single.location?.timestamp,
+        DateTime.fromMillisecondsSinceEpoch(1800000000 * 1000),
+        reason: 'the FFI carries seconds; the service type carries a DateTime',
+      );
+      expect(resolved.proposals, ['{"id":"leave","kind":445}']);
+      expect(resolved.autoCommits, isEmpty);
+    });
+
+    test('a replayed Unrecoverable blocks the circle (Rule 8)', () async {
+      final manager = _ResolutionManager(
+        onConfirm: outcome(results: [unrecoverable(groupId)]),
+      );
+      final service = NostrCircleService.withInjectedManager(
+        relayService: _StubRelayService(),
+        injectedManager: manager,
+      );
+
+      expect(service.isCircleBlocked(groupId), isFalse);
+      await service.confirmPendingCommit(PendingCommitToken(BigInt.from(3)));
+      expect(
+        service.isCircleBlocked(groupId),
+        isTrue,
+        reason: 'a resolution that hands back the raw FFI results without '
+            'converting them loses the blocked-circle marker, and the UI goes '
+            'on offering send/mutate on a group MLS cannot recover',
+      );
+    });
+
+    test('a throwing confirm surfaces a generic exception, never the engine '
+        'text', () async {
+      const engineText = 'mls group 0xdeadbeef is unrecoverable';
+      final manager = _ResolutionManager(confirmThrows: engineText);
+      final service = NostrCircleService.withInjectedManager(
+        relayService: _StubRelayService(),
+        injectedManager: manager,
+      );
+
+      await expectLater(
+        service.confirmPendingCommit(PendingCommitToken(BigInt.from(3))),
+        throwsA(
+          isA<CircleServiceException>().having(
+            (e) => e.message,
+            'message',
+            'Failed to confirm auto-commit',
+          ),
+        ),
+      );
+    });
+
+    test('a throwing fail-report is swallowed and reports an empty outcome',
+        () async {
+      final manager = _ResolutionManager(failThrows: 'boom');
+      final service = NostrCircleService.withInjectedManager(
+        relayService: _StubRelayService(),
+        injectedManager: manager,
+      );
+
+      final resolved = await service.failPendingCommit(
+        PendingCommitToken(BigInt.from(3)),
+      );
+
+      expect(resolved.results, isEmpty);
+      expect(resolved.autoCommits, isEmpty);
+      expect(
+        resolved.proposals,
+        isEmpty,
+        reason: 'the caller already knows the publish failed; a rollback that '
+            'itself failed replayed nothing, and an empty outcome says so',
+      );
+    });
+  });
+
+  group('a modal flow RESOLVES the work its resolution surfaced', () {
+    // A peer leaving while the user taps Update Relays lands inside that
+    // confirm's fold (it drains convergence for up to ~120 ms; the engine's
+    // SelfRemove jitter is ≤50 ms), so the confirm hands back a STAGED,
+    // OWED eviction commit. Discarding it leaves the circle unsendable, and
+    // in a HAVEN_LIVE_SYNC=false build nothing else ever redeems or reports
+    // it — `redeem_removal_deferrals`' only driver is the live-sync burst.
+    // Nothing on this path reads `liveSyncEnabled` (grep-verified), so one
+    // run proves both configurations; the suite is also run flag-off.
+    const groupId = [4, 4, 4, 4];
+    final held = _circleWithRelays(groupId, const ['wss://circle.example']);
+    final surfacedCommit = CommitToPublishFfi(
+      commitEventJson: '{"id":"eviction","kind":445,"tags":[["h","04040404"]]}',
+      pending: PendingStateRefFfi(token: BigInt.from(77)),
+    );
+
+    ({NostrCircleService service, _ResolutionManager manager,
+      _AcceptingRelayService relay}) build({
+      required DecryptLocationOutcomeFfi onFinalize,
+      int acceptsFirst = 1 << 20,
+      List<CircleWithMembersFfi> alsoHeld = const [],
+    }) {
+      final order = <String>[];
+      final manager = _ResolutionManager(
+        circle: held,
+        alsoHeld: alsoHeld,
+        stagedCommit: CommitToPublishFfi(
+          commitEventJson: '{"id":"relayRotation","kind":445}',
+          pending: PendingStateRefFfi(token: BigInt.from(11)),
+        ),
+        onFinalize: onFinalize,
+        order: order,
+      );
+      final relay = _AcceptingRelayService(
+        acceptsFirst: acceptsFirst,
+        order: order,
+      );
+      return (
+        service: NostrCircleService.withInjectedManager(
+          relayService: relay,
+          injectedManager: manager,
+        ),
+        manager: manager,
+        relay: relay,
+      );
+    }
+
+    test('publishes then confirms an auto-commit the confirm handed back',
+        () async {
+      final t = build(
+        onFinalize: DecryptLocationOutcomeFfi(
+          results: const [],
+          autoCommits: [surfacedCommit],
+          proposals: const [],
+        ),
+      );
+
+      await t.service.updateCircleRelays(
+        mlsGroupId: groupId,
+        newRelays: const ['wss://new.example'],
+      );
+
+      expect(t.manager.order, [
+        'publish:{"id":"relayRotation","kind":445}',
+        'finalize:11',
+        'publish:{"id":"eviction","kind":445,"tags":[["h","04040404"]]}',
+        'confirm:77',
+      ], reason: 'Rule 13 in order: the surfaced eviction is published FIRST '
+          'and confirmed only after a relay acked it — never confirmed '
+          'blind, never left staged');
+      expect(
+        t.relay.publishedTo.last,
+        held.circle.relays,
+        reason: "routed by the commit's own `h`, like every Rust plane",
+      );
+    });
+
+    test('reports an unacked surfaced auto-commit instead of confirming it',
+        () async {
+      // The rotation itself is acked; only the surfaced eviction's publish
+      // is rejected, which is the rung under test.
+      final t = build(
+        acceptsFirst: 1,
+        onFinalize: DecryptLocationOutcomeFfi(
+          results: const [],
+          autoCommits: [surfacedCommit],
+          proposals: const [],
+        ),
+      );
+
+      await t.service.updateCircleRelays(
+        mlsGroupId: groupId,
+        newRelays: const ['wss://new.example'],
+      );
+
+      expect(
+        t.relay.published,
+        contains(surfacedCommit.commitEventJson),
+        reason: 'Rule 13: the commit is ALWAYS published — only the '
+            'confirm/report branch depends on the outcome',
+      );
+      expect(
+        t.manager.rolledBackTokens,
+        contains(BigInt.from(77)),
+        reason: 'no ack ⇒ the fail-report rung, which for a removal-bearing '
+            'commit leaves it owed rather than discarding it',
+      );
+      expect(t.manager.confirmedTokens, isNot(contains(BigInt.from(77))));
+    });
+
+    test('publishes a surfaced proposal to the circle its own `h` names',
+        () async {
+      final other = _circleWithRelays(const [
+        5,
+        5,
+      ], const ['wss://other.example']);
+      final t = build(
+        alsoHeld: [other],
+        onFinalize: const DecryptLocationOutcomeFfi(
+          results: [],
+          autoCommits: [],
+          proposals: [
+            '{"id":"leave","kind":445,"tags":[["h","0505"]]}',
+            '{"id":"orphan","kind":445,"tags":[["h","beef"]]}',
+          ],
+        ),
+      );
+
+      await t.service.updateCircleRelays(
+        mlsGroupId: groupId,
+        newRelays: const ['wss://new.example'],
+      );
+
+      final leaveAt = t.relay.published.indexOf(
+        '{"id":"leave","kind":445,"tags":[["h","0505"]]}',
+      );
+      expect(leaveAt, isNonNegative);
+      expect(
+        t.relay.publishedTo[leaveAt],
+        other.circle.relays,
+        reason: "a replayed leave goes to ITS group's relays — sending it "
+            "to the resolving circle's relays tells those operators about a "
+            'second group and may never reach the members it is addressed to',
+      );
+      expect(
+        t.relay.published,
+        isNot(contains('{"id":"orphan","kind":445,"tags":[["h","beef"]]}')),
+        reason: 'fail closed: an `h` naming no circle we hold publishes '
+            'nowhere',
+      );
+    });
+  });
+
+  group('a modal flow absorbs its resolution', () {
+    test('updateCircleRelays converts the results it discards, so a replayed '
+        'Unrecoverable still blocks the circle', () async {
+      const groupId = [4, 4, 4, 4];
+      final manager = _ResolutionManager(
+        circle: _circleWithRelays(groupId, const ['wss://old.example']),
+        stagedCommit: CommitToPublishFfi(
+          commitEventJson: '{"id":"relayRotation","kind":445}',
+          pending: PendingStateRefFfi(token: BigInt.from(11)),
+        ),
+        onFinalize: outcome(results: [unrecoverable(groupId)]),
+      );
+      final relay = _AcceptingRelayService();
+      final service = NostrCircleService.withInjectedManager(
+        relayService: relay,
+        injectedManager: manager,
+      );
+
+      await service.updateCircleRelays(
+        mlsGroupId: groupId,
+        newRelays: const ['wss://new.example'],
+      );
+
+      expect(relay.published, ['{"id":"relayRotation","kind":445}']);
+      expect(manager.finalizedTokens, [BigInt.from(11)]);
+      expect(
+        service.isCircleBlocked(groupId),
+        isTrue,
+        reason: 'these modal flows discard the replayed locations on purpose '
+            '(the core persisted them), but the conversion that fires '
+            'markCircleBlocked is not optional',
+      );
+    });
+  });
+}
+
+CircleWithMembersFfi _circleWithRelays(
+  List<int> groupId,
+  List<String> relays,
+) => CircleWithMembersFfi(
+      circle: CircleFfi(
+        mlsGroupId: Uint8List.fromList(groupId),
+        nostrGroupId: Uint8List.fromList(groupId),
+        displayName: 'Fixture',
+        circleType: 'location_sharing',
+        relays: relays,
+        createdAt: 0,
+        updatedAt: 0,
+      ),
+      membershipStatus: 'accepted',
+      members: const [],
+    );
+
+/// A [CircleManagerFfi] that answers only the publish-resolution surface.
+///
+/// Every other member goes through `noSuchMethod`, so an unexpected dependency
+/// fails loudly rather than returning a default this test would then assert on.
+class _ResolutionManager implements CircleManagerFfi {
+  _ResolutionManager({
+    this.onConfirm,
+    this.onFinalize,
+    this.confirmThrows,
+    this.failThrows,
+    this.circle,
+    this.stagedCommit,
+    this.alsoHeld = const [],
+    List<String>? order,
+  }) : order = order ?? [];
+
+  final DecryptLocationOutcomeFfi? onConfirm;
+  final DecryptLocationOutcomeFfi? onFinalize;
+  final String? confirmThrows;
+  final String? failThrows;
+  final CircleWithMembersFfi? circle;
+  final CommitToPublishFfi? stagedCommit;
+
+  /// Other circles this device holds — what the `h` router reads.
+  final List<CircleWithMembersFfi> alsoHeld;
+
+  /// Shared publish/confirm call log, so a test can assert the ORDER across
+  /// this fake and the relay one.
+  final List<String> order;
+
+  final List<BigInt> finalizedTokens = [];
+  final List<BigInt> confirmedTokens = [];
+  final List<BigInt> rolledBackTokens = [];
+
+  static const _empty = DecryptLocationOutcomeFfi(
+    results: [],
+    autoCommits: [],
+    proposals: [],
+  );
+
+  @override
+  Future<DecryptLocationOutcomeFfi> confirmPublished({
+    required PendingStateRefFfi pending,
+  }) async {
+    final boom = confirmThrows;
+    if (boom != null) throw StateError(boom);
+    order.add('confirm:${pending.token}');
+    confirmedTokens.add(pending.token);
+    return onConfirm ?? _empty;
+  }
+
+  @override
+  Future<DecryptLocationOutcomeFfi> publishFailed({
+    required PendingStateRefFfi pending,
+  }) async {
+    final boom = failThrows;
+    if (boom != null) throw StateError(boom);
+    order.add('fail:${pending.token}');
+    rolledBackTokens.add(pending.token);
+    return _empty;
+  }
+
+  @override
+  Future<DecryptLocationOutcomeFfi> finalizeRelayUpdate({
+    required PendingStateRefFfi pending,
+    required List<int> mlsGroupId,
+  }) async {
+    order.add('finalize:${pending.token}');
+    finalizedTokens.add(pending.token);
+    return onFinalize ?? _empty;
+  }
+
+  @override
+  Future<CircleWithMembersFfi?> getCircle({
+    required List<int> mlsGroupId,
+  }) async => circle;
+
+  @override
+  Future<List<CircleWithMembersFfi>> getVisibleCircles() async => [
+    if (circle != null) circle!,
+    ...alsoHeld,
+  ];
+
+  @override
+  Future<CommitToPublishFfi> updateCircleRelays({
+    required List<int> mlsGroupId,
+    required List<String> newRelays,
+  }) async =>
+      stagedCommit ??
+      (throw StateError('no staged commit scripted'));
+
+  @override
+  bool get isDisposed => false;
+
+  @override
+  void dispose() {}
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) =>
+      throw UnimplementedError('unexpected call: ${invocation.memberName}');
+}
+
+/// A relay service whose publish is accepted by one relay, recording what it
+/// was asked to send.
+class _AcceptingRelayService extends _StubRelayService {
+  _AcceptingRelayService({this.acceptsFirst = 1 << 20, List<String>? order})
+    : order = order ?? [];
+
+  /// How many publishes the relay acks before it starts rejecting — so a test
+  /// can ack the flow's own commit and reject only the one the resolution
+  /// surfaced, which is the no-ack rung this fake exists to reach.
+  final int acceptsFirst;
+
+  /// The shared call log — see [_ResolutionManager.order].
+  final List<String> order;
+
+  final List<String> published = [];
+  final List<List<String>> publishedTo = [];
+
+  @override
+  Future<PublishResult> publishEvent({
+    required String eventJson,
+    required List<String> relays,
+  }) async {
+    order.add('publish:$eventJson');
+    published.add(eventJson);
+    publishedTo.add(List.of(relays));
+    return PublishResult(
+      eventId: 'accepted',
+      acceptedBy: published.length <= acceptsFirst
+          ? relays.take(1).toList()
+          : const <String>[],
+      rejectedBy: const [],
+      failed: const [],
+    );
+  }
 }
 
 void _handoffTests() {

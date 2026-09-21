@@ -99,7 +99,6 @@ use tempfile::TempDir;
 /// Alice (admin) + Bob as real co-members, each with their own MLS store.
 struct TwoMemberCircle {
     alice: Arc<CircleManager>,
-    alice_keys: Keys,
     bob: Arc<CircleManager>,
     bob_keys: Keys,
     mls_group_id: GroupId,
@@ -211,7 +210,6 @@ async fn build_two_member_circle(group_relays: Vec<String>) -> TwoMemberCircle {
 
     TwoMemberCircle {
         alice,
-        alice_keys,
         bob,
         bob_keys,
         mls_group_id,
@@ -896,7 +894,7 @@ async fn catchup_a_completed_window_advances_to_its_own_open_time() {
     wait_until_after(secs_of(&loc_event)).await;
 
     let before = now_secs();
-    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 20).await;
+    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, 20).await;
     let after = now_secs();
 
     assert_eq!(out.circles_swept, 1);
@@ -976,7 +974,7 @@ async fn catchup_a_rewrapped_forgery_cannot_drag_the_cursor_forward() {
         .expect("the forgery reaches the relay");
 
     let before = now_secs();
-    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 20).await;
+    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, 20).await;
     let after = now_secs();
 
     // Anti-vacuity, both halves: the forgery IS on the relay, and it IS above
@@ -1069,7 +1067,7 @@ async fn catchup_a_window_of_only_undecryptable_events_still_advances() {
         .expect("the junk reaches the relay");
 
     let before = now_secs();
-    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 20).await;
+    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, 20).await;
 
     assert_eq!(
         out.events_deferred, 0,
@@ -1108,7 +1106,7 @@ async fn catchup_a_malformed_445_neither_advances_the_cursor_nor_holds_it() {
         .expect("the malformed event reaches the relay");
 
     let before = now_secs();
-    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 20).await;
+    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, 20).await;
 
     assert_eq!(
         out.events_rejected_pre_auth, 1,
@@ -1156,7 +1154,7 @@ async fn catchup_an_engine_side_failure_holds_the_cursor_at_itself() {
         .await
         .expect("the junk reaches the relay");
 
-    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 20).await;
+    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, 20).await;
 
     assert_eq!(
         out.events_deferred, 1,
@@ -1186,7 +1184,7 @@ async fn catchup_an_unreachable_relay_holds_the_cursor() {
     let floor = (now_secs() - 7200) * 1000;
     fx.seed_alice_cursor(floor);
 
-    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 20).await;
+    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, 20).await;
 
     assert_eq!(out.circles_swept, 1, "the circle was attempted");
     assert!(out.relay_errors >= 1, "the non-responder is tallied");

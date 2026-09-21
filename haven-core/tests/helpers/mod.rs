@@ -464,10 +464,13 @@ pub fn haven_core_lines(lines: &[LogLine]) -> Vec<LogLine> {
 
 /// Every encoding of `needle` a log line could plausibly carry: the value
 /// itself, its case variants, its 8- and 16-character prefixes, and — when it
-/// decodes as hex — its base64 and `npub1…` renderings.
+/// decodes as hex — its base64, `npub1…` and raw-byte-slice renderings.
 ///
 /// Truncation is not redaction, so the prefixes are needles in their own right:
-/// this is what makes `.get(..8)` a failure rather than a pass.
+/// this is what makes `.get(..8)` a failure rather than a pass. Neither is
+/// `{:?}`: an id is a `[u8; 32]` or a `GroupId` in this crate long before it is
+/// a hex string, so the likeliest accidental leak prints `[225, 217, 232, …]`
+/// and matches no hex needle at all.
 fn needle_forms(needle: &str) -> Vec<String> {
     let mut forms = vec![
         needle.to_owned(),
@@ -486,6 +489,7 @@ fn needle_forms(needle: &str) -> Vec<String> {
     }
     if let Ok(bytes) = hex::decode(needle) {
         forms.push(BASE64.encode(&bytes));
+        forms.push(format!("{bytes:?}"));
         if let Ok(pk) = PublicKey::from_slice(&bytes) {
             forms.extend(pk.to_bech32().ok());
         }
@@ -629,6 +633,20 @@ mod log_capture_self_tests {
             .expect("encodes as npub");
         assert_no_needles(
             &[line("haven_core::x", &format!("peer {npub} connected"))],
+            &[NEEDLE_HEX],
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "carries")]
+    fn catches_a_debug_byte_slice_rendering_of_a_hex_needle() {
+        // The shape `{:?}` on a `[u8; 32]`, a `GroupId` or a `Vec<u8>` prints —
+        // which is what a group id, an event id and a key all are in this crate
+        // before anyone hex-encodes them. Built with the same `{:?}` the leak
+        // would use rather than hand-written, so it proves the form is wired in.
+        let bytes = hex::decode(NEEDLE_HEX).expect("test vector is hex");
+        assert_no_needles(
+            &[line("haven_core::x", &format!("group {bytes:?} advanced"))],
             &[NEEDLE_HEX],
         );
     }

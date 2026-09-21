@@ -130,7 +130,7 @@ abstract class RustLibApi extends BaseApi {
     required List<int> mlsGroupId,
   });
 
-  Future<void> crateApiCircleManagerFfiConfirmPublished({
+  Future<DecryptLocationOutcomeFfi> crateApiCircleManagerFfiConfirmPublished({
     required CircleManagerFfi that,
     required PendingStateRefFfi pending,
   });
@@ -213,7 +213,8 @@ abstract class RustLibApi extends BaseApi {
     required String pubkeyHex,
   });
 
-  Future<void> crateApiCircleManagerFfiFinalizeRelayUpdate({
+  Future<DecryptLocationOutcomeFfi>
+  crateApiCircleManagerFfiFinalizeRelayUpdate({
     required CircleManagerFfi that,
     required PendingStateRefFfi pending,
     required List<int> mlsGroupId,
@@ -353,7 +354,7 @@ abstract class RustLibApi extends BaseApi {
     required PlatformInt64 nowUnixSecs,
   });
 
-  Future<void> crateApiCircleManagerFfiPublishFailed({
+  Future<DecryptLocationOutcomeFfi> crateApiCircleManagerFfiPublishFailed({
     required CircleManagerFfi that,
     required PendingStateRefFfi pending,
   });
@@ -790,7 +791,6 @@ abstract class RustLibApi extends BaseApi {
   Future<CatchupResultFfi> crateApiRelayManagerFfiRunCatchupAllCircles({
     required RelayManagerFfi that,
     required CircleManagerFfi circle,
-    required String ownPubkeyHex,
     required BigInt maxDurationSecs,
   });
 
@@ -1340,7 +1340,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  Future<void> crateApiCircleManagerFfiConfirmPublished({
+  Future<DecryptLocationOutcomeFfi> crateApiCircleManagerFfiConfirmPublished({
     required CircleManagerFfi that,
     required PendingStateRefFfi pending,
   }) {
@@ -1361,7 +1361,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           );
         },
         codec: SseCodec(
-          decodeSuccessData: sse_decode_unit,
+          decodeSuccessData: sse_decode_decrypt_location_outcome_ffi,
           decodeErrorData: sse_decode_String,
         ),
         constMeta: kCrateApiCircleManagerFfiConfirmPublishedConstMeta,
@@ -1930,7 +1930,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  Future<void> crateApiCircleManagerFfiFinalizeRelayUpdate({
+  Future<DecryptLocationOutcomeFfi>
+  crateApiCircleManagerFfiFinalizeRelayUpdate({
     required CircleManagerFfi that,
     required PendingStateRefFfi pending,
     required List<int> mlsGroupId,
@@ -1953,7 +1954,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           );
         },
         codec: SseCodec(
-          decodeSuccessData: sse_decode_unit,
+          decodeSuccessData: sse_decode_decrypt_location_outcome_ffi,
           decodeErrorData: sse_decode_String,
         ),
         constMeta: kCrateApiCircleManagerFfiFinalizeRelayUpdateConstMeta,
@@ -2995,7 +2996,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  Future<void> crateApiCircleManagerFfiPublishFailed({
+  Future<DecryptLocationOutcomeFfi> crateApiCircleManagerFfiPublishFailed({
     required CircleManagerFfi that,
     required PendingStateRefFfi pending,
   }) {
@@ -3016,7 +3017,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           );
         },
         codec: SseCodec(
-          decodeSuccessData: sse_decode_unit,
+          decodeSuccessData: sse_decode_decrypt_location_outcome_ffi,
           decodeErrorData: sse_decode_String,
         ),
         constMeta: kCrateApiCircleManagerFfiPublishFailedConstMeta,
@@ -6478,7 +6479,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   Future<CatchupResultFfi> crateApiRelayManagerFfiRunCatchupAllCircles({
     required RelayManagerFfi that,
     required CircleManagerFfi circle,
-    required String ownPubkeyHex,
     required BigInt maxDurationSecs,
   }) {
     return handler.executeNormal(
@@ -6493,7 +6493,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             circle,
             serializer,
           );
-          sse_encode_String(ownPubkeyHex, serializer);
           sse_encode_u_64(maxDurationSecs, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
@@ -6507,7 +6506,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_String,
         ),
         constMeta: kCrateApiRelayManagerFfiRunCatchupAllCirclesConstMeta,
-        argValues: [that, circle, ownPubkeyHex, maxDurationSecs],
+        argValues: [that, circle, maxDurationSecs],
         apiImpl: this,
       ),
     );
@@ -6516,7 +6515,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiRelayManagerFfiRunCatchupAllCirclesConstMeta =>
       const TaskConstMeta(
         debugName: "RelayManagerFfi_run_catchup_all_circles",
-        argNames: ["that", "circle", "ownPubkeyHex", "maxDurationSecs"],
+        argNames: ["that", "circle", "maxDurationSecs"],
       );
 
   @override
@@ -8113,11 +8112,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 2)
-      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
+    if (arr.length != 3)
+      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
     return DecryptLocationOutcomeFfi(
       results: dco_decode_list_location_message_result_ffi(arr[0]),
       autoCommits: dco_decode_list_commit_to_publish_ffi(arr[1]),
+      proposals: dco_decode_list_String(arr[2]),
     );
   }
 
@@ -9718,9 +9718,11 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_results = sse_decode_list_location_message_result_ffi(deserializer);
     var var_autoCommits = sse_decode_list_commit_to_publish_ffi(deserializer);
+    var var_proposals = sse_decode_list_String(deserializer);
     return DecryptLocationOutcomeFfi(
       results: var_results,
       autoCommits: var_autoCommits,
+      proposals: var_proposals,
     );
   }
 
@@ -11618,6 +11620,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_list_location_message_result_ffi(self.results, serializer);
     sse_encode_list_commit_to_publish_ffi(self.autoCommits, serializer);
+    sse_encode_list_String(self.proposals, serializer);
   }
 
   @protected
@@ -12732,7 +12735,10 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
   /// Adds a relay to one category (idempotent).
   ///
   /// The URL is normalized via `nostr::RelayUrl::parse`; duplicates are
-  /// silent no-ops. `ws://` and credential-bearing URLs are rejected.
+  /// silent no-ops. `ws://` and credential-bearing URLs are rejected with a
+  /// `CircleError::InvalidRelayInput`, whose `RelayInputRejection` sentence
+  /// reaches Dart verbatim and is what `_mapStorageError` routes the
+  /// user-facing message on — the sentence itself is never displayed.
   Future<void> addUserRelay({
     required String url,
     required RelayTypeFfi relayType,
@@ -12841,11 +12847,18 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
   /// optimistic-merge forks (Rule 13, security F13). Pass the `pending` token
   /// carried in a [`CircleCreationResultFfi`] / [`AddMembersResultFfi`] /
   /// [`CommitToPublishFfi`].
-  Future<void> confirmPublished({required PendingStateRefFfi pending}) =>
-      RustLib.instance.api.crateApiCircleManagerFfiConfirmPublished(
-        that: this,
-        pending: pending,
-      );
+  ///
+  /// Returns everything the engine replayed out of the buffer it filled while
+  /// that commit was in flight — peer locations included. The locations are
+  /// already persisted by the core; the caller routes them for DISPLAY, and
+  /// must run [`DecryptLocationOutcomeFfi::auto_commits`] through this same
+  /// ladder and publish its `proposals`.
+  Future<DecryptLocationOutcomeFfi> confirmPublished({
+    required PendingStateRefFfi pending,
+  }) => RustLib.instance.api.crateApiCircleManagerFfiConfirmPublished(
+    that: this,
+    pending: pending,
+  );
 
   /// Creates a new circle with gift-wrapped Welcome events.
   ///
@@ -13256,7 +13269,10 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
   /// for the [`update_circle_relays`](Self::update_circle_relays) flow
   /// (members converge via the receive path). Pass the `pending` token from
   /// the [`CommitToPublishFfi`] and the circle's `mls_group_id`.
-  Future<void> finalizeRelayUpdate({
+  ///
+  /// Returns the confirm's replayed outcome, exactly as
+  /// [`confirm_published`](Self::confirm_published) does.
+  Future<DecryptLocationOutcomeFfi> finalizeRelayUpdate({
     required PendingStateRefFfi pending,
     required List<int> mlsGroupId,
   }) => RustLib.instance.api.crateApiCircleManagerFfiFinalizeRelayUpdate(
@@ -13615,11 +13631,14 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
   /// commit and returns the group to `Stable` at the prior epoch.
   ///
   /// The publish-failure counterpart to [`confirm_published`](Self::confirm_published);
-  /// pass the same `pending` token.
-  Future<void> publishFailed({required PendingStateRefFfi pending}) => RustLib
-      .instance
-      .api
-      .crateApiCircleManagerFfiPublishFailed(that: this, pending: pending);
+  /// pass the same `pending` token. It replays the same buffer, so it returns
+  /// the same outcome — a no-ack must not cost the peer's fix either.
+  Future<DecryptLocationOutcomeFfi> publishFailed({
+    required PendingStateRefFfi pending,
+  }) => RustLib.instance.api.crateApiCircleManagerFfiPublishFailed(
+    that: this,
+    pending: pending,
+  );
 
   /// The local member directory in picker order: current co-members first,
   /// then people who shared a circle within the retention window, each block
@@ -13771,8 +13790,12 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
   /// Removes a relay from one category.
   ///
   /// Returns `true` when a row was removed, `false` when the URL was not
-  /// in the user's list. Refuses to delete the last relay in a category
-  /// (returns `Err` so the UI can show "you need at least one relay").
+  /// in the user's list. Refuses to delete the last relay in a category with
+  /// `CircleError::InvalidRelayInput(RelayInputRejection::LastInCategory)`,
+  /// whose sentence — "At least one relay is required per category" — is the
+  /// `Err(String)` Dart's `_mapStorageError` routes its own user-facing
+  /// message on. It is the one `CircleError` payload that survives the
+  /// flattening, because it is Haven-authored and value-free.
   Future<bool> removeUserRelay({
     required String url,
     required RelayTypeFfi relayType,
@@ -15070,12 +15093,10 @@ class RelayManagerFfiImpl extends RustOpaque implements RelayManagerFfi {
   /// [`CatchupResultFfi`] (counters).
   Future<CatchupResultFfi> runCatchupAllCircles({
     required CircleManagerFfi circle,
-    required String ownPubkeyHex,
     required BigInt maxDurationSecs,
   }) => RustLib.instance.api.crateApiRelayManagerFfiRunCatchupAllCircles(
     that: this,
     circle: circle,
-    ownPubkeyHex: ownPubkeyHex,
     maxDurationSecs: maxDurationSecs,
   );
 

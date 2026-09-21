@@ -912,6 +912,20 @@ fn od4c_a_background_burst_cannot_publish_a_removal_bearing_auto_commit() {
          circle, still able to derive its keys — so an unacked publish stays owed \
          and is retried"
     );
+    assert!(
+        redeem.contains("self.confirm_published("),
+        "precondition for the pin below: the body read here is the redemption \
+         pass, which discharges by CONFIRMING"
+    );
+    assert!(
+        !redeem.contains("self.clear_removal_deferral("),
+        "and it must never clear by circle beside that confirm: the confirm's own \
+         replay can record a SECOND-generation obligation under the same circle \
+         (the map holds one entry per circle), so an ngid-scoped clear here would \
+         delete it — leaving a staged, unpublished, no-longer-owed and \
+         no-longer-reported eviction. The twin of the `note_epoch_changes` pin \
+         below"
+    );
 }
 
 /// The same guarantee, TREE-WIDE: no plane rolls a removal-bearing auto-commit
@@ -977,8 +991,22 @@ fn od4c_no_plane_can_roll_back_or_hide_a_removal_bearing_auto_commit() {
     );
 
     let auto = production_source(&repo_root().join("haven-core/src/relay/auto_commit.rs"));
-    let resolve = fn_body(&auto, "pub async fn resolve_receive_publish_work")
+    // The write-ahead rule lives at the policy-taking entry point, and the
+    // unconditional wrapper must reach the ladder through it — otherwise a new
+    // caller of the wrapper would get a publish with no record behind it.
+    let wrapper = fn_body(&auto, "pub async fn resolve_receive_publish_work")
         .expect("auto_commit.rs must define resolve_receive_publish_work");
+    assert!(
+        wrapper.contains("resolve_receive_publish_work_with_policy"),
+        "the unconditional entry point must delegate to the policy-taking one, \
+         so the write-ahead record and the ladder's cap disposition cannot be \
+         bypassed by calling it"
+    );
+    let resolve = fn_body(
+        &auto,
+        "pub async fn resolve_receive_publish_work_with_policy",
+    )
+    .expect("auto_commit.rs must define resolve_receive_publish_work_with_policy");
     let record = resolve
         .find("owe_removal_publish")
         .expect("the publishing planes must record the obligation");
@@ -992,6 +1020,25 @@ fn od4c_no_plane_can_roll_back_or_hide_a_removal_bearing_auto_commit() {
          refuses to clear, and only a row written before the send survives to \
          report it"
     );
+    // The ladder's cap. A cascade long enough to reach it costs O(k^3) to
+    // stage (measured in `receive_ladder_e2e`: 116 s at nine leavers, past
+    // fifteen minutes at seventeen), so what the cap DOES is pinned here
+    // instead: it parks every commit it will not run, and it never rolls one
+    // back. Both halves matter — a rollback is the permanent silent drop, and
+    // an un-parked stop is the invisible wedge.
+    let cap = resolve
+        .find("RESOLVE_RUNAWAY_CAP")
+        .expect("the ladder must have a runaway cap");
+    let cap_arm = &resolve[cap..];
+    let park = cap_arm
+        .find("defer_removal_commit")
+        .expect("the cap must PARK every commit it will not run");
+    assert!(
+        !cap_arm[..park].contains("publish_failed"),
+        "the cap must not roll a commit back on its way to parking it: at MDK \
+         e391adc that drops the removal permanently and silently"
+    );
+
     let no_publisher = fn_body(&auto, "pub async fn park_or_rollback_receive_publish_work")
         .expect("auto_commit.rs must define park_or_rollback_receive_publish_work");
     assert!(
@@ -1022,7 +1069,7 @@ fn od4c_no_plane_can_roll_back_or_hide_a_removal_bearing_auto_commit() {
 /// all for the crash this exists to catch.
 fn assert_the_ffi_planes_record_before_the_handover(manager: &str) {
     for surfacing in [
-        "async fn collect_auto_commits",
+        "async fn surface_auto_commit",
         "async fn collect_deferred_work",
     ] {
         let body = fn_body(manager, surfacing)
@@ -1047,7 +1094,14 @@ fn assert_the_ffi_planes_record_before_the_handover(manager: &str) {
 /// `CircleManager::session()` is `pub`, so a new plane could call the engine's
 /// fail rung directly and skip the owed-removal guard in silence.
 ///
-/// Whitespace is squashed because the one legitimate call spans three lines.
+/// What is pinned is the GUARD, not a count: every production call that reaches
+/// the engine's own `publish_failed` must sit in one of a reviewed set of
+/// `CircleManager` functions, and each of those must consult
+/// `keeps_its_removal_publish_owed` BEFORE it makes the call. A new call site
+/// anywhere else, or one that skips the guard, discards a peer's eviction
+/// permanently and silently and nothing else in the tree would notice.
+///
+/// Whitespace is squashed because the legitimate calls span several lines.
 fn assert_nothing_reaches_past_the_fail_rung() {
     let mut sources = Vec::new();
     sources_under(&repo_root().join("haven-core/src"), "rs", &mut sources);
@@ -1068,16 +1122,99 @@ fn assert_nothing_reaches_past_the_fail_rung() {
             direct.push(path.display().to_string());
         }
     }
+    let manager_path = repo_root().join("haven-core/src/circle/manager.rs");
+    assert!(
+        direct
+            .iter()
+            .all(|path| path == &manager_path.display().to_string()),
+        "only `CircleManager` may reach the engine's own `publish_failed`; found: {direct:?}"
+    );
+
+    // And `rollback_unfolded` must stay on the ENGINE's rung, never promoted to
+    // `CircleManager::publish_failed`: `remove_members` reaches it while holding
+    // `directory_lock` (non-reentrant) via `take_group_evolution` →
+    // `surface_co_drained_auto_commits` → `surface_auto_commit`, and
+    // `publish_failed` ends in a directory reconcile that takes the same lock.
+    let unfolded: String = fn_body(
+        &production_source(&manager_path),
+        "async fn rollback_unfolded",
+    )
+    .expect("manager.rs must define rollback_unfolded")
+    .chars()
+    .filter(|c| !c.is_whitespace())
+    .collect();
+    assert!(
+        !unfolded.contains("self.publish_failed("),
+        "rollback_unfolded must not go through `CircleManager::publish_failed`: \
+         the directory reconcile at the end of it takes a lock a caller already \
+         holds, and the deadlock would look like a hung Remove Member"
+    );
+
+    // The reviewed set, and the guard each one must take first.
+    let manager = production_source(&manager_path);
+    let mut guarded_calls = 0usize;
+    for signature in ["pub async fn publish_failed", "async fn rollback_unfolded"] {
+        let body: String = fn_body(&manager, signature)
+            .unwrap_or_else(|| panic!("manager.rs must define {signature}"))
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        let guard = body
+            .find("keeps_its_removal_publish_owed(")
+            .unwrap_or_else(|| panic!("{signature} must consult the owed-removal guard"));
+        let call = body
+            .find(".session.publish_failed(")
+            .unwrap_or_else(|| panic!("{signature} must be the one making the call"));
+        assert!(
+            guard < call,
+            "{signature} must take the owed-removal guard BEFORE it rolls back: a \
+             removal-bearing commit discarded here is gone permanently and silently"
+        );
+        guarded_calls += body.matches(".session.publish_failed(").count();
+    }
     assert_eq!(
-        direct,
-        vec![repo_root()
-            .join("haven-core/src/circle/manager.rs")
-            .display()
-            .to_string()],
-        "exactly ONE production call may reach the engine's own `publish_failed`, \
-         and it is the one inside `CircleManager::publish_failed` whose guard the \
-         caller pins. Any other call site discards a peer's eviction permanently \
-         and silently, and nothing else in the tree would notice; found: {direct:?}"
+        direct.len(),
+        guarded_calls,
+        "every production call to the engine's own `publish_failed` must live in \
+         a guarded `CircleManager` function; {} found in the tree, {guarded_calls} \
+         inside the reviewed set",
+        direct.len()
+    );
+}
+
+/// O3: a drained `GroupEvolution`'s welcomes are dropped — and never silently.
+///
+/// `CommitToPublish` carries no welcomes, so a queued Invite released by a
+/// convergence drain hands back a commit whose invitees nobody will ever receive
+/// a Welcome for. That is PRE-EXISTING (`collect_deferred_work` has the same
+/// hole) and it is a named follow-up, not this change's business — but a
+/// follow-up nobody can see is a bug that never gets fixed, so the fold must say
+/// so every time it happens.
+///
+/// Pinned at source because the arm is reachable only through the engine's
+/// jitter race: it needs a queued outbound Invite AND a `SelfRemove`
+/// scheduled-but-not-yet-due at the instant the fold re-advances convergence
+/// (`message_processor/mod.rs:216-221` returns early whenever the eviction IS
+/// due). `manager.rs`'s own
+/// `a_drained_group_evolution_is_surfaced_with_its_welcomes_noted` covers the
+/// behaviour; this covers the trace.
+#[test]
+fn drained_group_evolution_welcomes_are_never_dropped_silently() {
+    let manager = production_source(&repo_root().join("haven-core/src/circle/manager.rs"));
+    let dispose = fn_body(&manager, "async fn dispose_publish_work")
+        .expect("manager.rs must define dispose_publish_work");
+    let guard = dispose
+        .find("welcomes.is_empty()")
+        .expect("the drained-evolution arm must test its welcomes");
+    let warn = dispose[guard..]
+        .find("log::warn!")
+        .expect("and say so when there are any");
+    let surfaced = dispose[guard..]
+        .find("auto_commits.push")
+        .expect("before it surfaces the commit without them");
+    assert!(
+        warn < surfaced,
+        "the note belongs with the drop it describes, not after the hand-over"
     );
 }
 

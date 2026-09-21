@@ -411,7 +411,6 @@ class NostrRelayService implements RelayService {
       final manager = await _ensureInitialized();
       final r = await manager.runCatchupAllCircles(
         circle: circle,
-        ownPubkeyHex: ownPubkeyHex,
         maxDurationSecs: BigInt.from(maxDurationSecs),
       );
       return CatchupResult(
