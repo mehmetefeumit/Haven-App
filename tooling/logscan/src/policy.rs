@@ -153,11 +153,22 @@ pub struct SinkSpec {
     /// furniture the tool forwards and on whether the reporter's closing line
     /// beats the driver's disconnect, so the floor that clears the shortest
     /// COMPLETE transcript also clears a transcript in which nothing ran. The
-    /// test reporter's own progress line can tell them apart: it is written
-    /// before the first test body runs. Declared per class, because only a
-    /// class whose captures all come from one producer has such a line.
+    /// test reporter's own per-test line can tell them apart: it is written
+    /// when a test STARTS. Declared per class, because only a class whose
+    /// captures all come from one producer has such a line.
     #[serde(default)]
     pub proof_of_run: Option<String>,
+    /// Lines that match `proof_of_run` and are nonetheless not proof.
+    ///
+    /// A reporter renders a SUITE LOAD through the same shape as a test — the
+    /// expanded reporter's first line is `00:00 +0: loading <path>`, printed
+    /// before the app is even built, and the github reporter renders a failed
+    /// load as `::group::❌ loading <path> (failed)`. Neither is a test that
+    /// ran. `regex` has no lookahead, so "a reporter line whose subject is not
+    /// a suite load" cannot be one pattern; this is the other half of it, and a
+    /// line counts as proof only when it matches the pattern and none of these.
+    #[serde(default)]
+    pub proof_of_run_excludes: Vec<String>,
     /// How lines are framed.
     pub entry_format: EntryFormat,
     /// Log tags this repo owns. Structural rules run only on these lines.
@@ -343,6 +354,38 @@ impl Policy {
         Ok(())
     }
 
+    /// One sink's proof-of-run declaration: a pattern that can match something,
+    /// exclusions only where there is a proof to exclude from, and no exclusion
+    /// that would match every line (which would leave nothing able to prove a
+    /// run).
+    fn validate_proof_of_run(name: &str, sink: &SinkSpec) -> Result<(), String> {
+        if let Some(pattern) = &sink.proof_of_run {
+            if pattern.is_empty() {
+                return Err(format!(
+                    "sink `{name}` declares an empty proof_of_run, which every line matches and so proves nothing"
+                ));
+            }
+            regex::Regex::new(pattern).map_err(|_| {
+                format!("sink `{name}`'s proof_of_run is not a valid regular expression")
+            })?;
+        } else if !sink.proof_of_run_excludes.is_empty() {
+            return Err(format!(
+                "sink `{name}` excludes lines from a proof_of_run it does not declare"
+            ));
+        }
+        for pattern in &sink.proof_of_run_excludes {
+            if pattern.is_empty() {
+                return Err(format!(
+                    "sink `{name}` declares an empty proof_of_run exclusion, which every line matches, so no line could ever prove a run"
+                ));
+            }
+            regex::Regex::new(pattern).map_err(|_| {
+                format!("sink `{name}`'s proof_of_run exclusion is not a valid regular expression")
+            })?;
+        }
+        Ok(())
+    }
+
     fn validate(&self) -> Result<(), String> {
         if self.schema != SCHEMA {
             return Err(format!(
@@ -387,16 +430,7 @@ impl Policy {
                 _ => {}
             }
             self.validate_emitter_scopes(name, sink)?;
-            if let Some(pattern) = &sink.proof_of_run {
-                if pattern.is_empty() {
-                    return Err(format!(
-                        "sink `{name}` declares an empty proof_of_run, which every line matches and so proves nothing"
-                    ));
-                }
-                regex::Regex::new(pattern).map_err(|_| {
-                    format!("sink `{name}`'s proof_of_run is not a valid regular expression")
-                })?;
-            }
+            Self::validate_proof_of_run(name, sink)?;
             // A sink cannot require a control the declaration channel has no way
             // to mint: without the `plant` class the harness cannot declare a
             // token, and the requirement would be permanently unsatisfiable. The
@@ -753,9 +787,10 @@ ios = { term_floor = 8, declared_plants_expected = false, structural_rules = tru
             // prove.
             ("diag", 1),
             // The hermetic host relay prints its listen line and nothing else
-            // for a whole run. A lane whose relay is strfry (14-23 lines per
-            // `docker logs` dump) passes `--floor relay=7`, which is what
-            // catches a container torn down before the dump: ONE error line.
+            // for a whole run. A lane whose relay is strfry opens every `docker
+            // logs` dump with a FIXED 9-line startup block and grows only with
+            // traffic, so it passes `--floor relay=7` — which is what catches a
+            // container torn down before the dump: ONE error line.
             ("relay", 1),
         ] {
             assert_eq!(policy.sinks[sink].min_lines, expected, "`{sink}`");
@@ -867,7 +902,123 @@ ios = { term_floor = 8, declared_plants_expected = false, structural_rules = tru
                 sink == "drive",
                 "`{sink}`: only a class whose every capture comes from a test reporter has such a line"
             );
+            assert_eq!(
+                spec.proof_of_run_excludes.is_empty(),
+                sink != "drive",
+                "`{sink}`: a class excludes renderings of the proof it declares, and of no other"
+            );
         }
+    }
+
+    /// The renderings that MATCH the proof and are not one.
+    ///
+    /// Every line below satisfies the pattern above — that is the point: a
+    /// reporter renders the SUITE it is loading through the same shape as the
+    /// test it is running, and on iOS it writes that line before the Xcode
+    /// build, so `flutter test -d <udid>` proved a run by building. The
+    /// exclusions are what separate the two, and they are pinned here with the
+    /// names a real transcript carries on either side of the line, because an
+    /// exclusion anchored on the word `loading` alone would strike out three
+    /// passing tests of the hosted coverage lane and take its only proof.
+    #[test]
+    fn a_suite_load_matches_the_proof_and_is_not_one() {
+        let policy = Policy::load().expect("policy");
+        let spec = &policy.sinks["drive"];
+        let proof = regex::Regex::new(spec.proof_of_run.as_deref().expect("the proof"))
+            .expect("a valid pattern");
+        let excludes = regex::RegexSet::new(&spec.proof_of_run_excludes).expect("valid exclusions");
+
+        for line in [
+            // The expanded reporter's opening line, iOS and Android renderings.
+            "00:00 +0: loading /Users/runner/work/Haven-App/Haven-App/haven/integration_test/b4_ios_real_gps_test.dart",
+            "I/flutter ( 4457): 00:53 +0: loading /Users/runner/work/Haven-App/Haven-App/haven/integration_test/ios_bg_publish_test.dart",
+            // …the same suite once its load has FAILED, and the closing line
+            // `_onDone` writes for it — with no failure counter, which is how CI
+            // run 35397118356's capture ends.
+            "00:02 +0 -1: loading /home/runner/work/Haven-App/Haven-App/haven/test/pages/map_shell_test.dart [E]",
+            "06:17 +0: Some tests failed.",
+            // The github reporter prints nothing for a load that worked and
+            // this for one that did not: a LoadSuite name carries no suite-path
+            // prefix, which is what distinguishes it from a test's own line.
+            "::group::\u{274c} loading /home/runner/work/Haven-App/Haven-App/haven/test/pages/map_shell_test.dart (failed)",
+            "\u{2705} loading /home/runner/work/Haven-App/Haven-App/haven/test/e2e/wire_canaries_test.dart",
+        ] {
+            assert!(proof.is_match(line), "the pattern must match it: {line:?}");
+            assert!(
+                excludes.is_match(line),
+                "a suite load is not a test that ran: {line:?}"
+            );
+        }
+
+        for line in [
+            // A test whose NAME carries the word, under both reporters and in
+            // the single-suite rendering where the reporter prints no path.
+            "00:03 +41: /home/runner/work/Haven-App/Haven-App/haven/test/widgets/circles/circle_selector_test.dart: CircleSelector shows loading indicator while fetching circles",
+            "\u{2705} /home/runner/work/Haven-App/Haven-App/haven/test/providers/member_directory_provider_test.dart: memberDirectoryResultsProvider is empty while the directory is still loading",
+            "00:07 +2: loading indicator clears once the roster settles",
+            // The run's real events, including the summary `_onDone` reaches
+            // only with a non-empty passed set.
+            "00:00 +0: B4: publish a REAL simulator GPS fix and prove a peer decrypts those exact coordinates",
+            "00:16 +1: (tearDownAll)",
+            "00:39 +2: All tests passed!",
+        ] {
+            assert!(proof.is_match(line), "the pattern must match it: {line:?}");
+            assert!(
+                !excludes.is_match(line),
+                "this is a test that ran; excluding it would redden a green lane: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_proof_of_run_exclusion_is_rejected() {
+        let text = r#"
+schema = 1
+base64_entropy_bits = 4.2
+min_term_len = 6
+furniture = []
+[classes]
+[sinks]
+drive = { term_floor = 6, declared_plants_expected = false, structural_rules = true, reassemble = false, min_lines = 1, entry_format = "plain", proof_of_run = "ran", proof_of_run_excludes = [""] }
+[ledger]
+"#;
+        let err = Policy::parse(text).expect_err("an exclusion every line matches admits nothing");
+        assert!(err.contains("no line could ever prove a run"), "{err}");
+    }
+
+    #[test]
+    fn a_proof_of_run_exclusion_without_a_proof_is_rejected() {
+        let text = r#"
+schema = 1
+base64_entropy_bits = 4.2
+min_term_len = 6
+furniture = []
+[classes]
+[sinks]
+drive = { term_floor = 6, declared_plants_expected = false, structural_rules = true, reassemble = false, min_lines = 1, entry_format = "plain", proof_of_run_excludes = ["loading "] }
+[ledger]
+"#;
+        let err = Policy::parse(text).expect_err("an exclusion from nothing excludes nothing");
+        assert!(err.contains("does not declare"), "{err}");
+    }
+
+    #[test]
+    fn a_proof_of_run_exclusion_that_is_not_a_regex_is_rejected() {
+        let text = r#"
+schema = 1
+base64_entropy_bits = 4.2
+min_term_len = 6
+furniture = []
+[classes]
+[sinks]
+drive = { term_floor = 6, declared_plants_expected = false, structural_rules = true, reassemble = false, min_lines = 1, entry_format = "plain", proof_of_run = "ran", proof_of_run_excludes = ["+["] }
+[ledger]
+"#;
+        let err = Policy::parse(text).expect_err("an exclusion nothing can match excludes nothing");
+        assert!(
+            err.contains("exclusion is not a valid regular expression"),
+            "{err}"
+        );
     }
 
     #[test]

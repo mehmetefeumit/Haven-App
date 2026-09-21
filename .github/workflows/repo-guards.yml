@@ -482,6 +482,17 @@
 #     must also pass `-no-window`: provisioning verifies the HEADLESS binary,
 #     so that is the only one it can vouch for.
 #
+#   Gradle build hardening            scripts/ci/check_gradle_build_hardened.sh
+#     Every job that builds the app through Gradle restores the shared
+#     dependency cache, on the canonical key, BEFORE its first build, and
+#     reaches Gradle through scripts/ci/build_apk_with_retry.sh — never a bare
+#     `flutter build apk`, which would retry a compile error and, worse, retry
+#     a full disk into a green build. Exactly ONE job writes the key, because
+#     the relay-customization lane wipes ~/.gradle/caches by design and a
+#     second writer could publish that hole to everyone. A cold classpath
+#     resolution is what HTTP 429'd a lane into a red job that ran no test
+#     (CI run 35622556197, and run 30732662493 before it).
+#
 #   Diag-scan exit codes              scripts/ci/check_diag_scan_exit_codes.sh
 #     In a step that writes a `*_LEAK.txt` marker, exit code 1 means a leak
 #     and nothing else: the only literal `exit 1` is the leak branch's, and
@@ -1556,18 +1567,50 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash tooling/e2e/ci/check-proxy-sidecar-summary.sh --self-test
 
-      - name: Build-retry predicate self-test
+      # The retry ENGINE, not just its predicate: a transient 429 is ridden out,
+      # a compile error and a full disk are not, a persistent 429 stops at
+      # exactly the attempt count with one ::error:: saying INFRASTRUCTURE and
+      # that no test ran, and a budget an earlier build in the step already
+      # spent starts no further attempt. Its fake `flutter` refuses both a
+      # non-build argv and a build missing the flags the wrapper adds, so a
+      # green run means the command line was really passed through.
+      - name: Build-retry engine self-test
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/build_apk_with_retry.sh --self-test
+
+      # Every Gradle-building job restores the shared dependency cache before
+      # its first build and builds through that classified retry, and exactly
+      # ONE job writes the cache key. A cold ~/.gradle fetches hundreds of POMs
+      # from a shared runner IP, which is what HTTP 429'd a lane into a red job
+      # that ran no test (CI run 35622556197); a cold build takes 455-946 s
+      # against a warm one's 29-48 s.
+      - name: Gradle builds are cached and retried by class
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_gradle_build_hardened.sh
+
+      # Both directions: a building job with no cache step, one whose restore
+      # lands after its build, a bare `flutter build apk`, a non-canonical key
+      # or path, a second writer and a save without `if: success()` each fail;
+      # a bare build quoted in a COMMENT is prose and passes; an exemption is
+      # honoured only when it carries a reason. Fixture count pinned by
+      # equality.
+      - name: Gradle build hardening guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_gradle_build_hardened.sh --self-test
 
       # The fresh-install broadcast barrier every Android lane installs through.
       # Against a stub device: a fresh install is checked, then followed by a
       # drained package-manager handler and a loopers-flushing barrier under the
-      # full 120 s bound; a device that cannot run it, a queue that never
-      # drains and a failed install each fail by name; and an
-      # install over an installed package — a replace, which cannot relaunch
-      # anything — takes no barrier, so a sound lane never reds on one. Its
-      # fixture count is pinned by equality.
+      # full 120 s bound, whose four exit codes the GUEST prints and the host
+      # branches on — two of them controls, commands the guest cannot have, so a
+      # shell answering 0 to everything cannot read as a barrier that ran. A
+      # device that cannot run it, a runner that could not run it AT ALL (rc
+      # 125-127), a queue that never drains, a missing or truncated verdict line
+      # and a failed install each fail by name; and an install over an installed
+      # package — a replace, which cannot relaunch anything — takes no barrier,
+      # so a sound lane never reds on one. The stub `timeout` is checked against
+      # coreutils' real one first, since those verdicts are told apart by its
+      # exit code. Its fixture count is pinned by equality.
       - name: E2E harness self-test (fresh-install broadcast barrier)
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash tooling/e2e/ci/app-install-lib.sh --self-test
@@ -1912,6 +1955,16 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: dart tooling/e2e/ci/check-wire-canaries.dart --self-test
 
+      # The relay probe that proves the iOS background-publish lane's toggle-off
+      # silence from the HOST when iOS has reclaimed the app. The lane runs this
+      # self-test as a preflight, but that is minute two of a macOS job; here a
+      # probe that stopped seeing a planted in-window event, or that took an
+      # unanswered control for silence, reds on every PR. Its fake relay ignores
+      # `since` on purpose, so the probe's own range filter is what is measured.
+      - name: E2E harness self-test (iOS toggle-off relay probe)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: dart tooling/e2e/ci/bgp-wire-probe.dart --self-test
+
       # The recorder that PRODUCES that journal is itself a privacy hazard: it
       # captures full event JSON, ciphertext, and REQ filters carrying identity
       # pubkeys, mapped to named endpoints. Same shape as the exporter-label ban
@@ -2197,8 +2250,10 @@ jobs:
 
       # The one guard in this job whose subject is a workflow, not the tree, so
       # its fixtures are the only thing that can catch a widened re-run rule.
-      # They are hermetic: `gh` and `curl` are stubbed, nothing leaves the
-      # runner. One fixture DOES read the tree — the signature must appear in
+      # They are hermetic: `gh` is stubbed, and the `curl` stub is checked in
+      # the same run against the real curl talking to a loopback server, so
+      # nothing leaves the runner and the fake cannot drift from the tool. One
+      # fixture DOES read the tree — the signature must appear in
       # exactly one file — and it reads untracked files too, so a second copy
       # is caught in the commit that introduces it rather than the one after.
       - name: Runner-loss re-run gate self-test

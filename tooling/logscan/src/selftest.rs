@@ -1008,10 +1008,12 @@ fn case_floor(rig: &Rig, mutation: Option<&'static str>) -> Case {
 /// exactly the separation CI run 35464818348 had to make and could not.
 ///
 /// Which line that is depends on the reporter `flutter` picked, so the same
-/// capture is run three ways: the compact progress line, the github reporter's
-/// per-test line (what a hosted runner produces, and what run 35478132251 was
-/// rc 4 for lacking), and the github reporter's SKIP line, which is not proof —
-/// a skipped test is one whose body did not run.
+/// capture is run with the one reporter line swapped for each rendering in
+/// turn: the compact progress line, the github reporter's per-test line (what a
+/// hosted runner produces, and what run 35478132251 was rc 4 for lacking), its
+/// SKIP line, which is not proof — a skipped test is one whose body did not run
+/// — and then the three renderings of a SUITE LOAD, which is not a test at all
+/// and which on iOS is printed before the app is even built.
 fn case_proof_of_run(rig: &Rig, mutation: Option<&'static str>) -> Case {
     /// The one line of `clean.drive.log` the compact reporter wrote.
     const REPORTER: &str = "I/flutter ( 4457): 00:00 +0: the core flow settles a circle";
@@ -1067,10 +1069,16 @@ fn case_proof_of_run(rig: &Rig, mutation: Option<&'static str>) -> Case {
         "the problem must name the class and no path",
     )?;
 
-    // The same capture again with the compact line swapped for the rendering a
-    // hosted runner produces, and then for its SKIP form. Everything else —
-    // both plants, every byte of furniture — is untouched, so the glyph is the
-    // only difference between the clean verdict and rc 4.
+    // The same capture again with the compact line swapped for each of the
+    // other renderings in turn. Everything else — both plants, every byte of
+    // furniture — is untouched, so the reporter line is the only difference
+    // between a clean verdict and rc 4.
+    //
+    // The first two are the hosted runner's rendering of a finished test and of
+    // a SKIPPED one, whose body did not run. The last three are the reporter
+    // naming the SUITE it is LOADING: on iOS that line opens every transcript
+    // BEFORE the Xcode build, so while it counted, a capture of a build that
+    // never launched read as a run.
     for (label, replacement, want) in [
         (
             "a finished test",
@@ -1082,13 +1090,28 @@ fn case_proof_of_run(rig: &Rig, mutation: Option<&'static str>) -> Case {
             "::group::\u{274e} /home/runner/work/Haven-App/Haven-App/haven/test/core_flow_test.dart: the core flow settles a circle (skipped)\n::endgroup::",
             RC_META,
         ),
+        (
+            "a suite being loaded",
+            "00:00 +0: loading /Users/runner/work/Haven-App/Haven-App/haven/integration_test/b4_ios_real_gps_test.dart",
+            RC_META,
+        ),
+        (
+            "a suite that failed to load",
+            "::group::\u{274c} loading /home/runner/work/Haven-App/Haven-App/haven/test/pages/map_shell_test.dart (failed)\n::endgroup::",
+            RC_META,
+        ),
+        (
+            "a run whose suite never loaded, as the reporter closes it",
+            "06:17 +0: Some tests failed.",
+            RC_META,
+        ),
     ] {
         let body = CLEAN_DRIVE.replace(REPORTER, replacement);
         require(
             !body.contains(REPORTER),
             "the mutation must remove the compact reporter's line, or the leg proves nothing",
         )?;
-        let path = rig.write("github.drive.log", &body)?;
+        let path = rig.write("swapped.drive.log", &body)?;
         let outcome = scan(
             &manifest,
             &[sink("logcat", &[&logcat]), sink("drive", &[&path])],
@@ -1097,14 +1120,8 @@ fn case_proof_of_run(rig: &Rig, mutation: Option<&'static str>) -> Case {
         require(
             outcome.rc() == want,
             &format!(
-                "the github reporter's line for {label} must be rc {want}, got rc {} — {}",
-                outcome.rc(),
-                outcome
-                    .problems
-                    .iter()
-                    .map(|p| p.message.clone())
-                    .collect::<Vec<_>>()
-                    .join(" | ")
+                "the reporter's line for {label} must be rc {want}, got rc {}",
+                outcome.rc()
             ),
         )?;
     }

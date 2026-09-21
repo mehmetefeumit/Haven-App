@@ -1,0 +1,34 @@
+# Negative control: the transcript of a run that BUILT and never launched,
+# verbatim from the first eleven lines of `flutter-ios-test.log` in CI run
+# 35280144455's `e2e-ios-real-gps` upload — every byte the tool printed before
+# the first test body, and nothing after it. Reviewed against Rule 15 exactly as
+# `furniture.drive.log` was: no key material, no endpoint, no coordinate, no
+# name, no wall-clock instant, no count of anything the run minted.
+#
+# It is what the `drive` class's proof-of-run check exists to REFUSE, and until
+# `proof_of_run_excludes` it could not: the reporter's opening progress line —
+# a zero timestamp, a zero passed-count, then the word loading and the suite
+# path — is written BEFORE the Xcode build (it is the first line below, ahead of
+# a 74-second build), and it is progress-line shaped, so it satisfied the proof
+# pattern on its own. What separated this from a complete capture was then a
+# MEASURED line floor — half of a transcript's length — which is the racy proxy
+# `proof_of_run_excludes` replaces.
+#
+# Nothing in this header may be SPELT in that shape. A comment carrying a
+# literal timestamp-plus-counter prefix is a line the proof pattern can match,
+# and one reflow would turn this negative control into a certified run, so the
+# shape is described in words here and appears only in the capture below.
+#
+# One appended line turns it into a run, and that line is the whole difference:
+# see `the_ios_build_only_prefix_is_not_a_run` in src/scan.rs.
+00:00 +0: loading /Users/runner/work/Haven-App/Haven-App/haven/integration_test/b4_ios_real_gps_test.dart
+To ensure your app continues to launch on upcoming iOS versions, UIScene lifecycle support will soon be required. Please see https://flutter.dev/to/uiscene-migration for the migration guide.
+
+The following plugins do not support Swift Package Manager for ios:
+  - flutter_foreground_task
+  - patrol
+  - rust_lib_haven
+  - workmanager_apple
+This will become an error in a future version of Flutter. Please contact the plugin maintainers to request Swift Package Manager adoption.
+Running Xcode build...                                          
+Xcode build done.                                           74.2s

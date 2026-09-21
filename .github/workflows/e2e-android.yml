@@ -80,7 +80,7 @@ jobs:
     # the drive + 45 + 0.3 = 59.8, so 65) a 24-minute build and a 44-minute
     # drive, each inside its own cap, would have died here.
     # job-uncapped-minutes: 12.9 (149 runs, worst 30792258968)
-    timeout-minutes: ${{ inputs.live_sync && 156 || 141 }}
+    timeout-minutes: ${{ inputs.live_sync && 157 || 141 }}
     env:
       # 7788, NOT the relay's own port: this lane runs the recording wire proxy
       # (tooling/e2e/ci/start-wire-proxy.sh) in front of strfry. strfry keeps
@@ -177,6 +177,36 @@ jobs:
           echo "WIRE_SENTINEL=HAVEN_WIRE_SENTINEL:$(openssl rand -hex 16)" \
             >> "${GITHUB_ENV}"
 
+      # Gradle resolves the buildscript classpath over the network BEFORE it
+      # compiles anything, so a cold ~/.gradle makes this lane fetch hundreds of
+      # POMs — and hosted runners share egress IPs, so Maven Central rate-limits
+      # a runner nobody here provoked. CI run 35622556197 job 106414462454 lost
+      # a whole lane to HTTP 429 on the classpath, with NO test run, while twelve
+      # sibling Android lanes built the same commit with zero 429s. A warm
+      # dependency cache REMOVES those requests; the classified retry in
+      # scripts/ci/build_apk_with_retry.sh is only the backstop for what is left.
+      #
+      # Restore-only. build-check.yml is the single writer of this key, so a lane
+      # that deletes or half-fills ~/.gradle cannot publish a cache the other
+      # lanes would then restore. The `restore-keys` prefix means a changed
+      # dependency set still starts from the last good cache instead of cold.
+      #
+      # `continue-on-error` because a cache is an optimisation, and a step that
+      # overruns its own `timeout-minutes` FAILS the job: without this, a slow
+      # or unavailable cache service reddens a lane that would otherwise have
+      # built cold and run every test.
+      - name: Restore Gradle dependency cache
+        uses: actions/cache/restore@v4
+        timeout-minutes: 2
+        continue-on-error: true
+        with:
+          path: |
+            ~/.gradle/caches/modules-2
+            ~/.gradle/wrapper
+          key: gradle-deps-${{ runner.os }}-${{ hashFiles('haven/android/**/*.gradle*', 'haven/rust_builder/**/*.gradle*', 'haven/android/gradle/wrapper/gradle-wrapper.properties', 'haven/pubspec.lock') }}
+          restore-keys: |
+            gradle-deps-${{ runner.os }}-
+
       # Build the test APK BEFORE the emulator boots. The Rust-NDK +
       # Gradle compile peaks at several GB; running it concurrently
       # with a booted emulator + strfry container previously lost the
@@ -208,9 +238,7 @@ jobs:
         # x86_64-only roughly halves the native build/strip footprint and
         # the wall-clock. cargokit auto-installs any missing rustup target.
         run: |
-          flutter build apk \
-            --debug \
-            --target-platform android-x64 \
+          ../scripts/ci/build_apk_with_retry.sh android-x64 \
             --target=integration_test/e2e/e2e_combined.dart \
             --dart-define=HAVEN_E2E_RELAY="${HAVEN_E2E_RELAY}" \
             --dart-define=HAVEN_LIVE_SYNC=${{ inputs.live_sync }} \
@@ -869,7 +897,23 @@ jobs:
       - name: Capture host + emulator diagnostics
         if: always()
         run: |
+          # `adb` reaches PATH only through the emulator action's
+          # core.addPath(<sdk>/platform-tools); when that action never ran the
+          # slices below were `command not found`, and `|| true` kept it silent
+          # (run 35536892150). Resolve it from the SDK instead, and say in
+          # fixed words which case this diag is.
+          sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          if [ -n "${sdk}" ]; then PATH="${sdk}/platform-tools:${PATH}"; fi
+          if command -v adb >/dev/null 2>&1; then adb_state=resolved; else adb_state=absent; fi
+          devices=""
+          if [ "${adb_state}" = resolved ]; then devices="$(adb devices 2>/dev/null || true)"; fi
+          # Materialised: `adb devices | grep -q` reports the producer's
+          # SIGPIPE under pipefail, not the match.
+          if grep -qE '^[^[:space:]]+[[:space:]]+[a-z]+$' <<<"${devices}"; then device_state=present; else device_state=none; fi
           {
+            echo "adb: ${adb_state}"
+            echo "device: ${device_state}"
+            echo
             echo "=== df -h ==="
             df -h || true
             echo
@@ -921,7 +965,7 @@ jobs:
           if [[ -f /tmp/wire-summary.log ]]; then summary=(--sink diag=/tmp/wire-summary.log); fi
           rc=0
           bash tooling/e2e/ci/scan-logs.sh \
-            --manifest /tmp/haven-soak/needles/*.needles.json \
+            --manifest-dir /tmp/haven-soak/needles \
             --sink relay=/tmp/strfry.log \
             --sink diag=/tmp/diag.log \
             --sink proxy=/tmp/haven-wire-proxy.log \

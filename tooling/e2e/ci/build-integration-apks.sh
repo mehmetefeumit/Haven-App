@@ -41,6 +41,12 @@
 
 set -euo pipefail
 
+# Resolved from this script's own location, not from the caller's cwd: the
+# workflow runs it from haven/ as `bash ../tooling/e2e/ci/...`, a local run may
+# not.
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+readonly REPO_ROOT
+
 readonly RELAY_URL="${HAVEN_E2E_RELAY:-ws://10.0.2.2:7777}"
 
 # Mandatory live-sync define — no default, on purpose.
@@ -78,49 +84,31 @@ readonly LIVE_SYNC_DEFINE="--dart-define=HAVEN_LIVE_SYNC=${HAVEN_LIVE_SYNC}"
 readonly OUT_DIR="/tmp/integration-apks"
 readonly BUILD_APK="build/app/outputs/flutter-apk/app-debug.apk"
 
-# Bounded retry for `flutter build apk`. Gradle dependency resolution
-# intermittently fails on CI when Maven Central / plugins.gradle.org rate-limit
-# or hiccup on shared runner IPs — the tell is an HTTP 403/429/5xx (e.g.
-# "Could not GET '.../kotlin-stdlib-*.pom'. Received status code 403") during
-# ':classpath' resolution. That is a network flake, NOT a build error: a re-run
-# resolves it, and Gradle caches the artifacts it DID fetch in ~/.gradle within
-# the job, so a retry only re-fetches what the transient failure missed (fast). A
-# genuine compile error still fails every attempt and surfaces normally. Tunable
-# via env for local runs.
-readonly BUILD_MAX_ATTEMPTS="${HAVEN_BUILD_MAX_ATTEMPTS:-3}"
-readonly BUILD_RETRY_DELAY_SECS="${HAVEN_BUILD_RETRY_DELAY_SECS:-20}"
+# The ONE classified, budgeted retry every Gradle-backed lane builds through.
+#
+# This script used to carry its own loop, which retried EVERY non-zero exit. That
+# is wrong in the two directions that matter: it retried compile errors (three
+# copies of the same error, and the step's time spent before showing it), and it
+# retried disk/memory exhaustion — intermittent but REAL — which turns a capacity
+# problem into a green build that hides it. The wrapper classifies on Gradle's
+# own dependency-resolution wording instead, and carries the per-job wall-clock
+# budget that keeps a seven-APK step's worst case bounded (a per-target budget
+# would be spent seven times over). Its header has the failure it was measured
+# against and the worst-case arithmetic.
+readonly BUILD_WRAPPER="${REPO_ROOT}/scripts/ci/build_apk_with_retry.sh"
 
-build_apk_with_retry() {
-  local target="$1" attempt=1 rc=0
-  while (( attempt <= BUILD_MAX_ATTEMPTS )); do
-    rc=0
-    # `--target-platform android-x64`: the E2E AVDs are all x86_64, so x64 is the
-    # only ABI these APKs ever run on. Without it cargokit compiles the large
-    # debug haven-core Rust lib for four ABIs (arm/arm64 + the debug-forced
-    # x86/x64), which — with the NDK strip pass — has exhausted the runner disk.
-    # shellcheck disable=SC2086  # LIVE_SYNC_DEFINE is one validated word.
-    flutter build apk \
-      --debug \
-      --target-platform android-x64 \
-      --target="${target}" \
-      ${LIVE_SYNC_DEFINE} \
-      --dart-define=HAVEN_E2E_RELAY="${RELAY_URL}" || rc=$?
-    if (( rc == 0 )); then
-      return 0
-    fi
-    if (( attempt < BUILD_MAX_ATTEMPTS )); then
-      echo "WARN: 'flutter build apk' for ${target} failed (rc=${rc}," \
-           "attempt ${attempt}/${BUILD_MAX_ATTEMPTS}) — retrying in" \
-           "${BUILD_RETRY_DELAY_SECS}s. Transient Gradle repo/network failures" \
-           "(e.g. a Maven Central 403) are common on shared CI IPs and clear on" \
-           "re-run; Gradle reuses what it already cached this job." >&2
-      sleep "${BUILD_RETRY_DELAY_SECS}"
-    fi
-    attempt=$(( attempt + 1 ))
-  done
-  echo "ERROR: 'flutter build apk' for ${target} failed after" \
-       "${BUILD_MAX_ATTEMPTS} attempts (rc=${rc}) — see the last failure above." >&2
-  return "${rc}"
+build_target_apk() {
+  local target="$1"
+  # `--target-platform android-x64` (inside the wrapper): the E2E AVDs are all
+  # x86_64, so x64 is the only ABI these APKs ever run on. Without it cargokit
+  # compiles the large debug haven-core Rust lib for four ABIs (arm/arm64 + the
+  # debug-forced x86/x64), which — with the NDK strip pass — has exhausted the
+  # runner disk.
+  # shellcheck disable=SC2086  # LIVE_SYNC_DEFINE is one validated word.
+  "${BUILD_WRAPPER}" android-x64 \
+    --target="${target}" \
+    ${LIVE_SYNC_DEFINE} \
+    --dart-define=HAVEN_E2E_RELAY="${RELAY_URL}"
 }
 
 # The smoke-test pre-flight plus the five orphan integration targets
@@ -170,10 +158,11 @@ for target in "${TARGETS[@]}"; do
   echo "============================================================"
   echo "Building ${target} -> ${dest}"
   echo "============================================================"
-  # Build with a bounded retry so a transient Maven Central / plugins.gradle.org
-  # 403 during Gradle dependency resolution does not fail the whole lane (the
-  # x86_64-only rationale is documented on the flag inside the helper).
-  build_apk_with_retry "${target}"
+  # Build through the classified retry so a transient Maven Central rate limit
+  # during Gradle dependency resolution does not fail the whole lane, while a
+  # compile error or a full disk still fails it immediately (the x86_64-only
+  # rationale is documented on the flag inside the helper).
+  build_target_apk "${target}"
   cp "${BUILD_APK}" "${dest}"
   ls -lh "${dest}"
 done

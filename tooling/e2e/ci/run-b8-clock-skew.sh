@@ -306,7 +306,7 @@ run_self_test() {
   # Pinned by EQUALITY, never printed as prose: this used to end with a
   # hard-coded "all 18 fixture groups passed" while 17 ran. Each numbered
   # group counts itself.
-  local -r SELF_TEST_GROUPS=19
+  local -r SELF_TEST_GROUPS=20
   local tmp fail=0 got checked=0
   _group() { checked=$(( checked + 1 )); }
   tmp="$(mktemp -d)"
@@ -868,6 +868,66 @@ run_self_test() {
     fail=1
   fi
 
+  # --- (20) THIS LANE'S OWN LINE FLOOR, sealed before the first gate. -------
+  # The host profile REUSES whatever manifest is at the out path, so a pre-seal
+  # moved below the EXIT trap — or deleted — leaves the policy defaults sealed
+  # and this lane's floor silently inoperative.
+  _group
+  local seal_at trap_at
+  seal_at="$(grep -n -m1 '^logscan_seal host /tmp/haven-soak/needles "${SEAL_EXTRA\[@\]}" || seal_rc=$?$' \
+    "${self}" | cut -d: -f1 || true)"
+  trap_at="$(grep -n -m1 '^trap cleanup EXIT$' "${self}" | cut -d: -f1 || true)"
+  if [[ -z "${seal_at}" || -z "${trap_at}" ]] || (( seal_at > trap_at )); then
+    echo "SELF-TEST FAIL (20): the manifest must be sealed once before the EXIT" \
+         "trap is armed (seal='${seal_at}', trap='${trap_at}')" >&2
+    fail=1
+  fi
+  got="$(grep -cE '^readonly -a SEAL_EXTRA=\(--floor drive=8 --floor relay=7\)$' "${self}" || true)"
+  if [[ "${got}" != "1" ]]; then
+    echo "SELF-TEST FAIL (20b): this lane's sealed drive and relay floors are not" \
+         "the ones argued for above them (found ${got} declaration(s))" >&2
+    fail=1
+  fi
+  # …and that floor stays derived from what `flutter drive` prints on the HOST
+  # rather than from a transcript's length. The fixture is this lane's
+  # host-printed skeleton interleaved with forwarded device chatter, exactly as
+  # a real capture is: the floor may not exceed the skeleton, so a number
+  # measured from a whole transcript (120 was the shortest complete one) is
+  # rejected by the same check. Without this, the next red lane gets re-pinned
+  # from a length again — which is how a COMPLETE capture was reddened in CI
+  # run 35464818348.
+  local host_printed_re printed drive_floor
+  host_printed_re='^(Installing |VMServiceFlutterDriver: |All tests passed\.|Failure Details:)'
+  printf '%s\n' \
+    'Installing /tmp/integration-apks/b8_clock_skew_test.apk...      4.4s' \
+    'I/Choreographer( 4635): Skipped 165 frames!' \
+    'VMServiceFlutterDriver: Connecting to Flutter application at <endpoint>' \
+    'VMServiceFlutterDriver: Isolate found with number: <n>' \
+    'VMServiceFlutterDriver: Isolate <n> is runnable.' \
+    'VMServiceFlutterDriver: Isolate is paused at start.' \
+    'VMServiceFlutterDriver: Attempting to resume isolate' \
+    'VMServiceFlutterDriver: Connected to Flutter application.' \
+    'I/flutter ( 4635): 00:00 +0: B8: a +/-6h device clock jump is detected' \
+    'I/flutter ( 4635): 00:14 +2: All tests passed!' \
+    'All tests passed.' > "${tmp}/host-printed.drive.log"
+  printed="$(grep -cE "${host_printed_re}" "${tmp}/host-printed.drive.log" || true)"
+  if [[ "${printed}" != "8" ]]; then
+    echo "SELF-TEST FAIL (20c): the fixture must carry this lane's 8-line" \
+         "host-printed skeleton, counted ${printed} — the check below would" \
+         "otherwise be measuring the wrong thing" >&2
+    fail=1
+  fi
+  drive_floor="$(sed -n -E 's/^readonly -a SEAL_EXTRA=\(.*--floor drive=([0-9]+).*/\1/p' "${self}")"
+  if [[ -z "${drive_floor}" ]] || (( drive_floor < 1 || drive_floor > printed )); then
+    echo "SELF-TEST FAIL (20d): drive=${drive_floor:-none} is not within the" \
+         "${printed} line(s) \`flutter drive\` prints on the host. A drive floor" \
+         "is calibrated to those alone; a higher one was measured from a" \
+         "transcript that also carried forwarded logcat furniture, which is not" \
+         "a property of the run. 'A test ran' is the scanner's proof_of_run," \
+         "not this number." >&2
+    fail=1
+  fi
+
   if (( checked != SELF_TEST_GROUPS )); then
     echo "SELF-TEST FAIL: ran ${checked} fixture group(s), expected ${SELF_TEST_GROUPS}" >&2
     fail=1
@@ -1101,6 +1161,65 @@ cleanup() {
   bash "${STOP_STRFRY}" >/dev/null 2>&1 || true
   exit "${rc}"
 }
+
+# The line floor this lane seals with. A floor is what turns "the scan read an
+# empty or truncated file and found nothing" into rc 4 instead of a green, so it
+# is calibrated to the part of a capture its PRODUCER always writes — never to
+# what would make this lane pass, and never to a length the device can change.
+#
+# drive=8, and it is deliberately NOT a transcript's length. Until now this lane
+# sealed no floor at all, so the policy default of 100 applied to its single
+# transcript (tooling/logscan/policy.toml) — against complete captures of 120,
+# 124, 135 and 135 lines across four green runs (35311161479, 35376588206,
+# 35397118356, 35524002720). That 20-line margin was the tightest left in this
+# tree on a number that is not a property of the run at all: a `flutter drive`
+# transcript is the tool's own output INTERLEAVED with whatever logcat furniture
+# the device happened to print. Chasing that number is how a COMPLETE capture
+# was reddened in CI run 35464818348.
+#
+# "A test actually ran" is proven by the scanner instead, from the test
+# reporter's own progress line (`proof_of_run` on the `drive` class in
+# policy.toml). What is left for this floor is the other failure — an empty or
+# truncated file — so it is derived from what `flutter drive` prints on the
+# HOST, which no device chatter can change: `Installing …` (flutter_tools
+# installs unconditionally on every launch), the six `VMServiceFlutterDriver:`
+# connect lines (four unconditional; `Isolate is paused at start.` and
+# `Attempting to resume isolate` are the `kPauseStart` branch of
+# flutter_driver's vmservice_driver.dart, which `flutter drive` guarantees by
+# defaulting `--start-paused` to true — nothing in drive mode resumes the root
+# isolate, so another branch would mean a foreign debugger),
+# and the driver's own closing verdict. That is 8 in each of the
+# four transcripts above; this lane does not pass `--keep-app-running`, so it
+# never prints the ninth line a lane that does adds, and the --self-test reds if
+# this floor ever exceeds the skeleton.
+#
+# relay=7. The policy's 1 is sized for the hermetic host relay, which prints a
+# single listen line; this lane's relay is strfry, started from the same
+# digest-pinned image and the same checked-in strfry.conf as every other
+# Android lane (start-strfry.sh), whose `docker logs` dump OPENS with a fixed
+# 9-line startup block — arguments, current dir, verbosity, the rule, the two
+# CONFIG lines, the ephemeral-events WARN, `Started websocket server` — and
+# grows only with traffic. Measured on THIS lane's own dumps: 30/31/31/31 lines
+# across four green runs (35311161479, 35376588206, 35397118356, 35524002720),
+# the first 9 identical in all four, the 10th the first connection-dependent
+# line. 7 sits under the block every LIVE container prints, while one torn down
+# before the dump yields ONE line of docker error text — which a floor of 1
+# certifies clean. So this floor tells those two apart without depending on how
+# much traffic the run happened to generate.
+#
+# Sealed ONCE, before the first gate: every later gate reuses the manifest at
+# the out path, so without this the post-drive gate would seal this lane's
+# manifest with the policy defaults instead.
+readonly -a SEAL_EXTRA=(--floor drive=8 --floor relay=7)
+seal_rc=0
+logscan_seal host /tmp/haven-soak/needles "${SEAL_EXTRA[@]}" || seal_rc=$?
+if (( seal_rc != 0 )); then
+  echo "ERROR: could not seal this lane's needle manifest (rc ${seal_rc}) — see the" \
+       "line(s) above; every gate would fail the same way, so nothing this run" \
+       "captures can be proven clean." >&2
+  exit 1
+fi
+
 trap cleanup EXIT
 
 fail() {

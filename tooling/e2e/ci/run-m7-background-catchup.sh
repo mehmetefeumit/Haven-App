@@ -445,7 +445,12 @@ cleanup() {
 # body does. What is left for this floor is the other failure — an empty or
 # truncated file — so it is derived from what `flutter drive` prints on the
 # HOST, which no device chatter can change: `Installing …`, the six
-# `VMServiceFlutterDriver:` lines, the verdict (`All tests passed.`) and
+# `VMServiceFlutterDriver:` lines (four unconditional; `Isolate is paused at
+# start.` and `Attempting to resume isolate` are the `kPauseStart` branch of
+# flutter_driver's vmservice_driver.dart, which `flutter drive` guarantees by
+# defaulting `--start-paused` to true — nothing in drive mode resumes the root
+# isolate, so another branch would mean a foreign debugger), the verdict
+# (`All tests passed.`) and
 # `Leaving the application running.` (this lane runs --keep-app-running). That
 # is 9 in every complete transcript this lane produced in run 35464818348 — a
 # lane that lets `flutter drive` stop the app prints the same skeleton without

@@ -350,16 +350,31 @@ Usage: simctl privacy <device> <action> <service> [<bundle identifier>]
     <<<"${joined}" || rc=1
   _check "G1 the delegate is handed the seeded position for the log-privacy seal" 0 "${rc}"
 
+  # --- (G2) …and this lane's drive floor stays DERIVED from the host skeleton
+  #     the shared runner defines, never measured from a transcript's length.
+  #     Read from both files, so re-pinning either one alone reds here. 22 was
+  #     half a measured capture; what it used to catch — a build that never
+  #     launched — is the scanner's proof_of_run now.
+  local skeleton floor
+  skeleton="$(sed -n -E 's/^readonly IOS_HOST_SKELETON_LINES=([0-9]+).*/\1/p' \
+                "${SCRIPT_DIR}/run-ios-sim-scenario.sh")"
+  floor="$(sed -n -E 's/^HAVEN_LOGSCAN_DRIVE_FLOOR=([0-9]+) .*/\1/p' "${BASH_SOURCE[0]}")"
+  rc=0
+  [[ -n "${skeleton}" && -n "${floor}" ]] \
+    && (( floor >= 1 && floor <= skeleton )) || rc=1
+  _check "G2 the sealed drive floor stays within the shared runner's host skeleton" 0 "${rc}"
+
   if (( fail != 0 )); then
     echo "run-b4-ios-real-gps.sh --self-test: FAILED" >&2
     return 1
   fi
-  echo "run-b4-ios-real-gps.sh --self-test: all 18 fixtures passed (simctl" \
+  echo "run-b4-ios-real-gps.sh --self-test: all 19 fixtures passed (simctl" \
        "location/privacy support is probed not assumed and the two failure" \
        "modes are distinguished; coordinate seeds are range- and type-checked" \
        "and the null island is refused; a run that exits 0 without" \
-       "reaching its proof is refused; and the seeded position is handed to" \
-       "the delegate's log-privacy seal as a needle)."
+       "reaching its proof is refused; the seeded position is handed to" \
+       "the delegate's log-privacy seal as a needle; and this lane's drive" \
+       "floor stays within the shared runner's host skeleton)."
   return 0
 }
 
@@ -585,13 +600,15 @@ echo "B4 — seeded the simulator location (value withheld from the log)"
 # this lane exists to prove is encrypted must be the one its logs are searched
 # for. The gate's arm and profile arrive from the job env.
 #
-# HAVEN_LOGSCAN_DRIVE_FLOOR is this lane's own anti-vacuity floor. A COMPLETE,
-# fully passing transcript of this single-scenario drive is 45 lines (measured,
-# CI run 35280144455), against the policy default of 100 — which is the
-# core-flow drive's and would read every green B4 run as truncated. 22 is half
-# the measured complete capture: low enough that a passing run is never rc 4,
-# high enough that a drive killed before its first test (the shape the floor
-# exists to catch, ~12 lines of Xcode build output) still is.
+# HAVEN_LOGSCAN_DRIVE_FLOOR is this lane's own anti-vacuity floor, against the
+# policy default of 100 — which is the core-flow drive's and would read every
+# green B4 run as truncated. 4 is the HOST SKELETON the shared runner derives
+# (IOS_HOST_SKELETON_LINES: the reporter's `loading` and first test-start lines
+# and flutter_tools' two Xcode-build lines), not half of a measured transcript
+# the way 22 was. What 22 caught and 4 does not is a drive killed before its
+# first test — ~12 lines of Xcode build output — and what catches that now is
+# the scanner's own proof_of_run, which stopped accepting the reporter's
+# `loading <suite>` line as evidence a test ran.
 set +e
 HAVEN_LIVE_SYNC="${LIVE_SYNC}" \
 HAVEN_E2E_RELAY="${RELAY_URL}" \
@@ -600,7 +617,7 @@ HAVEN_E2E_IOS_SKIP_UNINSTALL=1 \
 HAVEN_B4_GEO_LAT="${GEO_LAT}" \
 HAVEN_B4_GEO_LON="${GEO_LON}" \
 HAVEN_B4_GEO_TOLERANCE_DEG="${GEO_TOLERANCE}" \
-HAVEN_LOGSCAN_DRIVE_FLOOR=22 \
+HAVEN_LOGSCAN_DRIVE_FLOOR=4 \
 HAVEN_LOGSCAN_HOST_COORDINATE="${GEO_LAT},${GEO_LON}" \
   bash "${SIM_RUNNER}" "${SCENARIO_FILE}" "${SIM_UDID}"
 DRIVE_RC=$?

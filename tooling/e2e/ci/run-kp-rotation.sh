@@ -824,7 +824,7 @@ run_self_test() {
   # hard-coded "all 50 fixture groups passed" that no counter backed, so a
   # deleted assertion changed neither the message nor the exit code. Every
   # assertion helper below counts itself.
-  local -r SELF_TEST_ASSERTIONS=87
+  local -r SELF_TEST_ASSERTIONS=89
   local tmp fails=0 checked=0
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
@@ -1699,7 +1699,36 @@ run_self_test() {
   [[ -n "${seal_at}" && -n "${trap_at}" ]] && (( seal_at < trap_at )) || rc=1
   _case "the manifest is sealed once before the EXIT trap is armed" 0 "${rc}"
   _eq_case "…with this lane's drive and relay floors" "1" \
-    "$(grep -cE '^readonly -a SEAL_EXTRA=\(--floor drive=43 --floor relay=7\)$' "${self}" || true)"
+    "$(grep -cE '^readonly -a SEAL_EXTRA=\(--floor drive=8 --floor relay=7\)$' "${self}" || true)"
+  # …and that drive floor stays derived from what `flutter drive` prints on the
+  # HOST rather than from a transcript's length. The fixture is this lane's
+  # host-printed skeleton interleaved with forwarded device chatter, exactly as
+  # a real capture is: the floor may not exceed the skeleton, and a number
+  # measured from a whole transcript (43 was half of one) must be rejected by
+  # the same check. Without this, the next red lane gets re-pinned from a
+  # length again — which is how a COMPLETE capture was reddened in CI run
+  # 35464818348.
+  local host_printed_re printed drive_floor
+  host_printed_re='^(Installing |VMServiceFlutterDriver: |All tests passed\.|Failure Details:)'
+  printf '%s\n' \
+    'Installing /tmp/integration-apks/kp_rotation_wire_test.apk...      4.7s' \
+    'I/Choreographer( 4866): Skipped 165 frames!' \
+    'VMServiceFlutterDriver: Connecting to Flutter application at <endpoint>' \
+    'VMServiceFlutterDriver: Isolate found with number: <n>' \
+    'VMServiceFlutterDriver: Isolate <n> is runnable.' \
+    'VMServiceFlutterDriver: Isolate is paused at start.' \
+    'VMServiceFlutterDriver: Attempting to resume isolate' \
+    'VMServiceFlutterDriver: Connected to Flutter application.' \
+    'I/flutter ( 4866): 00:00 +0: KPR: a rotated KeyPackage is usable' \
+    'I/flutter ( 4866): 00:10 +2: All tests passed!' \
+    'All tests passed.' > "${tmp}/host-printed.drive.log"
+  printed="$(grep -cE "${host_printed_re}" "${tmp}/host-printed.drive.log" || true)"
+  _eq_case "the fixture carries this lane's 8-line host-printed skeleton" "8" \
+    "${printed}"
+  drive_floor="$(sed -n -E 's/^readonly -a SEAL_EXTRA=\(.*--floor drive=([0-9]+).*/\1/p' "${self}")"
+  rc=1
+  [[ -n "${drive_floor}" ]] && (( drive_floor >= 1 && drive_floor <= printed )) && rc=0
+  _case "…and the sealed drive floor stays within it" 0 "${rc}"
 
   if (( checked != SELF_TEST_ASSERTIONS )); then
     printf '  \033[1;31mFAIL\033[0m ran %s assertion(s), expected exactly %s — an assertion was added or deleted without updating SELF_TEST_ASSERTIONS\n' \
@@ -1930,25 +1959,49 @@ cleanup() {
 
 # The line floors this lane seals with. A floor is what turns "the scan read an
 # empty or truncated file and found nothing" into rc 4 instead of a green, so
-# each is calibrated to the smallest COMPLETE capture this lane produces and
-# never to what would make it pass.
+# each is calibrated to the part of a capture its PRODUCER always writes —
+# never to what would make this lane pass, and never to a length the device
+# can change.
 #
-# drive=43. The policy's 100 lines is sized for the Android core flow's
-# 394-line transcript; this lane drives ONE target and its complete transcript
-# is 86 lines (flutter-drive.log, run 35280144455). 43 is half of that and
-# still far above the ~17 lines `flutter drive` prints before the first test result.
+# drive=8, and it is deliberately NOT half a transcript's length, which is what
+# the previous 43 was. A `flutter drive` transcript is the tool's own output
+# INTERLEAVED with whatever logcat furniture the device happened to print
+# (`Choreographer: Skipped N frames`, `ProfileInstaller`), so its length is not
+# a property of the run: this lane's COMPLETE transcript measured 88, 91, 92
+# and 93 lines across four green runs (35311161479, 35376588206, 35397118356,
+# 35524002720) with nothing but chatter between them. Chasing that number is
+# how a complete capture was reddened in CI run 35464818348.
+#
+# "A test actually ran" is proven by the scanner instead, from the test
+# reporter's own progress line (`proof_of_run` on the `drive` class in
+# tooling/logscan/policy.toml). What is left for this floor is the other
+# failure — an empty or truncated file — so it is derived from what `flutter
+# drive` prints on the HOST, which no device chatter can change: `Installing …`
+# (flutter_tools installs unconditionally on every launch), the six
+# `VMServiceFlutterDriver:` connect lines (four unconditional; `Isolate is
+# paused at start.` and `Attempting to resume isolate` are the `kPauseStart`
+# branch of flutter_driver's vmservice_driver.dart, which `flutter drive`
+# guarantees by defaulting `--start-paused` to true — nothing in drive mode
+# resumes the root isolate, so another branch would mean a foreign debugger),
+# and the driver script's verdict
+# (`All tests passed.`, or `Failure Details:` when it is not). That is 8 in
+# every complete transcript of this lane — 9 for a lane that keeps the app
+# running — and the --self-test reds if this floor ever exceeds it.
 #
 # relay=7. The policy's 1 is sized for the hermetic host relay, which prints a
-# single listen line; this lane's relays are strfry, whose `docker logs` dumps
-# are 23 and 14 lines here (same run), of which the first 9 are a fixed startup
-# block. 7 is half the smaller complete dump, so a dump below it is truncated
-# or absent (a container already torn down yields ONE line), never a quiet
-# relay — and it holds whether the EXIT trap captured one relay or both.
+# single listen line; this lane's relays are strfry, whose `docker logs` dump
+# OPENS with a fixed 9-line startup block and grows from there only with
+# traffic (9-49 lines across the fleet's green runs; exactly 9 for a target
+# whose relay serves nothing it logs). 7 sits under the block every LIVE
+# container prints, while one torn down before the dump yields ONE line of
+# docker error text — so this floor tells those two apart without depending on
+# how much traffic the target happened to generate, and it holds whether the
+# EXIT trap captured one relay or both.
 #
 # Sealed ONCE, before the first gate: every later gate reuses the manifest at
 # the out path, so without this the post-drive gate would seal the lane's
 # manifest with the policy defaults instead.
-readonly -a SEAL_EXTRA=(--floor drive=43 --floor relay=7)
+readonly -a SEAL_EXTRA=(--floor drive=8 --floor relay=7)
 seal_rc=0
 logscan_seal host /tmp/haven-soak/needles "${SEAL_EXTRA[@]}" || seal_rc=$?
 if (( seal_rc != 0 )); then

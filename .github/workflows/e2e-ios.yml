@@ -796,7 +796,7 @@ jobs:
           fi
           rc=0
           bash tooling/e2e/ci/scan-logs.sh \
-            --manifest /tmp/haven-soak/needles/*.needles.json \
+            --manifest-dir /tmp/haven-soak/needles \
             --sink ios=/tmp/sim-unified.log,/tmp/sim-unified-full.log \
             "${drives[@]}" \
             --sink relay=/tmp/relay.log \

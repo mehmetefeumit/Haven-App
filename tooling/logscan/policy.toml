@@ -147,8 +147,8 @@ ios = { term_floor = 8, declared_plants_expected = false, structural_rules = tru
 # cut from the first. What proves a test ran is a line the REPORTER writes, and
 # a `flutter` invocation picks its reporter from the environment, so the pattern
 # is an alternation over the renderings this tree actually captures:
-#   * the expanded/compact progress line `HH:MM +N: <name>`, written BEFORE the
-#     first test body runs — bare in a `flutter test` transcript and forwarded by
+#   * the expanded/compact progress line `HH:MM +N: <name>`, written the moment a
+#     test STARTS — bare in a `flutter test` transcript and forwarded by
 #     Android logcat as `I/flutter ( pid): 00:00 +0: …`. `( -[0-9]+)?` admits its
 #     failing-run form (`+3 -1:`), which proves a test ran just as well;
 #   * the GITHUB reporter's per-test line, `✅ <path>: <name>` for a test with no
@@ -161,9 +161,38 @@ ios = { term_floor = 8, declared_plants_expected = false, structural_rules = tru
 # not run, so a transcript of nothing but skips is the vacuous capture this check
 # exists to catch. The closing `🎉 N tests passed` summary is absent for the same
 # reason — the reporter writes it whatever N is, `0` included.
+#
+# `proof_of_run_excludes` is the other half of the same question, because BOTH
+# reporters render a SUITE LOAD through the very shape above and a suite load is
+# not a test:
+#   * the expanded reporter opens every transcript with `00:00 +0: loading
+#     <path>` — on iOS that line is written BEFORE the Xcode build, so the
+#     11-line build-only prefix of run 35280144455's captures satisfied the
+#     pattern and "built, never launched" read as a run;
+#   * the github reporter emits nothing at all for a load that succeeds, and
+#     `::group::❌ loading <path> (failed)` for one that does not (`_onComplete`
+#     in `test_core`'s `github.dart`: a `LoadSuite` test is synthetic and is
+#     printed only when it carries errors or messages, and without the suite
+#     path prefix a real test would have) — a suite that failed to load ran
+#     nothing.
+# `regex` has no lookahead, so each is a pattern of its own rather than one.
+# Both are anchored on BOTH sides of `loading`: on the reporter's own prefix to
+# their left and on the suite path's `.dart` to their right, so a test whose
+# NAME carries the word (`CircleSelector shows loading indicator …`, run
+# 35524002720's coverage transcript) is still proof.
+# The third is the expanded reporter's own CLOSING summary, which `_onDone`
+# renders as a progress line like any other: it writes `Some tests failed.`
+# whenever the run failed, and a run whose SUITE failed to load is such a run —
+# CI run 35397118356's bg-publish capture ends on exactly `06:17 +0: Some tests
+# failed.`, with no failure counter, because nothing had reached a failed state.
+# `All tests passed!` is NOT excluded: `_onDone` reaches it only with a non-empty
+# passed set, so it is a run. `No tests ran.` needs no entry — the reporter
+# writes it bare, with no progress prefix to match. Nor does `All tests
+# skipped.`, which `_progressLine` can only render once `~N` is in the counters,
+# a segment this pattern does not admit.
 # Only `drive` declares a proof: it is the one class whose every capture comes
 # from a test reporter.
-drive = { term_floor = 6, declared_plants_expected = true, structural_rules = true, reassemble = false, min_lines = 100, entry_format = "plain", proof_of_run = '[0-9]{2}:[0-9]{2} \+[0-9]+( -[0-9]+)?: |^(::group::)?(✅|❌) ' }
+drive = { term_floor = 6, declared_plants_expected = true, structural_rules = true, reassemble = false, min_lines = 100, entry_format = "plain", proof_of_run = '[0-9]{2}:[0-9]{2} \+[0-9]+( -[0-9]+)?: |^(::group::)?(✅|❌) ', proof_of_run_excludes = ['[0-9]{2}:[0-9]{2} \+[0-9]+( -[0-9]+)?: loading [^ ]+\.dart', '^(::group::)?(✅|❌) loading [^ ]+\.dart', '[0-9]{2}:[0-9]{2} \+[0-9]+( -[0-9]+)?: Some tests failed\.$'] }
 rust-test = { term_floor = 6, declared_plants_expected = false, structural_rules = true, reassemble = false, min_lines = 20, entry_format = "plain", cargo_status = "exempt" }
 proxy = { term_floor = 6, declared_plants_expected = false, structural_rules = true, reassemble = false, min_lines = 5, entry_format = "plain" }
 diag = { term_floor = 6, declared_plants_expected = false, structural_rules = true, reassemble = false, min_lines = 1, entry_format = "plain" }
@@ -178,8 +207,9 @@ diag = { term_floor = 6, declared_plants_expected = false, structural_rules = tr
 # else for a whole run, so `relay.log` is 1 line in every iOS lane of run
 # 35280144455. With the rules off and the public classes scoped out, existence
 # and readability are all this class's floor can prove; a lane whose relay
-# writes more (strfry's `docker logs` dump runs to 14-23 lines) carries its own
-# `seal --floor relay=<n>`, which is where a truncated dump is caught.
+# writes more (strfry's `docker logs` dump opens with a fixed 9-line startup
+# block and grows only with traffic) carries its own `seal --floor relay=<n>`,
+# which is where a truncated dump is caught.
 relay = { term_floor = 6, declared_plants_expected = false, structural_rules = false, reassemble = false, min_lines = 1, entry_format = "plain" }
 # The Tier-1 soak rig's own captures: one file per scenario (the lines the rig's
 # installed `log` sink captured while that scenario ran), plus the banner, the

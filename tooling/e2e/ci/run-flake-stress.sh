@@ -231,12 +231,14 @@ mkdir -p "${LOG_DIR}"
 # never to what would make it pass.
 #
 # relay=7. The policy's 1 is sized for the hermetic host relay, which prints a
-# single listen line; this lane's relay is strfry, whose `docker logs` dump is
-# 14-23 lines for a full run across the fleet, of which the first 9 are a fixed
-# startup block. 7 is half the smallest complete dump, so a dump below it is
-# truncated or absent — which is what a container torn down before the dump
-# looks like: ONE line of docker error text. The drive and logcat floors stay
-# the policy's: every iteration drives the whole core flow onto a device-wide
+# single listen line; this lane's relay is strfry, whose `docker logs` dump
+# OPENS with a fixed 9-line startup block and grows only with traffic
+# (9-49 lines across the fleet's green runs; exactly 9 for a target whose relay
+# serves nothing it logs). 7 sits under the block every LIVE container prints,
+# while one torn down before the dump yields ONE line of docker error text — so
+# this floor tells those two apart without depending on how much traffic the
+# target happened to generate. The drive and logcat floors stay the
+# policy's: every iteration drives the whole core flow onto a device-wide
 # capture, which is exactly the shape those defaults were sized for.
 #
 # Sealed ONCE, before the first iteration: every gate reuses the manifest at

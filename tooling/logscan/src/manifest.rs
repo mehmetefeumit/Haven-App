@@ -194,6 +194,19 @@ impl Manifest {
             .get(class)
             .and_then(|spec| spec.proof_of_run.as_deref())
     }
+
+    /// The renderings of `class`'s proof line that prove nothing — the
+    /// reporter naming a SUITE it is loading rather than a test it is running.
+    ///
+    /// Read from the same place and for the same reason as [`Self::proof_of_run`]:
+    /// a lane that could drop an exclusion could certify a build that never
+    /// launched as a run.
+    #[must_use]
+    pub fn proof_of_run_excludes(&self, class: &str) -> &[String] {
+        self.sinks
+            .get(class)
+            .map_or(&[], |spec| spec.proof_of_run_excludes.as_slice())
+    }
 }
 
 /// One line of a `.needles.decl` sidecar.

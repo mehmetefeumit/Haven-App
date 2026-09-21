@@ -42,6 +42,14 @@ jobs:
     # HAVEN_LIVE_SYNC-INTENT: production-default — see the header. This job
     # builds what ships, and what ships passes no define.
     runs-on: ubuntu-latest
+    # A job cap, because the cache-restore step below has one and a step cap
+    # inside an uncapped job cannot be ordered against anything (check_e2e_step
+    # _timeout_ordering.sh C3); without it a wedged build runs to GitHub's
+    # six-hour default. MEASURED worst 17.9 min across 12 CI runs (2026-09-19..21,
+    # all three ABIs; worst leg run 35524002720). 45 leaves room for a cold build
+    # that also spends the whole classified-retry budget in
+    # scripts/ci/build_apk_with_retry.sh and still dies naming itself.
+    timeout-minutes: 45
     strategy:
       # One architecture failing must not cancel the other two — each arch is
       # an independent signal.
@@ -106,6 +114,40 @@ jobs:
       - name: Get dependencies
         run: flutter pub get
 
+      # Gradle resolves the buildscript classpath over the network BEFORE it
+      # compiles anything, so a cold ~/.gradle makes this lane fetch hundreds of
+      # POMs — and hosted runners share egress IPs, so Maven Central rate-limits
+      # a runner nobody here provoked. CI run 35622556197 job 106414462454 lost
+      # a whole lane to HTTP 429 on the classpath, with NO test run, while twelve
+      # sibling Android lanes built the same commit with zero 429s. A warm
+      # dependency cache REMOVES those requests; the classified retry in
+      # scripts/ci/build_apk_with_retry.sh is only the backstop for what is left.
+      #
+      # This job is the single WRITER of the key (the save step below); every
+      # other lane restores it read-only, so no lane that deletes or half-fills
+      # ~/.gradle can publish a cache the others would inherit. It writes here
+      # because it builds three ABIs of the same dependency set on every push,
+      # and carries no emulator step whose job cap the extra time would squeeze.
+      # The `restore-keys` prefix means a changed dependency set still starts
+      # from the last good cache instead of cold.
+      #
+      # `continue-on-error` because a cache is an optimisation, and a step that
+      # overruns its own `timeout-minutes` FAILS the job: without this, a slow
+      # or unavailable cache service reddens a lane that would otherwise have
+      # built cold and run every test.
+      - name: Restore Gradle dependency cache
+        id: gradle-cache-restore
+        uses: actions/cache/restore@v4
+        timeout-minutes: 2
+        continue-on-error: true
+        with:
+          path: |
+            ~/.gradle/caches/modules-2
+            ~/.gradle/wrapper
+          key: gradle-deps-${{ runner.os }}-${{ hashFiles('haven/android/**/*.gradle*', 'haven/rust_builder/**/*.gradle*', 'haven/android/gradle/wrapper/gradle-wrapper.properties', 'haven/pubspec.lock') }}
+          restore-keys: |
+            gradle-deps-${{ runner.os }}-
+
       # Classified retry: Gradle dependency resolution intermittently fails when
       # Maven Central / plugins.gradle.org rate-limit shared runner IPs (CI run
       # 30732662493 lost the `arm` leg this way while arm64/x64 built the same
@@ -114,6 +156,33 @@ jobs:
       # never be retried into a green build.
       - name: Build APK (${{ matrix.arch }})
         run: ../scripts/ci/build_apk_with_retry.sh ${{ matrix.flutter-platform }}
+
+      # Saved ONLY from a successful build: a cache written by a build that died
+      # mid-resolution would carry exactly the gaps that made it fail, and every
+      # lane restoring it would inherit them. This job is the single writer of
+      # the key; the E2E lanes restore it read-only.
+      #
+      # `continue-on-error` because losing the save race to a sibling matrix leg
+      # (all three ABIs resolve the same dependencies and reserve the same key)
+      # is an optimisation missed, never a build broken — the APK is already
+      # built by the time this runs.
+      #
+      # The key is the RESTORE step's `cache-primary-key` output, not a second
+      # `hashFiles(...)`. `hashFiles` is evaluated where it is written, and this
+      # step is evaluated AFTER the build: its globs (`haven/android/**/*.gradle*`)
+      # would then also see anything the build generated, so a re-spelled call
+      # could publish under a key no restore step ever asks for — a cache that
+      # exists, costs a save, and warms nothing. This is actions/cache's own
+      # documented restore/save split.
+      - name: Save Gradle dependency cache
+        if: success()
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.gradle/caches/modules-2
+            ~/.gradle/wrapper
+          key: ${{ steps.gradle-cache-restore.outputs.cache-primary-key }}
 
       - name: Upload APK
         uses: actions/upload-artifact@v6

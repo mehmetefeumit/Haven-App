@@ -239,7 +239,7 @@ jobs:
         run: |
           rc=0
           bash tooling/e2e/ci/scan-logs.sh \
-            --manifest /tmp/haven-soak/needles/*.needles.json \
+            --manifest-dir /tmp/haven-soak/needles \
             --sink ios=/tmp/sim-unified.log,/tmp/sim-unified-full.log \
             --sink drive=/tmp/b4-ios-real-gps.log,/tmp/flutter-ios-test.log \
             --sink relay=/tmp/relay.log \

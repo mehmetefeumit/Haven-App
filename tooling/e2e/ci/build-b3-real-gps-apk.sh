@@ -38,6 +38,11 @@
 
 set -euo pipefail
 
+# Resolved from this script's own location, not the caller's cwd: the workflow
+# runs it from haven/ as `bash ../tooling/e2e/ci/...`, a local run may not.
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+readonly REPO_ROOT
+
 readonly OUT_DIR="/tmp/integration-apks"
 readonly BUILD_APK="build/app/outputs/flutter-apk/app-debug.apk"
 readonly TARGET="${1:-integration_test/b3_real_gps_test.dart}"
@@ -116,12 +121,11 @@ if [[ ! -f "${TARGET}" ]]; then
   exit 1
 fi
 
-# Bounded retry, same rationale as build-integration-apks.sh: Gradle
-# dependency resolution intermittently 403/429/5xxs on shared CI IPs, which is
-# a network flake rather than a build error, and Gradle keeps whatever it did
-# fetch so a retry is cheap. A genuine compile error fails every attempt.
-readonly BUILD_MAX_ATTEMPTS="${HAVEN_BUILD_MAX_ATTEMPTS:-3}"
-readonly BUILD_RETRY_DELAY_SECS="${HAVEN_BUILD_RETRY_DELAY_SECS:-20}"
+# Built through the ONE classified, budgeted retry (same wrapper as every other
+# Gradle-backed lane). The loop that used to live here retried every non-zero
+# exit, so a compile error cost three attempts and a full disk — intermittent but
+# REAL — could be retried into a green build that hid it.
+readonly BUILD_WRAPPER="${REPO_ROOT}/scripts/ci/build_apk_with_retry.sh"
 
 mkdir -p "${OUT_DIR}"
 
@@ -133,39 +137,16 @@ echo "  injected fix   lat=${HAVEN_B3_GEO_LAT} lon=${HAVEN_B3_GEO_LON}"
 echo "  tolerance      ${TOLERANCE} deg"
 echo "============================================================"
 
-attempt=1
-rc=0
-while (( attempt <= BUILD_MAX_ATTEMPTS )); do
-  rc=0
-  # `--target-platform android-x64`: the E2E AVDs are all x86_64. Without it
-  # cargokit builds the large debug haven-core lib for four ABIs, which has
-  # exhausted the runner disk.
-  flutter build apk \
-    --debug \
-    --target-platform android-x64 \
-    --target="${TARGET}" \
-    --dart-define=HAVEN_LIVE_SYNC="${HAVEN_LIVE_SYNC}" \
-    --dart-define=HAVEN_E2E_RELAY="${RELAY_URL}" \
-    --dart-define=HAVEN_B3_GEO_LAT="${HAVEN_B3_GEO_LAT}" \
-    --dart-define=HAVEN_B3_GEO_LON="${HAVEN_B3_GEO_LON}" \
-    --dart-define=HAVEN_B3_GEO_TOLERANCE_DEG="${TOLERANCE}" || rc=$?
-  if (( rc == 0 )); then
-    break
-  fi
-  if (( attempt < BUILD_MAX_ATTEMPTS )); then
-    echo "WARN: 'flutter build apk' failed (rc=${rc}, attempt" \
-         "${attempt}/${BUILD_MAX_ATTEMPTS}) — retrying in" \
-         "${BUILD_RETRY_DELAY_SECS}s." >&2
-    sleep "${BUILD_RETRY_DELAY_SECS}"
-  fi
-  attempt=$(( attempt + 1 ))
-done
-
-if (( rc != 0 )); then
-  echo "ERROR: 'flutter build apk' for ${TARGET} failed after" \
-       "${BUILD_MAX_ATTEMPTS} attempts (rc=${rc})." >&2
-  exit "${rc}"
-fi
+# `--target-platform android-x64` (inside the wrapper): the E2E AVDs are all
+# x86_64. Without it cargokit builds the large debug haven-core lib for four
+# ABIs, which has exhausted the runner disk.
+"${BUILD_WRAPPER}" android-x64 \
+  --target="${TARGET}" \
+  --dart-define=HAVEN_LIVE_SYNC="${HAVEN_LIVE_SYNC}" \
+  --dart-define=HAVEN_E2E_RELAY="${RELAY_URL}" \
+  --dart-define=HAVEN_B3_GEO_LAT="${HAVEN_B3_GEO_LAT}" \
+  --dart-define=HAVEN_B3_GEO_LON="${HAVEN_B3_GEO_LON}" \
+  --dart-define=HAVEN_B3_GEO_TOLERANCE_DEG="${TOLERANCE}"
 
 cp "${BUILD_APK}" "${OUT_DIR}/b3_real_gps_test.apk"
 ls -lh "${OUT_DIR}/b3_real_gps_test.apk"

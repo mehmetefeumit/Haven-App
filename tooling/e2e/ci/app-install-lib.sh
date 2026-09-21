@@ -40,6 +40,26 @@
 # system_server can wait on: a margin of everything between here and the
 # drive's launch, not a barrier.
 #
+# ## Why the guest is asked for its own exit codes
+#
+# Nothing here branches on a number adb reports or a word a framework prints —
+# no run of this lane has ever shown us either. The same round trip asks the
+# guest to print the two commands' OWN exit codes, and to reject two commands it
+# cannot have: rc 0 from a command that does not exist reads exactly like rc 0
+# from one that ran, so a shell that answered 0 to everything is the one shape
+# that would make this whole file a no-op nobody could see. Anything but both
+# zeros with both controls refused is a refusal, named. The four codes are
+# printed on success, so every lane's log carries the evidence instead of this
+# comment asserting it.
+#
+# MEASURED, run 35524002720 (2026-09-20), twelve Android lane jobs: `adb install
+# -r` answers "Performing Streamed Install"/"Success" with rc 0; the probe reads
+# a `package:` line for an installed package (M7's replaces) and nothing for an
+# absent one (every lane's fresh install, after its uninstall); and the chain
+# returned success in 0.3-14.8 s against the 120 s bound, worst case the
+# KeyPackage-rotation lane. UNMEASURED, and so relied on nowhere: what either
+# command's rc or text is when it is NOT understood.
+#
 # ONLY after a fresh install. A REPLACE is a no-op to the overlay manager for a
 # package that neither declares nor is targeted by an overlay — which is why
 # `flutter drive`'s own reinstall (its installApp never skips) relaunches
@@ -47,8 +67,10 @@
 # before it installed. Its probe can only err towards the barrier: anything but
 # a `package:` line reads as absent.
 #
-# FAIL CLOSED, never best-effort. A failed install, a device that cannot run the
-# barrier (the command arrived in API 34), and a queue still backed up after
+# FAIL CLOSED, never best-effort. A failed install, a barrier command this
+# runner could not execute at all, a device that cannot run the barrier (the
+# commands arrived in API 34), a guest that reports no exit codes or answers 0
+# to a command it cannot have, and a queue still backed up after
 # INSTALL_BARRIER_SECS each return non-zero with the reason named, and the
 # caller fails the lane: driving anyway is the silent ten-minute hang this
 # exists to remove. The bound is ~3.5x the worst backlog above, and it is a term
@@ -67,6 +89,10 @@
 readonly INSTALL_BARRIER_SECS=120
 readonly APP_INSTALL_PKG='com.oblivioustech.haven'
 
+# The line the barrier's round trip asks the guest to print: the handler drain's
+# exit code, the barrier's, then the two unknown-command controls'.
+readonly _APP_INSTALL_VERDICT_RE='^haven-barrier-rc ([0-9]+) ([0-9]+) ([0-9]+) ([0-9]+)$'
+
 _APP_INSTALL_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # _app_install_present <device> — 0 iff the package is installed on <device>.
@@ -84,7 +110,8 @@ _app_install_present() {
 # Explicit returns throughout: callers run this from `||` or `if !`, where
 # errexit no longer reaches inside.
 install_app() {
-  local device="$1" apk="$2" fresh=1 rc=0 out
+  local device="$1" apk="$2" fresh=1 rc=0 out verdict
+  local drain barrier ctl_cmd ctl_am
   if _app_install_present "${device}"; then
     fresh=0
     echo "  installing ${apk} over the installed ${APP_INSTALL_PKG} (a replace:" \
@@ -100,17 +127,35 @@ install_app() {
   if (( fresh == 0 )); then
     return 0
   fi
-  # Some adb versions exit 0 on a failed install, and a fresh install that did
-  # not land would leave `flutter drive` to make the fresh, unflushed one.
+  # An installer's rc is not evidence that the app is there; the probe is. WHICH
+  # adb answers 0 for an install that did not land is UNMEASURED — asking costs
+  # one round trip, and a fresh install that did not land would leave `flutter
+  # drive` to make the fresh, unflushed one.
   if ! _app_install_present "${device}"; then
     echo "ERROR: adb install -r ${apk} reported success, but" \
          "${APP_INSTALL_PKG} is not on ${device}." >&2
     return 1
   fi
   echo "  fresh install: flushing its broadcasts (up to ${INSTALL_BARRIER_SECS} s)..."
+  # `;` and not `&&`, so a half that fails still reports its own code rather
+  # than vanishing into a short circuit. The controls' output is dropped on the
+  # guest — nothing reads it, and an unrecognised command may answer with its
+  # whole help text.
+  #
+  # What the controls rest on is read from source, not yet seen on a lane: both
+  # `cmd package` and `am` (a wrapper over `cmd activity`) fall through to
+  # BasicShellCommandHandler.handleDefaultCommands, which prints "Unknown
+  # command: <cmd>" and returns -1, and cmd.cpp returns that result as the exit
+  # status (255). A guest that answers otherwise is refused below WITH the codes
+  # it gave, so one run settles it either way.
   out="$(timeout "${INSTALL_BARRIER_SECS}" adb -s "${device}" shell \
     "cmd package wait-for-handler --timeout $(( INSTALL_BARRIER_SECS * 1000 ))" \
-    "&& am wait-for-broadcast-barrier --flush-broadcast-loopers" 2>&1)" || rc=$?
+    '; h=$?; am wait-for-broadcast-barrier --flush-broadcast-loopers; b=$?;' \
+    'cmd package haven-not-a-command >/dev/null 2>&1; c=$?;' \
+    'am haven-not-a-command >/dev/null 2>&1; a=$?;' \
+    'echo; echo "haven-barrier-rc $h $b $c $a"' 2>&1)" || rc=$?
+  # The probe strips these for the same reason: an adb shell can hand back CRLF.
+  out="${out//$'\r'/}"
   if (( rc == 124 )); then
     echo "ERROR: the fresh install's broadcasts were still queued after" \
          "${INSTALL_BARRIER_SECS} s. Launching now would let a late" \
@@ -119,13 +164,52 @@ install_app() {
          "as wedged. Its last words: ${out:-<none>}" >&2
     return 1
   fi
+  # The chain ends in an `echo`, so no guest-side failure can reach adb's own
+  # exit status: 125-127 is this runner failing to execute the command at all,
+  # as `timeout … adb` did in eight of run 35536892150's thirteen Android lane
+  # jobs, with adb off the PATH.
+  if (( rc >= 125 && rc <= 127 )); then
+    echo "ERROR: nothing was asked of ${device}: the install barrier could not" \
+         "be run here at all (exit ${rc} — timeout's own usage, or a command" \
+         "that could not be executed). That is this runner's tooling." >&2
+    return 1
+  fi
   if (( rc != 0 )); then
-    echo "ERROR: the install barrier failed on ${device} (exit ${rc}): ${out}." \
-         "The device cannot run it, or its package manager never went idle;" \
+    echo "ERROR: adb could not run the install barrier on ${device} (exit" \
+         "${rc}): ${out}. Refusing to drive an unflushed fresh install." >&2
+    return 1
+  fi
+  verdict="$(awk '/^haven-barrier-rc /{ v = $0 } END { print v }' <<<"${out}")"
+  if [[ ! "${verdict}" =~ ${_APP_INSTALL_VERDICT_RE} ]]; then
+    echo "ERROR: ${device} exited 0 without reporting what the barrier's own" \
+         "commands returned, so nothing here can say its broadcasts were" \
+         "flushed. Its words: ${out:-<none>}" >&2
+    return 1
+  fi
+  drain="${BASH_REMATCH[1]}"
+  barrier="${BASH_REMATCH[2]}"
+  ctl_cmd="${BASH_REMATCH[3]}"
+  ctl_am="${BASH_REMATCH[4]}"
+  # Reported, not refused — yet. That an unknown command answers non-zero is read
+  # from source and has been seen on no lane; a refusal resting on it would red
+  # every Android lane at once if this image differs, which is how an unmeasured
+  # probe cost a whole run in CI run 35536892150. The success line below records
+  # the pair on every install, so the first run is the measurement; once a lane
+  # has shown non-zero codes this warning becomes the refusal it describes.
+  if (( ctl_cmd == 0 || ctl_am == 0 )); then
+    echo "::warning::${device} answered 0 to a command it cannot have (cmd" \
+         "${ctl_cmd}, am ${ctl_am}), so the install barrier's own 0 is not" \
+         "evidence that the barrier exists on this guest." >&2
+  fi
+  if (( drain != 0 || barrier != 0 )); then
+    echo "ERROR: the install barrier failed on ${device}: the package-manager" \
+         "handler drain exited ${drain} and the broadcast barrier exited" \
+         "${barrier}. A guest that predates either command reports non-zero;" \
          "refusing to drive an unflushed fresh install." >&2
     return 1
   fi
-  echo "  install broadcasts flushed."
+  echo "  install broadcasts flushed (handler/barrier rc ${drain}/${barrier}," \
+       "unknown-command control rc ${ctl_cmd}/${ctl_am})."
 }
 
 # install_fresh <device> <apk> — clear any prior install, then install_app,
@@ -394,9 +478,21 @@ EOF
 # ---------------------------------------------------------------------------
 # Self-test. A stub `adb` on PATH records every call and plays the device: the
 # package present or absent, the install passing or failing, the barrier
-# flushed, unsupported (pre-API-34) or wedged. A stub `timeout` records the
-# bound it is asked for and enforces 1 s instead, so the wedged device costs a
-# second rather than two minutes; the recorded call is what pins the real bound.
+# answering with any of the verdicts install_app must tell apart, wedged, or
+# never reached at all.
+#
+# WHAT THE STUB IS ALLOWED TO CLAIM. Every shape it plays that the library reads
+# is one a real run has shown (the citations sit on each arm) or one this file
+# invented — the verdict line, which the guest prints because it was asked to.
+# Where a real message or rc is UNMEASURED and the library never reads it, the
+# stub does not invent one: it plays the rc class and says so. A fake that
+# modelled remembered text would prove only that the memory and the code agree.
+#
+# The stub `timeout` records the bound it is asked for and hands the call to the
+# REAL coreutils timeout with that bound rewritten to 1 s, so a wedged device
+# costs a second rather than two minutes while 124, a pass-through rc and a
+# post-`-k` 137 stay the real tool's; the recorded call is what pins the real
+# bound, and _ai_suite_timeout checks the stub against coreutils in the same run.
 #
 # The helpers read `tmp`, `ran`, `fail`, `ai_rc` and `real_timeout` out of
 # app_install_lib_self_test's scope through bash's dynamic scoping.
@@ -406,15 +502,18 @@ EOF
 # floor: a floor lets a fixture be deleted and the suite stay green, which is
 # how a prose count once reported success here. Change it only in the commit
 # that adds or removes a fixture.
-readonly APP_INSTALL_SELF_TEST_FIXTURES=61
+readonly APP_INSTALL_SELF_TEST_FIXTURES=80
 
-# The calls install_fresh and install_app make on the stub device, verbatim.
+# The calls install_fresh and install_app make on the stub device, verbatim —
+# transcribed here rather than shared with the code, so that changing either
+# reds the suite.
 readonly _AI_STOP='-s emulator-5554 shell am force-stop com.oblivioustech.haven'
 readonly _AI_UNINSTALL='-s emulator-5554 uninstall com.oblivioustech.haven'
 readonly _AI_PROBE='-s emulator-5554 shell pm path com.oblivioustech.haven'
 readonly _AI_INSTALL='-s emulator-5554 install -r /tmp/fixture.apk'
-readonly _AI_BOUND='timeout 120 adb -s emulator-5554 shell cmd package wait-for-handler --timeout 120000 && am wait-for-broadcast-barrier --flush-broadcast-loopers'
-readonly _AI_BARRIER='-s emulator-5554 shell cmd package wait-for-handler --timeout 120000 && am wait-for-broadcast-barrier --flush-broadcast-loopers'
+readonly _AI_REMOTE='cmd package wait-for-handler --timeout 120000 ; h=$?; am wait-for-broadcast-barrier --flush-broadcast-loopers; b=$?; cmd package haven-not-a-command >/dev/null 2>&1; c=$?; am haven-not-a-command >/dev/null 2>&1; a=$?; echo; echo "haven-barrier-rc $h $b $c $a"'
+readonly _AI_BARRIER="-s emulator-5554 shell ${_AI_REMOTE}"
+readonly _AI_BOUND="timeout 120 adb ${_AI_BARRIER}"
 
 _ai_write_stubs() {
   mkdir -p "${tmp}/bin"
@@ -423,46 +522,107 @@ _ai_write_stubs() {
 printf '%s\n' "$*" >> "${STUB_CALLS}"
 case "$*" in
   *"wait-for-broadcast-barrier"*)
+    # The verdict line is this file's own protocol, so playing it is modelling,
+    # not remembering: <drain> <barrier> <cmd control> <am control>, where a
+    # control is the rc of a command the guest cannot have. flushed's 255 is
+    # what `cmd`/`am` are expected to answer there and NOTHING reads its value,
+    # which is why alt-codes plays a different pair.
     case "${STUB_BARRIER}" in
-      unsupported) echo "Unknown command: wait-for-handler" >&2; exit 255 ;;
+      flushed)     echo "haven-barrier-rc 0 0 255 255" ;;
+      alt-codes)   echo "haven-barrier-rc 0 0 1 20" ;;
+      # An adb shell that hands its lines back CRLF, as this library's probe has
+      # always assumed one can: the verdict is the same verdict.
+      crlf)        printf 'haven-barrier-rc 0 0 255 255\r\n' ;;
+      no-handler)  echo "haven-barrier-rc 255 0 255 255" ;;
+      no-barrier)  echo "haven-barrier-rc 0 255 255 255" ;;
+      lying-shell) echo "haven-barrier-rc 0 0 0 0" ;;
+      truncated)   echo "haven-barrier-rc 0 0" ;;
+      mute)        : ;;  # answers 0 and says nothing of its own commands
+      # 127 is what timeout answers when it cannot execute adb at all — the
+      # shape eight of run 35536892150's thirteen Android lane jobs hit, with
+      # adb off the PATH.
+      unrunnable)  exit 127 ;;
+      # "adb: device offline" is verbatim from the lane logs (60 hits in run
+      # 35524002720's jobs); rc 1 is this adb's, measured with no device.
+      offline)     echo "adb: device offline" >&2; exit 1 ;;
       # Outlives the stub timeout's 1 s, then reports success: a barrier that
       # lost its bound fails fixture (3) instead of hanging the self-test.
-      wedged) exec sleep 30 ;;
+      wedged)      exec sleep 30 ;;
     esac ;;
   *" shell pm path "*)
     # noise: every probe reads the noise of a package service that is not up;
-    # noise-once: only the first does. It names "package", so only an anchored
-    # `package:` test reads it as absent.
+    # noise-once: only the first does. Both its lines must read as ABSENT. The
+    # library reads stdout alone, so the noise is put there deliberately — a
+    # real service error goes to the stderr this discards, and its rc, 20, is
+    # read by nothing here.
     if [[ "${STUB_PROBE}" == noise ]] \
        || { [[ "${STUB_PROBE}" == noise-once ]] && [[ ! -e "${STUB_STATE}.probed" ]]; }; then
-      : > "${STUB_STATE}.probed"; echo "cmd: Can't find service: package"; exit 20
+      : > "${STUB_STATE}.probed"
+      # Names the package service, so a match on `package` alone reads it as an
+      # installed app. cmd.cpp prints `cmd: Can't find service: <name>` to
+      # STDERR and exits 20; it is placed on stdout here, where the library
+      # looks, which is the harder case for the anchor.
+      echo "cmd: Can't find service: package"
+      # Constructed, not quoted from any run: `package:` away from the start of
+      # a line, so it is the ANCHOR and not the colon that decides. Unanchored,
+      # this line reads as an installed app and a FRESH install takes no barrier.
+      echo "Error: Unknown package: com.oblivioustech.haven"
+      exit 20
     fi
+    # Present: the `package:` line every M7 replace read in run 35524002720.
+    # Absent: no such line — measured the same run, by every lane's probe after
+    # its uninstall. The rc is read by nothing here.
     [[ -e "${STUB_STATE}" ]] || exit 1
     echo "package:/data/app/~~stub==/com.oblivioustech.haven-stub==/base.apk" ;;
   *" uninstall "*)
-    # stuck: an uninstall that leaves the package in place.
-    [[ "${STUB_UNINSTALL}" == stuck ]] || rm -f "${STUB_STATE}" ;;
+    # Nothing reads this call's output or rc, so neither is invented: what is
+    # modelled is that clearing a device with nothing to clear FAILS, which is
+    # the state every lane's first install_fresh starts from, and that a stuck
+    # uninstall can still answer 0 — which is why the probe after it decides.
+    if [[ "${STUB_UNINSTALL}" == stuck ]]; then
+      exit 0
+    fi
+    [[ -e "${STUB_STATE}" ]] || exit 1
+    rm -f "${STUB_STATE}" ;;
   *" install -r "*)
     case "${STUB_INSTALL}" in
-      ok) : > "${STUB_STATE}" ;;
-      silent) echo "Success" ;;  # an adb that exits 0 on a failed install
-      *) echo "Failure [INSTALL_FAILED_STUB]" >&2; exit 1 ;;
+      # Verbatim from run 35524002720's 20 installs, in that order, on stdout.
+      ok) : > "${STUB_STATE}"; echo "Performing Streamed Install"; echo "Success" ;;
+      # An installer that answers 0 for an install that did not land. WHICH adb
+      # does this is UNMEASURED — a green lane never shows it — so what is
+      # modelled is only the shape the library must survive: an rc that says
+      # yes over a device that says no.
+      silent) echo "Performing Streamed Install"; echo "Failure [INSTALL_FAILED_STUB]" ;;
+      *) echo "adb: failed to install /tmp/fixture.apk: Failure [INSTALL_FAILED_STUB]" >&2; exit 1 ;;
     esac ;;
 esac
 exit 0
 STUB
   cat > "${tmp}/bin/timeout" <<'STUB'
 #!/usr/bin/env bash
+# Records the call, then hands it to the REAL timeout with the DURATION operand
+# — and only it — rewritten to 1 s. Options are passed through untouched, so
+# `-k`'s kill, the 124 on expiry and a pass-through rc are the real tool's
+# behaviour rather than this file's idea of it.
 printf 'timeout %s\n' "$*" >> "${STUB_CALLS}"
+opts=()
+while [[ "${1:-}" == -* ]]; do
+  case "$1" in
+    --) shift; break ;;
+    -k|--kill-after|-s|--signal) opts+=( "$1" "$2" ); shift 2 ;;
+    *) opts+=( "$1" ); shift ;;
+  esac
+done
 shift
-exec "${STUB_REAL_TIMEOUT}" 1 "$@"
+exec "${STUB_REAL_TIMEOUT}" "${opts[@]}" 1 "$@"
 STUB
   chmod +x "${tmp}/bin/adb" "${tmp}/bin/timeout"
 }
 
 # _ai_run <function> <present|absent> <install ok|failed|silent>
-#         <barrier flushed|unsupported|wedged> [<probe clean|noise|noise-once>]
-#         [<uninstall ok|stuck>]
+#         <barrier flushed|alt-codes|no-handler|no-barrier|lying-shell|mute|
+#                  unrunnable|offline|wedged>
+#         [<probe clean|noise|noise-once>] [<uninstall ok|stuck>]
 # Runs `<function> emulator-5554 /tmp/fixture.apk` on the stub device and
 # leaves its rc in ai_rc, its calls in ${tmp}/calls and its stderr in ${tmp}/err.
 _ai_run() {
@@ -529,6 +689,59 @@ _ai_expect_check_rc() { # <label> <want-rc> <tree> [<ere the report must carry>]
   fi
 }
 
+# _ai_timeout_rc <stub|real> <arg>... — `timeout <arg>...` under the stub or
+# under coreutils, its rc echoed. The stub forces every bound to 1 s, so the
+# real leg is given a bound of its own: it is the rc, not the wait, under test.
+_ai_timeout_rc() {
+  local which="$1" rc=0
+  shift
+  if [[ "${which}" == stub ]]; then
+    (
+      export PATH="${tmp}/bin:${PATH}" STUB_CALLS="${tmp}/timeout-calls" \
+        STUB_REAL_TIMEOUT="${real_timeout}"
+      timeout "$@"
+    ) >/dev/null 2>&1 || rc=$?
+  else
+    "${real_timeout}" "$@" >/dev/null 2>&1 || rc=$?
+  fi
+  printf '%s' "${rc}"
+}
+_ai_expect_timeout_agrees() { # <label> <want-rc> <stub-rc> <real-rc>
+  ran=$(( ran + 1 ))
+  if [[ "$3" != "$2" || "$4" != "$2" ]]; then
+    echo "SELF-TEST FAIL ($1): want rc $2 from both; the stub gave $3 and" \
+         "coreutils timeout gave $4" >&2
+    fail=1
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Suite 0: the stub `timeout` against the real one, in the same run. install_app
+# tells a wedged queue (124) from a barrier that answered (its own rc) from a
+# command this runner could not execute (127) — three rcs a fake could silently
+# flatten into one, which is why each is taken from both and must match.
+# ---------------------------------------------------------------------------
+_ai_suite_timeout() {
+  # (T1) A command that outlives its bound: 124, what install_app reads as a
+  #      broadcast queue that never drained.
+  _ai_expect_timeout_agrees T1 124 \
+    "$(_ai_timeout_rc stub 120 sleep 30)" "$(_ai_timeout_rc real 0.2 sleep 30)"
+
+  # (T2) One that returns in time keeps its own rc — every verdict install_app
+  #      reads, its 0 included, arrives through this.
+  _ai_expect_timeout_agrees T2 7 \
+    "$(_ai_timeout_rc stub 120 bash -c 'exit 7')" \
+    "$(_ai_timeout_rc real 5 bash -c 'exit 7')"
+
+  # (T3) One that ignores TERM is killed after --kill-after: 137, and the option
+  #      reaches the real tool rather than being eaten as the bound. No lane
+  #      passes -k here today; a stub that mangled it would hand the next one a
+  #      127 dressed as a device fault.
+  _ai_expect_timeout_agrees T3 137 \
+    "$(_ai_timeout_rc stub -k 0.2 120 bash -c 'trap "" TERM; sleep 30')" \
+    "$(_ai_timeout_rc real -k 0.2 0.2 bash -c 'trap "" TERM; sleep 30')"
+}
+
 # ---------------------------------------------------------------------------
 # Suite 1: install_fresh — moved here with the implementation from
 # run-single-avd-scenario.sh's --self-test (its fixtures 8a-8d).
@@ -544,17 +757,26 @@ _ai_suite_fresh() {
   _ai_expect_calls 1b "${_AI_STOP}" "${_AI_UNINSTALL}" "${_AI_PROBE}" \
     "${_AI_PROBE}" "${_AI_INSTALL}" "${_AI_PROBE}" "${_AI_BOUND}" "${_AI_BARRIER}"
 
-  # (1c) An uninstall that leaves the package fails, by name, before installing:
+  # (1c) THE PATH EVERY LANE TAKES FIRST: a freshly booted guest with nothing to
+  #      clear, so the uninstall fails for want of anything to remove. Its rc
+  #      may not be read — the probe after it is what decides — and the sequence
+  #      is the same one, barrier included.
+  _ai_run install_fresh absent ok flushed
+  _ai_expect_ok 1c
+  _ai_expect_calls 1d "${_AI_STOP}" "${_AI_UNINSTALL}" "${_AI_PROBE}" \
+    "${_AI_PROBE}" "${_AI_INSTALL}" "${_AI_PROBE}" "${_AI_BOUND}" "${_AI_BARRIER}"
+
+  # (1e) An uninstall that leaves the package fails, by name, before installing:
   #      over it the install would be a replace keeping the earlier target's
   #      data and sticky service, where the caller asked for a clean slate.
   _ai_run install_fresh present ok flushed clean stuck
-  _ai_expect_refused 1c
-  _ai_expect_named 1d 'still on emulator-5554 after its uninstall'
-  _ai_expect_calls 1e "${_AI_STOP}" "${_AI_UNINSTALL}" "${_AI_PROBE}"
+  _ai_expect_refused 1e
+  _ai_expect_named 1f 'still on emulator-5554 after its uninstall'
+  _ai_expect_calls 1g "${_AI_STOP}" "${_AI_UNINSTALL}" "${_AI_PROBE}"
 
-  # (2) A device that cannot take the barrier fails, never drives unflushed —
-  #     and says why.
-  _ai_run install_fresh present ok unsupported
+  # (2) A guest whose package manager cannot drain its handler — the command
+  #     arrived in API 34 — fails, never drives unflushed, and says why.
+  _ai_run install_fresh present ok no-handler
   _ai_expect_refused 2
   _ai_expect_named 2b 'install barrier failed'
 
@@ -590,10 +812,21 @@ _ai_suite_app() {
   _ai_expect_calls 5b "${_AI_PROBE}" "${_AI_INSTALL}" "${_AI_PROBE}" \
     "${_AI_BOUND}" "${_AI_BARRIER}"
 
+  # (5c) The control rcs are read as a class, never as values: a guest that
+  #      refuses an unknown command with some other pair passes just the same.
+  _ai_run install_app absent ok alt-codes
+  _ai_expect_ok 5c
+
+  # (5d) A verdict handed back CRLF is the same verdict. The probe has stripped
+  #      those since this file was written; a parser that did not would fail
+  #      every fresh install on the first guest whose shell allocates a pty.
+  _ai_run install_app absent ok crlf
+  _ai_expect_ok 5d
+
   # (6) THE NO-FALSE-RED FIXTURE. Over an installed package the install is a
   #     replace, which the overlay manager ignores: no barrier is taken, so a
   #     device that could not have run one does not fail the lane.
-  _ai_run install_app present ok unsupported
+  _ai_run install_app present ok no-handler
   _ai_expect_ok 6
   _ai_expect_calls 6b "${_AI_PROBE}" "${_AI_INSTALL}"
 
@@ -611,10 +844,52 @@ _ai_suite_app() {
   _ai_run install_app present ok flushed noise
   _ai_expect_refused 7c
 
-  # (8) A fresh install on a device that cannot take the barrier fails here too.
-  _ai_run install_app absent ok unsupported
+  # (8) A fresh install on a device that cannot take the barrier fails here too,
+  #     naming the half that refused.
+  _ai_run install_app absent ok no-handler
   _ai_expect_refused 8
-  _ai_expect_named 8b 'install barrier failed'
+  _ai_expect_named 8b 'handler drain exited 255'
+
+  # (8c) ...and so does the other half, which the same line must tell apart: a
+  #      guest can have the drain and not the barrier.
+  _ai_run install_app absent ok no-barrier
+  _ai_expect_refused 8c
+  _ai_expect_named 8d 'broadcast barrier exited 255'
+
+  # (8e) A guest that answers 0 to a command it cannot have makes the barrier's
+  #      own 0 worthless: rc 0 from a command that ran and rc 0 from one that
+  #      does not exist are the same line. Until a lane has shown what a real
+  #      guest answers, that is ANNOTATED and the install proceeds (see
+  #      install_app); what must never happen is that it passes in silence.
+  _ai_run install_app absent ok lying-shell
+  _ai_expect_ok 8e
+  _ai_expect_named 8f '^::warning::.*answered 0 to a command it cannot have \(cmd 0, am 0\)'
+
+  # (8g) An adb that exits 0 having said nothing about the barrier's commands
+  #      proves nothing was flushed — whether the guest ran them or adb dropped
+  #      its own exit status on the way back.
+  _ai_run install_app absent ok mute
+  _ai_expect_refused 8g
+  _ai_expect_named 8h 'without reporting what the barrier'
+
+  # (8i) A verdict cut short is not a verdict. A looser read would take the
+  #      halves it cannot see for zeros — the one wrong answer that passes.
+  _ai_run install_app absent ok truncated
+  _ai_expect_refused 8i
+  _ai_expect_named 8j 'without reporting what the barrier'
+
+  # (8k) A barrier that could not be executed on the RUNNER (adb off the PATH,
+  #      as in run 35536892150) is not the guest's fault, and is not reported as
+  #      one: nothing was asked of it.
+  _ai_run install_app absent ok unrunnable
+  _ai_expect_refused 8k
+  _ai_expect_named 8l 'nothing was asked of emulator-5554'
+
+  # (8m) A transport that dropped mid-barrier fails as the device-level refusal
+  #      it is, carrying what adb said.
+  _ai_run install_app absent ok offline
+  _ai_expect_refused 8m
+  _ai_expect_named 8n 'adb could not run the install barrier'
 
   # (9) A wedged queue after a fresh install fails here too.
   _ai_run install_app absent ok wedged
@@ -940,6 +1215,7 @@ app_install_lib_self_test() {
   }
 
   _ai_write_stubs
+  _ai_suite_timeout
   _ai_suite_fresh
   _ai_suite_app
   _ai_suite_pin

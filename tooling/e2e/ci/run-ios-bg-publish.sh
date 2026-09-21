@@ -148,6 +148,62 @@
 #       (an event-id DIFF over a bounded settle window — never a bare count),
 #       and the native session reports disarmed.
 #
+#       It is proved TWICE over, from both sides of the app, because the app
+#       may not survive its own window: the drive's diff from inside, and this
+#       script's count from the relay. See "P3 when iOS takes the app" below
+#       for why the second one exists and what each verdict then means.
+#
+# # P3 when iOS takes the app
+#
+# The disable is exactly what removes the app's claim to execute in the
+# background, so from that instant iOS owns the process — and twice it has
+# taken it mid-window. CI run 35622556197's sim-lifecycle.log names the
+# mechanism end to end: the app dropped every CoreLocation claim 0.2 s after
+# the disable, `runningboardd` invalidated the assertion locationd held on it
+# one second later, the shared `FinishTask` grace that replaced it expired
+# ~30 s on, and RunningBoard terminated the process for not invalidating it
+# (OS_REASON_RUNNINGBOARD 0x2182bad2 — no jetsam, no crash report, no
+# watchdog; the assertion nobody ended is the DEBUG Flutter engine's own
+# "Flutter debug task", which UIKit warns about in every run of this lane).
+# A healthy product therefore REACHES that outcome — it is the privacy-best
+# outcome — and it used to end the lane on "P3 was neither proved nor
+# disproved", an indeterminate result reported as a failure.
+#
+# So the wire half moved to a witness the OS cannot reclaim. On EVERY path,
+# once the window has elapsed, this script asks the relay whether any kind-445
+# was created inside it (`bgp-wire-probe.dart`). The count is the whole answer
+# because the drive disposes the synthetic peer BEFORE P3, so nothing else on
+# that relay can author one — a premise check 19 of
+# scripts/ci/check_ios_background_publish.sh pins, since the host cannot tell
+# two authors apart (ephemeral per-message keys, one shared `h` tag). And when
+# the app is gone the probe is also the only oracle that would see a
+# background RELAUNCH publishing, which is the defect P3 exists to catch.
+#
+# A reclaimed run then ends on exactly one of four PROVEN verdicts
+# (`bgp_p3_host_verdict`), never on a default:
+#
+#   holds       silent for the whole window, the process stayed gone, and the
+#               DISABLED marker is there — which the drive appends only after
+#               asserting the provider false and the scheduler torn down. The
+#               NATIVE half comes free: an app still holding a location
+#               keep-alive is an app iOS keeps executing (P2a/P2b measure that
+#               for 400+ s every run), so a process RunningBoard took for an
+#               expired background assertion had already released it. A
+#               simulator has no jetsam, so there is no other way to lose it.
+#               What this does NOT prove is that the release was PROMPT; the
+#               drive's own disarm poll owns that, and the other legs run it.
+#   leak        a kind-445 inside the window. P3 broken, lane red.
+#   relaunched  the app was RUNNING again at the window's end although this
+#               script never launched it. Red.
+#   unproven    the wire could not be read, the read had no control, the
+#               liveness probe was never calibrated, or the disable was never
+#               signalled. Red, naming the harness rather than the product.
+#
+# Only `holds` excuses anything, and only the two markers a dead process could
+# not print (NEGATIVE_SILENCE_OK, SESSION_DISARMED). Every other terminal
+# proof is still demanded, so a drive that stopped in an EARLIER phase cannot
+# buy a green off P3's verdict.
+#
 # # The host<->test handshake
 #
 #   1. Once P1 passed, the drive writes `[bg-publish] READY_FOR_BACKGROUND`
@@ -199,6 +255,12 @@
 #      activates it) so flutter_test's post-suite teardown gets real engine
 #      frames again — an in-process resumed dispatch cannot restart the
 #      native animator iOS paused on the way out.
+#   6. Then, on every path, it asks the RELAY what happened inside P3's
+#      window. After the re-foreground deliberately: a foregrounded Haven
+#      publishes by design and those events are created past the window, so
+#      the probe's seconds come out of nobody's margin, while spending them
+#      first would come straight out of the drive's own race with the 228 s
+#      kind-445 expiration.
 #
 # # The completion gate (A3b)
 #
@@ -321,9 +383,11 @@
 #      left no standing REQ, or a background catch-up sweep), and the disable
 #      stopped both — every proof this leg owes, and none it must not produce
 #   1  the drive failed, or it exited 0 without this leg's full proof set, or it
-#      printed a proof only another leg can reach
+#      printed a proof only another leg can reach, or a kind-445 reached the
+#      relay inside P3's settle window, or that window could not be read at all
 #   2  usage / harness misconfiguration (including: this Xcode cannot grant
-#      location privacy or seed a simulated location)
+#      location privacy or seed a simulated location, or there is no `dart` to
+#      run P3's wire oracle with, or that oracle fails its own self-test here)
 
 set -euo pipefail
 
@@ -371,6 +435,24 @@ readonly SILENCE_MARKER='[bg-publish] NEGATIVE_SILENCE_OK'
 readonly DISARMED_MARKER='[bg-publish] SESSION_DISARMED'
 readonly ALWAYS_MARKER='[bg-publish] ALWAYS_SESSION_OK'
 
+# P3's settle window and its in-flight grace, DUPLICATED from the drive
+# target's `_negativeSettleWindow` (`kLocationPublishMaxInterval` 168 s + 32 s)
+# and `_inFlightGraceSecs` for the same reason the markers are: the Dart
+# consts are not readable from bash. The host's own wire verdict has to
+# measure the SAME window the drive measures — a host window that started
+# earlier would count the app's in-flight tick as a leak, and one that ended
+# later would count the post-window foreground publish the host itself
+# provokes. Check 19 of scripts/ci/check_ios_background_publish.sh pins both
+# numbers against the Dart sources, so a drift is a red rather than a quiet
+# disagreement between two oracles.
+readonly SETTLE_WINDOW_SECS=200
+readonly LEAK_GRACE_SECS=10
+
+# The host-side wire oracle for that window (see "P3 when iOS takes the app").
+# Standalone Dart: `dart <file>` needs no package resolution, the same shape
+# check-wire-canaries.dart has and the same way CI already runs it.
+readonly WIRE_PROBE="${SCRIPT_DIR}/bgp-wire-probe.dart"
+
 # The shared runner's fixed log path (run-ios-sim-scenario.sh's LOG_FILE).
 # Read ONLY after the drive exits — for the completion gate and the artifact —
 # never for the live handshake: what reaches it, and when, is the test
@@ -390,11 +472,20 @@ readonly SIGNAL_NAME='bg-publish-handshake'
 readonly BG_LOG="/tmp/bg-publish-ios.log"
 
 # This lane's `drive` line floor, sealed by the delegate and re-stated on the
-# belt below. A COMPLETE transcript of this drive is 112 lines (measured on CI
-# run 35280144455's upload); half of it is the anti-vacuity floor, and it is
-# below the policy default of 100 because that default is calibrated to the
-# core-flow drive, which prints several times as much.
-readonly BGP_DRIVE_FLOOR=56
+# belt below. It is the HOST SKELETON an iOS `flutter test -d <udid>` transcript
+# always carries whatever the scenario printed — run-ios-sim-scenario.sh's
+# IOS_HOST_SKELETON_LINES, derived there — and NOT a fraction of a measured
+# transcript, which is what 56 was (half of this drive's 112 lines on CI run
+# 35280144455). The delegate refuses anything above it.
+#
+# One number serves both call sites although the belt's sink sums TWO copies of
+# the same transcript: a floor is a minimum, so the single-capture bound holds
+# for the pair too and is merely weaker there. What 56 used to catch — a drive
+# that built and never launched — is the scanner's proof_of_run now, which
+# stopped accepting the reporter's `loading <suite>` line as evidence a test
+# ran; the policy default of 100 is the core-flow drive's and would read every
+# green run of this lane as truncated.
+readonly BGP_DRIVE_FLOOR=4
 
 # Handshake bounds. READY must appear after the delegated `flutter test`'s
 # incremental build (~2-4 min; the cold build happens in THIS script, before
@@ -521,13 +612,23 @@ readonly BGP_DRIVE_FLOOR=56
 #           measuring and a correct app fails P3;
 #   upper — the drive re-fetches the relay when it wakes, and the earliest
 #           event that can count as a leak is created at the disable cutoff
-#           plus the 10 s in-flight grace, so it is evicted at cutoff + 10 +
-#           228 s (the kind-445 NIP-40 expiration) = 238 s. A later wake-up
-#           re-fetches silence whether or not the disable worked.
+#           plus the 10 s in-flight grace, so it stops being READABLE BY THE
+#           APP at cutoff + 10 + 228 s (the kind-445 NIP-40 expiration) =
+#           238 s. Not because the relay drops it — this one never does, see
+#           `bgp_wait_until` — but because the app's own client does:
+#           nostr-relay-pool 0.44 rejects an expired event on receipt
+#           (`Error::EventExpired`, relay/inner.rs), before any Haven code
+#           sees it. A later wake-up re-fetches silence whether or not the
+#           disable worked.
 # 200 + 10 = 210 s clears the window by the in-flight grace and leaves the
-# re-fetch (210 + one <=5 s poll + the drive's own resume) ~20 s inside the
-# eviction bound. A run where the app was NOT suspended signals DISARMED
-# first and never reaches the deadline.
+# re-fetch (210 + one <=5 s poll + the drive's own resume) ~20 s inside that
+# bound. A run where the app was NOT suspended signals DISARMED first and
+# never reaches the deadline.
+#
+# The HOST's wire probe is not bound by any of this: it reads the relay over a
+# raw socket with no nostr client in the way, so it still sees what the relay
+# kept. That is why its verdict survives a wake-up this budget could not save
+# — and why it, not the drive's re-fetch, is what ends P3.
 #
 # Both of those bounds are WALL-CLOCK facts about the app and the relay, so
 # the 210 s has to be measured the same way, from the same instant they are:
@@ -538,13 +639,13 @@ readonly BGP_DRIVE_FLOOR=56
 # (35376588206, 35311161479, 35280144455 x2, 34798752509 — marker in the
 # drive log to re-foreground line, so each is a LOWER bound on the app's own
 # wait) instead of 210,
-# leaving 16-21 s of the 238 s eviction bound rather than 28, and shrinking
+# leaving 16-21 s of the 238 s readability bound rather than 28, and shrinking
 # under load, which is exactly when a runner is slowest to wake the app.
 # `bgp_wait_until` therefore measures wall clock, and `bgp_budget_after_lag`
 # takes the observation lag off the budget (bounded by
 # DISARM_ANCHOR_MAX_LAG_SECS, and one-sided: it may never wake the app EARLY,
 # which is the error that reds a correct app). Overshooting is not merely
-# untidy — past the eviction bound P3's re-fetch collects silence whichever
+# untidy — past that bound P3's re-fetch collects silence whichever
 # way the disable went, and the wire half passes VACUOUSLY.
 #
 # What neither bound can do is keep the app ALIVE. From the disable it holds
@@ -552,11 +653,16 @@ readonly BGP_DRIVE_FLOOR=56
 # the whole window, and in CI run 35397118356 it took it: 37 s after the
 # disable the app's background-task assertions invalidated without UIKit ever
 # running their expiration handlers, the process logged nothing again, and
-# the host's VM-service connection closed 5 s later, so the drive died with
-# P3 neither proved nor disproved. Shortening the exposure to the 210 s the
-# proof actually needs is all a wrapper can do about that; the DISARM wait's
-# exit branch says the rest out loud rather than leaving an rc to be read as
-# an assertion failure.
+# the host's VM-service connection closed 5 s later, and it happened again in
+# run 35622556197. Shortening the exposure to the 210 s the proof actually
+# needs is all a wrapper can do about the app's LIFE — but it no longer has to
+# do anything about the PROOF: the wire half is now asked of the relay, which
+# is not the app's to take with it, so the DISARM wait's exit branch holds the
+# window open and finishes P3 from the host instead of reporting an
+# indeterminate outcome as a failure ("P3 when iOS takes the app", above).
+# The 210 s therefore cannot be shortened for a different reason than before:
+# it is not exposure any more, it is the drive's own settle window plus the
+# grace, and both oracles measure it.
 #
 # P2c does not move either side of that, and the re-derivation above is why it
 # does not have to: P2c runs entirely BEFORE the disable, so it changes when
@@ -972,6 +1078,122 @@ bgp_calibrated_app_state() {
   printf '%s\n' "${state}"
 }
 
+# bgp_secs_until <target-epoch> <cap-secs> — how long to wait for <target>,
+# never more than <cap> and never less than nothing.
+#
+# The host takes over P3's settle window when the OS reclaims the app inside
+# it, and that takeover must cost the lane NO extra wall clock: <cap> is
+# whatever is left of the DISARM budget, which is what the wait it replaces
+# would have spent. A target that is not a number, or already past, is 0 —
+# the same fail-to-now reading `bgp_budget_after_lag` gives a bad anchor.
+bgp_secs_until() {
+  local target="${1:-}" cap="$2" remaining
+  if ! [[ "${target}" =~ ^[0-9]+$ ]]; then printf '0\n'; return 0; fi
+  remaining=$(( target - $(bgp_now) ))
+  if (( remaining <= 0 )); then printf '0\n'; return 0; fi
+  if (( remaining > cap )); then printf '%s\n' "${cap}"; return 0; fi
+  printf '%s\n' "${remaining}"
+}
+
+# bgp_p3_host_verdict <disable-rc> <exit-state> <end-state> <wire-rc> — the
+# verdict on a drive that exited INSIDE P3's settle window, in one word:
+#
+#   holds       the app applied the disable in-process (it appended the
+#               DISABLED marker, which it only does AFTER asserting the
+#               provider false and the publish scheduler torn down), the OS
+#               then reclaimed it, the relay saw NO kind-445 for the whole
+#               window, and nothing brought the process back. P3 kept.
+#   leak        a kind-445 was created inside the window. Publishing outlived
+#               the withdrawal of consent — whether from the app before it
+#               died or from a background relaunch after, both of which are
+#               the defect P3 exists to catch.
+#   relaunched  the window ended with the app RUNNING again although the host
+#               never launched it. Something re-armed a background wake after
+#               consent was withdrawn.
+#   unproven    anything else: the drive died with its app still there (its
+#               own failure), the liveness read was never calibrated, the
+#               disable was never signalled, or the wire could not be read.
+#
+# There is deliberately no fifth answer and no default-to-green: `unknown`
+# reaching here means the evidence is missing, and missing evidence is not a
+# pass. The NATIVE half of P3 — that the CoreLocation keep-alive was released
+# — is not asserted separately on this path because the reclaim IS that
+# assertion: an app still holding a location session is exactly an app iOS
+# keeps executing (P2a/P2b measure that every run, for 400+ s), so a process
+# RunningBoard took inside the window is a process that had already let its
+# keep-alive go. A simulator has no jetsam, so there is no other way to lose
+# it there.
+bgp_p3_host_verdict() {
+  local disable_rc="${1:-}" exit_state="${2:-}" end_state="${3:-}" \
+        wire_rc="${4:-}"
+  [[ "${disable_rc}" == '0' ]] || { printf 'unproven\n'; return 0; }
+  [[ "${exit_state}" == 'gone' ]] || { printf 'unproven\n'; return 0; }
+  case "${wire_rc}" in
+    1) printf 'leak\n'; return 0 ;;
+    0) : ;;
+    *) printf 'unproven\n'; return 0 ;;
+  esac
+  [[ "${end_state}" == 'gone' ]] || { printf 'relaunched\n'; return 0; }
+  printf 'holds\n'
+}
+
+# bgp_unexcused_proofs <missing-markers> — the missing terminal proofs that a
+# host-proved P3 does NOT excuse, one per line.
+#
+# Exactly two markers are excusable, and only when `bgp_p3_host_verdict` says
+# `holds`: the silence proof, which the host has just re-proven from the relay
+# with an oracle the app's death cannot reach, and the disarm proof, which a
+# process that no longer exists cannot print and does not need to. Every other
+# phase's proof is still demanded — a drive reclaimed inside P3 has already
+# printed them all, so a missing one means the run stopped somewhere else
+# entirely and P3's verdict says nothing about it.
+bgp_unexcused_proofs() {
+  local missing="${1:-}"
+  [[ -n "${missing}" ]] || return 0
+  printf '%s\n' "${missing}" \
+    | grep -vFx -e "${SILENCE_MARKER}" -e "${DISARMED_MARKER}" || true
+}
+
+# bgp_dart_bin — the `dart` this runner drives the wire oracle with.
+#
+# Prints the path, or nothing at all when there is none. `flutter-action`
+# exports the SDK's bin/ on PATH and `dart` lives beside `flutter` in it, so
+# the fallback covers a PATH that carried only the wrapper. No `dart` at all
+# is a harness misconfiguration, never a silent skip: the caller exits 2.
+bgp_dart_bin() {
+  local flutter_bin
+  if command -v dart >/dev/null 2>&1; then
+    command -v dart
+    return 0
+  fi
+  flutter_bin="$(command -v flutter 2>/dev/null || true)"
+  [[ -n "${flutter_bin}" ]] || return 0
+  flutter_bin="$(dirname "${flutter_bin}")/dart"
+  [[ -x "${flutter_bin}" ]] || return 0
+  printf '%s\n' "${flutter_bin}"
+}
+
+# bgp_wire_probe_rc <dart> <relay> <since> <until> <disable-at> — ask the relay
+# whether any kind-445 was created inside P3's settle window. Prints the probe's
+# own (bucketed, Rule-15 safe) line and returns its status: 0 silent, 1 leak,
+# 3 unreadable, 4 a control came back empty. The relay URL is an ARGUMENT and
+# never an output, here or in the probe.
+#
+# The disable anchor is passed as well as the window derived from it: the
+# probe's SECOND control looks for a kind-445 in the seconds before it, which
+# is what certifies that this relay is still serving the very kind the window
+# is read for. Without it an empty window and a relay that stopped serving 445
+# are the same observation.
+bgp_wire_probe_rc() {
+  # `till`, not `until`: shadowing a shell keyword with a local is legal and
+  # works, but it reads as a loop to everyone who meets it next.
+  local dart="$1" relay="$2" since="$3" till="$4" anchor="$5" out rc=0
+  out="$("${dart}" "${WIRE_PROBE}" --relay "${relay}" --since "${since}" \
+           --until "${till}" --disable-at "${anchor}" 2>&1)" || rc=$?
+  if [[ -n "${out}" ]]; then printf '%s\n' "${out}"; fi
+  return "${rc}"
+}
+
 # bgp_wait_until <pid> <deadline-secs> <poll-secs> -- <cmd> [args…] — bounded
 # wait for a predicate command to succeed while a process is still alive.
 #
@@ -987,10 +1209,21 @@ bgp_calibrated_app_state() {
 # five CI runs (35376588206, 35311161479, 35280144455 x2, 34798752509). Both
 # of that budget's bounds are wall-clock facts about the app and the relay —
 # the drive's settle window below it and the 228 s kind-445 expiration above
-# it — so a counted deadline walks P3's re-fetch towards the eviction that
-# makes it meaningful, where a leak that aged out reads as silence. The same
-# argument applies one phase up: the DISABLE deadline is derived to sit inside
-# the drive's own Timeout, which is also wall clock.
+# it — so a counted deadline walks P3's re-fetch out of the interval where the
+# app would still be publishing if it were broken. The same argument applies
+# one phase up: the DISABLE deadline is derived to sit inside the drive's own
+# Timeout, which is also wall clock.
+#
+# Not, note, relay-side EVICTION. VERIFIED in the crates this lane's relay is
+# built from (nostr-relay-builder 0.44.1 over nostr-database 0.44.0): expiry is
+# enforced at INGEST only — `helper.rs` `internal_index_event` rejects an
+# already-expired event (`RejectedReason::Expired`), `internal_query` never
+# filters on expiry, and no sweeper exists — so an event this relay accepted is
+# served for the life of the process. The corollary matters more than the
+# correction: an event that was ALREADY expired when it arrived is rejected and
+# stored nowhere, so no REQ-based oracle can ever see it. Reaching that state
+# needs a >=228 s stall between wrapping a kind-445 and flushing it, which
+# Haven does not queue for.
 #
 # Returns:
 #   0  the predicate succeeded
@@ -1045,7 +1278,7 @@ run_self_test() {
   # check_ios_background_publish.sh's SELF_TEST_FIXTURES enforces). A count in
   # the summary line alone reports whatever ran: a fixture deleted with the
   # code it covered would print a smaller number and still say "all passed".
-  local -r SELF_TEST_FIXTURES=92
+  local -r SELF_TEST_FIXTURES=113
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
   trap "rm -rf '${tmp}'" RETURN
@@ -1623,8 +1856,9 @@ Usage: simctl location <device> <action> [<arguments>]
   #     dangerous rather than merely slow: the host would stop timing P3's
   #     settle window from the disable and re-foreground only on the DISABLE
   #     deadline, minutes late — by which time a real leak has aged past the
-  #     228 s kind-445 expiration and been evicted, so the drive re-fetches
-  #     silence and P3 passes having proved nothing.
+  #     228 s kind-445 expiration, which the app's own relay client refuses
+  #     on receipt, so the drive re-fetches silence and P3 passes having
+  #     proved nothing.
   local dart_disabled
   dart_disabled="$(sed -n \
     's/^const String kDisabledMarker = .\(.*\).;$/\1/p' \
@@ -1848,6 +2082,72 @@ Usage: simctl location <device> <action> [<arguments>]
   _check "N6 the Dart background-catchup marker matches CATCHUP_MARKER" \
     "${CATCHUP_MARKER}" "${dart_catchup}"
 
+  # --- (N7) P3's in-flight grace. Two oracles now measure ONE window — the
+  #     drive's event-id diff and this script's wire probe — and a grace that
+  #     drifted between them would make them disagree about the app's own
+  #     last in-flight tick: the drive tolerating it as a straggler while the
+  #     host counted it as a leak, on a perfectly healthy run. The window's
+  #     other end is a sum across two Dart files and is pinned by check 19 of
+  #     scripts/ci/check_ios_background_publish.sh instead.
+  local dart_grace
+  dart_grace="$(sed -n \
+    's/^const int _inFlightGraceSecs = \([0-9]*\);$/\1/p' \
+    "${SCRIPT_DIR}/../../../haven/integration_test/ios_bg_publish_test.dart" \
+    2>/dev/null || true)"
+  _check "N7 the Dart in-flight grace matches LEAK_GRACE_SECS" \
+    "${LEAK_GRACE_SECS}" "${dart_grace}"
+
+  # --- (T1-T4) `bgp_secs_until`: the host's takeover of P3's settle window
+  #     costs the lane no extra wall clock, and cannot sleep on a bad anchor.
+  #     A target already past is 0 (the drive died late in the window), a
+  #     future one is the remainder, and a remainder larger than what is left
+  #     of the DISARM budget is CAPPED — without the cap a stale anchor from a
+  #     previous attempt would hold the job for its whole span.
+  _check "T1 a target already past waits for nothing" \
+    0 "$(bgp_secs_until "$(( $(bgp_now) - 5 ))" 200)"
+  _check "T2 a future target waits out the remainder" \
+    30 "$(bgp_secs_until "$(( $(bgp_now) + 30 ))" 200)"
+  _check "T3 a remainder past the budget is capped" \
+    200 "$(bgp_secs_until "$(( $(bgp_now) + 9999 ))" 200)"
+  _check "T4 an unreadable anchor waits for nothing" \
+    0 "$(bgp_secs_until 'not-a-number' 200)"
+
+  # --- (V1-V8) `bgp_p3_host_verdict`: what a drive that died INSIDE P3's
+  #     settle window leaves behind. The whole point of this function is that
+  #     it has no "unknown" outcome that reads as a pass — every fixture below
+  #     differs from V1 by exactly one input, and every one of them must land
+  #     on a verdict that is not `holds`.
+  _check "V1 gone + silent wire + still gone + disable signalled => P3 holds" \
+    'holds' "$(bgp_p3_host_verdict 0 gone gone 0)"
+  _check "V2 a kind-445 inside the window => leak (P3 broken)" \
+    'leak' "$(bgp_p3_host_verdict 0 gone gone 1)"
+  _check "V3 an unreadable relay is NOT silence" \
+    'unproven' "$(bgp_p3_host_verdict 0 gone gone 3)"
+  _check "V4 a wire read with no control is NOT silence" \
+    'unproven' "$(bgp_p3_host_verdict 0 gone gone 4)"
+  _check "V5 the app still RUNNING at the drive's exit is the drive's own failure" \
+    'unproven' "$(bgp_p3_host_verdict 0 running gone 0)"
+  _check "V6 an uncalibrated liveness read proves nothing" \
+    'unproven' "$(bgp_p3_host_verdict 0 unknown gone 0)"
+  _check "V7 the app back at the window's end is a surviving background wake" \
+    'relaunched' "$(bgp_p3_host_verdict 0 gone running 0)"
+  _check "V8 no disable signal at all => no P3 verdict" \
+    'unproven' "$(bgp_p3_host_verdict 3 gone gone 0)"
+
+  # --- (X1-X3) `bgp_unexcused_proofs`: the completion gate's ONE excuse, and
+  #     its exact width. A host-proved P3 excuses the two markers a reclaimed
+  #     process could not print and nothing else, so a drive that also lost an
+  #     earlier phase's proof still reds — which is what keeps this from being
+  #     a way to buy a green with a truncated transcript.
+  _check "X1 the two excusable proofs are excused" \
+    "" "$(bgp_unexcused_proofs "${SILENCE_MARKER}
+${DISARMED_MARKER}")"
+  _check "X2 any other missing proof survives the excuse" \
+    "${ARMED_MARKER}" "$(bgp_unexcused_proofs "${ARMED_MARKER}
+${SILENCE_MARKER}
+${DISARMED_MARKER}")"
+  _check "X3 nothing missing stays nothing" "" "$(bgp_unexcused_proofs "")"
+
   # --- (H8) STRUCTURAL: the DISABLE deadline is SELECTED from LIVE_SYNC, and
   #     the two legs' values are different. Both halves matter. A run that
   #     always took the live-sync value would put the deadline past the poll
@@ -1886,10 +2186,12 @@ Usage: simctl location <device> <action> [<arguments>]
   [[ -n "${body}" ]] || rc=1
   grep -qF 'bgp_wait_until "${DRIVE_PID}" "${DISARM_BUDGET_SECS}"' \
     <<<"${body}" || rc=1
-  grep -qF 'DISARM_BUDGET_SECS="$(bgp_budget_after_lag' <<<"${body}" || rc=1
-  grep -qF '"$(bgp_signal_mtime_with "${APP_DATA_ROOT}" "${SIGNAL_NAME}" \' \
+  grep -qF 'DISABLE_AT="$(bgp_signal_mtime_with "${APP_DATA_ROOT}" \' \
     <<<"${body}" || rc=1
-  grep -qF '"${DISABLED_MARKER}" || true)" \' <<<"${body}" || rc=1
+  grep -qF '"${SIGNAL_NAME}" "${DISABLED_MARKER}" || true)"' <<<"${body}" \
+    || rc=1
+  grep -qF 'DISARM_BUDGET_SECS="$(bgp_budget_after_lag "${DISABLE_AT}" \' \
+    <<<"${body}" || rc=1
   _check "H9 the DISARM wake-up is anchored on the disable append" 0 "${rc}"
 
   # --- (H10) STRUCTURAL: a drive that exits INSIDE P3's settle window is
@@ -1926,6 +2228,79 @@ Usage: simctl location <device> <action> [<arguments>]
   fi
   _check "H10 a drive that dies inside the settle window is attributed" \
     0 "${rc}"
+
+  # --- (H11) STRUCTURAL: the 'gone' branch can no longer END there. Before
+  #     the host owned a wire oracle it printed a diagnosis and fell through
+  #     to the drive's rc, so an app iOS reclaimed produced an unconditional
+  #     red whose own message said P3 was "neither proved nor disproved" — an
+  #     indeterminate result reported as a failure, which is a flaky lane by
+  #     construction. The branch must now HOLD the window open (`bgp_secs_until`
+  #     against the disable anchor plus the settle window) and hand the answer
+  #     to the relay. Nothing behavioural can see this: V1-V8 prove the
+  #     verdict function, and only this proves the run reaches it.
+  rc=0
+  [[ -n "${disarm_exit}" ]] || rc=1
+  grep -qF 'RECLAIMED_INSIDE_WINDOW=1' <<<"${disarm_exit}" || rc=1
+  grep -qF 'bgp_secs_until \' <<<"${disarm_exit}" || rc=1
+  grep -qF 'DISABLE_AT:-0} + SETTLE_WINDOW_SECS' <<<"${disarm_exit}" || rc=1
+  _check "H11 the reclaimed branch holds P3's window open instead of ending" \
+    0 "${rc}"
+
+  # --- (H12) STRUCTURAL: the wire oracle's window is derived from the SAME
+  #     anchor and the SAME two constants the drive uses, and the verdict is
+  #     taken from the function V1-V8 pin. A `--since` computed from `now`
+  #     instead of the anchor would drift with the runner's load, and a probe
+  #     called without `--until` would count the foreground publishes the
+  #     host's own re-foreground provokes as leaks. The anchor itself goes too:
+  #     the probe's second control reads the kind-445s from just before it, and
+  #     without that argument it can only report `no verdict`.
+  rc=0
+  [[ -n "${body}" ]] || rc=1
+  grep -qF 'bgp_wire_probe_rc "${DART_BIN}" "${RELAY_URL}" \' <<<"${body}" \
+    || rc=1
+  grep -qF '"$(( DISABLE_AT + LEAK_GRACE_SECS ))" \' <<<"${body}" || rc=1
+  grep -qF '"$(( DISABLE_AT + SETTLE_WINDOW_SECS ))" \' <<<"${body}" || rc=1
+  # Anchored as a whole line: `"${DISABLE_AT}"` also appears in the guard that
+  # decides whether to ask at all, and a needle that matches there would pass
+  # on a call that never passed the anchor.
+  grep -qFx '        "${DISABLE_AT}"' <<<"${body}" || rc=1
+  grep -qF 'P3_HOST_VERDICT="$(bgp_p3_host_verdict "${DISABLE_RC}" \' \
+    <<<"${body}" || rc=1
+  _check "H12 the wire verdict measures the drive's own window" 0 "${rc}"
+
+  # --- (H13) STRUCTURAL: the instrument proves itself on the runner BEFORE
+  #     the lane depends on it, and the completion gate's excuse has exactly
+  #     one source. `P3_PROVEN_BY_HOST` may be set only under the `holds`
+  #     verdict — assigned anywhere else it would excuse two proofs on a run
+  #     that proved nothing — and the preflight must run the probe's own
+  #     `--self-test`, because a probe that reads nothing answers "silent"
+  #     for every relay there is (the lesson of the emulator-probe round: a
+  #     fake proves nothing about behaviour nobody measured).
+  rc=0
+  [[ -n "${body}" ]] || rc=1
+  grep -qF '"${DART_BIN}" "${WIRE_PROBE}" --self-test' <<<"${body}" || rc=1
+  grep -qF 'MISSING_PROOFS="$(bgp_unexcused_proofs "${MISSING_PROOFS}")"' \
+    <<<"${body}" || rc=1
+  local proven_assignments
+  proven_assignments="$(grep -cF 'P3_PROVEN_BY_HOST=1' <<<"${body}" || true)"
+  [[ "${proven_assignments}" == '1' ]] || rc=1
+  _check "H13 the probe proves itself first and the excuse has one source" \
+    0 "${rc}"
+
+  # --- (H14) STRUCTURAL: no verdict but `holds` can end in exit 0. Each of
+  #     the other three has its own exit, so the lane's STATUS names what
+  #     happened instead of handing back the drive's rc for the OS reclaim
+  #     that preceded it — and the drive's rc is bypassed only under the
+  #     proven flag. Delete any one of these and the outcome is still red
+  #     today, which is exactly why nothing behavioural would notice the day
+  #     the last one went.
+  rc=0
+  [[ -n "${body}" ]] || rc=1
+  grep -qF 'if (( WIRE_LEAK == 1 )); then' <<<"${body}" || rc=1
+  grep -qF 'if (( P3_RELAUNCHED == 1 )); then' <<<"${body}" || rc=1
+  grep -qF 'if (( WIRE_UNREAD == 1 )); then' <<<"${body}" || rc=1
+  grep -qF 'if (( P3_PROVEN_BY_HOST == 1 )); then' <<<"${body}" || rc=1
+  _check "H14 every verdict but 'holds' has its own non-zero exit" 0 "${rc}"
 
   # --- (G1-G3) The flag-off arm CONTAINS. The workflow uploads this lane's
   #     log `if: failure()` and a leak is a failure, so unless the gate removes
@@ -1990,6 +2365,19 @@ Usage: simctl location <device> <action> [<arguments>]
   _check "G5 the flag-on arm hands the sourced gate the profile, this lane's drive floor, both copies and the report" \
     "4 host /tmp/haven-soak/needles --floor drive=${BGP_DRIVE_FLOOR} -- --sink drive=${gate_a},${gate_b} --report /tmp/ios-logscan/bg-publish.ndjson" \
     "${rc} $(tr '\n' ' ' < "${gate_argv}" | sed 's/ $//')"
+  # --- (G5b) …and that floor stays DERIVED from the host skeleton the shared
+  #     runner defines, rather than measured from a transcript's length: the
+  #     delegate refuses anything above it, and the belt above — whose sink sums
+  #     two copies of the same transcript — must pass the same number. 56 was
+  #     half a measured capture, and what it used to catch is the scanner's
+  #     proof_of_run now.
+  local skeleton
+  skeleton="$(sed -n -E 's/^readonly IOS_HOST_SKELETON_LINES=([0-9]+).*/\1/p' \
+                "${SCRIPT_DIR}/run-ios-sim-scenario.sh")"
+  rc=0
+  [[ -n "${skeleton}" ]] \
+    && (( BGP_DRIVE_FLOOR >= 1 && BGP_DRIVE_FLOOR <= skeleton )) || rc=1
+  _check "G5b this lane's drive floor stays within the shared runner's host skeleton" 0 "${rc}"
   # --- (G7) THE PROFILE IS INFERRED, NEVER DEFAULTED. With the profile unset
   #     the gate is handed `proxy` under either recorder export alone and
   #     `host` under neither; every variable the inference reads is pinned on
@@ -2050,19 +2438,33 @@ Usage: simctl location <device> <action> [<arguments>]
        "drive's own install causes, stays marker-specific and clears every" \
        "container; the app-data root is derived AND validated; the signal" \
        "name, the disable marker, the always marker, the receive marker, the" \
-       "catch-up marker and" \
-       "the tier-define name still match the Dart drive's; and the" \
+       "catch-up marker, P3's in-flight grace and" \
+       "the tier-define name still match the Dart drive's; a drive the OS" \
+       "reclaimed inside P3's settle window ends on a PROVEN verdict and" \
+       "never on an indeterminate one — silent wire plus a process that" \
+       "stayed gone is the only shape that holds, a kind-445 inside the" \
+       "window is a leak, a process that came back is a surviving background" \
+       "wake, and an unreadable relay, a read with no control, an" \
+       "uncalibrated liveness probe or a missing disable signal are each" \
+       "'unproven' rather than a pass; the host's takeover of that window" \
+       "waits out the remainder, caps a stale anchor and never sleeps on an" \
+       "unreadable one; the completion gate's one excuse covers exactly the" \
+       "two markers a dead process could not print and nothing else; and the" \
        "background step and its call, the per-wait markers, the fail-closed" \
        "grant, the uninstall" \
        "skip, the tier threaded to the delegate, the single validated tier" \
        "input, the per-leg DISABLE deadline, the anchored DISARM budget, the" \
-       "attribution of a drive that dies inside the settle window and the" \
+       "attribution of a drive that dies inside the settle window, the" \
+       "window the wire verdict measures, the probe's own preflight" \
+       "self-test, the single source of that excuse, the own non-zero exit" \
+       "every verdict but 'holds' has, and the" \
        "moving location drip are" \
        "structurally pinned; and the log-privacy gate is the floor alone when" \
        "HAVEN_LOGSCAN is unset, removing what it flags and nothing else, sits" \
        "between the log's preservation and the drive's exit with no echo of" \
        "either copy, hands the sourced gate the job's profile, this lane's own" \
-       "drive floor, both copies and the report when the flag is on, and has" \
+       "drive floor — itself within the shared runner's host skeleton — both" \
+       "copies and the report when the flag is on, and has" \
        "no soft or bare arm)."
   return 0
 }
@@ -2198,6 +2600,35 @@ case "${LOC_RC}" in
     exit 2
     ;;
 esac
+
+# --- Preflight: does the wire oracle work ON THIS RUNNER? -------------------
+# P3's verdict rests on this probe whenever iOS reclaims the app mid-window,
+# and a probe that reads nothing answers "silent" for every relay there is. So
+# it proves itself here, before anything depends on it — the same discipline
+# start-wire-proxy.sh applies to the recording proxy. Its own fixtures are
+# what make the proof worth having: a planted in-window event must RED, one
+# second past the window must not, and an unread relay must never be reported
+# as a silent one. The output is printed on failure, because a verifier that
+# rejects without saying why is the failure this round started with.
+[[ -f "${WIRE_PROBE}" ]] \
+  || { echo "ERROR: the wire oracle is missing: ${WIRE_PROBE}" >&2; exit 2; }
+DART_BIN="$(bgp_dart_bin)"
+readonly DART_BIN
+if [[ -z "${DART_BIN}" ]]; then
+  echo "ERROR: no 'dart' on PATH and none beside 'flutter'. P3's host-side" >&2
+  echo "       wire oracle cannot run, and without it a run where iOS" >&2
+  echo "       reclaims the app inside the settle window has no verdict." >&2
+  exit 2
+fi
+if ! PROBE_SELFTEST="$("${DART_BIN}" "${WIRE_PROBE}" --self-test 2>&1)"; then
+  echo "ERROR: the settle-window wire probe failed its own self-test, so" >&2
+  echo "       nothing it reports about P3 can be believed." >&2
+  printf '%s\n' "${PROBE_SELFTEST}" | sed 's/^/       /' >&2
+  exit 2
+fi
+unset PROBE_SELFTEST
+echo "bg-publish preflight — the settle-window wire probe passed its own" \
+     "self-test on this runner."
 
 cd "${HAVEN_DIR}"
 
@@ -2378,10 +2809,9 @@ echo "bg-publish — simulated-location drip every ${DRIP_SECS}s (two fixes ~5m"
 # erasing the grant made above.
 #
 # HAVEN_LOGSCAN_DRIVE_FLOOR is this lane's own anti-vacuity floor, and it seals
-# the manifest the belt below and the workflow's own scan step both read. A
-# COMPLETE transcript of this drive is 112 lines (measured, CI run
-# 35280144455); 56 is half of it, below the policy default of 100 only because
-# the default is the core-flow drive's.
+# the manifest the belt below and the workflow's own scan step both read. Its
+# derivation is at BGP_DRIVE_FLOOR above: the host skeleton, not a fraction of a
+# transcript.
 HAVEN_LIVE_SYNC="${LIVE_SYNC}" \
 HAVEN_E2E_RELAY="${RELAY_URL}" \
 HAVEN_E2E_IOS_SKIP_UNINSTALL=1 \
@@ -2397,6 +2827,16 @@ bgp_wait_until "${DRIVE_PID}" "${READY_WAIT_SECS}" "${MARKER_POLL_SECS}" \
   -- bgp_marker_present_under "${APP_DATA_ROOT}" "${SIGNAL_NAME}" "${READY_MARKER}"
 READY_RC=$?
 set -e
+
+# P3's host-side state, declared before the branches that may set it so every
+# exit below reads a defined value rather than a `set -u` abort on the paths
+# that never reached the settle window.
+DRIVE_EXIT_APP_STATE=""
+RECLAIMED_INSIDE_WINDOW=0
+P3_PROVEN_BY_HOST=0
+WIRE_LEAK=0
+WIRE_UNREAD=0
+P3_RELAUNCHED=0
 
 case "${READY_RC}" in
   0)
@@ -2427,13 +2867,17 @@ case "${READY_RC}" in
     set -e
     # The budget for the wake-up below, ANCHORED on the drive's own append
     # rather than on the poll that noticed it. Unanchored is the full budget,
-    # which is what every branch but the first one gets.
+    # which is what every branch but the first one gets. The same anchor is
+    # what the host's own wire verdict measures its window from, so it is read
+    # ONCE into DISABLE_AT rather than twice into two possibly different
+    # answers.
+    DISABLE_AT=""
     DISARM_BUDGET_SECS="${DISARM_WAIT_SECS}"
     case "${DISABLE_RC}" in
       0)
-        DISARM_BUDGET_SECS="$(bgp_budget_after_lag \
-          "$(bgp_signal_mtime_with "${APP_DATA_ROOT}" "${SIGNAL_NAME}" \
-               "${DISABLED_MARKER}" || true)" \
+        DISABLE_AT="$(bgp_signal_mtime_with "${APP_DATA_ROOT}" \
+                        "${SIGNAL_NAME}" "${DISABLED_MARKER}" || true)"
+        DISARM_BUDGET_SECS="$(bgp_budget_after_lag "${DISABLE_AT}" \
           "${DISARM_WAIT_SECS}" "${DISARM_ANCHOR_MAX_LAG_SECS}")"
         echo "bg-publish — disable signal observed; P3's settle window is" \
              "running. Re-foregrounding in at most ${DISARM_BUDGET_SECS}s."
@@ -2481,28 +2925,128 @@ case "${READY_RC}" in
         # the one stretch of the lane where the app holds no execution claim
         # (that is the guarantee being proven), so it is also the one where
         # iOS can end the process under a drive that has printed every proof
-        # but its last two. In CI run 35397118356 it did: the app's background
-        # assertions invalidated 37 s after the disable without UIKit ever
-        # running their expiration handlers, the process logged nothing again,
-        # and the host's VM-service connection closed 5 s later — package:test
-        # reported the test AND its tearDownAll as "did not complete" over a
-        # transcript that ends at the disable. Unsaid, that is indistinguishable
-        # from an assertion failure and the next reader repeats the forensics.
+        # but its last two. In CI runs 35397118356 and 35622556197 it did, and
+        # the second one's sim-lifecycle.log names the mechanism exactly: the
+        # disable released every CoreLocation claim, runningboardd invalidated
+        # the assertion locationd held on the app one second later, the shared
+        # FinishTask grace that replaced it expired ~30 s on, and RunningBoard
+        # terminated the process for not invalidating it
+        # (OS_REASON_RUNNINGBOARD 0x2182bad2 — no jetsam, no crash report, no
+        # watchdog). That is iOS doing exactly what a healthy app with no
+        # background claim invites, so it cannot be a red on its own.
         DRIVE_EXIT_APP_STATE="$(bgp_calibrated_app_state \
           "${APP_PROBE_AT_READY}" "$(bgp_app_process_state "${SIM_UDID}")")"
-        echo "bg-publish — the drive exited INSIDE P3's settle window," >&2
-        echo "      before ${DISARMED_MARKER}, with the app process" >&2
-        echo "      '${DRIVE_EXIT_APP_STATE}'." >&2
-        echo "      'gone' means the OS reclaimed the suspended app" >&2
-        echo "      before the wake-up above could re-foreground it, and" >&2
-        echo "      P3 was neither proved nor disproved; 'running' means" >&2
-        echo "      the drive died with its app still there, which is the" >&2
-        echo "      drive's own failure and its transcript's to explain." >&2
-        echo "      The device log's lifecycle daemons are the record" >&2
-        echo "      either way (sim-lifecycle.log in this job's artifact)." >&2
-        echo "      The drive's rc is collected below." >&2
+        echo "bg-publish — the drive exited INSIDE P3's settle window," \
+             "before ${DISARMED_MARKER}, with the app process" \
+             "'${DRIVE_EXIT_APP_STATE}'."
+        if [[ "${DRIVE_EXIT_APP_STATE}" == 'gone' ]]; then
+          # The OS reclaimed the app. Its in-process half of P3 is already
+          # proven — the DISABLED marker is appended only AFTER the provider
+          # and the publish scheduler have been asserted — and the half it
+          # could not finish is the one the HOST can take over, because the
+          # relay outlives the app. So this is not the end of the phase: wait
+          # the rest of the window out (capped by the budget the wake-up it
+          # replaces would have spent, so the lane costs no extra wall clock)
+          # and let the wire answer below.
+          RECLAIMED_INSIDE_WINDOW=1
+          echo "      The OS reclaimed the suspended app, which is its right" \
+               "once the disable removed the app's background claim. Holding" \
+               "P3's window open from the host and asking the relay."
+          SETTLE_SLEEP_SECS="$(bgp_secs_until \
+            "$(( ${DISABLE_AT:-0} + SETTLE_WINDOW_SECS ))" \
+            "${DISARM_BUDGET_SECS}")"
+          if (( SETTLE_SLEEP_SECS > 0 )); then sleep "${SETTLE_SLEEP_SECS}"; fi
+        else
+          echo "      'running' means the drive died with its app still" >&2
+          echo "      there, which is the drive's own failure and its" >&2
+          echo "      transcript's to explain; 'unknown' means the liveness" >&2
+          echo "      read was never calibrated, so neither reading is" >&2
+          echo "      evidence. The device log's lifecycle daemons are the" >&2
+          echo "      record either way (sim-lifecycle.log in this job's" >&2
+          echo "      artifact). The drive's rc is collected below." >&2
+        fi
         ;;
     esac
+
+    # --- P3's WIRE verdict, taken by the HOST. --------------------------
+    # Asked on EVERY path, not only the reclaimed one. The relay is the
+    # ground truth for "did anything publish after consent was withdrawn",
+    # it does not depend on the app surviving, and it is the only oracle in
+    # this lane that would see a background RELAUNCH publishing. Running it
+    # every time is also what keeps it honest: an oracle exercised only on
+    # the rare path is an oracle nobody would notice had stopped reading.
+    #
+    # It runs AFTER the re-foreground above, deliberately. Not because the
+    # window's events would age out of the relay — they do not; this relay
+    # enforces the kind-445 NIP-40 expiration at INGEST only and never evicts
+    # (see bgp_wait_until's note) — but because the wake-up above is sized
+    # against that 228 s bound, so seconds spent before it come straight out of
+    # the drive's own margin, while seconds spent after it cost nothing. A
+    # foregrounded Haven publishes by design; those events are created past the
+    # window and excluded by `--until`, and they are also why the probe's
+    # pre-disable control has an upper bound of its own.
+    WIRE_RC=''
+    if [[ "${DISABLE_AT}" =~ ^[0-9]+$ ]] \
+       && (( $(bgp_now) >= DISABLE_AT + SETTLE_WINDOW_SECS )); then
+      set +e
+      bgp_wire_probe_rc "${DART_BIN}" "${RELAY_URL}" \
+        "$(( DISABLE_AT + LEAK_GRACE_SECS ))" \
+        "$(( DISABLE_AT + SETTLE_WINDOW_SECS ))" \
+        "${DISABLE_AT}"
+      WIRE_RC=$?
+      set -e
+    else
+      # No anchor, or the window has not elapsed — the second happens only
+      # when the drive died with its app still there, which is already a
+      # red. An unasked question is never an answer, so it is said and the
+      # verdict stays `unproven`.
+      echo "bg-publish — P3's settle window was not asked of the relay:" \
+           "there is no disable anchor, or the window had not elapsed when" \
+           "the drive ended."
+    fi
+
+    # Read ONCE, after the window: "did anything bring the app back while
+    # nobody was allowed to?" is a different question from the one asked at
+    # the drive's exit, and both feed the verdict.
+    APP_STATE_AT_WINDOW_END="$(bgp_calibrated_app_state \
+      "${APP_PROBE_AT_READY}" "$(bgp_app_process_state "${SIM_UDID}")")"
+    P3_HOST_VERDICT="$(bgp_p3_host_verdict "${DISABLE_RC}" \
+      "${DRIVE_EXIT_APP_STATE}" "${APP_STATE_AT_WINDOW_END}" "${WIRE_RC}")"
+    case "${WIRE_RC}" in
+      1) WIRE_LEAK=1 ;;
+      0) : ;;
+      '') : ;;
+      *) WIRE_UNREAD=1 ;;
+    esac
+    if (( RECLAIMED_INSIDE_WINDOW == 1 )); then
+      case "${P3_HOST_VERDICT}" in
+        holds)
+          P3_PROVEN_BY_HOST=1
+          echo "bg-publish — P3 HOLDS on the wire: the app applied the" \
+               "disable in-process, the OS reclaimed it, no kind-445 was" \
+               "created for the whole settle window, and nothing brought" \
+               "the process back."
+          ;;
+        relaunched)
+          P3_RELAUNCHED=1
+          echo "ERROR: P3 — the settle window ended with the app RUNNING" >&2
+          echo "       again, although this script never launched it. A" >&2
+          echo "       background wake that survives the withdrawal of" >&2
+          echo "       consent is the defect this phase exists to catch." >&2
+          ;;
+        leak)
+          : # reported by the probe, and turned into the exit status below.
+          ;;
+        *)
+          echo "ERROR: P3 has NO verdict on this run. The OS reclaimed the" >&2
+          echo "       app inside the settle window and the host's own wire" >&2
+          echo "       oracle could not answer either, so the phase was" >&2
+          echo "       neither proved nor disproved. That is a harness" >&2
+          echo "       failure, not a product one: fix the oracle rather" >&2
+          echo "       than the lane's expectations." >&2
+          ;;
+      esac
+    fi
     ;;
   2)
     echo "bg-publish — the drive exited before signalling ${READY_MARKER};" \
@@ -2568,9 +3112,59 @@ if (( SCAN_RC == 1 )); then
   exit 1
 fi
 
+# A LEAK outranks every other verdict here, including the drive's own rc: it
+# is the one outcome that names a product defect rather than a harness one,
+# and it is the same defect whichever oracle saw it first.
+if (( WIRE_LEAK == 1 )); then
+  echo "ERROR: P3 — kind-445 event(s) reached the relay INSIDE the settle" >&2
+  echo "       window that follows disabling background sharing. Publishing" >&2
+  echo "       must stop when the user withdraws consent (privacy Rule 10);" >&2
+  echo "       the scheduler ticks every 72-168 s, so the window is a full" >&2
+  echo "       max-jitter interval and this cannot be a straggler. The" >&2
+  echo "       ${LEAK_GRACE_SECS}s in-flight grace already excludes a tick" >&2
+  echo "       that had begun when the disable landed." >&2
+  exit 1
+fi
+
+# A process that came BACK inside the window is the same class of defect one
+# step removed: nothing may re-arm a background wake after consent is
+# withdrawn. Its own exit, so the lane's status names it rather than handing
+# back the drive's rc for the OS reclaim that preceded it.
+if (( P3_RELAUNCHED == 1 )); then
+  echo "ERROR: P3 — the app was reclaimed inside the settle window and was" >&2
+  echo "       RUNNING again before it ended, with nothing on the host" >&2
+  echo "       having launched it." >&2
+  exit 1
+fi
+
 if (( DRIVE_RC != 0 )); then
-  echo "ERROR: the iOS bg-publish drive failed (rc=${DRIVE_RC})." >&2
-  exit "${DRIVE_RC}"
+  if (( P3_PROVEN_BY_HOST == 1 )); then
+    # The drive's rc is the OS reclaiming its app inside P3's settle window,
+    # not an assertion. Every proof but the two that phase owes was already
+    # printed, and both of those have been answered from the host: the wire
+    # by the probe above, the native session by the reclaim itself. Said out
+    # loud, because a green that skipped two markers must never be silent
+    # about which ones and why.
+    echo "bg-publish — the drive exited rc=${DRIVE_RC} because iOS reclaimed" \
+         "its app inside P3's settle window. P3 was proved from the host" \
+         "instead; the two markers the dead process could not print are" \
+         "excused by name below."
+  else
+    echo "ERROR: the iOS bg-publish drive failed (rc=${DRIVE_RC})." >&2
+    exit "${DRIVE_RC}"
+  fi
+fi
+
+# An oracle that could not read is not an oracle that found nothing. This is
+# the harness failing, so it says so rather than naming P3.
+if (( WIRE_UNREAD == 1 )); then
+  echo "ERROR: P3's host-side wire oracle could not read the relay (or read" >&2
+  echo "       it with no control), so the settle window has no verdict from" >&2
+  echo "       this side. The probe proved itself on this runner in the" >&2
+  echo "       preflight, so a failure here is about the relay or the run," >&2
+  echo "       not about the instrument. Fail closed rather than read an" >&2
+  echo "       unread relay as a silent one." >&2
+  exit 1
 fi
 if (( SCAN_RC != 0 )); then
   echo "ERROR: ${BG_LOG} / ${SHARED_LOG} could not be scanned (rc=${SCAN_RC});" >&2
@@ -2588,9 +3182,26 @@ fi
 # under the Always tier that the When-In-Use legs must not produce.
 MISSING_PROOFS="$(bgp_missing_proofs "${BG_LOG}" "${AUTH_TIER}" \
                     "${LIVE_SYNC}")"
+# The ONE excuse this gate has, and it is not a widening: when the host proved
+# P3 itself, the two markers a reclaimed process could not print are dropped
+# from the demanded set BY NAME. Every other proof is still required, so a
+# drive that stopped anywhere else still reds — and on every other run the set
+# is untouched, because P3_PROVEN_BY_HOST is 0 there.
+if (( P3_PROVEN_BY_HOST == 1 )); then
+  echo "bg-publish — completion gate: excusing ${SILENCE_MARKER} and" \
+       "${DISARMED_MARKER}; the host proved P3 from the relay after iOS" \
+       "reclaimed the app. Every other proof is still demanded."
+  MISSING_PROOFS="$(bgp_unexcused_proofs "${MISSING_PROOFS}")"
+fi
 readonly MISSING_PROOFS
 if [[ -n "${MISSING_PROOFS}" ]]; then
-  echo "ERROR: the drive exited 0 WITHOUT printing its terminal proof(s)" >&2
+  if (( P3_PROVEN_BY_HOST == 1 )); then
+    echo "ERROR: the drive was reclaimed inside P3, and the proof(s) it is" >&2
+    echo "       missing are NOT the two that excuses, so it had already" >&2
+    echo "       stopped somewhere earlier" >&2
+  else
+    echo "ERROR: the drive exited 0 WITHOUT printing its terminal proof(s)" >&2
+  fi
   echo "       for the ${AUTH_TIER} tier at live_sync=${LIVE_SYNC}:" >&2
   printf '%s\n' "${MISSING_PROOFS}" | sed 's/^/         missing: /' >&2
   echo "       This is NOT an assertion failure — a failed expect() makes" >&2
@@ -2655,3 +3266,14 @@ fi
 echo "     and, not provable on a simulator at all, that the shape survives"
 echo "     hours of stationary wall clock on a device (M7 §6 item 0a,"
 echo "     DEFERRED for want of hardware — still owed)."
+if (( P3_PROVEN_BY_HOST == 1 )); then
+  echo "     P3 on THIS run was proved from the host, not from the app: iOS"
+  echo "     reclaimed the process inside the settle window (its right, once"
+  echo "     the disable removed the background claim), so the relay answered"
+  echo "     the silence and the reclaim itself answered the keep-alive — a"
+  echo "     process iOS takes for an expired background assertion is one"
+  echo "     that had already released its CoreLocation session. NOT proved"
+  echo "     this way: that the release was PROMPT rather than merely done"
+  echo "     before the OS acted — the drive's own disarm poll owns that, and"
+  echo "     the other legs ran it."
+fi

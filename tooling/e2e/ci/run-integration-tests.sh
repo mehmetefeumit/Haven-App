@@ -178,6 +178,28 @@ run_self_test() {
     echo "SELF-TEST FAIL (wiring): expected exactly one gate call over LOG_DIR with the report outside it" >&2
     fail=1
   fi
+  # The segment claim, and that it is DERIVED: the aggregate gate says how many
+  # drive transcripts must be under LOG_DIR, and the number is the argument
+  # list's own length taken before the loop. Without it a target whose log
+  # never reached the directory is invisible — the files that did land still
+  # clear the summed floor and still carry the reporter's proof_of_run. The
+  # mutation below is why the pin is worth having: a constant satisfies the
+  # gate's argv just as well and certifies whatever landed.
+  local count_line loop_at
+  count_line="$(grep -n -m1 '^readonly TARGET_COUNT=\$#$' "${BASH_SOURCE[0]}" || true)"
+  count_line="${count_line%%:*}"
+  loop_at="$(grep -n -m1 '^for spec in "$@"; do' "${BASH_SOURCE[0]}" || true)"
+  loop_at="${loop_at%%:*}"
+  if [[ -z "${count_line}" || -z "${loop_at}" ]] || (( count_line > loop_at )) \
+     || (( "$(grep -cF -- '--segments "drive=${TARGET_COUNT}"' <<<"${real_run}")" != 1 )); then
+    echo "SELF-TEST FAIL (wiring): the aggregate gate must claim one drive transcript per target spec, from a count taken before the loop (count='${count_line:-none}', loop='${loop_at:-none}')" >&2
+    fail=1
+  fi
+  if (( "$(grep -cF -- '--segments "drive=${TARGET_COUNT}"' \
+            <<<"$(sed 's/--segments "drive=${TARGET_COUNT}"/--segments "drive=7"/' "${BASH_SOURCE[0]}")")" != 0 )); then
+    echo "SELF-TEST FAIL (wiring): a segment count frozen to a literal would still satisfy the pin above, which would then certify whatever landed rather than what this run drove" >&2
+    fail=1
+  fi
   if grep -qE 'if[[:space:]]+\[\[[[:space:]]+-x[[:space:]]' <<<"${real_run}"; then
     echo "SELF-TEST FAIL (wiring): a soft \`if [[ -x …\` scanner gate is in the real run" >&2
     fail=1
@@ -188,8 +210,45 @@ run_self_test() {
   loop_line="$(grep -n -m1 '^for spec in "$@"; do' "${BASH_SOURCE[0]}")"
   loop_line="${loop_line%%:*}"
   if [[ -z "${seal_line}" || -z "${loop_line}" ]] || (( seal_line > loop_line )) \
-     || ! grep -qE '^readonly -a SEAL_EXTRA=\(--floor drive=20 --floor logcat=300 --floor relay=7\)$' "${BASH_SOURCE[0]}"; then
+     || ! grep -qE '^readonly -a SEAL_EXTRA=\(--floor drive=18 --floor logcat=300 --floor relay=7\)$' "${BASH_SOURCE[0]}"; then
     echo "SELF-TEST FAIL (wiring): the lane's manifest must be sealed once, with its drive, logcat and relay floors, before the first target (seal='${seal_line:-none}', loop='${loop_line:-none}')" >&2
+    fail=1
+  fi
+  # …and that drive floor stays derived from what the HOST prints, never from a
+  # transcript's length. Each target is gated as `drive=<final>,<full>` (run-
+  # single-avd-scenario.sh) and the floor SUMS a class's files, so the fixture
+  # is both: the runner's own attempt banner, `Installing …`, the six
+  # `VMServiceFlutterDriver:` connect lines (four unconditional, two the
+  # `kPauseStart` branch `--start-paused` guarantees — see the seal below) and
+  # the driver script's verdict —
+  # interleaved with forwarded device chatter, exactly as a real capture is.
+  # The floor may not exceed that sum, so a number taken from a whole
+  # transcript's length (the previous 20) cannot come back.
+  local host_printed_re printed_final printed_full drive_floor
+  host_printed_re='^(===== flutter drive attempt |Installing |VMServiceFlutterDriver: |All tests passed\.|Failure Details:)'
+  printf '%s\n' \
+    '===== flutter drive attempt 1/3 (rc=0, preconnect_stall=0) =====' \
+    'Installing /tmp/scenario.apk...                 1,316ms' \
+    'D/FlutterGeolocator( 5253): Creating service.' \
+    'VMServiceFlutterDriver: Connecting to Flutter application at <endpoint>' \
+    'VMServiceFlutterDriver: Isolate found with number: <n>' \
+    'VMServiceFlutterDriver: Isolate <n> is runnable.' \
+    'VMServiceFlutterDriver: Isolate is paused at start.' \
+    'VMServiceFlutterDriver: Attempting to resume isolate' \
+    'VMServiceFlutterDriver: Connected to Flutter application.' \
+    'I/flutter ( 5253): 00:00 +0: (setUpAll)' \
+    'I/flutter ( 5253): 00:01 +4: All tests passed!' \
+    'All tests passed.' > "${tmp}/host-printed.full.drive.log"
+  cp "${tmp}/host-printed.full.drive.log" "${tmp}/host-printed.final.drive.log"
+  printed_full="$(grep -cE "${host_printed_re}" "${tmp}/host-printed.full.drive.log" || true)"
+  printed_final="$(grep -cE "${host_printed_re}" "${tmp}/host-printed.final.drive.log" || true)"
+  drive_floor="$(sed -n -E 's/^readonly -a SEAL_EXTRA=\(--floor drive=([0-9]+) .*/\1/p' "${BASH_SOURCE[0]}")"
+  if (( printed_final != 9 || printed_full != 9 )); then
+    echo "SELF-TEST FAIL (drive floor): a target's two slices carry ${printed_final} and ${printed_full} host-printed line(s), not the 9 each every complete transcript of this lane carries — the check below would be measuring the wrong thing" >&2
+    fail=1
+  elif [[ -z "${drive_floor}" ]] || (( drive_floor < 1 )) \
+       || (( drive_floor > printed_final + printed_full )); then
+    echo "SELF-TEST FAIL (drive floor): drive=${drive_floor:-none} is not within the $(( printed_final + printed_full )) line(s) the host prints for a target's two gated slices. A drive floor is calibrated to those lines alone; a higher one was measured from a transcript that also carried forwarded logcat furniture, which is not a property of the run (CI run 35464818348). 'A test ran' is the scanner's proof_of_run, not this number." >&2
     fail=1
   fi
   # The relay log is only evidence if it is read out of a LIVE container and
@@ -223,7 +282,7 @@ run_self_test() {
     echo "run-integration-tests.sh: SELF-TEST FAILED" >&2
     return 1
   fi
-  echo "run-integration-tests.sh: self-test passed (the log-privacy gate removes exactly the *.log files it scanned on a leak and touches nothing on rc 3 or rc 0; the gate library is sourced, the one gate call covers LOG_DIR with its report outside the upload, no soft scanner gate, no captured-log echo of its own, the manifest is sealed once with the lane's drive, logcat and relay floors before the first target; each target's relay log is dumped from the live container, typed as a relay sink, before the aggregate gate)."
+  echo "run-integration-tests.sh: self-test passed (the log-privacy gate removes exactly the *.log files it scanned on a leak and touches nothing on rc 3 or rc 0; the gate library is sourced, the one gate call covers LOG_DIR with its report outside the upload and claims one drive transcript per target spec from a count taken before the loop — a literal in its place is refused — no soft scanner gate, no captured-log echo of its own, the manifest is sealed once with the lane's drive, logcat and relay floors before the first target; each target's relay log is dumped from the live container, typed as a relay sink, before the aggregate gate)."
   return 0
 }
 
@@ -236,6 +295,12 @@ if [[ $# -lt 1 ]]; then
   echo "Usage: $0 <target.dart>[=<prebuilt.apk>] [<target.dart>[=<prebuilt.apk>] ...]" >&2
   exit 2
 fi
+
+# How many transcripts the aggregate gate must find (see its `--segments`
+# claim). Taken from the argument list itself, before the loop consumes it, so
+# adding a target to the workflow's invocation moves the claim by construction
+# — a constant here would certify whatever landed.
+readonly TARGET_COUNT=$#
 
 # Resolve sibling scripts relative to this file so the workflow doesn't
 # have to care about its cwd.
@@ -259,34 +324,61 @@ readonly LOG_DIR="/tmp/integration-logs"
 mkdir -p "${LOG_DIR}"
 # The line floors this lane seals with. A floor is what turns "the scan read an
 # empty or truncated file and found nothing" into rc 4 instead of a green, so
-# each is calibrated to the smallest COMPLETE capture this lane produces and
-# never to what would make it pass.
+# each is calibrated to the part of a capture its PRODUCER always writes, never
+# to what would make this lane pass.
 #
-# drive=20. The policy's 100 lines is sized for a full core flow; here a target
-# is one or two tests, and the smallest complete transcript measured is 22
-# lines (integration_test/keyring_test.dart, run 35280144455). 20 sits under
-# that and above the ~17 lines `flutter drive` prints before the first test
-# result, so a transcript that fails it is one in which no test ran — which is
-# the reason this floor is not simply halved: the preamble, not half the
-# capture, is what it has to clear.
+# drive=18, and it is deliberately NOT a transcript's length, which is what the
+# previous 20 was. A `flutter drive` transcript is the tool's own output
+# INTERLEAVED with whatever logcat furniture the device happened to print, so
+# its length is not a property of the run: this lane's shortest target
+# (keyring_test) measured 23, 25, 31 and 35 lines per slice across four green
+# runs (35311161479, 35376588206, 35397118356, 35524002720) — a 50% swing on
+# nothing the run controls. That is the proxy that reddened a COMPLETE capture
+# on the M7 lane in CI run 35464818348; here it had not bitten yet only
+# because the gate sums two slices.
+#
+# "A test actually ran" is proven by the scanner instead, from the test
+# reporter's own progress line (`proof_of_run` on the `drive` class in
+# tooling/logscan/policy.toml). What is left for this floor is the other
+# failure — an empty or truncated file — so it is derived from what the HOST
+# prints, which no device chatter can change. Each target is gated as
+# `drive=<final>,<full>` (run-single-avd-scenario.sh) and a floor SUMS its
+# class's files, so it is TWICE the per-slice skeleton: the runner's own
+# `===== flutter drive attempt …` banner, `Installing …` (flutter_tools
+# installs unconditionally on every launch), the six `VMServiceFlutterDriver:`
+# connect lines (four unconditional; `Isolate is paused at start.` and
+# `Attempting to resume isolate` are the `kPauseStart` branch of
+# flutter_driver's vmservice_driver.dart, which `flutter drive` guarantees by
+# defaulting `--start-paused` to true — nothing in drive mode resumes the root
+# isolate, so another branch would mean a foreign debugger)
+# and the driver script's verdict (`All tests passed.`, or
+# `Failure Details:` when it is not) — 9 per slice, 18 for the pair, and more
+# for every retry. The aggregate EXIT gate sums all seven targets, so it clears
+# this by a wide margin. The --self-test reds if the floor ever exceeds the
+# pair.
 #
 # logcat=300. The policy's 2000 is a device-wide capture of a whole scenario;
 # this lane captures logcat PER TARGET, and the smallest complete slice
-# measured is 746 lines (integration_test/session_guard_contention_test.dart,
-# same run). 300 is under half of that and far above the handful of lines a
-# dead or mis-pathed capture yields.
+# measured is 725 lines (integration_test/session_guard_contention_test.dart,
+# run 35311161479; 725-846 across the four runs above). 300 is under half of
+# that and far above the handful of lines a dead or mis-pathed capture yields.
+# It is still a measured proxy — what actually proves this class reached the
+# app's log backends is the `rust` and `kotlin` SHAPE plants the policy demands
+# of it (tooling/logscan/policy.toml), which no chatter can supply.
 #
 # relay=7. The policy's 1 is sized for the hermetic host relay, which prints a
-# single listen line; this lane's relay is strfry, whose `docker logs` dump is
-# 14-23 lines for a full run across the fleet, of which the first 9 are a fixed
-# startup block. 7 is half the smallest complete dump, so a dump below it is
-# truncated or absent — which is what a container torn down before the dump
-# looks like: ONE line of docker error text.
+# single listen line; this lane's relay is strfry, whose `docker logs` dump
+# OPENS with a fixed 9-line startup block and grows only with traffic
+# (9-49 lines across the fleet's green runs; exactly 9 for a target whose relay
+# serves nothing it logs). 7 sits under the block every LIVE container prints,
+# while one torn down before the dump yields ONE line of docker error text — so
+# this floor tells those two apart without depending on how much traffic the
+# target happened to generate.
 #
 # Sealed ONCE, before the first target: the host profile reuses the manifest at
 # its out path, so the first seal's floors are the lane's — every later call
 # passes the same arguments.
-readonly -a SEAL_EXTRA=(--floor drive=20 --floor logcat=300 --floor relay=7)
+readonly -a SEAL_EXTRA=(--floor drive=18 --floor logcat=300 --floor relay=7)
 seal_rc=0
 logscan_seal host /tmp/haven-soak/needles "${SEAL_EXTRA[@]}" || seal_rc=$?
 if (( seal_rc != 0 )); then
@@ -446,11 +538,24 @@ done
 # runs: those are exactly the runs where the inner scan was likely skipped.
 # The verdict is applied after the FAIL list is printed, so a leak never robs
 # triage of the failing-target names (both outcomes are exit 1 regardless).
+#
+# `--segments drive=<targets>` is what makes "N drive logs" mean "N distinct
+# drives". Nothing else here does: the class's line floor SUMS its files and
+# its proof_of_run ORs them, so six complete transcripts certify a seventh
+# target that never wrote one. The count is the argument list's own length, so
+# it cannot be satisfied by whatever landed. A short walk is rc 3, and the
+# cases that produce one are all already loud — a target that failed before its
+# drive is in FAILED, and a per-target gate that contained a leak deleted the
+# transcript it flagged and printed the LEAK line above. What this adds is the
+# case nothing else covers: a target whose transcript is `cp`'d here out of the
+# shared /tmp path the NEXT target overwrites, so one that died before writing
+# it leaves no file at all — and the lane can still report success.
 # ---------------------------------------------------------------------------
 echo
 echo "== Log-privacy gate over ${LOG_DIR} (Security Rules 6 and 15) =="
 scan_rc=0
-logscan_gate_dir host /tmp/haven-soak/needles "${LOG_DIR}" "${LOGSCAN_REPORT}" "${SEAL_EXTRA[@]}" || scan_rc=$?
+logscan_gate_dir host /tmp/haven-soak/needles "${LOG_DIR}" "${LOGSCAN_REPORT}" "${SEAL_EXTRA[@]}" \
+  --segments "drive=${TARGET_COUNT}" || scan_rc=$?
 
 echo
 echo "============================================================"
@@ -474,8 +579,11 @@ fi
 if (( scan_rc != 0 )); then
   echo "ERROR: log-privacy gate failed on ${LOG_DIR} (rc=${scan_rc}) — see the" \
        "line(s) above. rc=1 means key material or a declared identifier reached" \
-       "the logs; rc=3 means a target's log was absent, unreadable or empty, so" \
-       "this run carries no evidence either way." >&2
+       "the logs; rc=3 means a target's log was absent, unreadable or empty, or" \
+       "fewer than the ${TARGET_COUNT} transcripts this run drove reached" \
+       "${LOG_DIR} — if a per-target gate contained a leak it deleted the" \
+       "transcript it flagged, and that LEAK line, not this one, is the" \
+       "verdict." >&2
   exit 1
 fi
 

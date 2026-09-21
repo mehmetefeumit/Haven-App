@@ -163,6 +163,36 @@ jobs:
         working-directory: haven
         run: flutter pub get
 
+      # Gradle resolves the buildscript classpath over the network BEFORE it
+      # compiles anything, so a cold ~/.gradle makes this lane fetch hundreds of
+      # POMs — and hosted runners share egress IPs, so Maven Central rate-limits
+      # a runner nobody here provoked. CI run 35622556197 job 106414462454 lost
+      # a whole lane to HTTP 429 on the classpath, with NO test run, while twelve
+      # sibling Android lanes built the same commit with zero 429s. A warm
+      # dependency cache REMOVES those requests; the classified retry in
+      # scripts/ci/build_apk_with_retry.sh is only the backstop for what is left.
+      #
+      # Restore-only. build-check.yml is the single writer of this key, so a lane
+      # that deletes or half-fills ~/.gradle cannot publish a cache the other
+      # lanes would then restore. The `restore-keys` prefix means a changed
+      # dependency set still starts from the last good cache instead of cold.
+      #
+      # `continue-on-error` because a cache is an optimisation, and a step that
+      # overruns its own `timeout-minutes` FAILS the job: without this, a slow
+      # or unavailable cache service reddens a lane that would otherwise have
+      # built cold and run every test.
+      - name: Restore Gradle dependency cache
+        uses: actions/cache/restore@v4
+        timeout-minutes: 2
+        continue-on-error: true
+        with:
+          path: |
+            ~/.gradle/caches/modules-2
+            ~/.gradle/wrapper
+          key: gradle-deps-${{ runner.os }}-${{ hashFiles('haven/android/**/*.gradle*', 'haven/rust_builder/**/*.gradle*', 'haven/android/gradle/wrapper/gradle-wrapper.properties', 'haven/pubspec.lock') }}
+          restore-keys: |
+            gradle-deps-${{ runner.os }}-
+
       # Build the target APK BEFORE the emulator boots (build-before-boot
       # discipline). Staged at /tmp/integration-apks/<basename>.apk; the
       # --dart-defines baked here (relay URL + receive path) MUST match what
@@ -331,9 +361,33 @@ jobs:
         if: failure()
         run: |
           mkdir -p /tmp/b9-logs
-          adb reconnect offline || true
-          timeout 60 adb wait-for-device || true
+          # `adb` reaches PATH only through the emulator action's
+          # core.addPath(<sdk>/platform-tools); when that action never ran —
+          # the pre-action failure this capture exists for — every adb line
+          # below was `command not found`, and `|| true` kept it silent (run
+          # 35536892150). Resolve it from the SDK instead, and say in fixed
+          # words which case this diag is.
+          sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          if [ -n "${sdk}" ]; then PATH="${sdk}/platform-tools:${PATH}"; fi
+          if command -v adb >/dev/null 2>&1; then adb_state=resolved; else adb_state=absent; fi
+          devices=""
+          if [ "${adb_state}" = resolved ]; then
+            adb reconnect offline || true
+            # Materialised: `adb devices | grep -q` reports the producer's
+            # SIGPIPE under pipefail, not the match.
+            devices="$(adb devices 2>/dev/null || true)"
+          fi
+          if grep -qE '^[^[:space:]]+[[:space:]]+[a-z]+$' <<<"${devices}"; then
+            device_state=present
+            # Nothing to wait for when no emulator was ever started.
+            timeout 60 adb wait-for-device || true
+          else
+            device_state=none
+          fi
           {
+            echo "adb: ${adb_state}"
+            echo "device: ${device_state}"
+            echo
             echo "=== df -h ==="
             df -h || true
             echo
@@ -366,7 +420,7 @@ jobs:
           diag_scan_rc=0
           mkdir -p /tmp/b9-logscan
           bash tooling/e2e/ci/scan-logs.sh \
-            --manifest /tmp/haven-soak/needles/*.needles.json \
+            --manifest-dir /tmp/haven-soak/needles \
             --sink diag=/tmp/b9-logs/diag.log \
             --report /tmp/b9-logscan/diag.ndjson || diag_scan_rc=$?
           if [ "${diag_scan_rc}" -eq 1 ]; then

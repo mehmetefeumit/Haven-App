@@ -248,7 +248,7 @@ rust|src/tiles/|95                           # measured 97.87% (690/705)
 # percentage point is 42 lines, so a single new uncovered file still moves this
 # row several points. That is exactly what the two points of headroom are for,
 # and why this row must never be pinned tight.
-flutter|lib/src/services/|70                 # measured 72.13% (3044/4220); was 46 (48.96%) before the
+flutter|lib/src/services/|73                 # measured 75.11% (3332/4436); was 46 (48.96%) before the
                                              # location-access gate, clock-skew detector and
                                              # session/cursor work brought their own tests
 
@@ -264,7 +264,7 @@ flutter|lib/src/services/mls_session_handover.dart|91       # measured 93.75% (1
 flutter|lib/src/services/foreground_liveness_probe.dart|58  # measured 60.98% (25/41)
 
 # --- Location send/receive pipeline -----------------------------------------
-flutter|lib/src/services/location_sharing_service.dart|87   # measured 89.51% (384/429)
+flutter|lib/src/services/location_sharing_service.dart|88   # measured 90.80% (444/489)
 flutter|lib/src/services/geolocator_location_service.dart|94 # measured 96.98% (193/199)
 flutter|lib/src/services/live_sync_resubscriber.dart|100    # measured 100.00% (117/117)
 flutter|lib/src/services/subscription_service.dart|100      # measured 100.00% (58/58)
@@ -310,8 +310,8 @@ flutter|lib/src/services/background_catchup_worker.dart|30  # measured 32.94% (2
 # nostr_relay_preferences_service.dart sat at literal 0.00% when first pinned
 # — 88 instrumented lines, none executed by any test, invisible to the 50%
 # gate — and has since been fully covered, so it is pinned exactly at 100.
-flutter|lib/src/services/nostr_circle_service.dart|24       # measured 26.22% (161/614)
-flutter|lib/src/services/nostr_identity_service.dart|52     # measured 54.62% (65/119)
+flutter|lib/src/services/nostr_circle_service.dart|38       # measured 40.21% (263/654)
+flutter|lib/src/services/nostr_identity_service.dart|53     # measured 55.56% (65/117)
 flutter|lib/src/services/nostr_profile_service.dart|41      # measured 43.61% (58/133)
 flutter|lib/src/services/nostr_relay_service.dart|18        # measured 20.31% (39/192); was 0 (0.63%, 1/158)
                                                             # before classifyKeyPackageMaintenance was lifted

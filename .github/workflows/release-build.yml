@@ -95,6 +95,23 @@ jobs:
     # HAVEN_LIVE_SYNC-INTENT: production-default — see the header. The shipped
     # APK's receive path is live_sync_provider.dart's defaultValue, not a
     # value this workflow chooses.
+    #
+    # HAVEN_GRADLE_CACHE-EXEMPT: this job signs and ships the artifact, and an
+    # unverified cache is not an input a release build should take to save one
+    # cold build per release. Nothing here would check what a restore put on
+    # disk: there is no haven/android/gradle/verification-metadata.xml (Gradle
+    # dependency verification is off) and gradle-wrapper.properties carries no
+    # distributionSha256Sum, so a poisoned `~/.gradle/caches/modules-2` can
+    # substitute a dependency and a poisoned `~/.gradle/wrapper` the Gradle
+    # distribution itself, into the one build whose output users install. The
+    # E2E lanes take that trade because they ship nothing; this job does not.
+    # It still gets the widened in-Gradle 429 window from
+    # haven/android/gradle.properties (5 tentatives, 2 s doubling backoff),
+    # which is the only retry on this path: scripts/build_release.sh calls
+    # `flutter build` itself rather than going through
+    # scripts/ci/build_apk_with_retry.sh, so a transient here is a human
+    # re-run of the tag, not an in-job recovery. Revisit only once both
+    # checksums are pinned and verified.
     needs: [rust-check, cross-check, coverage, guards]
     runs-on: ubuntu-latest
     # contents: write lets the built-in GITHUB_TOKEN create the GitHub Release and
@@ -172,6 +189,12 @@ jobs:
 
       - name: Get dependencies
         run: flutter pub get
+
+      # No Gradle dependency cache here, on purpose — see the
+      # HAVEN_GRADLE_CACHE-EXEMPT reason on this job. This build resolves its
+      # dependencies and its Gradle distribution from the network every time,
+      # because that is the only path anything upstream is in a position to
+      # authenticate.
 
       # Version is single-sourced from the trigger: the git tag (vX.Y.Z -> X.Y.Z)
       # gives the marketing version; the run number gives a unique build number.

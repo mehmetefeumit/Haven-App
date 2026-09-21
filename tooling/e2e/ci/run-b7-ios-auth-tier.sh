@@ -493,16 +493,31 @@ Usage: simctl privacy <device> <action> <service> [<bundle identifier>]
     || rc=1
   _check "H1c the relay restart is fail-closed, not best-effort" 0 "${rc}"
 
+  # --- (H2) This lane's drive floor stays DERIVED from the host skeleton the
+  #     shared runner defines, never measured from a transcript's length. Read
+  #     from both files, so re-pinning either alone reds here. 27 was half a
+  #     measured capture; what it used to catch — a tier that built and never
+  #     launched — is the scanner's proof_of_run now.
+  local skeleton floor
+  skeleton="$(sed -n -E 's/^readonly IOS_HOST_SKELETON_LINES=([0-9]+).*/\1/p' \
+                "${SCRIPT_DIR}/run-ios-sim-scenario.sh")"
+  floor="$(sed -n -E 's/^ *HAVEN_LOGSCAN_DRIVE_FLOOR=([0-9]+) .*/\1/p' "${BASH_SOURCE[0]}")"
+  rc=0
+  [[ -n "${skeleton}" && -n "${floor}" ]] \
+    && (( floor >= 1 && floor <= skeleton )) || rc=1
+  _check "H2 the sealed drive floor stays within the shared runner's host skeleton" 0 "${rc}"
+
   if (( fail != 0 )); then
     echo "run-b7-ios-auth-tier.sh --self-test: FAILED" >&2
     return 1
   fi
-  echo "run-b7-ios-auth-tier.sh --self-test: all 24 fixtures passed (simctl" \
+  echo "run-b7-ios-auth-tier.sh --self-test: all 25 fixtures passed (simctl" \
        "support is probed not assumed; the tier parser reports missing and" \
        "conflict distinctly; the discrimination gate rejects identical," \
        "swapped and absent observations; the completion gate refuses a" \
        "run that exited 0 without printing both terminal proofs in BOTH tier" \
-       "logs; and each tier run resets the relay as well as the device)."
+       "logs; each tier run resets the relay as well as the device; and this" \
+       "lane's drive floor stays within the shared runner's host skeleton)."
   return 0
 }
 
@@ -691,15 +706,18 @@ run_tier() {
   # retry gate and the secret-leak scan. HAVEN_E2E_IOS_SKIP_UNINSTALL is the one
   # opt-in this lane needs from it (see this file's header).
   #
-  # HAVEN_LOGSCAN_DRIVE_FLOOR is this lane's own anti-vacuity floor: a COMPLETE
-  # transcript of one tier's drive is 54 lines (measured, CI run 35280144455)
-  # against the policy default of 100, which is the core-flow drive's and would
-  # read every green B7 tier as truncated. 27 is half the measured capture.
+  # HAVEN_LOGSCAN_DRIVE_FLOOR is this lane's own anti-vacuity floor, against the
+  # policy default of 100, which is the core-flow drive's and would read every
+  # green B7 tier as truncated. 4 is the HOST SKELETON the shared runner derives
+  # (IOS_HOST_SKELETON_LINES), not half of a measured transcript the way 27 was.
+  # A tier killed before its first test is what 27 used to catch and this does
+  # not; the scanner's proof_of_run catches it now, having stopped accepting the
+  # reporter's `loading <suite>` line as evidence a test ran.
   set +e
   HAVEN_LIVE_SYNC="${LIVE_SYNC}" \
   HAVEN_E2E_RELAY="${RELAY_URL}" \
   HAVEN_E2E_IOS_SKIP_UNINSTALL=1 \
-  HAVEN_LOGSCAN_DRIVE_FLOOR=27 \
+  HAVEN_LOGSCAN_DRIVE_FLOOR=4 \
     bash "${SIM_RUNNER}" "${SCENARIO_FILE}" "${SIM_UDID}"
   rc=$?
   set -e

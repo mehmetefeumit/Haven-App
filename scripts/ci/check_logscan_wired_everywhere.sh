@@ -77,6 +77,17 @@
 #       first capture, rotates the needle directory (the inline
 #       `mkdir -m 0700 -p` plus the three `rm -f` shapes, or
 #       rotate-needle-dir.sh) before its first capture, and discards as in (h).
+#   (j) NO UNEXPANDED GLOB. A scan-logs.sh invocation's `--manifest` names one
+#       path, never a pattern. `--manifest <dir>/*.needles.json` is expanded by
+#       the CALLING shell, which collapses three different facts into one
+#       argument list: nothing matched (the lane died before it sealed) arrives
+#       as the literal pattern, a mistyped directory arrives as that same
+#       literal, and two matches (a retried attempt, a stale file on a reused
+#       runner) arrive as a second argument the parser reads as something else
+#       — measured on the wrapper: `unknown argument '<path>'`, rc 2, with the
+#       key-material floor never reached and the manifest's full path printed.
+#       Lanes pass `--manifest-dir <dir>`; the wrapper matches, says what it
+#       found and refuses to choose.
 #
 #   (h) and (i) are asked by what a job STARTS or DECLARES, not by what it
 #   captures: a proxy-starting or flag-on job whose capture this guard does
@@ -133,6 +144,10 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 readonly REPO_ROOT
 
 readonly WRAPPER_RE='tooling/e2e/ci/scan-logs[.]sh'
+# A `--manifest` argument still holding a glob character: the caller's shell
+# was left to expand it, so the wrapper cannot tell "nothing matched" from
+# "wrong directory" and gets a second path when two matched.
+readonly MANIFEST_GLOB_RE='--manifest[[:space:]]+[^[:space:]]*[*?[]'
 # A runner is INVOKED when `bash` runs it; `test -f …/run-x.sh` names one.
 readonly RUNNER_INVOKE_RE='(^|[[:space:]])bash[[:space:]]+[^[:space:]]*tooling/e2e/ci/run-[A-Za-z0-9._-]+[.]sh'
 readonly RUNNER_NAME_RE='run-[A-Za-z0-9._-]+[.]sh'
@@ -457,7 +472,15 @@ check_job() { # check_job <records> <file> <job> <harness-dir>
         if grep -qxF -- "${r}" <<<"${GATED_RUNNERS}"; then gated_runner_lines+="${line}"$'\t'"${r}"$'\n'; fi
       done
     fi
-    [[ "${cmd}" =~ ${WRAPPER_RE} ]] && wrapper_lines+="${line}"$'\n'
+    if [[ "${cmd}" =~ ${WRAPPER_RE} ]]; then
+      wrapper_lines+="${line}"$'\n'
+      # (j) asked of the wrapper's own invocation, not of the file: another
+      # tool on this lane (the canary oracle) takes --manifest repeatably and
+      # reads every match, so a glob is correct there and wrong only here.
+      if [[ "${cmd}" =~ ${MANIFEST_GLOB_RE} ]]; then
+        violation "${where}: line ${line} hands scan-logs.sh a --manifest still holding a glob character. The calling shell expands it, so no match and a mistyped directory arrive as the same literal, and two matches arrive as a second argument the wrapper reads as something else — with the key-material floor never reached. Pass --manifest-dir ${NEEDLE_DIR} and let the wrapper match, report and refuse to choose."
+      fi
+    fi
   done <<<"${cmds}"
   local uploads_logs
   uploads_logs="$(awk -F'\t' '$3 ~ /[.]log$/' <<<"${uploads}" || true)"
@@ -780,7 +803,7 @@ jobs:
           relays=(/tmp/strfry.log /tmp/strfry-profile-*.log)
           rc=0
           bash tooling/e2e/ci/scan-logs.sh \\
-            --manifest /tmp/haven-soak/needles/*.needles.json \\
+            --manifest-dir /tmp/haven-soak/needles \\
             --sink "relay=\$(IFS=,; echo "\${relays[*]}")" \\
             --sink diag=/tmp/diag.log \\
             \${summary[@]+"\${summary[@]}"} \\
@@ -875,7 +898,7 @@ jobs:
           for f in /tmp/relay-profile-*.log /tmp/blossom.log; do relays="${relays},${f}"; done
           rc=0
           bash tooling/e2e/ci/scan-logs.sh \
-            --manifest /tmp/haven-soak/needles/*.needles.json \
+            --manifest-dir /tmp/haven-soak/needles \
             --sink ios=/tmp/sim-unified-full.log \
             --sink drive=/tmp/flutter-ios-test.log \
             --sink "relay=${relays}" \
@@ -947,7 +970,7 @@ YAML
 }
 
 self_test() {
-  local -r SELF_TEST_CASES=57
+  local -r SELF_TEST_CASES=59
   local tmp cases=0 failures=0
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
@@ -1086,7 +1109,7 @@ self_test() {
   _expect "floor: fewer capturing jobs than pinned is BROKEN" "${b}" 2 "capturing job(s) found" 4 1
 
   # (g)
-  d="${tmp}/g1"; mut "${b}" "${d}" 'wf/e2e-android.yml' 's|--manifest /tmp/haven-soak/needles/\*.needles.json|--rules-only|'
+  d="${tmp}/g1"; mut "${b}" "${d}" 'wf/e2e-android.yml' 's|--manifest-dir /tmp/haven-soak/needles|--rules-only|'
   _expect "(g) --rules-only in a lane fails" "${d}" 1 "--rules-only appears"
   _expect "(g) --rules-only in rust-check.yml passes (base)" "${b}" 0
   d="${tmp}/g2"; rm -rf "${d}"; cp -r "${b}" "${d}"; write_runner "${d}/harness" 'run-good.sh' rules
@@ -1098,6 +1121,14 @@ self_test() {
   _expect "(g) a rust-test sink in a lane fails" "${d}" 1 "outside rust-check.yml"
   d="${tmp}/g4"; rm -rf "${d}"; cp -r "${b}" "${d}"; sed -i 's|--sink drive=/tmp/flutter-drive.log|--sink rust-test=/tmp/flutter-drive.log|' "${d}/harness/run-good.sh"
   _expect "(g) a rust-test sink in a lane runner fails" "${d}" 1 "appears in a lane runner"
+
+  # (j) The base passes because both lanes hand over the DIRECTORY; putting the
+  # pattern back is the regression this rule exists for.
+  d="${tmp}/j1"; mut "${b}" "${d}" 'wf/e2e-android.yml' 's#--manifest-dir /tmp/haven-soak/needles#--manifest /tmp/haven-soak/needles/*.needles.json#'
+  _expect "(j) a --manifest glob in a lane fails" "${d}" 1 "still holding a glob character"
+  d="${tmp}/j2"; mut "${b}" "${d}" 'wf/e2e-android.yml' \
+    's#^(\s+)\{ echo diag; \} > /tmp/diag\.log 2>&1$#\1dart tooling/e2e/ci/check-wire-canaries.dart --manifest /tmp/haven-soak/needles/*.canaries.json || true\n&#'
+  _expect "(j) a glob on another tool's --manifest is not this rule's business" "${d}" 0
 
   # (h)
   d="${tmp}/h1"; mut "${b}" "${d}" 'wf/e2e-android.yml' '/check-proxy-sidecar-summary.sh/d; /Proxy declaration channel stayed healthy/d'

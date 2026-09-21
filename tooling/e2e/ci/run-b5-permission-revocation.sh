@@ -1867,14 +1867,18 @@ type=LocationServiceException streamAgeMs=52000" \
   : > "${scandir}/relay-baseline.ids"          # ditto
   printf 'deadbeef\n' > "${scandir}/relay-scan.tmp"   # has content -> must be scanned
   b5_prepare_logs_for_scan "${scandir}"
-  # A fake scanner records the argv the gate builds over the directory: the
-  # promoted relay scratch types as `relay` by its prefix, the drive as
-  # `drive`, and the empty intermediates are gone rather than named.
-  local fake_dir="${tmp}/fake" fake_bin="${tmp}/fake/logscan"
+  # The SHARED fake scanner records the argv the gate builds over the directory:
+  # the promoted relay scratch types as `relay` by its prefix, the drive as
+  # `drive`, and the empty intermediates are gone rather than named. It is
+  # LOGSCAN_FAKE_BIN (logscan-gate.sh, sourced above) rather than three lines
+  # written here, because those three lines exited 0 for every argv — a seal
+  # that named a flag the binary does not have recorded nothing and still read
+  # as a clean gate. tooling/logscan/tests/cli_contract.rs ties the shared one
+  # to the real binary's argv contract.
+  local fake_dir="${tmp}/fake" fake_bin="${LOGSCAN_FAKE_BIN}"
   mkdir -p "${fake_dir}"
-  printf '%s\n' '#!/usr/bin/env bash' \
-    'case "${1:-}" in scan) printf "%s\n" "$@" > "${FAKE_SCAN_ARGV}" ;; esac' 'exit 0' > "${fake_bin}"
-  chmod +x "${fake_bin}"
+  _case "the shared fake scanner is present and executable" 0 \
+    "$([[ -x "${fake_bin}" ]]; echo $?)"
   FAKE_SCAN_ARGV="${fake_dir}/scan-argv" GITHUB_RUN_ID= GITHUB_RUN_ATTEMPT= WIRE_UPSTREAM= RELAY_URL= \
     HAVEN_LOGSCAN=true HAVEN_LOGSCAN_BIN="${fake_bin}" \
     logscan_gate_dir host "${fake_dir}/needles" "${scandir}" "${fake_dir}/r.ndjson" >/dev/null 2>&1 || true
@@ -1936,10 +1940,49 @@ type=LocationServiceException streamAgeMs=52000" \
   # injected points and both line floors, pinned so a red lane cannot be turned
   # green by lowering one of them. Counted at column 0, where the real
   # declaration sits and this fixture's own copy does not.
-  local extra_lit='readonly -a SEAL_EXTRA=(--host-decl "coordinate=${GEO_LAT},${GEO_LON}" --host-decl "coordinate=${GEO_LAT_B},${GEO_LON}" --floor drive=85 --floor relay=7)'
+  local extra_lit='readonly -a SEAL_EXTRA=(--host-decl "coordinate=${GEO_LAT},${GEO_LON}" --host-decl "coordinate=${GEO_LAT_B},${GEO_LON}" --floor drive=7 --floor relay=7)'
   _eq_case "the seal extras carry both injected points and both line floors" "1" \
     "$(awk -v lit="${extra_lit}" \
          'index($0, lit) == 1 { n++ } END { print n + 0 }' "${self}")"
+  # …and that drive floor stays derived from what `flutter drive` prints on the
+  # HOST rather than from a transcript's length (85 was half of one). Both acts
+  # are fixtured, host-printed skeleton interleaved with forwarded device
+  # chatter as a real capture is, because ONE floor covers both gate calls: act
+  # 1's green shape ends in the DriverError the revocation causes, so it has no
+  # verdict line and the floor may not exceed ITS 7.
+  local host_printed_re act1 act2 drive_floor
+  host_printed_re='^(Installing |VMServiceFlutterDriver: |All tests passed\.|Failure Details:)'
+  printf '%s\n' \
+    'Installing /tmp/integration-apks/b5_permission_revocation_test.apk...      6.9s' \
+    'I/Choreographer( 6034): Skipped 78 frames!' \
+    'VMServiceFlutterDriver: Connecting to Flutter application at <endpoint>' \
+    'VMServiceFlutterDriver: Isolate found with number: <n>' \
+    'VMServiceFlutterDriver: Isolate <n> is runnable.' \
+    'VMServiceFlutterDriver: Isolate is paused at start.' \
+    'VMServiceFlutterDriver: Attempting to resume isolate' \
+    'VMServiceFlutterDriver: Connected to Flutter application.' \
+    'I/flutter ( 6034): 00:00 +0: B5: survive a mid-session revocation' \
+    'Unhandled exception:' \
+    'DriverError: Failed to fulfill RequestData due to remote error' \
+    > "${tmp}/host-printed.act1.drive.log"
+  printf '%s\n' \
+    'Installing /tmp/integration-apks/b5_permission_revocation_test.apk...      1,231ms' \
+    'VMServiceFlutterDriver: Connecting to Flutter application at <endpoint>' \
+    'VMServiceFlutterDriver: Isolate found with number: <n>' \
+    'VMServiceFlutterDriver: Isolate <n> is runnable.' \
+    'VMServiceFlutterDriver: Isolate is paused at start.' \
+    'VMServiceFlutterDriver: Attempting to resume isolate' \
+    'VMServiceFlutterDriver: Connected to Flutter application.' \
+    'I/flutter ( 6152): 04:39 +2: All tests passed!' \
+    'All tests passed.' > "${tmp}/host-printed.act2.drive.log"
+  act1="$(grep -cE "${host_printed_re}" "${tmp}/host-printed.act1.drive.log" || true)"
+  act2="$(grep -cE "${host_printed_re}" "${tmp}/host-printed.act2.drive.log" || true)"
+  _eq_case "the fixtures carry each act's host-printed skeleton (act 1 has no verdict)" \
+    "7 8" "${act1} ${act2}"
+  drive_floor="$(sed -n -E 's/^readonly -a SEAL_EXTRA=\(.*--floor drive=([0-9]+).*/\1/p' "${self}")"
+  rc=1
+  [[ -n "${drive_floor}" ]] && (( drive_floor >= 1 && drive_floor <= act1 && drive_floor <= act2 )) && rc=0
+  _case "…and the sealed drive floor stays within the smaller of them" 0 "${rc}"
   local trap_body dump_at scan_at exit_at
   trap_body="$(sed -n '/^cleanup() {/,/^}/p' <<<"${joined}")"
   dump_at="$(grep -nF 'docker logs "${STRFRY_CONTAINER}" > "${LOG_DIR}/strfry.final.log"' <<<"${trap_body}" | cut -d: -f1 | head -n 1 || true)"
@@ -2133,25 +2176,45 @@ mkdir -p "${LOGSCAN_REPORTS}"
 # at the out path.
 #
 # A floor is what turns "the scan read an empty or truncated file and found
-# nothing" into rc 4 instead of a green, so it is sized to the smallest
-# COMPLETE capture and never to what would make the lane pass.
+# nothing" into rc 4 instead of a green, so it is sized to the part of a
+# capture its PRODUCER always writes — never to what would make the lane pass,
+# and never to a length the device can change.
 #
-# drive=85. The policy's 100 is sized for the Android core flow's 394-line
-# transcript; this lane drives one scenario whose complete transcript is
-# 170 lines (flutter-drive.act1.log; act2 is 405) in run 35376588206, the first green run after the
-# gate's rollout. 85 is half of that and far above the ~17 lines `flutter
-# drive` prints before the first test result, so a transcript that fails it
-# is one in which no test ran. (The provisional 20 was set blind: run
-# 35280144455's rc 1 on the dumpsys hits outranked the rc 4 beneath it and
-# containment deleted the transcript before it could be measured.)
+# drive=7, and it is deliberately NOT half a transcript's length, which is what
+# the previous 85 was. A `flutter drive` transcript is the tool's own output
+# INTERLEAVED with whatever logcat furniture the device happened to print, so
+# its length is not a property of the run: across four green runs
+# (35311161479, 35376588206, 35397118356, 35524002720) ACT 1 measured 170-186
+# lines and ACT 2 391-417. Chasing that number is how a complete capture was
+# reddened in CI run 35464818348.
+#
+# "A test actually ran" is proven by the scanner instead, from the test
+# reporter's own progress line (`proof_of_run` on the `drive` class in
+# tooling/logscan/policy.toml). What is left for this floor is the other
+# failure — an empty or truncated file — so it is derived from what `flutter
+# drive` prints on the HOST: `Installing …` (flutter_tools installs
+# unconditionally on every launch) and the six `VMServiceFlutterDriver:`
+# connect lines — four unconditional; `Isolate is paused at start.` and
+# `Attempting to resume isolate` are the `kPauseStart` branch of
+# flutter_driver's vmservice_driver.dart, which `flutter drive` guarantees by
+# defaulting `--start-paused` to true, nothing in drive mode resuming the root
+# isolate, so another branch would mean a foreign debugger.
+# The driver script's verdict is NOT counted, because ACT 1's
+# green shape has none: the revocation ends the app under the driver, so a
+# COMPLETE act 1 closes on `DriverError: … Service has disappeared` in all four
+# runs above while act 2 closes on `All tests passed.`. ONE floor covers both
+# gate calls, so it is act 1's 7 — and the --self-test reds if it ever exceeds
+# the smaller of the two skeletons.
 #
 # relay=7. The policy's 1 is sized for the hermetic host relay, which prints a
-# single listen line; this lane's relay is strfry, whose `docker logs` dump is
-# 14-23 lines for a full run, of which the first 9 are a fixed startup block.
-# 7 is half the smallest complete dump, so a dump below it is truncated or
-# absent — which is what a container torn down before the dump looks like: ONE
-# line of docker error text.
-readonly -a SEAL_EXTRA=(--host-decl "coordinate=${GEO_LAT},${GEO_LON}" --host-decl "coordinate=${GEO_LAT_B},${GEO_LON}" --floor drive=85 --floor relay=7)
+# single listen line; this lane's relay is strfry, whose `docker logs` dump
+# OPENS with a fixed 9-line startup block and grows only with traffic
+# (9-49 lines across the fleet's green runs; exactly 9 for a target whose relay
+# serves nothing it logs). 7 sits under the block every LIVE container prints,
+# while one torn down before the dump yields ONE line of docker error text — so
+# this floor tells those two apart without depending on how much traffic the
+# target happened to generate.
+readonly -a SEAL_EXTRA=(--host-decl "coordinate=${GEO_LAT},${GEO_LON}" --host-decl "coordinate=${GEO_LAT_B},${GEO_LON}" --floor drive=7 --floor relay=7)
 
 # ---------------------------------------------------------------------------
 # Cleanup (EXIT trap): stop the background helpers, RESTORE the permission

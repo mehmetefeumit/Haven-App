@@ -527,7 +527,7 @@ on the reporter `flutter` picked, so the pattern is an alternation over the two
 reporters this tree captures:
 
 * **`HH:MM +N: <name>`** — the expanded/compact progress line, which the reporter
-  writes **before the first test body runs**. Bare in a `flutter test` transcript
+  writes **the moment a test starts**. Bare in a `flutter test` transcript
   and in an iOS `flutter test <file> -d <udid>` one (only because
   `run-ios-sim-scenario.sh` pins `--reporter expanded`; without that pin a
   hosted iOS run would be github-rendered too); forwarded by Android logcat
@@ -551,33 +551,132 @@ summary, which the reporter writes whatever N is, `0` included. Both fixtures �
 again with every matching line deleted, so neither branch can pass for the wrong
 reason.
 
+#### A suite load is not a run (`proof_of_run_excludes`)
+
+Both reporters render the SUITE they are **loading** through the very shape that
+proves a test ran, and a load is not a run. `regex` has no lookahead, so "a
+reporter line whose subject is not a suite load" cannot be one pattern;
+`proof_of_run_excludes` is the other half, and a line is proof only when it
+matches the pattern and **none** of these:
+
+* **`HH:MM +N: loading <path>.dart`** — the expanded reporter's opening line,
+  which on iOS is written **before the Xcode build**: it is line 1 of every
+  `flutter-ios-test.log` in CI run 35280144455's uploads, ahead of a 74-to-197
+  second build. With it accepted, the eleven lines an iOS lane prints when the
+  app is built and the suite never starts were a certified run
+  (`fixtures/buildonly.ios.drive.log` is that capture, verbatim), and the only
+  thing left between them and a clean verdict was a MEASURED line floor.
+* **`::group::❌ loading <path>.dart (failed)`** — the github reporter's rendering
+  of a suite that failed to load. It emits nothing at all for a load that
+  succeeds: `_onComplete` in `test_core`'s `github.dart` treats a `LoadSuite`
+  test as synthetic and prints it only when it carries errors or messages,
+  without the suite-path prefix a real test's line has. A suite that failed to
+  load ran nothing.
+* **`HH:MM +N: Some tests failed.`** — the expanded reporter's own closing
+  summary, which `_onDone` renders as a progress line like any other whenever the
+  run failed; a run whose suite failed to load is such a run, and CI run
+  35397118356's bg-publish capture ends on exactly `06:17 +0: Some tests
+  failed.`, failure counter and all absent.
+
+`All tests passed!` is deliberately NOT excluded — `_onDone` reaches it only with
+a non-empty passed set, so it is a run. `No tests ran.` needs no entry: the
+reporter writes it bare, with no progress prefix to match. Nor does `All tests
+skipped.`, which `_progressLine` can only render once `~N` is in the counters, a
+segment the pattern does not admit.
+
+Each exclusion is anchored on **both** sides of the word: on the reporter's own
+prefix to its left and on the suite path's `.dart` to its right. `loading` is an
+ordinary word in a Dart test description — `CircleSelector shows loading
+indicator while fetching circles` is one of three in run 35524002720's coverage
+transcript — and an exclusion anchored on the word alone would strike those out
+and take the hosted lane's only proof with it.
+
 `drive` is the one class that declares a proof, because it is the one class whose
 every capture comes from a test reporter; a class whose producer writes no such
 line would be rc 4 on every green run. `seal --floor` tunes the line floor and
-can never remove it (`Manifest::proof_of_run` reads the sink spec, which every
-manifest re-reads from the compiled-in policy), and
+can never remove it or its exclusions (`Manifest::proof_of_run` and
+`Manifest::proof_of_run_excludes` read the sink spec, which every manifest
+re-reads from the compiled-in policy), and
 `scripts/ci/check_logscan_policy.sh`'s P8 pins which class carries it and what it
-says — in both directions, so neither narrowing it back to one reporter nor
-widening it to the skip glyph is a one-line diff nobody reads.
+says — in both directions, so neither narrowing it back to one reporter, nor
+widening it to the skip glyph, nor dropping an exclusion, nor widening one past
+the suite-path anchor is a one-line diff nobody reads.
 
 With "a test ran" proven this way, an **Android drive floor** is calibrated to
 the lines `flutter drive` prints on the HOST, which no device chatter changes:
-the `Installing …` line, the six `VMServiceFlutterDriver:` lines, the verdict,
-and `Leaving the application running.` where the lane keeps the app alive. That
-is what run-m7-background-catchup.sh's `drive=9` is, and its `--self-test` reds
-if the floor ever exceeds that skeleton again. It is so far the only floor
-derived that way: every other lane's is still measured from a whole transcript
-(an iOS one has no such skeleton at all — the simulator forwards no device
-chatter), and until each is re-derived the proof is what keeps a vacuous capture
-of theirs from reading clean.
+the `Installing …` line (flutter_tools installs on every launch — there is no
+already-installed shortcut in `AndroidDevice.startApp`), the six
+`VMServiceFlutterDriver:` connect lines, the driver script's
+verdict (`All tests passed.`, or `Failure Details:` when it is not), and
+`Leaving the application running.` where the lane keeps the app alive. Measured
+across four green runs (35311161479, 35376588206, 35397118356, 35524002720),
+that skeleton is **exactly constant per lane** — 8 lines, 9 with
+`--keep-app-running` — while the transcripts around it swing by half their
+length.
+
+Four of those six are unconditional: `Connecting to Flutter application at …`,
+`Isolate found with number: …`, `Isolate <n> is runnable.` and `Connected to
+Flutter application.`, which `flutter_driver`'s `vmservice_driver.dart` writes
+on the one path that reaches a connected driver. The other two — `Isolate is
+paused at start.` and `Attempting to resume isolate` — sit inside
+`if (isolate.pauseEvent.kind == kPauseStart)`; its sibling branches print
+`Isolate is paused mid-flight.` (and resume) or `Isolate is not paused.
+Assuming application is ready.` (and do not), and the file's own comment names
+the race, a debugger that resumed the isolate first. Nothing here is such a
+tool: `flutter drive` defaults `--start-paused` to `true`
+(`drive.dart`'s `startPausedDefault`), and in drive mode flutter_tools starts
+the app and DDS and hands the VM to the driver script without resuming it, so
+`kPauseStart` is the branch a freshly launched app takes and the other two
+would mean a foreign resumer. That is why they are present in every drive
+transcript of the four runs above (three of three in the background-catchup
+lane of 35524002720, to pick the capture that is cheapest to re-read), and why
+counting them keeps the floor a true lower bound rather than an aspiration.
+
+Every Android lane's floor is now that number: background-catchup and
+FGS-publish `drive=9` (both keep the app running, so both carry the ninth
+line), KeyPackage-rotation / real-GPS / provider-toggle / clock-skew /
+network-reconnect `drive=8`, integration and
+relay-customization `drive=18` (each target is gated as
+`--sink drive=<final>,<full>` and a floor sums its class's files, so it is twice
+the per-slice 9, the runner's own `===== flutter drive attempt …` banner
+included), permission-revocation `drive=7` — that lane alone drops the verdict,
+because ACT 1's green shape is the app dying under the driver mid-session, so a
+COMPLETE act 1 ends in a `DriverError` and prints none. Every one of them also
+seals `relay=7`. The flake-stress lane is the one that seals `relay=7` ALONE:
+each of its iterations drives the whole core flow onto a device-wide capture,
+which is the shape the policy's own `drive` and `logcat` defaults were sized
+for. Each of the ten runners above builds its own skeleton fixture in its
+`--self-test` and reds if the floor ever exceeds
+it, so a red lane cannot be re-pinned from a transcript's length again.
+
+An **iOS floor** is derived the same way, from the four lines a `flutter test
+-d <udid>` transcript always carries whatever the app printed: the reporter's
+`HH:MM +N: loading <path>` and its first test-start line, and flutter_tools'
+`Running Xcode build...` / `Xcode build done.` pair, which an incremental build
+prints exactly as a cold one does. That is **4**, and it is what every iOS lane
+now seals — `run-ios-sim-scenario.sh` refuses anything outside `1..4` at script
+start, before the build and therefore before any capture exists, so a floor
+cannot be re-pinned from a transcript's length in any lane that goes through it,
+and a lane that mis-states one dies in seconds rather than reaching a gate that
+would then decline to scan what it had captured. The
+floors it replaces — 22 for B4, 24 for the profile lane, 27 for B7, 56 for
+background-publish — were each half of a MEASURED transcript, and they were
+carrying the anti-vacuity work the proof could not do while `00:00 +0: loading
+<path>` still satisfied it. Now `proof_of_run_excludes` does that work honestly,
+on the line rather than on the length: a build-only transcript is rc 4 at any
+floor, and what a higher number bought instead was a lane reddened for printing
+less than last time (CI run 35464818348).
 
 The floor of 7 that every strfry lane passes is the clearest case of what a
-floor is for: strfry's own `docker logs` dump is 14-23 lines for a full run,
-of which the first 9 are a fixed startup block, while the same command against
-a container that has already been torn down prints ONE line of error text and
-nothing else. Only the floor tells those two apart — the needle search finds
-nothing in either, and the structural rules are off for this class — so `relay`
-at 1 would certify a dead capture as clean, and 7 is what turns it into rc 4.
+floor is for: strfry's own `docker logs` dump OPENS with a fixed 9-line startup
+block (header, arguments, config, the ephemeral-events warning, the listen
+line) and grows from there only with traffic — 9 to 49 lines across the fleet's
+green runs, and exactly 9 for a target whose relay serves nothing it logs —
+while the same command against a container that has already been torn down
+prints ONE line of error text and nothing else. Only the floor tells those two
+apart — the needle search finds nothing in either, and the structural rules are
+off for this class — so `relay` at 1 would certify a dead capture as clean, and
+7, which sits under the block every live container prints, turns it into rc 4.
 
 `fixtures/format.ios.log` is in two halves, and its header says which is which.
 Section A is **captured**, mined byte for byte from CI run 35280144455's

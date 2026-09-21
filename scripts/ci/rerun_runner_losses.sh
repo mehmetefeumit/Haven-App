@@ -29,7 +29,8 @@
 # So, four properties, each pinned by a `--self-test` fixture:
 #
 #   * ONE admitted signature, matched ANCHORED to the start of a runner log
-#     line — not as a substring (fixtures 6 and 7).
+#     line — not as a substring (fixtures 6 and 7), and not merely preceded by
+#     some timestamp, which a step printing a captured log satisfies (7b).
 #   * PER-JOB judgement. A run holding one genuine failure and one runner loss
 #     re-runs the runner loss and leaves the genuine failure red (fixture O2).
 #   * FAIL CLOSED. A log that cannot be fetched, or arrives empty, is never a
@@ -66,11 +67,24 @@
 # those too is the correct result rather than collateral. Every E2E lane, this
 # incident included, has no dependents at all.
 #
+# UNMEASURED, and left that way on purpose: what a SECOND `…/rerun` POST does
+# once an earlier one in the same pass has already opened attempt 2. Either it
+# opens a further attempt — still one re-run per qualifying job, every one of
+# which the attempt gate then refuses — or it answers 403, which this script
+# reports as its OWN failure and exits 2 on (fixture O4), never as a verdict.
+# Both are loud and neither re-runs anything twice. Over the measured history of
+# 74 failed jobs the signature qualified exactly one, so the case has not arisen.
+#
 # ## Usage
 #
 #   scripts/ci/rerun_runner_losses.sh              # driven by rerun-runner-losses.yml
 #   scripts/ci/rerun_runner_losses.sh --classify <job-log>
-#   scripts/ci/rerun_runner_losses.sh --self-test  # hermetic; no network, no gh
+#   scripts/ci/rerun_runner_losses.sh --self-test  # offline; loopback only
+#
+# `--self-test` drives the REAL `curl` against a 127.0.0.1 server it starts
+# itself, so it needs curl, python3, jq and git. A missing one is reported as a
+# named FAILED fixture — never as a skip, because a stub nobody checked is what
+# this gate exists to stop reporting green.
 #
 # Environment (the orchestrating run):
 #   GH_TOKEN                  token carrying `actions: write`
@@ -178,7 +192,15 @@ rerun_attempt_allowed() { [[ "${1:-}" == "1" ]]; }
 # The run
 # ---------------------------------------------------------------------------
 
-summary() { printf '%s\n' "$*" >>"${GITHUB_STEP_SUMMARY:-/dev/stdout}"; }
+# Both sinks, always. Measured 2026-09-21: the step of run 35541175084 judged
+# thirteen failed jobs and wrote NOTHING between its `##[endgroup]` and `Post job
+# cleanup` — every line had gone to the step summary, which no REST endpoint
+# serves, so the record of what was judged existed only as a web page. The log is
+# the copy `gh run view --log` and the log scanner can read.
+summary() {
+  printf '%s\n' "$*"
+  [[ -z "${GITHUB_STEP_SUMMARY:-}" ]] || printf '%s\n' "$*" >>"${GITHUB_STEP_SUMMARY}"
+}
 
 # failed_jobs_tsv <jobs-json> — `id<TAB>name` for every job the run reports as
 # `failure`. `cancelled` is deliberately not a candidate: that is what GitHub
@@ -198,8 +220,17 @@ failed_jobs_tsv() {
 # switch this whole feature off. `-L` follows the documented 302 to the
 # short-lived signed URL; `-f` turns an HTTP error into a non-zero exit and
 # leaves no file, which is exactly the fail-closed input classify_log expects.
+#
+# Named so the C fixtures measure THESE flags against the real binary instead of
+# a retyped approximation. The two bounds are not politeness: without them one
+# stalled connection eats the whole 15-minute budget rerun-runner-losses.yml
+# gives this job, the job is cancelled, and every judgement it had already made
+# is lost along with the annotation. A log that has not arrived in 60 s is the
+# fail-closed `not-proven` case, which leaves a job red — the safe direction.
+readonly -a CURL_FETCH_FLAGS=(-fsSL --connect-timeout 15 --max-time 60)
+
 fetch_job_log() {
-  curl -fsSL \
+  curl "${CURL_FETCH_FLAGS[@]}" \
     -H "Authorization: Bearer ${GH_TOKEN}" \
     -H 'Accept: application/vnd.github+json' \
     -H 'X-GitHub-Api-Version: 2022-11-28' \
@@ -284,8 +315,12 @@ main() {
 }
 
 # ---------------------------------------------------------------------------
-# --self-test — hermetic. No network, no gh, no runner.
+# --self-test — offline. No gh, no runner, no packet past 127.0.0.1.
 # ---------------------------------------------------------------------------
+
+# Pinned by equality against the fixtures that actually ran, because a fixture
+# that stops running is the one way a deleted fixture reports success.
+readonly SELF_TEST_FIXTURES=39
 
 # The shutdown line below is the ONLY re-typed copy of the signature in this
 # repository, and it is re-typed on purpose: these are the bytes CI run
@@ -309,15 +344,30 @@ self_test() {
   # shellcheck disable=SC2064
   trap "rm -rf '${tmp}'" RETURN
 
+  # The ONE counter every fixture goes through, so the pin above cannot drift
+  # from the fixtures that ran. `<detail>` is a file printed only on failure:
+  # the old harness swallowed the driven script's output, and a fixture that
+  # fails without evidence cost an hour when `jq is required` was the whole
+  # story.
+  _ok() { # <0-if-passed> <label> [detail-file]
+    n=$((n + 1))
+    if [[ "$1" == 0 ]]; then
+      printf '  PASS %s\n' "$2"
+      return 0
+    fi
+    printf '  FAIL %s\n' "$2" >&2
+    [[ -z "${3:-}" || ! -s "${3:-}" ]] || sed 's/^/        | /' "$3" >&2
+    fails=1
+    return 0
+  }
+
   _expect() { # <want-rc> <label> <log>
     local want="$1" label="$2" log="$3" got=0
-    n=$((n + 1))
     classify_log "${log}" >/dev/null 2>&1 || got=$?
     if [[ "${got}" == "${want}" ]]; then
-      printf '  PASS %s\n' "${label}"
+      _ok 0 "${label}"
     else
-      printf '  FAIL %s (want rc=%s, got rc=%s)\n' "${label}" "${want}" "${got}" >&2
-      fails=1
+      _ok 1 "${label} (want rc=${want}, got rc=${got})"
     fi
   }
 
@@ -389,6 +439,19 @@ self_test() {
     >"${tmp}/embedded-prefix.log"
   _expect 1 '(7) the signature quoted mid-line is left red' "${tmp}/embedded-prefix.log"
 
+  # (7b) A CAPTURED RUNNER LOG, PRINTED BY A STEP. The runner stamps the line it
+  #      is given, and the line it is given is itself `<timestamp> ##[error]…` —
+  #      the shape any step that cats a job log produces, this repository's own
+  #      log scanners included. The timestamp requirement alone is SATISFIED
+  #      here; only anchoring to the start of the line refuses it, and without
+  #      this fixture that anchor could be dropped with every other one green.
+  printf '%s\n' \
+    "2026-09-20T22:16:47.1000000Z 2026-08-23T23:30:05.7050585Z ${RUNNER_SHUTDOWN_SIGNATURE}." \
+    '2026-09-20T22:16:47.2000000Z ##[error]Process completed with exit code 1.' \
+    >"${tmp}/echoed-runner-log.log"
+  _expect 1 '(7b) a captured runner log printed by a step is left red' \
+    "${tmp}/echoed-runner-log.log"
+
   # (8)/(9) FAIL CLOSED — no log at all, and a log that arrived empty.
   _expect 1 '(8) an unfetchable log is left red' "${tmp}/absent.log"
   : >"${tmp}/empty.log"
@@ -397,24 +460,18 @@ self_test() {
   # (10) …and the unreadable cases must SAY they were unreadable. The annotation
   #      is the only place a human learns a job was never judged, and "no
   #      runner-shutdown line" would be a lie about what was observed.
-  n=$((n + 1))
-  if [[ "$(classify_log "${tmp}/absent.log" || true)" == *'could not be fetched'* ]]; then
-    printf '  PASS (10) an unfetchable log is reported as unread, not as judged\n'
-  else
-    printf '  FAIL (10) an unfetchable log is not reported as unread\n' >&2
-    fails=1
-  fi
+  _ok "$([[ "$(classify_log "${tmp}/absent.log" || true)" == *'could not be fetched'* ]] \
+          && echo 0 || echo 1)" \
+      '(10) an unfetchable log is reported as unread, not as judged'
 
   printf -- '--- the attempt gate ---\n'
   _attempt() { # <want-rc> <label> <attempt>
     local want="$1" label="$2" got=0
-    n=$((n + 1))
     rerun_attempt_allowed "${3-}" || got=$?
     if [[ "${got}" == "${want}" ]]; then
-      printf '  PASS %s\n' "${label}"
+      _ok 0 "${label}"
     else
-      printf '  FAIL %s (want rc=%s, got rc=%s)\n' "${label}" "${want}" "${got}" >&2
-      fails=1
+      _ok 1 "${label} (want rc=${want}, got rc=${got})"
     fi
   }
   _attempt 0 '(A1) attempt 1 is considered'                1
@@ -428,20 +485,20 @@ self_test() {
   #      direction fixture 1 cannot: fixture 1 keeps passing if the constant and
   #      the verbatim log are edited together, but a constant narrowed on its
   #      own stops being a substring of the real line here.
-  n=$((n + 1))
-  if LC_ALL=C grep -qF -- "${RUNNER_SHUTDOWN_SIGNATURE}" <(_verbatim_runner_loss_log); then
-    printf '  PASS (P1) the pinned literal still occurs in the real CI log\n'
-  else
-    printf '  FAIL (P1) the pinned literal no longer matches the bytes of job 97275651481\n' >&2
-    fails=1
-  fi
+  _ok "$(LC_ALL=C grep -qF -- "${RUNNER_SHUTDOWN_SIGNATURE}" <(_verbatim_runner_loss_log) \
+          && echo 0 || echo 1)" \
+      '(P1) the pinned literal still occurs in the real CI log'
 
-  # (P2) …and occurs in no other file that could act on it or describe it.
-  #      Scoped to the trees where a second copy becomes behaviour or
-  #      documentation, and reading UNTRACKED files too: a workflow added
-  #      alongside this script is untracked until it is committed, and a scan
-  #      blind to that would bless the very drift it exists to catch.
-  n=$((n + 1))
+  # (P2) …and occurs in no other file that could act on it or describe it. The
+  #      header claims nothing in this REPOSITORY prints the phrase, so the scan
+  #      is the whole tree — ~1280 files, 54 ms measured — and not the four
+  #      directories it used to cover, which left a Dart or Rust fixture free to
+  #      print the line into a CI log and nominate its own job. Untracked files
+  #      count: a workflow added alongside this script is untracked until it is
+  #      committed, and a scan blind to that would bless the drift it exists to
+  #      catch. `scratchpad/` is the one exclusion, because a working note
+  #      quoting this line neither ships nor runs, and a guard that reds on
+  #      somebody's analysis of it is a guard nobody keeps.
   local -a others=()
   local repo_root f
   if repo_root="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel 2>/dev/null)"; then
@@ -451,28 +508,34 @@ self_test() {
         others+=("${f}")
       fi
     done < <(git -C "${repo_root}" ls-files --cached --others --exclude-standard \
-               -- .github scripts tooling docs)
+               -- . ':(exclude)scratchpad')
     if ((${#others[@]} == 0)); then
-      printf '  PASS (P2) the signature is defined in exactly one file\n'
+      _ok 0 '(P2) the signature is defined in exactly one file'
     else
-      printf '  FAIL (P2) the signature is duplicated in: %s\n' "${others[*]}" >&2
-      fails=1
+      _ok 1 "(P2) the signature is duplicated in: ${others[*]}"
     fi
   else
-    printf '  FAIL (P2) not a git checkout — the single-definition scan could not run\n' >&2
-    fails=1
+    _ok 1 '(P2) not a git checkout — the single-definition scan could not run'
   fi
 
   printf -- '--- end to end, with gh and curl stubbed ---\n'
   _orchestrator_fixtures "${tmp}" || fails=1
-  n=$((n + 6))
+
+  printf -- '--- the curl stub, measured against the real binary ---\n'
+  _real_curl_fixtures "${tmp}" "${tmp}/bin" || fails=1
 
   printf '\n'
   if ((fails != 0)); then
     printf '%s --self-test: FAILED — the re-run gate cannot be trusted.\n' "${SCRIPT_NAME}" >&2
     return 1
   fi
-  printf 'OK: %s --self-test passed (%d fixtures).\n' "${SCRIPT_NAME}" "${n}"
+  if ((n != SELF_TEST_FIXTURES)); then
+    printf '%s --self-test: ran %d fixture(s), expected exactly %d. A fixture was added or removed without moving the pin — the one way a deleted fixture reports success.\n' \
+      "${SCRIPT_NAME}" "${n}" "${SELF_TEST_FIXTURES}" >&2
+    return 1
+  fi
+  printf 'OK: %s --self-test passed (%d/%d fixtures).\n' \
+    "${SCRIPT_NAME}" "${n}" "${SELF_TEST_FIXTURES}"
   return 0
 }
 
@@ -487,26 +550,49 @@ _orchestrator_fixtures() { # <tmp>
   # `gh` stub: serves the jobs listing from a fixture and records each re-run
   # request. Records EVERY call, so a fixture can assert the attempt gate
   # stopped the run before the network was touched at all.
+  #
+  # Failure is MODELLED, not imagined. Measured 2026-09-21 against this
+  # repository: `gh api --silent` on an HTTP error exits 1, prints nothing on
+  # stdout and renders exactly `gh: <message> (HTTP <code>)` on stderr. The
+  # re-run endpoint is documented 201/403 and is never called from a test, so
+  # the 403 comes from the REST reference and its rendering from that
+  # measurement. Without this the stub was a `gh` that could not fail, and the
+  # two paths where the API refuses were the untested ones.
   cat >"${bin}/gh" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >>"${STUB_CALLS}"
+_http_error() { printf 'gh: %s (HTTP %s)\n' "$2" "$1" >&2; exit 1; }
 case "$*" in
   */rerun*)
     for a in "$@"; do
       case "${a}" in
-        */rerun) a="${a##*/jobs/}"; printf '%s\n' "${a%/rerun}" >>"${STUB_RERUNS}" ;;
+        */rerun)
+          a="${a##*/jobs/}"; a="${a%/rerun}"
+          case " ${STUB_GH_RERUN_403:-} " in
+            *" ${a} "*) _http_error 403 'Forbidden' ;;
+          esac
+          printf '%s\n' "${a}" >>"${STUB_RERUNS}"
+          ;;
       esac
     done
     ;;
-  *"/jobs?"*) cat "${STUB_JOBS_JSON}" ;;
+  *"/jobs?"*)
+    [[ -z "${STUB_GH_JOBS_404:-}" ]] || _http_error 404 'Not Found'
+    cat "${STUB_JOBS_JSON}"
+    ;;
   *) echo "unexpected gh call: $*" >&2; exit 9 ;;
 esac
 STUB
 
-  # `curl` stub: serves `${STUB_LOG_DIR}/<job-id>.log` when it exists, otherwise
-  # exits 22 writing nothing — what real `curl -f` does on an HTTP error, and
-  # the fail-closed input the classifier must be handed.
+  # `curl` stub: serves `${STUB_LOG_DIR}/<job-id>.log` when it exists. Its two
+  # failure shapes are the ones fixtures C1-C6 re-measure against the real
+  # binary in this same run, so this can no longer drift from the tool it
+  # impersonates: a miss is `-f`'s HTTP error — rc 22, NO output file, one line
+  # on stderr — and `<job-id>.partial` is a transfer that died mid-body, which
+  # exits 18 leaving the bytes it did receive ON DISK. Nothing asserts the rc-18
+  # wording (it carries a byte count a fixture has no declared length for), so
+  # it is not invented here; the rc and the residue are what production meets.
   cat >"${bin}/curl" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -514,12 +600,19 @@ url=""; out=""
 while (($#)); do
   case "$1" in
     -o) out="$2"; shift 2 ;;
-    https://*) url="$1"; shift ;;
+    https://*|http://*) url="$1"; shift ;;
     *) shift ;;
   esac
 done
 id="${url##*/jobs/}"; id="${id%/logs}"
-[[ -f "${STUB_LOG_DIR}/${id}.log" ]] || exit 22
+if [[ -f "${STUB_LOG_DIR}/${id}.partial" ]]; then
+  cp "${STUB_LOG_DIR}/${id}.partial" "${out}"
+  exit 18
+fi
+if [[ ! -f "${STUB_LOG_DIR}/${id}.log" ]]; then
+  printf 'curl: (22) The requested URL returned error: 404\n' >&2
+  exit 22
+fi
 cp "${STUB_LOG_DIR}/${id}.log" "${out}"
 STUB
   chmod +x "${bin}/gh" "${bin}/curl"
@@ -529,29 +622,52 @@ STUB
   _verbatim_runner_loss_log >"${logs}/97275651481.log"
   cp "${tmp}/test-failure.log" "${logs}/97249491991.log"
 
+  # The API's shape, not a sketch of it. Measured 2026-09-21 on run 35536892150:
+  # `--paginate --slurp` yields an ARRAY OF PAGE OBJECTS, each `{"total_count",
+  # "jobs"}`, and a job carries `status` alongside `conclusion`. The vocabulary
+  # below is the one that repository's last 25 runs actually produced —
+  # success, skipped, failure, cancelled, and `in_progress` with a NULL
+  # conclusion (3 of 340 jobs) — so `select(.conclusion == "failure")` is
+  # exercised against every value it can meet rather than against three.
   cat >"${tmp}/jobs.json" <<'JSON'
-[{"jobs":[
-  {"id":97275651481,"name":"E2E Integration Tests (Android) / e2e_integration","conclusion":"failure"},
-  {"id":97249491991,"name":"E2E Permission Revocation (Android) / e2e_permission_revocation","conclusion":"failure"},
-  {"id":97275651000,"name":"Rust Checks / haven-core","conclusion":"success"},
-  {"id":97275651001,"name":"E2E Core Flow (Android) / e2e_android","conclusion":"cancelled"}
+[{"total_count":6,"jobs":[
+  {"id":97275651481,"run_id":32672237999,"run_attempt":1,"workflow_name":"CI","status":"completed","conclusion":"failure","name":"E2E Integration Tests (Android) / e2e_integration"},
+  {"id":97249491991,"run_id":32672237999,"run_attempt":1,"workflow_name":"CI","status":"completed","conclusion":"failure","name":"E2E Permission Revocation (Android) / e2e_permission_revocation"},
+  {"id":97275651000,"run_id":32672237999,"run_attempt":1,"workflow_name":"CI","status":"completed","conclusion":"success","name":"Rust Checks / haven-core"},
+  {"id":97275651001,"run_id":32672237999,"run_attempt":1,"workflow_name":"CI","status":"completed","conclusion":"cancelled","name":"E2E Core Flow (Android) / e2e_android"},
+  {"id":97275651002,"run_id":32672237999,"run_attempt":1,"workflow_name":"CI","status":"completed","conclusion":"skipped","name":"Build Verification / build_android_arm64"},
+  {"id":97275651003,"run_id":32672237999,"run_attempt":1,"workflow_name":"CI","status":"in_progress","conclusion":null,"name":"E2E Core Flow (iOS) / e2e_ios"}
+]}]
+JSON
+
+  # The same run split the way the API really splits it once a run outgrows one
+  # page, with the runner loss stranded on page 2.
+  cat >"${tmp}/jobs-paged.json" <<'JSON'
+[{"total_count":3,"jobs":[
+  {"id":97249491991,"run_id":32672237999,"run_attempt":1,"workflow_name":"CI","status":"completed","conclusion":"failure","name":"E2E Permission Revocation (Android) / e2e_permission_revocation"},
+  {"id":97275651000,"run_id":32672237999,"run_attempt":1,"workflow_name":"CI","status":"completed","conclusion":"success","name":"Rust Checks / haven-core"}
+]},
+{"total_count":3,"jobs":[
+  {"id":97275651481,"run_id":32672237999,"run_attempt":1,"workflow_name":"CI","status":"completed","conclusion":"failure","name":"E2E Integration Tests (Android) / e2e_integration"}
 ]}]
 JSON
 
   local calls="${tmp}/calls" reruns="${tmp}/reruns" sum="${tmp}/summary.md"
-  _drive() { # <attempt> <log-dir>
-    : >"${calls}"; : >"${reruns}"; : >"${sum}"
+  local out="${tmp}/main.out"
+  _drive() { # <attempt> <log-dir> [NAME=VALUE ...]
+    : >"${calls}"; : >"${reruns}"; : >"${sum}"; : >"${out}"
+    local attempt="$1" logdir="$2" kv
+    shift 2
     ( export PATH="${bin}:${PATH}" \
              STUB_CALLS="${calls}" STUB_RERUNS="${reruns}" \
-             STUB_JOBS_JSON="${tmp}/jobs.json" STUB_LOG_DIR="$2" \
+             STUB_JOBS_JSON="${tmp}/jobs.json" STUB_LOG_DIR="${logdir}" \
              GITHUB_STEP_SUMMARY="${sum}" GH_TOKEN=stub \
              GITHUB_REPOSITORY='mehmetefeumit/Haven-App' \
-             HAVEN_RERUN_RUN_ID=32672237999 HAVEN_RERUN_RUN_ATTEMPT="$1"
-      main >/dev/null 2>&1 )
+             HAVEN_RERUN_RUN_ID=32672237999 HAVEN_RERUN_RUN_ATTEMPT="${attempt}"
+      for kv in "$@"; do export "${kv?}"; done
+      main ) >"${out}" 2>&1
   }
-  _check() { # <rc> <label>
-    if [[ "$1" == 0 ]]; then printf '  PASS %s\n' "$2"; else printf '  FAIL %s\n' "$2" >&2; fails=1; fi
-  }
+  _check() { _ok "$1" "$2" "${out}"; }
 
   # (O1) LOOP SAFETY, END TO END. Attempt 2 is what a sanctioned re-run reports
   #      back, and it must cost nothing: no listing, no log fetch, no re-run.
@@ -569,6 +685,16 @@ JSON
          '(O2) exactly the runner-loss job is re-run; the genuine failure stays red'
   _check "$(grep -q "e2e_permission_revocation.*this failure is the job" "${sum}" && echo 0 || echo 1)" \
          '(O2) the annotation names the failure it deliberately left alone'
+  # …and only `failure` was ever a candidate. Without this the conclusion filter
+  # could be relaxed to anything-but-success and every fixture above would stay
+  # green, because a cancelled job has no log to fetch and is left red anyway.
+  _check "$(grep -qxF '**Left red (1)**' "${sum}" && echo 0 || echo 1)" \
+         '(O2) cancelled, skipped and in-progress jobs are not candidates at all'
+  # `${out}` is main's own stdout and stderr. Run 35541175084 judged thirteen
+  # jobs and left not one word in its log, because every line went to a step
+  # summary no API serves; this is the fixture that reds if it goes back.
+  _check "$(grep -q 'e2e_integration.*the runner was shut down' "${out}" && echo 0 || echo 1)" \
+         '(O2) …and the decision reaches the job log, not only the step summary'
 
   # (O3) FAIL CLOSED, END TO END. Same run, but no log can be fetched for any
   #      job: nothing may be re-run, and the summary must say why.
@@ -578,6 +704,237 @@ JSON
             && grep -q 'could not be fetched' "${sum}" && echo 0 || echo 1)" \
          '(O3) unreadable logs re-run nothing and say so'
 
+  # (O4) THE API REFUSES A SANCTIONED RE-RUN. Judged actionable and not acted on
+  #      is this script failing, not a verdict, so it must go RED rather than
+  #      report a tidy nothing — the one path that makes this workflow visible.
+  rc=0
+  _drive 1 "${logs}" 'STUB_GH_RERUN_403=97275651481' || rc=$?
+  # rc 2 alone would also be satisfied by a misconfigured run that never got as
+  # far as judging anything, so each of these reads the reason too.
+  _check "$([[ "${rc}" == 2 && ! -s "${reruns}" ]] \
+            && grep -q 'a sanctioned re-run was refused' "${out}" && echo 0 || echo 1)" \
+         '(O4) a re-run the API refuses exits 2, not 0'
+  _check "$(grep -q 'the re-run was refused' "${sum}" && echo 0 || echo 1)" \
+         '(O4) …and the annotation says so instead of claiming a re-run'
+
+  # (O5) A FETCH THAT DIED MID-BODY. Fixture C5 measures that real curl leaves
+  #      those bytes on disk; `|| rm -f` is what deletes them. The fragment here
+  #      DOES carry the shutdown line, and the job is still left red: a
+  #      truncated fetch is not evidence, because nothing says what the rest of
+  #      the log held. Delete the `rm -f` and this fixture re-runs the job.
+  local partial="${tmp}/partiallogs"
+  mkdir -p "${partial}"
+  cp "${tmp}/test-failure.log" "${partial}/97249491991.log"
+  head -3 "${tmp}/runner-loss.log" >"${partial}/97275651481.partial"
+  rc=0
+  _drive 1 "${partial}" || rc=$?
+  _check "$([[ "${rc}" == 0 && ! -s "${reruns}" ]] && echo 0 || echo 1)" \
+         '(O5) a log whose fetch died mid-body is deleted, not judged'
+  _check "$(grep -q 'e2e_integration.*could not be fetched' "${sum}" && echo 0 || echo 1)" \
+         '(O5) …and is reported as unread, not as a failure of its own'
+
+  # (O6) THE LISTING ITSELF REFUSED. "Nothing failed" is the one wrong answer
+  #      this script must never give itself, so an unreadable listing is exit 2.
+  rc=0
+  _drive 1 "${logs}" 'STUB_GH_JOBS_404=1' || rc=$?
+  _check "$([[ "${rc}" == 2 && ! -s "${reruns}" ]] \
+            && grep -q 'could not list the jobs' "${out}" && echo 0 || echo 1)" \
+         '(O6) a jobs listing the API refuses exits 2 and re-runs nothing'
+
+  # (O7) MORE THAN ONE PAGE. `--paginate --slurp` returns an array of pages, and
+  #      a run over 100 jobs really is several; a selector reading only the
+  #      first would silently stop judging everything past it.
+  rc=0
+  _drive 1 "${logs}" "STUB_JOBS_JSON=${tmp}/jobs-paged.json" || rc=$?
+  _check "$([[ "${rc}" == 0 && "$(cat "${reruns}")" == '97275651481' ]] && echo 0 || echo 1)" \
+         '(O7) a runner loss on the second page is still judged and re-run'
+
+  return "${fails}"
+}
+
+# The curl stub above STATES what `curl -f` does. This measures it, in the same
+# run, against the real binary and a server on 127.0.0.1 — offline, on a port
+# the kernel picks — so the fake and the tool cannot drift apart unnoticed. A
+# missing binary is six named FAILED fixtures, never a skip: the count stays
+# pinned, and "we could not check the stub" reads as what it is.
+_real_curl_fixtures() { # <tmp> <stub-bin-dir>
+  local tmp="$1" bin="$2" fails=0
+  local -a labels=(
+    '(C1) real curl -f on an HTTP error exits 22 and writes no file'
+    '(C2) the curl stub fails exactly as real curl does'
+    '(C3) real curl on a refused connection exits 7 and writes no file'
+    '(C4) real curl past --max-time exits 28 and writes no file'
+    '(C5) real curl leaves the bytes it got when a transfer dies mid-body'
+    '(C6) the curl stub leaves them too, and exits as real curl did'
+  )
+  _cannot_run() { # <reason>
+    local l
+    for l in "${labels[@]}"; do _ok 1 "${l} — NOT RUN: $1"; done
+  }
+
+  # (C7) Needs no binary, so it is judged before the others can be skipped.
+  #      Without both bounds one stalled fetch eats the workflow's whole budget
+  #      and the job is cancelled with every judgement still unwritten — and no
+  #      behavioural fixture can catch that without waiting out the timeout.
+  local flags=" ${CURL_FETCH_FLAGS[*]} "
+  _ok "$([[ "${flags}" == *' --connect-timeout '* && "${flags}" == *' --max-time '* ]] \
+          && echo 0 || echo 1)" \
+      '(C7) the production fetch is bounded by --connect-timeout and --max-time'
+
+  local -a missing=()
+  local b
+  for b in curl python3; do
+    command -v "${b}" >/dev/null 2>&1 || missing+=("${b}")
+  done
+  if ((${#missing[@]} > 0)); then
+    _cannot_run "${missing[*]} absent"
+    return 1
+  fi
+
+  local py="${tmp}/loopback.py"
+  cat >"${py}" <<'PY'
+import http.server, socket, socketserver, time
+
+BODY = b"2026-08-23T23:30:05.7050585Z ##[error]The runner has received a shutdown signal.\n"
+
+
+class H(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        if self.path == "/ok":
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(BODY)))
+            self.end_headers()
+            self.wfile.write(BODY)
+        elif self.path == "/stall":
+            # Longer than any --max-time a fixture uses, so the abort is the
+            # client's decision and never a race with this thread.
+            time.sleep(15)
+        elif self.path == "/truncated":
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(BODY) * 4))
+            self.end_headers()
+            self.wfile.write(BODY)
+            self.wfile.flush()
+            self.close_connection = True
+            self.connection.close()
+        else:
+            self.send_response(404)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+
+class S(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+    def handle_error(self, *a):
+        pass
+
+
+srv = S(("127.0.0.1", 0), H)
+shut = socket.socket()
+shut.bind(("127.0.0.1", 0))
+refused = shut.getsockname()[1]
+shut.close()
+# listen() already happened in the constructor, so a reader that has seen this
+# line can connect without polling for readiness.
+print(srv.server_address[1], refused, flush=True)
+srv.serve_forever()
+PY
+
+  local pipe="${tmp}/port.fifo" srv_err="${tmp}/loopback.err" pfd srv_pid
+  mkfifo "${pipe}"
+  # O_RDWR on a fifo never blocks, so the bounded `read` below is the only wait
+  # in this function: no sleep ever stands in for readiness.
+  exec {pfd}<>"${pipe}"
+  python3 "${py}" >"${pipe}" 2>"${srv_err}" &
+  srv_pid=$!
+  # shellcheck disable=SC2064  # expand now: the reap must not depend on a live var
+  trap "kill ${srv_pid} 2>/dev/null; wait ${srv_pid} 2>/dev/null; exec ${pfd}>&-" EXIT
+
+  local live='' refused=''
+  if ! read -r -t 30 -u "${pfd}" live refused || [[ -z "${live}" || -z "${refused}" ]]; then
+    _cannot_run 'the loopback server never reported a port'
+    kill "${srv_pid}" 2>/dev/null || true
+    wait "${srv_pid}" 2>/dev/null || true
+    exec {pfd}>&-
+    trap - EXIT
+    return 1
+  fi
+
+  # Never the port, never the host: a FAIL line carries the exit codes and
+  # nothing that identifies where it connected (Rule 15).
+  local base="http://127.0.0.1:${live}" detail="${tmp}/curl.detail"
+  local real_rc=0 real_err='' stub_rc=0 stub_err=''
+
+  rm -f "${tmp}/c1.out"
+  real_err="$( { curl "${CURL_FETCH_FLAGS[@]}" "${base}/missing" -o "${tmp}/c1.out"; } 2>&1 )" \
+    || real_rc=$?
+  printf 'real: rc=%s\n' "${real_rc}" >"${detail}"
+  _ok "$([[ "${real_rc}" == 22 && ! -e "${tmp}/c1.out" ]] && echo 0 || echo 1)" \
+      "${labels[0]}" "${detail}"
+
+  # The stub is driven through the same argv production builds, so a flag change
+  # in fetch_job_log is a flag change here.
+  rm -f "${tmp}/c2.out"
+  stub_err="$( { STUB_LOG_DIR="${tmp}/no-logs-here" "${bin}/curl" "${CURL_FETCH_FLAGS[@]}" \
+                   'https://api.github.com/repos/o/r/actions/jobs/1/logs' \
+                   -o "${tmp}/c2.out"; } 2>&1 )" || stub_rc=$?
+  printf 'real: rc=%s err=%s\nstub: rc=%s err=%s\n' \
+    "${real_rc}" "${real_err}" "${stub_rc}" "${stub_err}" >"${detail}"
+  _ok "$([[ "${stub_rc}" == "${real_rc}" && ! -e "${tmp}/c2.out" \
+            && "${stub_err}" == "${real_err}" ]] && echo 0 || echo 1)" \
+      "${labels[1]}" "${detail}"
+
+  rm -f "${tmp}/c3.out"
+  real_rc=0
+  curl "${CURL_FETCH_FLAGS[@]}" "http://127.0.0.1:${refused}/ok" -o "${tmp}/c3.out" \
+    >/dev/null 2>&1 || real_rc=$?
+  printf 'real: rc=%s\n' "${real_rc}" >"${detail}"
+  _ok "$([[ "${real_rc}" == 7 && ! -e "${tmp}/c3.out" ]] && echo 0 || echo 1)" \
+      "${labels[2]}" "${detail}"
+
+  # The production flags with --max-time overridden, because a fixture cannot
+  # wait out the 60 s the real fetch is allowed; the flag under test is the one
+  # fetch_job_log passes.
+  rm -f "${tmp}/c4.out"
+  real_rc=0
+  curl "${CURL_FETCH_FLAGS[@]}" --max-time 1 "${base}/stall" -o "${tmp}/c4.out" \
+    >/dev/null 2>&1 || real_rc=$?
+  printf 'real: rc=%s\n' "${real_rc}" >"${detail}"
+  _ok "$([[ "${real_rc}" == 28 && ! -e "${tmp}/c4.out" ]] && echo 0 || echo 1)" \
+      "${labels[3]}" "${detail}"
+
+  # The measurement `|| rm -f` in fetch_job_log exists for: a failed transfer
+  # CAN leave a half-log behind, and a half-log must never be classified.
+  rm -f "${tmp}/c5.out"
+  real_rc=0
+  curl "${CURL_FETCH_FLAGS[@]}" "${base}/truncated" -o "${tmp}/c5.out" \
+    >/dev/null 2>&1 || real_rc=$?
+  printf 'real: rc=%s\n' "${real_rc}" >"${detail}"
+  _ok "$([[ "${real_rc}" == 18 && -s "${tmp}/c5.out" ]] && echo 0 || echo 1)" \
+      "${labels[4]}" "${detail}"
+
+  mkdir -p "${tmp}/stubpartial"
+  head -3 "${tmp}/runner-loss.log" >"${tmp}/stubpartial/1.partial"
+  rm -f "${tmp}/c6.out"
+  stub_rc=0
+  STUB_LOG_DIR="${tmp}/stubpartial" "${bin}/curl" "${CURL_FETCH_FLAGS[@]}" \
+    'https://api.github.com/repos/o/r/actions/jobs/1/logs' -o "${tmp}/c6.out" \
+    >/dev/null 2>&1 || stub_rc=$?
+  printf 'real: rc=%s\nstub: rc=%s\n' "${real_rc}" "${stub_rc}" >"${detail}"
+  _ok "$([[ "${stub_rc}" == "${real_rc}" && -s "${tmp}/c6.out" ]] && echo 0 || echo 1)" \
+      "${labels[5]}" "${detail}"
+
+  kill "${srv_pid}" 2>/dev/null || true
+  wait "${srv_pid}" 2>/dev/null || true
+  exec {pfd}>&-
+  trap - EXIT
   return "${fails}"
 }
 

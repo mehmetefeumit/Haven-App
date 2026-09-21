@@ -203,6 +203,36 @@ jobs:
         working-directory: haven
         run: flutter pub get
 
+      # Gradle resolves the buildscript classpath over the network BEFORE it
+      # compiles anything, so a cold ~/.gradle makes this lane fetch hundreds of
+      # POMs — and hosted runners share egress IPs, so Maven Central rate-limits
+      # a runner nobody here provoked. CI run 35622556197 job 106414462454 lost
+      # a whole lane to HTTP 429 on the classpath, with NO test run, while twelve
+      # sibling Android lanes built the same commit with zero 429s. A warm
+      # dependency cache REMOVES those requests; the classified retry in
+      # scripts/ci/build_apk_with_retry.sh is only the backstop for what is left.
+      #
+      # Restore-only. build-check.yml is the single writer of this key, so a lane
+      # that deletes or half-fills ~/.gradle cannot publish a cache the other
+      # lanes would then restore. The `restore-keys` prefix means a changed
+      # dependency set still starts from the last good cache instead of cold.
+      #
+      # `continue-on-error` because a cache is an optimisation, and a step that
+      # overruns its own `timeout-minutes` FAILS the job: without this, a slow
+      # or unavailable cache service reddens a lane that would otherwise have
+      # built cold and run every test.
+      - name: Restore Gradle dependency cache
+        uses: actions/cache/restore@v4
+        timeout-minutes: 2
+        continue-on-error: true
+        with:
+          path: |
+            ~/.gradle/caches/modules-2
+            ~/.gradle/wrapper
+          key: gradle-deps-${{ runner.os }}-${{ hashFiles('haven/android/**/*.gradle*', 'haven/rust_builder/**/*.gradle*', 'haven/android/gradle/wrapper/gradle-wrapper.properties', 'haven/pubspec.lock') }}
+          restore-keys: |
+            gradle-deps-${{ runner.os }}-
+
       # Build the test APK BEFORE the emulator boots (the OOM rule — the
       # Rust-NDK + Gradle peak must not coincide with a resident emulator +
       # containers; see docs/E2E_TROUBLESHOOTING.md). Staged at /tmp/scenario.apk;
@@ -221,9 +251,7 @@ jobs:
         working-directory: haven
         timeout-minutes: 25
         run: |
-          flutter build apk \
-            --debug \
-            --target-platform android-x64 \
+          ../scripts/ci/build_apk_with_retry.sh android-x64 \
             --target=integration_test/e2e/e2e_profile_sharing.dart \
             --dart-define=HAVEN_E2E_RELAY="${HAVEN_E2E_RELAY}" \
             --dart-define=HAVEN_E2E_PROFILE_RELAY="${HAVEN_E2E_PROFILE_RELAY}" \
@@ -462,7 +490,23 @@ jobs:
       - name: Capture host + emulator diagnostics
         if: always()
         run: |
+          # `adb` reaches PATH only through the emulator action's
+          # core.addPath(<sdk>/platform-tools); when that action never ran the
+          # slices below were `command not found`, and `|| true` kept it silent
+          # (run 35536892150). Resolve it from the SDK instead, and say in
+          # fixed words which case this diag is.
+          sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          if [ -n "${sdk}" ]; then PATH="${sdk}/platform-tools:${PATH}"; fi
+          if command -v adb >/dev/null 2>&1; then adb_state=resolved; else adb_state=absent; fi
+          devices=""
+          if [ "${adb_state}" = resolved ]; then devices="$(adb devices 2>/dev/null || true)"; fi
+          # Materialised: `adb devices | grep -q` reports the producer's
+          # SIGPIPE under pipefail, not the match.
+          if grep -qE '^[^[:space:]]+[[:space:]]+[a-z]+$' <<<"${devices}"; then device_state=present; else device_state=none; fi
           {
+            echo "adb: ${adb_state}"
+            echo "device: ${device_state}"
+            echo
             echo "=== df -h ==="
             df -h || true
             echo
@@ -508,7 +552,7 @@ jobs:
           relays=(/tmp/strfry.log /tmp/strfry-profile-*.log)
           rc=0
           bash tooling/e2e/ci/scan-logs.sh \
-            --manifest /tmp/haven-soak/needles/*.needles.json \
+            --manifest-dir /tmp/haven-soak/needles \
             --sink "relay=$(IFS=,; echo "${relays[*]}")" \
             --sink diag=/tmp/diag.log,/tmp/blossom-summary.log \
             --report /tmp/logscan-report-upload.ndjson || rc=$?
@@ -612,12 +656,15 @@ jobs:
       # tooling/e2e/ci/scan-logs.sh before the retry classification can see it.
       HAVEN_LOGSCAN: "true"
       HAVEN_LOGSCAN_PROFILE: host
-      # This lane's own `drive` line floor. A COMPLETE transcript of this
-      # single-scenario drive is 49 lines (measured, CI run 35280144455)
-      # against the policy default of 100, which is the core-flow drive's and
-      # would read every green profile run as truncated; 24 is half the
-      # measured capture.
-      HAVEN_LOGSCAN_DRIVE_FLOOR: "24"
+      # This lane's own `drive` line floor, against the policy default of 100,
+      # which is the core-flow drive's and would read every green profile run
+      # as truncated. 4 is the HOST SKELETON an iOS transcript always carries
+      # (run-ios-sim-scenario.sh's IOS_HOST_SKELETON_LINES, which refuses
+      # anything above it), not half of a measured transcript the way 24 was.
+      # A drive that built and never launched is caught by the scanner's
+      # proof_of_run, which no longer reads the reporter's `loading <suite>`
+      # line as evidence a test ran.
+      HAVEN_LOGSCAN_DRIVE_FLOOR: "4"
 
     steps:
       - name: Checkout
@@ -791,7 +838,7 @@ jobs:
           for f in /tmp/relay-profile-*.log; do relays="${relays},${f}"; done
           rc=0
           bash tooling/e2e/ci/scan-logs.sh \
-            --manifest /tmp/haven-soak/needles/*.needles.json \
+            --manifest-dir /tmp/haven-soak/needles \
             --sink ios=/tmp/sim-unified.log,/tmp/sim-unified-full.log \
             --sink drive=/tmp/flutter-ios-test.log \
             --sink "relay=${relays}" \

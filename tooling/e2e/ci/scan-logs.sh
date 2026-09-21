@@ -29,14 +29,27 @@
 # on a key-material leak never depends on the scanner being built.
 #
 # Usage:
-#   scan-logs.sh --manifest <path>.needles.json --sink <class>=<path>[,<path>...] \
+#   scan-logs.sh (--manifest <path>.needles.json | --manifest-dir <dir>) \
+#                --sink <class>=<path>[,<path>...] \
 #                [--sink ...] [--segments <class>=<n>]... [--plants-in <class>=<path>]... \
 #                [--report <path>.ndjson]
 #   scan-logs.sh --rules-only [--exempt-endpoint <url|host|ip>]... \
 #                --sink <class>=<path>[,<path>...] [--sink ...] [--report <path>.ndjson]
 #   scan-logs.sh --self-test
 #
-#   --manifest   the manifest `haven-logscan seal` wrote; must end in `.needles.json`
+#   --manifest   the manifest `haven-logscan seal` wrote; must end in
+#                `.needles.json`, and must be ONE path: a `*.needles.json` the
+#                caller's shell left unexpanded is refused, never searched for
+#   --manifest-dir  the run's needle directory, matched HERE under nullglob.
+#                Exactly one match is scanned against; no match is the meta
+#                floor, naming the directory and whether it exists at all (so
+#                "the lane died before sealing" is told from "wrong
+#                directory"); two or more is a broken guard, because choosing
+#                one would scan this run's capture against another run's
+#                needles — glob order would pick the LOWER run id, i.e. the
+#                stale one. Callers pass this rather than a glob: an
+#                unexpanded pattern reaches an argv parser as one literal or
+#                as two paths, and neither shape can say which happened
 #   --rules-only no manifest: the structural rules and the line floors alone,
 #                for a sink no needle is declarable for (a unit-test transcript).
 #                It certifies that the rules ran, NOT that any declared value is
@@ -62,8 +75,9 @@
 #   1  leak  — a needle or structural hit, or key material; EVERY named sink
 #              has been deleted before this returns
 #   2  guard broken — usage error, scanner binary absent or not executable,
-#              a mis-shaped manifest, an expired allowlist entry, or a scanner
-#              exit code outside the closed set
+#              a mis-shaped manifest, more than one manifest in the needle
+#              directory, an expired allowlist entry, or a scanner exit code
+#              outside the closed set
 #   3  unusable — a sink absent/empty/unreadable, a segment count off, a plant
 #              missed: fix the CAPTURE, not the app
 #   4  meta floor — a line or declaration floor unmet, no manifest: fix the
@@ -87,7 +101,17 @@ readonly SECRET_SCAN="${script_dir}/scan-logs-for-secrets.sh"
 readonly DEFAULT_LOGSCAN_BIN="${script_dir}/../../logscan/target/release/haven-logscan"
 
 usage() {
-  echo "Usage: $0 --manifest <path>.needles.json --sink <class>=<path>[,<path>...]... [--segments <class>=<n>]... [--plants-in <class>=<path>]... [--report <path>.ndjson]  |  $0 --rules-only [--exempt-endpoint <url|host|ip>]... --sink <class>=<path>[,<path>...]... [--report <path>.ndjson]  |  $0 --self-test" >&2
+  echo "Usage: $0 (--manifest <path>.needles.json | --manifest-dir <dir>) --sink <class>=<path>[,<path>...]... [--segments <class>=<n>]... [--plants-in <class>=<path>]... [--report <path>.ndjson]  |  $0 --rules-only [--exempt-endpoint <url|host|ip>]... --sink <class>=<path>[,<path>...]... [--report <path>.ndjson]  |  $0 --self-test" >&2
+}
+
+# A pattern the caller's shell did not expand. `*.needles.json` arrives as this
+# literal when nothing matched it, so a wrapper that took it as a path would
+# report the honest "no manifest" red for a mistyped directory too.
+holds_glob_char() {
+  case "$1" in
+    *'*'*|*'?'*|*'['*) return 0 ;;
+  esac
+  return 1
 }
 
 usage_error() {
@@ -126,7 +150,7 @@ verdict_word() {
 }
 
 main() {
-  local manifest="" report="" rules_only=0
+  local manifest="" manifest_dir="" report="" rules_only=0
   local -a sink_files=() scanner_args=() exempt_args=()
   local spec class paths part
   local -a parts
@@ -137,7 +161,19 @@ main() {
       --manifest)
         [[ $# -ge 2 ]] || usage_error "--manifest takes a path"
         [[ -z "${manifest}" ]] || usage_error "--manifest given twice (a second manifest means the needle directory was not rotated)"
+        if holds_glob_char "$2"; then
+          usage_error "--manifest takes one sealed manifest, and '${2##*/}' still holds a glob character: a pattern reached this wrapper unexpanded, so the caller's shell matched nothing. Pass --manifest-dir <dir> and let the wrapper match, say what it found, and refuse to choose"
+        fi
         manifest="$2"
+        shift 2
+        ;;
+      --manifest-dir)
+        [[ $# -ge 2 ]] || usage_error "--manifest-dir takes a directory"
+        [[ -z "${manifest_dir}" ]] || usage_error "--manifest-dir given twice"
+        if holds_glob_char "$2"; then
+          usage_error "--manifest-dir takes a directory, not a pattern, and '$2' still holds a glob character: the wrapper does the matching"
+        fi
+        manifest_dir="$2"
         shift 2
         ;;
       --rules-only)
@@ -193,13 +229,15 @@ main() {
     esac
   done
   if (( rules_only )); then
-    [[ -z "${manifest}" ]] || usage_error "--rules-only and --manifest are exclusive: a manifest means needles are declarable, so they must be searched"
+    [[ -z "${manifest}" && -z "${manifest_dir}" ]] || usage_error "--rules-only and --manifest/--manifest-dir are exclusive: a manifest means needles are declarable, so they must be searched"
   else
     (( ${#exempt_args[@]} == 0 )) || usage_error "--exempt-endpoint is for --rules-only: with a manifest the exemptions were sealed into it"
-    [[ -n "${manifest}" ]] || usage_error "--manifest is required (or --rules-only for a sink no needle is declarable for)"
+    [[ -z "${manifest}" || -z "${manifest_dir}" ]] || usage_error "--manifest and --manifest-dir are exclusive: one names the sealed manifest, the other asks this wrapper to find it"
+    [[ -n "${manifest}" || -n "${manifest_dir}" ]] || usage_error "--manifest or --manifest-dir is required (or --rules-only for a sink no needle is declarable for)"
     # The suffix is the contract the sidecar guard keys its bans on; a manifest
-    # under another name is a manifest nothing protects.
-    [[ "${manifest}" == *.needles.json ]] \
+    # under another name is a manifest nothing protects. What --manifest-dir
+    # resolves carries the suffix by construction — it matched on it.
+    [[ -z "${manifest}" || "${manifest}" == *.needles.json ]] \
       || usage_error "--manifest must end in .needles.json, got '${manifest##*/}'"
   fi
   (( ${#sink_files[@]} > 0 )) || usage_error "at least one --sink is required"
@@ -213,6 +251,35 @@ main() {
   local floor_rc=0
   bash "${SECRET_SCAN}" "${sink_files[@]}" || floor_rc=$?
 
+  # The needle directory is read AFTER the floor, for the floor's reason:
+  # containment must no more depend on the directory having been rotated than
+  # on the scanner having been built.
+  local manifest_rc=0
+  if [[ -n "${manifest_dir}" ]]; then
+    local -a found=()
+    local had_nullglob=0
+    if shopt -q nullglob; then had_nullglob=1; fi
+    shopt -s nullglob
+    found=("${manifest_dir}"/*.needles.json)
+    (( had_nullglob )) || shopt -u nullglob
+    if (( ${#found[@]} == 1 )); then
+      manifest="${found[0]}"
+    elif (( ${#found[@]} == 0 )); then
+      local state="holds no *.needles.json, so this run sealed none — the lane died before it could"
+      [[ -d "${manifest_dir}" ]] || state="is not an existing directory, so nothing could have sealed into it"
+      echo "ERROR: the needle directory ${manifest_dir} ${state}. A scan with no" \
+           "manifest proves only that the structural rules ran; fix the lane, or" \
+           "the directory this was pointed at." >&2
+      manifest_rc="${RC_META}"
+    else
+      echo "ERROR: the needle directory ${manifest_dir} holds ${#found[@]} manifests," \
+           "and this wrapper will not choose one: glob order would take the lowest" \
+           "run id, i.e. the STALE file, and scan this run's capture against another" \
+           "run's needles. Rotate the directory before the run seals." >&2
+      manifest_rc="${RC_GUARD}"
+    fi
+  fi
+
   local bin="${HAVEN_LOGSCAN_BIN:-${DEFAULT_LOGSCAN_BIN}}" scan_rc=0
   if [[ ! -f "${bin}" || ! -x "${bin}" ]]; then
     echo "ERROR: haven-logscan is not an executable file at ${bin}. Build it" \
@@ -220,6 +287,9 @@ main() {
          "point HAVEN_LOGSCAN_BIN at one. An absent scanner is a broken guard," \
          "never a skipped scan." >&2
     scan_rc="${RC_GUARD}"
+  elif (( manifest_rc )); then
+    # No manifest resolved; the block above has already said which case it is.
+    scan_rc="${manifest_rc}"
   else
     local -a report_args=() source_args=(--manifest "${manifest}")
     [[ -z "${report}" ]] || report_args=(--report "${report}")
@@ -237,20 +307,25 @@ main() {
          "${sink_files[*]}" >&2
   fi
   local basis="manifest ${manifest##*/}"
-  (( ! rules_only )) || basis="rules-only, no manifest"
+  if (( rules_only )); then
+    basis="rules-only, no manifest"
+  elif [[ -z "${manifest}" ]]; then
+    basis="no manifest resolved from the needle directory"
+  fi
   echo "scan-logs: $(verdict_word "${rc}") (rc ${rc}) — key-material floor rc ${floor_rc}," \
        "identifier scanner rc ${scan_rc}; ${#sink_files[@]} sink file(s); ${basis}"
   exit "${rc}"
 }
 
 # --self-test — the wrapper's OWN logic, driven end to end through a
-# subprocess with a FAKE scanner injected via HAVEN_LOGSCAN_BIN and the REAL
-# key-material floor. The fake records its argv and exits with FAKE_LOGSCAN_RC;
-# the floor is driven with its own real patterns (a `secret: Some([…])` line),
-# so the integration under test is the actual one. Every fixture count is
+# subprocess with the SHARED fake scanner injected via HAVEN_LOGSCAN_BIN and
+# the REAL key-material floor. The fake parses the real binary's argv contract,
+# records what it ACCEPTED in FAKE_SCAN_ARGV and exits with FAKE_SCAN_RC; the
+# floor is driven with its own real patterns (a `secret: Some([…])` line), so
+# the integration under test is the actual one. Every fixture count is
 # pinned by equality: a deleted fixture is the one way a self-test reports
 # success for work it did not do.
-readonly SELF_TEST_FIXTURES=43
+readonly SELF_TEST_FIXTURES=64
 # The iOS lanes run this wrapper on macOS under /bin/bash 3.2 (no mapfile,
 # no associative arrays, no case conversion); fixture (10) pins that
 # statically, since macOS cannot be run here.
@@ -264,14 +339,34 @@ run_self_test() {
   # shellcheck disable=SC2064
   trap "rm -rf '${tmp}'" RETURN
 
-  local fake="${tmp}/fake-logscan" argv="${tmp}/argv"
-  printf '%s\n' \
-    '#!/usr/bin/env bash' \
-    'printf "%s\n" "$@" > "${FAKE_ARGV_FILE}"' \
-    'while [[ $# -gt 0 ]]; do if [[ "$1" == "--report" ]]; then : > "$2"; fi; shift; done' \
-    'exit "${FAKE_LOGSCAN_RC}"' \
-    > "${fake}"
-  chmod +x "${fake}"
+  # The SHARED fake, never one written here: a fake this file authored could
+  # only record what it was handed, so it would answer a renamed flag exactly
+  # as it answers a working one — the shape that cost CI run 35536892150 a
+  # whole Android matrix. This wrapper does not source logscan-gate.sh, so it
+  # resolves the same fixture beside itself; cli_contract.rs is where the fake
+  # is held to the real binary's argv contract.
+  local fake="${script_dir}/fixtures/fake-haven-logscan.sh" argv="${tmp}/argv"
+  ran=$(( ran + 1 ))
+  if [[ ! -f "${fake}" || ! -x "${fake}" ]]; then
+    echo "SELF-TEST FAIL (fake scanner): ${fake} is missing or not an executable" \
+         "file; every fixture below would exercise this wrapper's absent-binary" \
+         "arm instead of its scanner arm and still pass" >&2
+    fail=1
+  fi
+  # ...and it is a PARSER, not a yes-machine. repo-guards.yml runs this
+  # self-test with no cargo, so cli_contract.rs — which ties the fake's
+  # vocabulary to the binary's — is not beside it; without this control every
+  # fixture below would prove only that SOMETHING ran.
+  local control_rc=0
+  bash "${fake}" scan --sink "logcat=${tmp}/absent.log" --no-such-flag x >/dev/null 2>&1 \
+    || control_rc=$?
+  ran=$(( ran + 1 ))
+  if (( control_rc != RC_GUARD )); then
+    echo "SELF-TEST FAIL (fake scanner): the injected fake answered rc ${control_rc}" \
+         "for a flag the real scanner does not have; a fake that accepts every" \
+         "command line cannot tell a working argv from a renamed one" >&2
+    fail=1
+  fi
   local manifest="${tmp}/selftest.needles.json"
   printf '{}\n' > "${manifest}"
 
@@ -283,6 +378,33 @@ run_self_test() {
   }
   plant_key_material() { # into <file>
     printf 'D/keyring ( 111): Entry { secret: Some([1, 2, 3]) }\n' >> "$1"
+  }
+  # The fake records ACCEPTED argv only, so an absent record no longer tells
+  # "never invoked" from "invoked and refused" — both are rc 2. Its messages
+  # are the binary's own (`haven-logscan: …`, `haven-logscan — …`); this
+  # wrapper's are `ERROR:` plus its usage block. So both are asked.
+  scanner_ran() {
+    local rc=0
+    if [[ ! -e "${argv}" ]]; then
+      grep -qE '^haven-logscan( —|:)' "${tmp}/out" || rc=1
+    fi
+    return "${rc}"
+  }
+  never_ran() { # <what would have happened>
+    ran=$(( ran + 1 ))
+    if scanner_ran; then
+      echo "SELF-TEST FAIL: $1" >&2
+      fail=1
+    fi
+  }
+  # A refused invocation records nothing, which is the mismatch to REPORT
+  # rather than a reason to die reading a file that is not there.
+  argv_text() {
+    if [[ -e "${argv}" ]]; then
+      printf '%s' "$(< "${argv}")"
+    else
+      printf '%s' '<nothing recorded: the scanner refused this argv, or was never invoked>'
+    fi
   }
 
   # expect <label> <want-rc> <deleted|kept> <fake-rc> <bin> -- <args...>
@@ -299,7 +421,7 @@ run_self_test() {
     ran=$(( ran + 1 ))
     rm -f "${argv}"
     local rc=0
-    HAVEN_LOGSCAN_BIN="${bin}" FAKE_LOGSCAN_RC="${fake_rc}" FAKE_ARGV_FILE="${argv}" \
+    HAVEN_LOGSCAN_BIN="${bin}" FAKE_SCAN_RC="${fake_rc}" FAKE_SCAN_ARGV="${argv}" \
       bash "${SELF_PATH}" "$@" > "${tmp}/out" 2>&1 || rc=$?
     if (( rc != want )); then
       echo "SELF-TEST FAIL (${label}): wanted rc ${want}, got ${rc}" >&2
@@ -371,10 +493,7 @@ run_self_test() {
   # (5) Usage errors: rc 2 before anything runs (the fake is never invoked).
   reset_sinks
   expect "manifest without the suffix"                  2 kept    0 "${fake}" -- --manifest "${tmp}/wrong.json" --sink "logcat=${a}"
-  if [[ -e "${argv}" ]]; then
-    echo "SELF-TEST FAIL: a usage error still ran the scanner" >&2
-    fail=1
-  fi
+  never_ran "a usage error still ran the scanner"
   expect "no --manifest"                                2 kept    0 "${fake}" -- --sink "logcat=${a}"
   expect "two --manifest"                               2 kept    0 "${fake}" -- --manifest "${manifest}" --manifest "${manifest}" --sink "logcat=${a}"
   expect "no --sink"                                    2 kept    0 "${fake}" -- --manifest "${manifest}"
@@ -386,10 +505,7 @@ run_self_test() {
   expect "unknown option"                               2 kept    0 "${fake}" -- "${sinks[@]}" --no-such-option
   expect "no arguments"                                 2 kept    0 "${fake}"
   expect "--rules-only with a manifest"                 2 kept    0 "${fake}" -- --rules-only "${sinks[@]}"
-  if [[ -e "${argv}" ]]; then
-    echo "SELF-TEST FAIL: --rules-only beside --manifest still ran the scanner" >&2
-    fail=1
-  fi
+  never_ran "--rules-only beside --manifest still ran the scanner"
 
   # (5b) --rules-only: no manifest, the floor still first, the scanner told so
   #      and nothing else re-derived; a leak still contains; the verdict line
@@ -397,7 +513,8 @@ run_self_test() {
   reset_sinks
   expect "rules-only clean"                             0 kept    0 "${fake}" -- --rules-only --sink "logcat=${a}" --sink "drive=${b},${c}" --report "${tmp}/rules.ndjson"
   local -a want_rules=(scan --rules-only --sink "logcat=${a}" --sink "drive=${b},${c}" --report "${tmp}/rules.ndjson")
-  got="$(< "${argv}")"
+  local got
+  got="$(argv_text)"
   ran=$(( ran + 1 ))
   if [[ "${got}" != "$(printf '%s\n' "${want_rules[@]}")" ]]; then
     echo "SELF-TEST FAIL: --rules-only invoked the scanner with '${got//$'\n'/ }', expected '${want_rules[*]}'" >&2
@@ -415,7 +532,7 @@ run_self_test() {
   reset_sinks
   expect "rules-only exempt endpoints pass through"     0 kept    0 "${fake}" -- --rules-only --exempt-endpoint 127.0.0.1 --sink "rust-test=${a}" --exempt-endpoint http://127.0.0.1:4545
   want_rules=(scan --rules-only --exempt-endpoint 127.0.0.1 --exempt-endpoint http://127.0.0.1:4545 --sink "rust-test=${a}")
-  got="$(< "${argv}")"
+  got="$(argv_text)"
   ran=$(( ran + 1 ))
   if [[ "${got}" != "$(printf '%s\n' "${want_rules[@]}")" ]]; then
     echo "SELF-TEST FAIL: --exempt-endpoint reached the scanner as '${got//$'\n'/ }', expected '${want_rules[*]}'" >&2
@@ -423,11 +540,84 @@ run_self_test() {
   fi
   reset_sinks
   expect "exempt endpoint with a manifest is 2"         2 kept    0 "${fake}" -- "${sinks[@]}" --exempt-endpoint 127.0.0.1
-  if [[ -e "${argv}" ]]; then
-    echo "SELF-TEST FAIL: --exempt-endpoint beside --manifest still ran the scanner" >&2
+  never_ran "--exempt-endpoint beside --manifest still ran the scanner"
+  expect "exempt endpoint without a value"              2 kept    0 "${fake}" -- --rules-only --sink "logcat=${a}" --exempt-endpoint
+  # --plants-in under --rules-only: this wrapper FORWARDS it, because mirroring
+  # the scanner's mode policy here would be a second copy of it, and the
+  # SCANNER's refusal is the verdict — rc 2, sinks kept, its own reason in the
+  # log. Only a fake that parses can pin this; the inline one answered 0 and
+  # the lane would have been the first to find out.
+  reset_sinks
+  expect "rules-only forwards --plants-in to its refusal" 2 kept  0 "${fake}" -- --rules-only --sink "logcat=${a}" --plants-in "drive=${b}"
+  ran=$(( ran + 1 ))
+  if ! grep -qF 'reconciles positive controls' "${tmp}/out"; then
+    echo "SELF-TEST FAIL: --plants-in under --rules-only did not surface the scanner's own reason, so rc 2 says only that something was wrong" >&2
     fail=1
   fi
-  expect "exempt endpoint without a value"              2 kept    0 "${fake}" -- --rules-only --sink "logcat=${a}" --exempt-endpoint
+
+  # (5c) --manifest-dir: the needle directory resolved HERE, so the three cases
+  #      a caller's `*.needles.json` collapses into stay apart. One match is
+  #      today's scan; none is the meta floor and says whether the directory
+  #      even exists; two is a broken guard that picks NEITHER (glob order
+  #      would take the lower run id — the stale one); and a pattern that
+  #      reached --manifest unexpanded is refused as such rather than read as
+  #      "the lane sealed nothing".
+  local nd_one="${tmp}/nd-one" nd_empty="${tmp}/nd-empty" nd_two="${tmp}/nd-two"
+  local nd_gone="${tmp}/nd-gone"
+  mkdir -p "${nd_one}" "${nd_empty}" "${nd_two}"
+  printf '{}\n' > "${nd_one}/900001-1.needles.json"
+  printf '{}\n' > "${nd_two}/900001-1.needles.json"
+  printf '{}\n' > "${nd_two}/900002-1.needles.json"
+
+  reset_sinks
+  expect "one manifest in the dir scans"                0 kept    0 "${fake}" -- --manifest-dir "${nd_one}" --sink "logcat=${a}"
+  want_rules=(scan --manifest "${nd_one}/900001-1.needles.json" --sink "logcat=${a}")
+  got="$(argv_text)"
+  ran=$(( ran + 1 ))
+  if [[ "${got}" != "$(printf '%s\n' "${want_rules[@]}")" ]]; then
+    echo "SELF-TEST FAIL: --manifest-dir reached the scanner as '${got//$'\n'/ }', expected '${want_rules[*]}'" >&2
+    fail=1
+  fi
+
+  reset_sinks
+  expect "an empty needle dir is the meta floor"        4 kept    0 "${fake}" -- --manifest-dir "${nd_empty}" --sink "logcat=${a}"
+  ran=$(( ran + 1 ))
+  if ! grep -qF "${nd_empty} holds no *.needles.json" "${tmp}/out"; then
+    echo "SELF-TEST FAIL: an existing but empty needle directory did not report that it exists and sealed nothing" >&2
+    fail=1
+  fi
+  never_ran "a run with no sealed manifest still invoked the scanner"
+
+  reset_sinks
+  expect "a missing needle dir is the meta floor too"   4 kept    0 "${fake}" -- --manifest-dir "${nd_gone}" --sink "logcat=${a}"
+  ran=$(( ran + 1 ))
+  if ! grep -qF "${nd_gone} is not an existing directory" "${tmp}/out"; then
+    echo "SELF-TEST FAIL: a mistyped needle directory read as 'the lane sealed none', which is a different fact" >&2
+    fail=1
+  fi
+
+  reset_sinks
+  expect "two manifests is a broken guard"              2 kept    0 "${fake}" -- --manifest-dir "${nd_two}" --sink "logcat=${a}"
+  ran=$(( ran + 1 ))
+  if ! grep -qF 'holds 2 manifests' "${tmp}/out"; then
+    echo "SELF-TEST FAIL: two manifests in the needle directory did not report the count" >&2
+    fail=1
+  fi
+  ran=$(( ran + 1 ))
+  if scanner_ran || grep -qF '900001-1.needles.json' "${tmp}/out"; then
+    echo "SELF-TEST FAIL: two manifests still picked one — the capture would be scanned against another run's needles" >&2
+    fail=1
+  fi
+
+  reset_sinks
+  expect "a glob that reached --manifest is refused"    2 kept    0 "${fake}" -- --manifest "${nd_empty}/*.needles.json" --sink "logcat=${a}"
+  ran=$(( ran + 1 ))
+  if ! grep -qF 'reached this wrapper unexpanded' "${tmp}/out"; then
+    echo "SELF-TEST FAIL: a pattern that reached --manifest unexpanded was not named as one" >&2
+    fail=1
+  fi
+  expect "--manifest beside --manifest-dir is 2"        2 kept    0 "${fake}" -- --manifest "${manifest}" --manifest-dir "${nd_one}" --sink "logcat=${a}"
+  expect "--rules-only beside --manifest-dir is 2"      2 kept    0 "${fake}" -- --rules-only --manifest-dir "${nd_one}" --sink "logcat=${a}"
 
   # (6) Pass-through: the scanner receives exactly the typed-sink arguments,
   #     nothing re-derived, and the report survives a leak (it holds sink:line
@@ -439,9 +629,8 @@ run_self_test() {
     echo "SELF-TEST FAIL: the leak verdict deleted the findings report along with the sinks" >&2
     fail=1
   fi
-  local got
   local -a want_argv=(scan --manifest "${manifest}" --sink "logcat=${a}" --sink "drive=${b},${c}" --segments logcat=1 --plants-in "drive=${b}" --report "${rep}")
-  got="$(< "${argv}")"
+  got="$(argv_text)"
   ran=$(( ran + 1 ))
   if [[ "${got}" != "$(printf '%s\n' "${want_argv[@]}")" ]]; then
     echo "SELF-TEST FAIL: the scanner was invoked with '${got//$'\n'/ }', expected '${want_argv[*]}'" >&2
@@ -499,7 +688,7 @@ run_self_test() {
     echo "scan-logs: SELF-TEST FAILED — ran ${ran} fixture(s), expected exactly ${SELF_TEST_FIXTURES}; a fixture was added or removed without moving the pin" >&2
     return 1
   fi
-  echo "scan-logs: self-test passed (${ran}/${SELF_TEST_FIXTURES} fixtures: verdicts fold 1 > 2 > 3 > 4 > 0 across both scanners, only a leak deletes and it deletes every sink, the key-material floor contains on its own and before the binary is looked for, an absent or non-executable scanner is rc 2 and never a skip, usage errors run nothing, arguments pass through untouched, the report survives containment, the manifest is named by basename only, the gate keeps its hard-fail shape, and no bash-4-only construct is in the file)."
+  echo "scan-logs: self-test passed (${ran}/${SELF_TEST_FIXTURES} fixtures: the injected scanner is the ONE shared fake and it parses, refusing a flag the real binary does not have; verdicts fold 1 > 2 > 3 > 4 > 0 across both scanners, only a leak deletes and it deletes every sink, the key-material floor contains on its own and before the binary is looked for, an absent or non-executable scanner is rc 2 and never a skip, usage errors run nothing at all, arguments pass through untouched, --plants-in under --rules-only reaches the scanner and its refusal is the verdict, the report survives containment, the manifest is named by basename only, a needle directory resolves to exactly one manifest or to a named reason — empty, missing or holding several, never a choice between two — a pattern that reached --manifest unexpanded is refused as one, the gate keeps its hard-fail shape, and no bash-4-only construct is in the file)."
   return 0
 }
 

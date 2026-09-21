@@ -724,23 +724,25 @@ wlan0	0002000A	00000000	0000	0	0	0	00FFFFFF	0	0	0" 10.0.2.2; then
   fi
 
   # ---------------------------------------------------------------
-  # (9c) This runner's OWN call site into the gate: a FAKE haven-logscan
-  #      (HAVEN_LOGSCAN_BIN, read at call time) records its argv while the REAL
-  #      scan-logs.sh and the REAL key-material floor run. Under test is the
-  #      profile selection and what this runner adds — the proxy lane's floors,
-  #      the callers' infrastructure endpoints, its three sinks — never the
-  #      gate's arms, which logscan-gate.sh --self-test pins.
+  # (9c) This runner's OWN call site into the gate: the SHARED fake
+  #      haven-logscan (LOGSCAN_FAKE_BIN, injected through HAVEN_LOGSCAN_BIN,
+  #      read at call time) parses the real binary's argv contract and records
+  #      what it accepted, while the REAL scan-logs.sh and the REAL key-material
+  #      floor run. Under test is the profile selection and what this runner
+  #      adds — the proxy lane's floors, the callers' infrastructure endpoints,
+  #      its three sinks — never the gate's arms, which logscan-gate.sh
+  #      --self-test pins. A fake written here could only record what it was
+  #      handed, so it would answer a renamed flag exactly as it answers a
+  #      working one; tooling/logscan/tests/cli_contract.rs holds the shared one
+  #      to the binary.
   # ---------------------------------------------------------------
-  local fake_bin="${tmp}/fake-logscan" seal_argv="${tmp}/seal-argv" scan_argv="${tmp}/scan-argv"
-  printf '%s\n' \
-    '#!/usr/bin/env bash' \
-    'case "${1:-}" in' \
-    '  seal) printf "%s\n" "$@" > "${FAKE_SEAL_ARGV}"; exit "${FAKE_SEAL_RC:-0}" ;;' \
-    '  scan) printf "%s\n" "$@" > "${FAKE_SCAN_ARGV}"; exit "${FAKE_SCAN_RC:-0}" ;;' \
-    'esac' \
-    'exit 9' \
-    > "${fake_bin}"
-  chmod +x "${fake_bin}"
+  local fake_bin="${LOGSCAN_FAKE_BIN}" seal_argv="${tmp}/seal-argv" scan_argv="${tmp}/scan-argv"
+  if [[ ! -x "${fake_bin}" ]]; then
+    echo "SELF-TEST FAIL (9c): ${fake_bin} is missing or not executable; every" \
+         "fixture below would exercise the gate's absent-binary arm instead of" \
+         "its scanner arm and still pass" >&2
+    fail=1
+  fi
   local needles="${tmp}/needles" logcat="${tmp}/logcat.log"
   local drive_final="${tmp}/drive-final.log" drive_full="${tmp}/drive-full.log"
   mkdir -p "${needles}"
@@ -844,11 +846,69 @@ wlan0	0002000A	00000000	0000	0	0	0	00FFFFFF	0	0	0" 10.0.2.2; then
   fi
   unset FAKE_SEAL_ARGV FAKE_SCAN_ARGV
 
+  # (10) NO RUN INHERITS THE PREVIOUS ONE'S CAPTURE. The shared /tmp paths are
+  #      cleared before the earliest thing in this script that can exit, so a
+  #      target that dies at an argument guard, in Phase 1's build or in Phase
+  #      2's install leaves NOTHING for its caller's `cp` to file under its own
+  #      name — run-integration-tests.sh, run-relay-customization.sh and
+  #      run-flake-stress.sh all copy these paths per target/iteration, and
+  #      until this landed the copy carried the PREVIOUS target's complete
+  #      transcript, reporter progress line included.
+  #
+  #      Exercised against a DERIVED copy of THIS file (every `/tmp/` rewritten
+  #      into a sandbox, nothing else changed), so the fixture cannot drift
+  #      from the script it certifies, and paired with the same copy MINUS the
+  #      removal line as its control: one property differs, and without that
+  #      line the stale transcript survives. A control that stopped reproducing
+  #      the defect — because the line was renamed out of the deletion's reach
+  #      — reds here too, so the pin cannot go quietly vacuous.
+  local sand="${tmp}/shared" derived="${tmp}/derived/tooling/e2e/ci"
+  mkdir -p "${sand}" "${derived}"
+  cp "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"/*.sh "${derived}/"
+  local kept="${derived}/run-single-avd-scenario.sh" gutted="${derived}/gutted.sh"
+  sed "s|/tmp/|${sand}/|g" "${BASH_SOURCE[0]}" > "${kept}"
+  sed '\|^rm -f /tmp/adb-logcat\.log|d' "${BASH_SOURCE[0]}" \
+    | sed "s|/tmp/|${sand}/|g" > "${gutted}"
+  # stale_case <label> <script> <removed|survives> <want-rc> [argv...] — seed
+  # both shared captures with a previous target's transcript, run a script that
+  # dies before it captures anything of its own, and say what must be left.
+  stale_case() {
+    local label="$1" script="$2" want="$3" want_rc="$4" f src_rc=0
+    shift 4
+    printf '00:03 +1: THE PREVIOUS TARGET\nAll tests passed.\n' > "${sand}/flutter-drive.log"
+    printf 'I/flutter ( 111): THE PREVIOUS TARGET\n' > "${sand}/adb-logcat.log"
+    # The final-attempt slice is this runner's too, and it is the file the gate
+    # reconciles the run's PLANTS against (`--plants-in drive=<final>`), so a
+    # previous target's copy of it must not outlive that target either.
+    printf '00:03 +1: THE PREVIOUS TARGET\n' > "${sand}/flutter-drive.final-attempt.log"
+    bash "${script}" "$@" > "${tmp}/stale-out" 2>&1 || src_rc=$?
+    if (( src_rc != want_rc )); then
+      echo "SELF-TEST FAIL (10 ${label}): wanted the early-exit rc ${want_rc}, got ${src_rc} —" \
+           "this fixture no longer exercises a run that died before its own capture began" >&2
+      fail=1
+    fi
+    for f in flutter-drive.log adb-logcat.log flutter-drive.final-attempt.log; do
+      if [[ "${want}" == removed && -e "${sand}/${f}" ]]; then
+        echo "SELF-TEST FAIL (10 ${label}): ${f} survived a run that captured nothing," \
+             "so a multi-target caller's \`cp\` would file the PREVIOUS target's" \
+             "transcript under this target's name — complete, proof_of_run and all" >&2
+        fail=1
+      elif [[ "${want}" == survives && ! -e "${sand}/${f}" ]]; then
+        echo "SELF-TEST FAIL (10 ${label}): the control (the removal line deleted) lost" \
+             "${f} anyway, so fixture (10) is not measuring that line" >&2
+        fail=1
+      fi
+    done
+  }
+  stale_case "usage guard"     "${kept}"   removed  2
+  stale_case "project guard"   "${kept}"   removed  1 integration_test/x_test.dart
+  stale_case "control"         "${gutted}" survives 1 integration_test/x_test.dart
+
   if (( fail )); then
     echo "run-single-avd-scenario: SELF-TEST FAILED" >&2
     return 1
   fi
-  echo "run-single-avd-scenario: self-test passed (connect flake caught; clean pass, real post-connect failure, and non-connect failure all correctly NOT retried; app-failure check scoped to the final attempt; the network gate admits a guest whose on-link routes cover the relay, still rejects one with no route to it, and is satisfied by neither loopback, a foreign subnet, a downed interface, nor adb noise; the Wi-Fi read-back accepts only a literal 0, never 'null' or adb noise; a connect-flake retry restores the app through install_app and re-grants; the secret-leak gate removes what it flags and nothing else; the log-privacy gate is one call into logscan-gate.sh that takes the proxy profile with e2e_combined's floors when the recorder's upstream is exported and the host profile otherwise, honours a stated profile, exempts every endpoint its callers configure without declaring one, hands the logcat and both drive logs to the wrapper, contains on a leak, and the drive log is echoed only after it. Phase 2's install barrier is app-install-lib.sh's, and its own --self-test pins it)."
+  echo "run-single-avd-scenario: self-test passed (connect flake caught; clean pass, real post-connect failure, and non-connect failure all correctly NOT retried; app-failure check scoped to the final attempt; the network gate admits a guest whose on-link routes cover the relay, still rejects one with no route to it, and is satisfied by neither loopback, a foreign subnet, a downed interface, nor adb noise; the Wi-Fi read-back accepts only a literal 0, never 'null' or adb noise; a connect-flake retry restores the app through install_app and re-grants; the secret-leak gate removes what it flags and nothing else; the log-privacy gate is one call into logscan-gate.sh that takes the proxy profile with e2e_combined's floors when the recorder's upstream is exported and the host profile otherwise, honours a stated profile, exempts every endpoint its callers configure without declaring one, hands the logcat and both drive logs to the wrapper, contains on a leak, and the drive log is echoed only after it; a run that dies at an argument guard leaves NEITHER shared capture behind, so no multi-target caller can file the previous target's transcript under this one's name, and the same copy with that removal deleted still inherits it. Phase 2's install barrier is app-install-lib.sh's, and its own --self-test pins it)."
   return 0
 }
 
@@ -856,6 +916,29 @@ if [[ "${1:-}" == "--self-test" ]]; then
   run_self_test
   exit $?
 fi
+
+# The shared captures this run OWNS, cleared before ANYTHING that can fail.
+#
+# Every one of them is created by a redirect far below — logcat at the device
+# handshake, the drive log before the retry loop — and every one of those
+# redirects sits behind a guard that can exit first: the usage check below, the
+# four helper/project checks, `adb logcat -c`, Phase 1's build, Phase 2's
+# install. A caller that drives SEVERAL targets through this script
+# (run-integration-tests.sh, run-relay-customization.sh, run-flake-stress.sh)
+# copies these paths under each target's own name afterwards, so a target that
+# died before its own capture began was handed the PREVIOUS target's
+# transcript: a complete file, carrying that other target's reporter progress
+# line, which clears the drive floor and satisfies the scanner's proof_of_run
+# under a name it does not belong to.
+#
+# REMOVED rather than truncated, because an empty file is still a file: the
+# `drive` class's line floor SUMS its files and its proof_of_run ORs them, so a
+# zero-line transcript hides among real ones, and `--segments` would count it
+# as a segment that arrived. The wrapper's own per-file check does refuse an
+# empty capture — but as "a log was unreadable", never as "that target never
+# drove". Absent is the state that is both true and legible, and the callers'
+# `cp … || true` deliberately leaves it absent.
+rm -f /tmp/adb-logcat.log /tmp/flutter-drive*.log
 
 if [[ $# -lt 1 ]]; then
   echo "Usage: $0 <scenario-file>  |  $0 --self-test" >&2

@@ -32,7 +32,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use aho_corasick::{AhoCorasick, AhoCorasickBuilder, MatchKind};
-use regex::Regex;
+use regex::{Regex, RegexSet};
 
 use crate::expand::Term;
 use crate::manifest::Manifest;
@@ -371,7 +371,7 @@ pub fn scan_sinks(
                 continue;
             }
         };
-        let Ok(proof) = spec.proof_of_run.as_deref().map(Regex::new).transpose() else {
+        let Ok(proof) = ProofOfRun::compile(&spec) else {
             outcome.problems.push(Problem {
                 rc: RC_GUARD,
                 message: format!(
@@ -412,6 +412,41 @@ pub fn scan_sinks(
     outcome
 }
 
+/// The sink class's compiled proof-of-run test.
+///
+/// Two patterns rather than one because `regex` has no lookahead and both test
+/// reporters render a SUITE LOAD through the very shape that proves a test ran
+/// (`00:00 +0: loading <path>`, `::group::❌ loading <path> (failed)`). A load
+/// is not a run: on iOS the expanded reporter writes its `loading` line before
+/// the Xcode build, so a transcript that built and never launched satisfied the
+/// pattern alone.
+struct ProofOfRun {
+    pattern: Regex,
+    /// Renderings that match `pattern` and prove nothing.
+    excludes: RegexSet,
+}
+
+impl ProofOfRun {
+    /// Compiles a class's proof, or `None` where the class declares none.
+    ///
+    /// `Err` is the policy's own problem, reported as rc 2 rather than silently
+    /// dropping the check: a proof that cannot compile would otherwise make
+    /// every capture of the class vacuously provable.
+    fn compile(spec: &SinkSpec) -> Result<Option<Self>, ()> {
+        let Some(pattern) = spec.proof_of_run.as_deref() else {
+            return Ok(None);
+        };
+        let pattern = Regex::new(pattern).map_err(|_| ())?;
+        let excludes = RegexSet::new(&spec.proof_of_run_excludes).map_err(|_| ())?;
+        Ok(Some(Self { pattern, excludes }))
+    }
+
+    /// Whether this line is proof that a test ran.
+    fn holds(&self, line: &str) -> bool {
+        self.pattern.is_match(line) && !self.excludes.is_match(line)
+    }
+}
+
 /// One file of one sink class, and everything needed to scan it.
 struct SinkFile<'a> {
     class: &'a str,
@@ -421,7 +456,7 @@ struct SinkFile<'a> {
     rules: &'a RuleSet,
     disclose: bool,
     /// The sink class's compiled `proof_of_run`, where it declares one.
-    proof: Option<&'a Regex>,
+    proof: Option<&'a ProofOfRun>,
     /// Whether plants found here count. `--plants-in` narrows reconciliation to
     /// one file of the class while every file is still searched for needles.
     reconcile_plants: bool,
@@ -608,7 +643,8 @@ fn check_floors(manifest: &Manifest, sinks: &[SinkArg], outcome: &mut Outcome) {
 /// A line floor answers "was the capture truncated"; it cannot answer "did the
 /// subject ever run", because the two look identical at the short end. A class
 /// that declares a `proof_of_run` answers the second question from a line its
-/// producer writes before the first test body does.
+/// producer writes when a test STARTS — and not from the one it writes for the
+/// SUITE it is about to load, which a build that never launched prints too.
 fn check_proofs_of_run(manifest: &Manifest, sinks: &[SinkArg], outcome: &mut Outcome) {
     let classes: std::collections::BTreeSet<&String> = sinks.iter().map(|s| &s.class).collect();
     for class in classes {
@@ -618,7 +654,7 @@ fn check_proofs_of_run(manifest: &Manifest, sinks: &[SinkArg], outcome: &mut Out
         outcome.problems.push(Problem {
             rc: RC_META,
             message: format!(
-                "sink class `{class}` carries no line any test reporter writes per test (`HH:MM +N:` from the compact reporter, `✅` or `::group::✅` from the github one); the capture is readable but proves too little: no test ever started"
+                "sink class `{class}` carries no line any test reporter writes per test (`HH:MM +N:` from the compact reporter, `✅` or `::group::✅` from the github one; a `loading <suite>` line is the reporter naming a SUITE, not a test); the capture is readable but proves too little: no test ever started"
             ),
         });
     }
@@ -895,7 +931,7 @@ fn scan_file(
     needles: &Needles<'_>,
     rules: &RuleSet,
     plant_shape: &Regex,
-    proof: Option<&Regex>,
+    proof: Option<&ProofOfRun>,
     disclose: bool,
 ) -> Result<FileReport, String> {
     let mut file = std::fs::File::open(path)
@@ -1005,7 +1041,7 @@ fn handle_line(
     // The WHOLE line, framing included: the proof is about the capture's
     // producer, not about which part of the line Haven owns — on Android the
     // reporter's own output reaches the transcript through logcat's prefix.
-    if !report.proof_of_run && ctx.proof.is_some_and(|proof| proof.is_match(text)) {
+    if !report.proof_of_run && ctx.proof.is_some_and(|proof| proof.holds(text)) {
         report.proof_of_run = true;
     }
     // Only for a line the window pass already matched on. The window pass for a
@@ -1170,7 +1206,7 @@ struct LineCtx<'a> {
     rules: &'a RuleSet,
     plant_shape: &'a Regex,
     /// The sink class's compiled `proof_of_run`, where it declares one.
-    proof: Option<&'a Regex>,
+    proof: Option<&'a ProofOfRun>,
     sink_path: &'a str,
     disclose: bool,
 }
@@ -2526,6 +2562,111 @@ mod tests {
             COMPACT.lines().any(|l| before.is_match(l)),
             "the compact fixture must still carry the rendering a device run and every local run print"
         );
+    }
+
+    /// A build that never launched is not a run, however it is rendered.
+    ///
+    /// `flutter test -d <udid>` opens EVERY transcript with the expanded
+    /// reporter's `00:00 +0: loading <path>` — before the Xcode build, not
+    /// after it — so the eleven lines the fixture holds are everything an iOS
+    /// lane prints when the app is built and the suite never starts. They are
+    /// progress-line shaped, which is how that capture read as a run until
+    /// `proof_of_run_excludes`, leaving a MEASURED line floor as the only thing
+    /// between it and a clean verdict (22/24/27/56, each half of a transcript).
+    ///
+    /// The other two are the same event under the other renderings: a suite
+    /// that FAILED to load, which ran nothing either, and which the expanded
+    /// reporter closes on `Some tests failed.` — itself a progress line, and
+    /// with no failure counter, exactly as CI run 35397118356's bg-publish
+    /// capture ends.
+    ///
+    /// Each leg is then repeated with ONE real test-start line appended, which
+    /// is the whole difference between the two verdicts.
+    #[test]
+    fn the_ios_build_only_prefix_is_not_a_run() {
+        const BUILD_ONLY: &str = include_str!("../fixtures/buildonly.ios.drive.log");
+        const SUITE: &str =
+            "/Users/runner/work/Haven-App/Haven-App/haven/integration_test/b4_ios_real_gps_test.dart";
+
+        let dir = Dir::new("buildonly");
+        let manifest = manifest(&[]);
+
+        let load_failed = format!(
+            "00:00 +0: loading {SUITE}\n\
+             00:02 +0 -1: loading {SUITE} [E]\n\
+             Failed to load \"{SUITE}\": Compilation failed\n\
+             00:02 +0 -1: Some tests failed.\n"
+        );
+        let github_load_failed = format!(
+            "\n::group::\u{274c} loading {SUITE} (failed)\n\
+             Failed to load \"{SUITE}\": Compilation failed\n\
+             ::endgroup::\n\
+             ::error::0 tests passed, 1 failed.\n"
+        );
+        for (label, body) in [
+            ("the build-only prefix", BUILD_ONLY),
+            ("an expanded-reporter load failure", load_failed.as_str()),
+            (
+                "a github-reporter load failure",
+                github_load_failed.as_str(),
+            ),
+        ] {
+            let path = dir.write(&format!("{}.drive.log", label.replace(' ', "-")), body);
+            let outcome = run(&manifest, "drive", &[path]);
+            assert_eq!(
+                outcome.rc(),
+                RC_META,
+                "{label}: nothing here is a test that ran, so it must be rc 4: {:?}",
+                outcome.problems
+            );
+
+            // …and the ONE line that makes it one. Appended to the very same
+            // bytes, so the verdict cannot flip for any other reason.
+            let ran = format!("{body}00:12 +0: B4: publish a REAL simulator GPS fix\n");
+            let path = dir.write(&format!("ran-{}.drive.log", label.replace(' ', "-")), &ran);
+            let outcome = run(&manifest, "drive", &[path]);
+            assert!(
+                outcome.problems.is_empty(),
+                "{label}: one real test-start line is a run: {:?}",
+                outcome.problems
+            );
+        }
+    }
+
+    /// The exclusions refuse a SUITE LOAD, never a test that mentions one.
+    ///
+    /// `loading` is an ordinary English word in a Dart test description, and
+    /// three of them are in the hosted coverage lane's own transcript
+    /// (`CircleSelector shows loading indicator while fetching circles`, CI run
+    /// 35524002720). An exclusion anchored on the word alone would strike them
+    /// out and take the coverage lane's only proof with it, so each is anchored
+    /// on the reporter's prefix to its left and the suite path's `.dart` to its
+    /// right — and this test is that claim, on both reporters' renderings.
+    #[test]
+    fn a_test_whose_name_says_loading_still_proves_a_run() {
+        let dir = Dir::new("namedloading");
+        let manifest = manifest(&[]);
+
+        for (label, line) in [
+            (
+                "the compact reporter, path printed",
+                "00:03 +41: /home/runner/work/Haven-App/Haven-App/haven/test/widgets/circles/circle_selector_test.dart: CircleSelector shows loading indicator while fetching circles",
+            ),
+            (
+                "the github reporter",
+                "\u{2705} /home/runner/work/Haven-App/Haven-App/haven/test/providers/invitation_count_provider_test.dart: invitationCountProvider returns 0 when pendingInvitationsProvider is loading",
+            ),
+            (
+                "a single-suite run, where the reporter prints the name alone",
+                "00:07 +2: loading indicator clears once the roster settles",
+            ),
+        ] {
+            let path = dir.write("named.drive.log", &format!("{line}\n"));
+            assert!(
+                run(&manifest, "drive", &[path]).problems.is_empty(),
+                "{label}: a test whose NAME carries the word is still a test that ran"
+            );
+        }
     }
 
     /// A progress reporter's carriage returns are RECORD boundaries, not text.

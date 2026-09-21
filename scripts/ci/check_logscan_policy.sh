@@ -58,7 +58,12 @@
 #       class's anti-vacuity check to a line count, which cannot tell a short
 #       COMPLETE transcript from an empty one (CI run 35464818348), and adding
 #       it to a class whose producer writes no such line would be rc 4 on every
-#       green run.
+#       green run. `proof_of_run_excludes` — the renderings that match that line
+#       and prove nothing, because a reporter names the SUITE it is LOADING
+#       through the same shape — is pinned with it, in both directions too: drop
+#       one and a capture of a build that never launched certifies a run; widen
+#       one past its suite-path anchor and every test whose NAME says "loading"
+#       stops being proof. The README must explain both keys.
 #
 # Floors on the number of sinks and classes parsed keep a policy the parser
 # has stopped reading from passing as compliant. What the floors CANNOT see is a
@@ -140,10 +145,22 @@ readonly EMITTER_SCOPE_DOC='com.apple.locationd.Position'
 # transcript of nothing but skipped tests would read as proof. Only a class whose
 # every capture comes from a test reporter may carry it; on any other class it
 # would be rc 4 on every green run. The README must explain the key.
+#
+# `proof_of_run_excludes` is pinned in the same breath and for the opposite
+# reason: BOTH reporters render a SUITE LOAD through the very shape above, and a
+# load is not a run. The expanded reporter opens every iOS transcript with
+# `00:00 +0: loading <path>` BEFORE the Xcode build, so without these a capture
+# of a build that never launched proves a run — leaving a MEASURED line floor as
+# the only thing between the two (22/24/27/56, each half of a transcript), which
+# is the racy proxy the Android skeletons already dropped. Dropping one of these
+# restores that; widening one past the suite-path anchor (`loading [^ ]+\.dart`)
+# strikes out every test whose NAME says "loading" and takes the hosted coverage
+# lane's only proof with it.
 declare -A PROOF_OF_RUN=(
-  ['drive']="proof_of_run = '[0-9]{2}:[0-9]{2} \\+[0-9]+( -[0-9]+)?: |^(::group::)?(✅|❌) '"
+  ['drive']="proof_of_run = '[0-9]{2}:[0-9]{2} \\+[0-9]+( -[0-9]+)?: |^(::group::)?(✅|❌) ', proof_of_run_excludes = ['[0-9]{2}:[0-9]{2} \\+[0-9]+( -[0-9]+)?: loading [^ ]+\\.dart', '^(::group::)?(✅|❌) loading [^ ]+\\.dart', '[0-9]{2}:[0-9]{2} \\+[0-9]+( -[0-9]+)?: Some tests failed\\.\$']"
 )
 readonly PROOF_OF_RUN_KEY='proof_of_run'
+readonly PROOF_OF_RUN_EXCLUDES_KEY='proof_of_run_excludes'
 # Sinks whose DECLARED Dart plant tokens are not demanded, with the reason;
 # the README's positive-controls bullet must name each one.
 declare -A DECLARED_PLANTS_OFF=(
@@ -272,6 +289,9 @@ check_policy() { # check_policy <policy> <readme>
   if (( ${#PROOF_OF_RUN[@]} > 0 )) && ! grep -qF -- "${PROOF_OF_RUN_KEY}" "${readme}"; then
     violation "${README_REL}: nothing explains \`${PROOF_OF_RUN_KEY}\`. It is what a line floor cannot be — the proof that a capture's subject ran at all — so say there which class carries it, which line proves it, and why a floor could not."
   fi
+  if (( ${#PROOF_OF_RUN[@]} > 0 )) && ! grep -qF -- "${PROOF_OF_RUN_EXCLUDES_KEY}" "${readme}"; then
+    violation "${README_REL}: nothing explains \`${PROOF_OF_RUN_EXCLUDES_KEY}\`. It is the half that keeps the proof honest — the reporter renders a SUITE LOAD through the same shape as a test, and on iOS writes it before the build — so say there which renderings are refused and what each would otherwise certify."
+  fi
 
   local classes ledgers kind n_classes=0
   classes="$(section_entries "${policy}" classes)"
@@ -357,7 +377,7 @@ check_all() { # check_all <policy> <allowlist> <readme> <proof-root>
 # scratch. Every rule has a fixture in both directions; the count is pinned.
 # ---------------------------------------------------------------------------
 self_test() {
-  local -r SELF_TEST_CASES=48
+  local -r SELF_TEST_CASES=52
   local tmp cases=0 failures=0
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
@@ -498,6 +518,17 @@ self_test() {
   _expect "(P8) narrowing the proof back to the compact reporter alone fails" "${d}" 1 "no longer carries the pinned proof-of-run line"
   d="${tmp}/p8f"; mut "${d}" policy.toml '/^drive = /s@❌@❌|❎@'
   _expect "(P8) widening the proof to the skip glyph fails" "${d}" 1 "no longer carries the pinned proof-of-run line"
+  # …and the exclusions, which are what keep the proof from certifying a build
+  # that never launched. Dropping them, dropping one of them, and widening one
+  # past the suite-path anchor are three different ways back to that.
+  d="${tmp}/p8g"; mut "${d}" policy.toml '/^drive = /s@, proof_of_run_excludes = \[[^]]*\]@@'
+  _expect "(P8) dropping the suite-load exclusions fails" "${d}" 1 "no longer carries the pinned proof-of-run line"
+  d="${tmp}/p8h"; mut "${d}" policy.toml "/^drive = /s@proof_of_run_excludes = \\['[^']*', @proof_of_run_excludes = [@"
+  _expect "(P8) dropping one of the suite-load exclusions fails" "${d}" 1 "no longer carries the pinned proof-of-run line"
+  d="${tmp}/p8i"; mut "${d}" policy.toml '/^drive = /s@\\\.dart@@g'
+  _expect "(P8) widening an exclusion past the suite-path anchor fails" "${d}" 1 "no longer carries the pinned proof-of-run line"
+  d="${tmp}/p8j"; mut "${d}" README.md 's|proof_of_run_excludes|proof-of-run-exclusions|g'
+  _expect "(P8) a README that never explains the exclusions fails" "${d}" 1 "nothing explains \`proof_of_run_excludes\`"
   _expect "(P8) the shipped proof passes (base)" "${b}" 0
 
   # floors

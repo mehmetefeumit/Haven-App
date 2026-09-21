@@ -156,7 +156,7 @@ location_provider_names() {
 # ---------------------------------------------------------------------------
 run_self_test() {
   local tmp fails=0 checked=0
-  local -r SELF_TEST_FIXTURES=27
+  local -r SELF_TEST_FIXTURES=29
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
   trap "rm -rf '${tmp}'" RETURN
@@ -346,10 +346,36 @@ run_self_test() {
   # …and the array that call passes is this lane's whole seal claim: its
   # injected point and both line floors, pinned so a red lane cannot be turned
   # green by lowering one of them.
-  local extra_lit='readonly -a SEAL_EXTRA=(--host-decl "coordinate=${GEO_LAT},${GEO_LON}" --floor drive=64 --floor relay=7)'
+  local extra_lit='readonly -a SEAL_EXTRA=(--host-decl "coordinate=${GEO_LAT},${GEO_LON}" --floor drive=8 --floor relay=7)'
   _eq_case "the seal extras carry the injected point and both line floors" "1" \
     "$(awk -v lit="${extra_lit}" \
          'index($0, lit) == 1 { n++ } END { print n + 0 }' "${self}")"
+  # …and that drive floor stays derived from what `flutter drive` prints on the
+  # HOST rather than from a transcript's length. The fixture is this lane's
+  # host-printed skeleton interleaved with forwarded device chatter, exactly as
+  # a real capture is: the floor may not exceed the skeleton, so a number
+  # measured from a whole transcript (64 was half of one) is rejected here.
+  local host_printed_re printed drive_floor
+  host_printed_re='^(Installing |VMServiceFlutterDriver: |All tests passed\.|Failure Details:)'
+  printf '%s\n' \
+    'Installing /tmp/integration-apks/b3_real_gps_test.apk...      8.6s' \
+    'I/Choreographer( 4519): Skipped 118 frames!' \
+    'VMServiceFlutterDriver: Connecting to Flutter application at <endpoint>' \
+    'VMServiceFlutterDriver: Isolate found with number: <n>' \
+    'VMServiceFlutterDriver: Isolate <n> is runnable.' \
+    'VMServiceFlutterDriver: Isolate is paused at start.' \
+    'VMServiceFlutterDriver: Attempting to resume isolate' \
+    'VMServiceFlutterDriver: Connected to Flutter application.' \
+    'I/flutter ( 4519): 00:00 +0: B3: publish a REAL GPS fix' \
+    'I/flutter ( 4519): 01:02 +2: All tests passed!' \
+    'All tests passed.' > "${tmp}/host-printed.drive.log"
+  printed="$(grep -cE "${host_printed_re}" "${tmp}/host-printed.drive.log" || true)"
+  _eq_case "the fixture carries this lane's 8-line host-printed skeleton" "8" \
+    "${printed}"
+  drive_floor="$(sed -n -E 's/^readonly -a SEAL_EXTRA=\(.*--floor drive=([0-9]+).*/\1/p' "${self}")"
+  rc=1
+  [[ -n "${drive_floor}" ]] && (( drive_floor >= 1 && drive_floor <= printed )) && rc=0
+  _case "…and the sealed drive floor stays within it" 0 "${rc}"
   # (19) The EXIT trap scans the whole directory through the same gate, after
   #      the relay dump is written and before the exit, every file typed by
   #      name (logscan-gate.sh's walker).
@@ -477,25 +503,43 @@ mkdir -p "${LOGSCAN_REPORTS}"
 # at the out path.
 #
 # A floor is what turns "the scan read an empty or truncated file and found
-# nothing" into rc 4 instead of a green, so it is sized to the smallest
-# COMPLETE capture and never to what would make the lane pass.
+# nothing" into rc 4 instead of a green, so it is sized to the part of a
+# capture its PRODUCER always writes — never to what would make the lane pass,
+# and never to a length the device can change.
 #
-# drive=64. The policy's 100 is sized for the Android core flow's 394-line
-# transcript; this lane drives one scenario whose complete transcript is
-# 128 lines (flutter-drive.log) in run 35376588206, the first green run after the
-# gate's rollout. 64 is half of that and far above the ~17 lines `flutter
-# drive` prints before the first test result, so a transcript that fails it
-# is one in which no test ran. (The provisional 20 was set blind: run
-# 35280144455's rc 1 on the dumpsys hits outranked the rc 4 beneath it and
-# containment deleted the transcript before it could be measured.)
+# drive=8, and it is deliberately NOT half a transcript's length, which is what
+# the previous 64 was. A `flutter drive` transcript is the tool's own output
+# INTERLEAVED with whatever logcat furniture the device happened to print, so
+# its length is not a property of the run: this lane's COMPLETE transcript
+# measured 127, 128, 130 and 131 lines across four green runs (35311161479,
+# 35376588206, 35397118356, 35524002720). Chasing that number is how a
+# complete capture was reddened in CI run 35464818348.
+#
+# "A test actually ran" is proven by the scanner instead, from the test
+# reporter's own progress line (`proof_of_run` on the `drive` class in
+# tooling/logscan/policy.toml). What is left for this floor is the other
+# failure — an empty or truncated file — so it is derived from what `flutter
+# drive` prints on the HOST, which no device chatter can change: `Installing …`
+# (flutter_tools installs unconditionally on every launch), the six
+# `VMServiceFlutterDriver:` connect lines (four unconditional; `Isolate is
+# paused at start.` and `Attempting to resume isolate` are the `kPauseStart`
+# branch of flutter_driver's vmservice_driver.dart, which `flutter drive`
+# guarantees by defaulting `--start-paused` to true — nothing in drive mode
+# resumes the root isolate, so another branch would mean a foreign debugger),
+# and the driver script's verdict
+# (`All tests passed.`, or `Failure Details:` when it is not). That is 8 in
+# every complete transcript of this lane, and the --self-test reds if this
+# floor ever exceeds it.
 #
 # relay=7. The policy's 1 is sized for the hermetic host relay, which prints a
-# single listen line; this lane's relay is strfry, whose `docker logs` dump is
-# 14-23 lines for a full run, of which the first 9 are a fixed startup block.
-# 7 is half the smallest complete dump, so a dump below it is truncated or
-# absent — which is what a container torn down before the dump looks like: ONE
-# line of docker error text.
-readonly -a SEAL_EXTRA=(--host-decl "coordinate=${GEO_LAT},${GEO_LON}" --floor drive=64 --floor relay=7)
+# single listen line; this lane's relay is strfry, whose `docker logs` dump
+# OPENS with a fixed 9-line startup block and grows only with traffic
+# (9-49 lines across the fleet's green runs; exactly 9 for a target whose relay
+# serves nothing it logs). 7 sits under the block every LIVE container prints,
+# while one torn down before the dump yields ONE line of docker error text — so
+# this floor tells those two apart without depending on how much traffic the
+# target happened to generate.
+readonly -a SEAL_EXTRA=(--host-decl "coordinate=${GEO_LAT},${GEO_LON}" --floor drive=8 --floor relay=7)
 
 # ---------------------------------------------------------------------------
 # Cleanup (EXIT trap): stop the background helpers, run the MANDATORY

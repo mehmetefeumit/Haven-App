@@ -1822,7 +1822,7 @@ run_self_test() {
   # Pinned by EQUALITY, never by a floor: the run used to end with a hard-coded
   # "all N fixtures passed" and no counter, so deleting a case left the message
   # — and the exit code — untouched. Mirrors check_android_location_power.sh.
-  local -r SELF_TEST_FIXTURES=108
+  local -r SELF_TEST_FIXTURES=112
   local tmp fail=0 checked=0 got
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
@@ -3404,19 +3404,19 @@ wait ${bound_at:-?}, kill ${kill_at:-?}, wait ${wait_at:-?}, read ${read_at:-?})
     fail=1
   fi
   _case
-  local gate_lit='logscan_gate host /tmp/haven-soak/needles --host-decl "coordinate=${GEO_LAT},${GEO_LON}" --   --sink "logcat=${LOGCAT_FILE}" --sink "drive=${DRIVE_LOG}"   --report "${LOGSCAN_REPORTS}/gate.ndjson" || LOGSCAN_GATE_RC=$?'
+  local gate_lit='logscan_gate host /tmp/haven-soak/needles "${SEAL_EXTRA[@]}" --   --sink "logcat=${LOGCAT_FILE}" --sink "drive=${DRIVE_LOG}"   --report "${LOGSCAN_REPORTS}/gate.ndjson" || LOGSCAN_GATE_RC=$?'
   got="$(awk -v lit="${gate_lit}" \
          'index($0, lit) == 1 { n++ } END { print n + 0 }' <<<"${joined}")"
   if [[ "${got}" != "1" ]]; then
     echo "SELF-TEST FAIL (67b): the gate no longer names the logcat, the drive" \
-         "log and the injected point with the report beside the uploaded" \
+         "log and this lane's seal claim with the report beside the uploaded" \
          "directory (found ${got})" >&2
     fail=1
   fi
   _case
   trap_body="$(sed -n '/^cleanup() {/,/^}/p' <<<"${joined}")"
   dump_at="$(grep -nF 'docker logs strfry > "${LOG_DIR}/strfry.final.log"' <<<"${trap_body}" | cut -d: -f1 | head -n 1 || true)"
-  scan_at="$(grep -nF 'logscan_gate_dir host /tmp/haven-soak/needles "${LOG_DIR}" "${LOGSCAN_REPORTS}/exit.ndjson" --host-decl "coordinate=${GEO_LAT},${GEO_LON}"     || scan_rc=$?' <<<"${trap_body}" \
+  scan_at="$(grep -nF 'logscan_gate_dir host /tmp/haven-soak/needles "${LOG_DIR}" "${LOGSCAN_REPORTS}/exit.ndjson" "${SEAL_EXTRA[@]}"     || scan_rc=$?' <<<"${trap_body}" \
     | cut -d: -f1 | head -n 1 || true)"
   exit_at="$(grep -nF 'exit "${rc}"' <<<"${trap_body}" | cut -d: -f1 | head -n 1 || true)"
   if [[ -z "${dump_at}" || -z "${scan_at}" || -z "${exit_at}" ]] \
@@ -3438,6 +3438,77 @@ wait ${bound_at:-?}, kill ${kill_at:-?}, wait ${wait_at:-?}, read ${read_at:-?})
   _case
   if ! declare -f logscan_gate | grep -q 'HAVEN_LOGSCAN'; then
     echo "SELF-TEST FAIL (67e): the sourced gate has no HAVEN_LOGSCAN arm" >&2
+    fail=1
+  fi
+  # (67f) The seal claim both gates pass is this lane's injected point AND its
+  #       drive floor, pinned at the ONE place they live. Every gate after the
+  #       first reuses the manifest the pre-seal wrote, so a declaration that
+  #       reached a gate but not this array would be silently dropped — a
+  #       coordinate the scan never searches its own captures for, which looks
+  #       exactly like a clean run.
+  _case
+  local extra_lit='readonly -a SEAL_EXTRA=(--host-decl "coordinate=${GEO_LAT},${GEO_LON}" --floor drive=9 --floor relay=7)'
+  got="$(awk -v lit="${extra_lit}" \
+         'index($0, lit) == 1 { n++ } END { print n + 0 }' "${self}")"
+  if [[ "${got}" != "1" ]]; then
+    echo "SELF-TEST FAIL (67f): the seal extras no longer carry the injected" \
+         "point and this lane's drive and relay floors (found ${got})" >&2
+    fail=1
+  fi
+  # (67g) …and the pre-seal that writes them runs before the EXIT trap is
+  #       armed: the host profile REUSES whatever manifest is at the out path,
+  #       so a pre-seal moved below the trap leaves the policy defaults sealed
+  #       and both the declaration and the floor silently inoperative.
+  _case
+  local seal_at trap_at
+  seal_at="$(grep -n -m1 '^logscan_seal host /tmp/haven-soak/needles "${SEAL_EXTRA\[@\]}" || seal_rc=$?$' \
+    "${self}" | cut -d: -f1 || true)"
+  trap_at="$(grep -n -m1 '^trap cleanup EXIT$' "${self}" | cut -d: -f1 || true)"
+  if [[ -z "${seal_at}" || -z "${trap_at}" ]] || (( seal_at > trap_at )); then
+    echo "SELF-TEST FAIL (67g): the manifest must be sealed once before the EXIT" \
+         "trap is armed (seal='${seal_at}', trap='${trap_at}')" >&2
+    fail=1
+  fi
+  # (67h) …and that drive floor stays derived from what `flutter drive` prints
+  #       on the HOST rather than from a transcript's length. The fixture is
+  #       this lane's host-printed skeleton interleaved with forwarded device
+  #       chatter, exactly as a real capture is: the floor may not exceed the
+  #       skeleton, so a number measured from a whole transcript (249 was the
+  #       shortest complete one) is rejected by the same check. Without this,
+  #       the next red lane gets re-pinned from a length again — which is how a
+  #       COMPLETE capture was reddened in CI run 35464818348.
+  local host_printed_re printed drive_floor
+  host_printed_re='^(Installing |VMServiceFlutterDriver: |All tests passed\.|Failure Details:|Leaving the application running\.)'
+  printf '%s\n' \
+    'Installing /tmp/integration-apks/b1_fgs_publish_test.apk...      8.7s' \
+    'I/Choreographer( 4472): Skipped 147 frames!' \
+    'VMServiceFlutterDriver: Connecting to Flutter application at <endpoint>' \
+    'VMServiceFlutterDriver: Isolate found with number: <n>' \
+    'VMServiceFlutterDriver: Isolate <n> is runnable.' \
+    'VMServiceFlutterDriver: Isolate is paused at start.' \
+    'VMServiceFlutterDriver: Attempting to resume isolate' \
+    'VMServiceFlutterDriver: Connected to Flutter application.' \
+    'I/flutter ( 4472): 00:00 +0: B1: the foreground service publishes' \
+    'I/flutter ( 4472): 05:12 +2: All tests passed!' \
+    'All tests passed.' \
+    'Leaving the application running.' > "${tmp}/host-printed.drive.log"
+  printed="$(grep -cE "${host_printed_re}" "${tmp}/host-printed.drive.log" || true)"
+  _case
+  if [[ "${printed}" != "9" ]]; then
+    echo "SELF-TEST FAIL (67h): the fixture must carry this lane's 9-line" \
+         "host-printed skeleton, counted ${printed} — the check below would" \
+         "otherwise be measuring the wrong thing" >&2
+    fail=1
+  fi
+  drive_floor="$(sed -n -E 's/^readonly -a SEAL_EXTRA=\(.*--floor drive=([0-9]+).*/\1/p' "${self}")"
+  _case
+  if [[ -z "${drive_floor}" ]] || (( drive_floor < 1 || drive_floor > printed )); then
+    echo "SELF-TEST FAIL (67i): drive=${drive_floor:-none} is not within the" \
+         "${printed} line(s) \`flutter drive\` prints on the host. A drive floor" \
+         "is calibrated to those alone; a higher one was measured from a" \
+         "transcript that also carried forwarded logcat furniture, which is not" \
+         "a property of the run. 'A test ran' is the scanner's proof_of_run," \
+         "not this number." >&2
     fail=1
   fi
 
@@ -3577,7 +3648,7 @@ cleanup() {
   adb -s "${DEVICE}" shell dumpsys battery reset >/dev/null 2>&1 || true
   docker logs strfry > "${LOG_DIR}/strfry.final.log" 2>&1 || true
   echo "== Log-privacy scan over ${LOG_DIR} (Security Rules 6 and 15) =="
-  logscan_gate_dir host /tmp/haven-soak/needles "${LOG_DIR}" "${LOGSCAN_REPORTS}/exit.ndjson" --host-decl "coordinate=${GEO_LAT},${GEO_LON}" \
+  logscan_gate_dir host /tmp/haven-soak/needles "${LOG_DIR}" "${LOGSCAN_REPORTS}/exit.ndjson" "${SEAL_EXTRA[@]}" \
     || scan_rc=$?
   if (( scan_rc == 1 || LOGSCAN_GATE_RC == 1 )); then
     # CONTAINMENT, not just detection. The workflow uploads ${LOG_DIR} with
@@ -3608,6 +3679,69 @@ cleanup() {
   bash "${STOP_STRFRY}" >/dev/null 2>&1 || true
   exit "${rc}"
 }
+
+# This lane's whole seal claim, in ONE place because every gate after the first
+# reuses the manifest the first one wrote: a `--host-decl` passed to a later
+# gate alone would be silently dropped, and the captures would never be
+# searched for the point this lane feeds the emulator's GPS.
+#
+# drive=9. A floor is what turns "the scan read an empty or truncated file and
+# found nothing" into rc 4 instead of a green, so it is calibrated to the part
+# of a capture its PRODUCER always writes — never to what would make this lane
+# pass, and never to a length the device can change. Until now this lane sealed
+# no floor at all, so the policy default of 100 applied to its single transcript
+# (tooling/logscan/policy.toml) against complete captures of 249, 266, 279 and
+# 290 lines across four green runs (35311161479, 35376588206, 35397118356,
+# 35524002720) — a number that is not a property of the run at all, since a
+# `flutter drive` transcript is the tool's own output INTERLEAVED with whatever
+# logcat furniture the device happened to print. Chasing it is how a COMPLETE
+# capture was reddened in CI run 35464818348.
+#
+# "A test actually ran" is proven by the scanner instead, from the test
+# reporter's own progress line (`proof_of_run` on the `drive` class in
+# policy.toml). What is left for this floor is the other failure — an empty or
+# truncated file — so it is derived from what `flutter drive` prints on the
+# HOST, which no device chatter can change: `Installing …` (flutter_tools
+# installs unconditionally on every launch), the six `VMServiceFlutterDriver:`
+# connect lines (four unconditional; `Isolate is paused at start.` and
+# `Attempting to resume isolate` are the `kPauseStart` branch of
+# flutter_driver's vmservice_driver.dart, which `flutter drive` guarantees by
+# defaulting `--start-paused` to true — nothing in drive mode resumes the root
+# isolate, so another branch would mean a foreign debugger),
+# the driver's own closing verdict, and
+# `Leaving the application running.` — this lane passes `--keep-app-running`,
+# which is load-bearing here (see the drive below), so its skeleton is the
+# nine-line one rather than the eight a lane that lets the drive stop the app
+# prints. That is 9 in each of the four transcripts above, and the --self-test
+# reds if this floor ever exceeds the skeleton.
+#
+# relay=7. The policy's 1 is sized for the hermetic host relay, which prints a
+# single listen line; this lane's relay is strfry, started from the same
+# digest-pinned image and the same checked-in strfry.conf as every other
+# Android lane (start-strfry.sh), whose `docker logs` dump OPENS with a fixed
+# 9-line startup block — arguments, current dir, verbosity, the rule, the two
+# CONFIG lines, the ephemeral-events WARN, `Started websocket server` — and
+# grows only with traffic. Measured on THIS lane's own dumps: 44/45/48/49 lines
+# across the four green runs above, the first 9 identical in all four, the 10th
+# the first connection-dependent line. 7 sits under the block every LIVE
+# container prints, while one torn down before the dump yields ONE line of
+# docker error text — which a floor of 1 certifies clean. So this floor tells
+# those two apart without depending on how much traffic the run happened to
+# generate.
+#
+# Sealed ONCE, before the first gate: every later gate reuses the manifest at
+# the out path, so without this the post-drive gate would seal this lane's
+# manifest with the policy defaults instead.
+readonly -a SEAL_EXTRA=(--host-decl "coordinate=${GEO_LAT},${GEO_LON}" --floor drive=9 --floor relay=7)
+seal_rc=0
+logscan_seal host /tmp/haven-soak/needles "${SEAL_EXTRA[@]}" || seal_rc=$?
+if (( seal_rc != 0 )); then
+  echo "ERROR: could not seal this lane's needle manifest (rc ${seal_rc}) — see the" \
+       "line(s) above; every gate would fail the same way, so nothing this run" \
+       "captures can be proven clean." >&2
+  exit 1
+fi
+
 trap cleanup EXIT
 
 fail() {
@@ -3967,8 +4101,11 @@ rm -f "${sample_part}"
 # STEP log, which has no retention control and cannot be redacted after the
 # fact — a wider, more permanent sink than the artifact upload. The gate is
 # the key-material floor AND the identifier scanner, sealed from the host
-# needles plus the point this lane injected; a leak deletes both captures.
-logscan_gate host /tmp/haven-soak/needles --host-decl "coordinate=${GEO_LAT},${GEO_LON}" -- \
+# needles plus this lane's own seal claim (SEAL_EXTRA: the point it injected
+# and its drive floor). The pre-seal above already wrote the manifest, so these
+# extras are the same array that produced it rather than a second, drifting
+# copy. A leak deletes both captures.
+logscan_gate host /tmp/haven-soak/needles "${SEAL_EXTRA[@]}" -- \
   --sink "logcat=${LOGCAT_FILE}" --sink "drive=${DRIVE_LOG}" \
   --report "${LOGSCAN_REPORTS}/gate.ndjson" || LOGSCAN_GATE_RC=$?
 drive_log_clean=$(( LOGSCAN_GATE_RC == 0 ))

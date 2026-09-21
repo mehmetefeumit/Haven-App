@@ -77,13 +77,16 @@
 #                    (run-b4-ios-real-gps.sh), declared at seal time beside the
 #                    host needles. Never echoed.
 #   HAVEN_LOGSCAN_DRIVE_FLOOR  This lane's `drive` line floor, sealed as
-#                    `--floor drive=<n>`. A floor is calibrated to the smallest
-#                    COMPLETE transcript of ITS lane, and the policy default
-#                    (100) is the long core-flow drive's: a single-scenario
-#                    b-lane prints a third of that on a fully passing run, so
-#                    each such lane states its own rather than the default
-#                    reading every green run as truncated. Unset keeps the
-#                    policy's.
+#                    `--floor drive=<n>`. The policy default (100) is the long
+#                    core-flow drive's, which a single-scenario b-lane would
+#                    read as truncated on a fully passing run, so each such lane
+#                    states its own. It must be DERIVED from the host skeleton
+#                    below, never measured from a transcript's length: a number
+#                    above IOS_HOST_SKELETON_LINES is refused at script start,
+#                    before anything can have been captured — never on the gate
+#                    path, where a refusal would leave a transcript unscanned.
+#                    "A test ran" is the scanner's proof_of_run, not this
+#                    number. Unset keeps the policy's.
 #
 # Retry discipline (CI_HARDENING_BACKLOG.md A6):
 #   Both iOS callers wrap this script in `nick-fields/retry@v3` with no
@@ -323,6 +326,43 @@ run_ios_test_with_watchdog() {
 # the run minted, so it is exempted from S7/S12 and never declared. The gate
 # already exempts RELAY_URL and the proxy's two spellings; what it cannot know
 # is the profile pool and the Blossom server, which only the profile lane sets.
+
+# The lines an iOS `flutter test -d <udid>` transcript carries whatever the app
+# printed — its HOST skeleton, the iOS twin of the `VMServiceFlutterDriver:`
+# block run-b3-real-gps.sh derives its Android floor from:
+#   1. the expanded reporter's `HH:MM +N: loading <suite>.dart`, written before
+#      anything is built;
+#   2. flutter_tools' `Running Xcode build...`, and
+#   3. its `Xcode build done.  <n>s` — an incremental build prints both exactly
+#      as a cold one does (measured across every iOS upload of CI runs
+#      35280144455, 35397118356 and 35622556197);
+#   4. the reporter's first test-start line, which the scanner's `proof_of_run`
+#      separately requires.
+# Nothing else is a property of the RUN: the rest of a transcript is whatever
+# the scenario chose to print, which is why floors measured from a transcript's
+# length (22/24/27/56, each half of one) redden a lane for printing less than
+# last time — CI run 35464818348 on the Android side. A floor is a MINIMUM, so
+# this bound holds for a sink of several transcripts too; it only grows weaker
+# there, never wrong.
+readonly IOS_HOST_SKELETON_LINES=4
+
+# ios_drive_floor_ok <n> — refuses a floor that is not derived from that
+# skeleton. Called ONCE, at script start (below the --self-test dispatch), never
+# on the gate path: a refusal there would mean a mis-set floor skipped the gate
+# and left the transcript the failure upload publishes unscanned and
+# uncontained, which is the one outcome the gate exists to prevent.
+ios_drive_floor_ok() {
+  if ! [[ "$1" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: HAVEN_LOGSCAN_DRIVE_FLOOR must be an integer in 1..${IOS_HOST_SKELETON_LINES}, got '$1'" >&2
+    return 1
+  fi
+  if (( $1 > IOS_HOST_SKELETON_LINES )); then
+    echo "ERROR: HAVEN_LOGSCAN_DRIVE_FLOOR=$1 is outside 1..${IOS_HOST_SKELETON_LINES}, the host skeleton an iOS transcript always carries. A higher number can only have been measured from one transcript's length, which is not a property of the run; what proves a test ran is the scanner's proof_of_run, not this number." >&2
+    return 1
+  fi
+  return 0
+}
+
 scan_log_or_contain() {
   local profile="${HAVEN_LOGSCAN_PROFILE:-}"
   if [[ -z "${profile}" ]]; then
@@ -352,6 +392,9 @@ scan_log_or_contain() {
   local -a lane=()
   [[ -z "${HAVEN_LOGSCAN_HOST_COORDINATE:-}" ]] \
     || lane=(--host-decl "coordinate=${HAVEN_LOGSCAN_HOST_COORDINATE}")
+  # Whatever the floor says, this function SCANS: the value was validated at
+  # script start, and a refusal here would leave a transcript that exists
+  # unscanned and uncontained while the workflow's failure upload still ran.
   [[ -z "${HAVEN_LOGSCAN_DRIVE_FLOOR:-}" ]] \
     || lane+=(--floor "drive=${HAVEN_LOGSCAN_DRIVE_FLOOR}")
   # The profile pool is three `ws://` URLs, which is an S7 hit on any
@@ -420,7 +463,17 @@ scenario_transcript() {
 # resulting log to the REAL classifier. That last step is also the anti-drift
 # proof: if the marker the watchdog writes ever stops being the marker the
 # classifier requires, fixture W1 fails.
+#
+# The count below is pinned by EQUALITY, and counts CASES — each distinct input
+# driven through the thing under test, loop iterations included — not the
+# assertions made about them, because several assertions can rest on one run.
+# A summary printed from whatever happened to run would report "all passed"
+# over a case somebody deleted, which is how the floor cases added in
+# 2026-09 went in with nothing pinning them.
 # ---------------------------------------------------------------------------
+readonly IOS_SIM_SELF_TEST_FIXTURES=30
+readonly IOS_SIM_WATCHDOG_CASES=9
+
 run_self_test() {
   # Drive the watchdog on a compressed clock. The deadline constants are
   # `readonly` on purpose (they gate a 45-minute step), so re-exec once with a
@@ -432,7 +485,7 @@ run_self_test() {
       exec bash "${BASH_SOURCE[0]}" --self-test
   fi
 
-  local tmp fail=0 log
+  local tmp fail=0 log ran=0
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
   trap "rm -rf '${tmp}'" RETURN
@@ -444,6 +497,7 @@ run_self_test() {
   local real_spawn
   real_spawn="$(declare -f spawn_ios_test)"
 
+  ran=$(( ran + 1 ))
   # (W1) THE ADMITTED FLAKE — build completes, then the suite never speaks.
   #      The watchdog MUST fire, mark the log, and kill the run, and the REAL
   #      classifier MUST accept the result as retryable.
@@ -470,6 +524,7 @@ run_self_test() {
     fail=1
   fi
 
+  ran=$(( ran + 1 ))
   # (W2) A HEALTHY, SLOW SUITE — it STARTS, then keeps working well past the
   #      watchdog deadline. The watchdog MUST stand down: killing a running
   #      suite at a fixed deadline would be a self-inflicted flake, and it is
@@ -500,6 +555,7 @@ run_self_test() {
     fail=1
   fi
 
+  ran=$(( ran + 1 ))
   # (W3) A GENUINE FAST FAILURE. The watchdog must not touch it, the true exit
   #      code must survive, and the classifier must refuse to retry it.
   spawn_ios_test() {
@@ -520,6 +576,7 @@ run_self_test() {
     fail=1
   fi
 
+  ran=$(( ran + 1 ))
   # (W4) THE BUILD IS NOT WATCHED. A build that outlives the deadline must NOT
   #      arm the watchdog: a hung or failed build is deterministic, and retrying
   #      it hides it for another ten minutes.
@@ -541,6 +598,7 @@ run_self_test() {
     fail=1
   fi
 
+  ran=$(( ran + 1 ))
   # (W5) THE ADMITTED FLAKE, WITH A CHILD THAT SPEAKS ON ITS WAY OUT — the case
   #      that cost CI run 30964250098 its retry, and which NO fixture covered:
   #      every stub above dies silently, so `>` and `>>` were indistinguishable
@@ -590,6 +648,7 @@ run_self_test() {
     fail=1
   fi
 
+  ran=$(( ran + 1 ))
   # (W5d) THE PRODUCTION REDIRECT ITSELF. Every fixture here overrides
   #       `spawn_ios_test` wholesale, so none of them can observe how the REAL
   #       one redirects — reverting it to `>` would leave all of them green
@@ -613,6 +672,7 @@ run_self_test() {
     fail=1
   fi
 
+  ran=$(( ran + 1 ))
   # (W6) THE NEGATIVE TWIN. The same post-kill log SHAPE, but with no flag and
   #      no snapshot: nothing our watchdog produced. That is what an outer
   #      attempt timeout (SIGKILL from the retry action) leaves behind, and it
@@ -631,6 +691,7 @@ run_self_test() {
     fail=1
   fi
 
+  ran=$(( ran + 1 ))
   # (W7) A stale verdict must not be inherited. W5 left a flag and a snapshot on
   #      `${log}`; a fresh run that fails GENUINELY must clear them, or attempt 2
   #      would inherit attempt 1's retryable verdict.
@@ -654,6 +715,7 @@ run_self_test() {
     fail=1
   fi
 
+  ran=$(( ran + 1 ))
   # (W8) THE REPORTER IS PINNED. Everything above is about how the watchdog
   #      reacts to a log; this is about which log `flutter test` produces at
   #      all. Left to itself flutter_tools picks the `github` reporter in CI,
@@ -705,6 +767,7 @@ run_self_test() {
   printf '%s\n' '#!/usr/bin/env bash' 'exit "${FAKE_SCAN_RC}"' > "${fake_scan}"
   gate_log="${tmp}/gate.log"
   for want in 1 3 0; do
+    ran=$(( ran + 1 ))
     printf 'transcript\n' > "${gate_log}"
     rm -f "${tmp}"/gate.*.log
     rc=0
@@ -740,6 +803,7 @@ run_self_test() {
     fi
   done
 
+  ran=$(( ran + 1 ))
   # (S2) THE GATE IS HARD, AND FIRST. Read from the real run (everything from
   #      the LOG_FILE definition down, comments stripped): the transcript goes
   #      through the gate at top level, BEFORE the retry classification that
@@ -810,6 +874,7 @@ run_self_test() {
   local gate_drive="${gate_log}"
   real_gate="$(declare -f logscan_gate)"
   logscan_gate() { printf '%s\n' "$@" > "${gate_argv}"; return "${FAKE_GATE_RC}"; }
+  ran=$(( ran + 1 ))
   local -a want_argv=(proxy /tmp/haven-soak/needles --
     --sink "drive=${gate_drive}" --report /tmp/ios-logscan/sim.ndjson)
   rc=0
@@ -823,6 +888,7 @@ run_self_test() {
          "${rc} with '$(tr '\n' ' ' < "${gate_argv}")'" >&2
     fail=1
   fi
+  ran=$(( ran + 1 ))
   want_argv=(host /tmp/haven-soak/needles --host-decl 'coordinate=-63.076429,-141.927821' --
     --sink "drive=${gate_drive}" --report /tmp/ios-logscan/sim.ndjson)
   rc=0
@@ -842,13 +908,93 @@ run_self_test() {
   # when the lane states one. The policy default is the core-flow drive's, and
   # a b-lane that took it would read its own complete transcript as truncated
   # (CI run 35280144455: 45, 49 and 54 lines against a floor of 100).
-  want_argv=(host /tmp/haven-soak/needles --floor drive=22 --
+  #
+  # …and the number itself is DERIVED, not measured. The fixture below is a
+  # real iOS transcript's opening — the build-only prefix of CI run
+  # 35280144455's B4 upload, verbatim, plus the one test-start line that makes
+  # it a run — interleaved with the app output a scenario happens to print. Only
+  # the host skeleton is a property of the run, so the floor may not exceed it,
+  # which is what refuses a number taken from a transcript's length.
+  ran=$(( ran + 1 ))
+  local ios_skeleton_re printed
+  ios_skeleton_re='^([0-9]{2}:[0-9]{2} \+[0-9]+( -[0-9]+)?: |Running Xcode build|Xcode build done)'
+  printf '%s\n' \
+    '00:00 +0: loading /Users/runner/work/Haven-App/Haven-App/haven/integration_test/b4_ios_real_gps_test.dart' \
+    'The following plugins do not support Swift Package Manager for ios:' \
+    '  - rust_lib_haven' \
+    'Running Xcode build...                                          ' \
+    'Xcode build done.                                           74.2s' \
+    '00:00 +0: B4: publish a REAL simulator GPS fix' \
+    '[b4] LOCATION_AUTH_OK status=LocationPermissionStatus.whileInUse' \
+    '[ScenarioHarness] bootstrapped role=ScenarioRole.solo' > "${tmp}/ios-skeleton.drive.log"
+  printed="$(grep -cE "${ios_skeleton_re}" "${tmp}/ios-skeleton.drive.log" || true)"
+  if [[ "${printed}" != "${IOS_HOST_SKELETON_LINES}" ]]; then
+    echo "SELF-TEST FAIL (S3): the fixture carries ${printed} host-skeleton" \
+         "line(s), and IOS_HOST_SKELETON_LINES pins ${IOS_HOST_SKELETON_LINES}." \
+         "A floor derived from a number nothing counts is a measurement again." >&2
+    fail=1
+  fi
+  # …so a floor that is not derived from it is refused AT SCRIPT START, before
+  # any capture can exist. Driven by RE-RUNNING THIS SCRIPT with no arguments:
+  # the refusal has to precede even the usage error, so a lane that mis-set the
+  # floor never builds, never launches and never writes a transcript. The old
+  # refusal lived in scan_log_or_contain instead — on the very path the
+  # workflows upload `if: failure()` — where it meant the key-material floor
+  # never ran, nothing was contained, and the artifact step published the
+  # transcript anyway.
+  local bad out floor_rc
+  for bad in "$(( IOS_HOST_SKELETON_LINES + 1 ))" 22 0 'four'; do
+    ran=$(( ran + 1 ))
+    floor_rc=0
+    out="$(HAVEN_LOGSCAN_DRIVE_FLOOR="${bad}" bash "${BASH_SOURCE[0]}" 2>&1)" || floor_rc=$?
+    if (( floor_rc != 2 )) || ! grep -qF 'HAVEN_LOGSCAN_DRIVE_FLOOR' <<<"${out}" \
+       || grep -qF 'usage:' <<<"${out}"; then
+      echo "SELF-TEST FAIL (S3): a drive floor of '${bad}' is not derived from" \
+           "the ${IOS_HOST_SKELETON_LINES}-line host skeleton and must stop the" \
+           "script before it reads its arguments; got rc ${floor_rc} with" \
+           "'$(tr '\n' ' ' <<<"${out}")'" >&2
+      fail=1
+    fi
+  done
+  # …and the control, so the refusal above is the floor's and not an artefact of
+  # calling this script with no arguments: a DERIVED floor gets past it and the
+  # run stops on the usage error instead.
+  ran=$(( ran + 1 ))
+  floor_rc=0
+  out="$(HAVEN_LOGSCAN_DRIVE_FLOOR="${IOS_HOST_SKELETON_LINES}" bash "${BASH_SOURCE[0]}" 2>&1)" || floor_rc=$?
+  if (( floor_rc != 2 )) || ! grep -qF 'usage:' <<<"${out}" \
+     || grep -qF 'HAVEN_LOGSCAN_DRIVE_FLOOR' <<<"${out}"; then
+    echo "SELF-TEST FAIL (S3): a floor of ${IOS_HOST_SKELETON_LINES} is derived" \
+         "from the host skeleton and must pass the start-up check; got rc" \
+         "${floor_rc} with '$(tr '\n' ' ' <<<"${out}")'" >&2
+    fail=1
+  fi
+  # …while the gate path itself no longer refuses ANYTHING: a transcript that
+  # exists is scanned and its verdict returned, floor or no floor. This is the
+  # half the old `|| return 2` broke — it skipped the gate on a capture the
+  # failure upload was about to publish.
+  ran=$(( ran + 1 ))
+  rc=0
+  rm -f "${tmp}"/gate.*.log "${gate_argv}"
+  SCENARIO_FILE=integration_test/e2e/e2e_combined.dart \
+    HAVEN_LOGSCAN=true HAVEN_LOGSCAN_PROFILE=host HAVEN_LOGSCAN_HOST_COORDINATE= \
+    HAVEN_LOGSCAN_DRIVE_FLOOR=99 HAVEN_E2E_PROFILE_RELAYS= HAVEN_E2E_BLOSSOM_URL= \
+    FAKE_GATE_RC=1 scan_log_or_contain "${gate_log}" || rc=$?
+  if (( rc != 1 )) || [[ ! -e "${gate_argv}" ]] \
+     || [[ -e "${tmp}/gate.e2e_combined.log" ]]; then
+    echo "SELF-TEST FAIL (S3): a capture that exists must be scanned and" \
+         "contained whatever the floor says; got rc ${rc}$([[ -e "${gate_argv}" ]] || echo ' with the gate never called')." >&2
+    fail=1
+  fi
+  rm -f "${tmp}"/gate.*.log "${gate_argv}"
+  ran=$(( ran + 1 ))
+  want_argv=(host /tmp/haven-soak/needles "--floor" "drive=${IOS_HOST_SKELETON_LINES}" --
     --sink "drive=${gate_drive}" --report /tmp/ios-logscan/sim.ndjson)
   rc=0
   rm -f "${tmp}"/gate.*.log
   SCENARIO_FILE=integration_test/e2e/e2e_combined.dart \
     HAVEN_LOGSCAN=true HAVEN_LOGSCAN_PROFILE=host HAVEN_LOGSCAN_HOST_COORDINATE= \
-    HAVEN_LOGSCAN_DRIVE_FLOOR=22 HAVEN_E2E_PROFILE_RELAYS= HAVEN_E2E_BLOSSOM_URL= \
+    HAVEN_LOGSCAN_DRIVE_FLOOR="${IOS_HOST_SKELETON_LINES}" HAVEN_E2E_PROFILE_RELAYS= HAVEN_E2E_BLOSSOM_URL= \
     FAKE_GATE_RC=0 scan_log_or_contain "${gate_log}" || rc=$?
   if (( rc != 0 )) || [[ "$(cat "${gate_argv}")" != "$(printf '%s\n' "${want_argv[@]}")" ]]; then
     echo "SELF-TEST FAIL (S3): a lane's drive floor must be one --floor seal" \
@@ -870,6 +1016,7 @@ run_self_test() {
   local spelling
   for spelling in 'ws://localhost:7778,ws://localhost:7779,ws://localhost:7780' \
                   'ws://localhost:7778 ws://localhost:7779 ws://localhost:7780'; do
+    ran=$(( ran + 1 ))
     rc=0
     rm -f "${tmp}"/gate.*.log
     SCENARIO_FILE=integration_test/e2e/e2e_combined.dart \
@@ -887,6 +1034,7 @@ run_self_test() {
   done
   # …and a lane that configures neither passes neither: an exemption nobody
   # asked for is a rule switched off for free.
+  ran=$(( ran + 1 ))
   want_argv=(host /tmp/haven-soak/needles --
     --sink "drive=${gate_drive}" --report /tmp/ios-logscan/sim.ndjson)
   rc=0
@@ -908,6 +1056,7 @@ run_self_test() {
   # second gate has to weigh the first scenario's PRESERVED transcript with it,
   # or every green core-flow run is rc 4. Per-step floors cannot substitute:
   # the first gate sealed the manifest and this one reuses it.
+  ran=$(( ran + 1 ))
   rm -f "${tmp}"/gate.*.log
   printf 'the core flow, preserved by its own gate\n' > "${tmp}/gate.e2e_combined.log"
   want_argv=(host /tmp/haven-soak/needles --
@@ -941,6 +1090,7 @@ run_self_test() {
   #      inherits all).
   local inferred spec label sentinel upstream
   for spec in 'sentinel|HAVEN_WIRE_SENTINEL:cafe||proxy' 'upstream||ws://127.0.0.1:7777|proxy' 'neither|||host'; do
+    ran=$(( ran + 1 ))
     IFS='|' read -r label sentinel upstream want <<<"${spec}"
     rc=0
     rm -f "${tmp}"/gate.*.log
@@ -962,8 +1112,16 @@ run_self_test() {
     echo "run-ios-sim-scenario.sh --self-test: FAILED" >&2
     return 1
   fi
-  echo "run-ios-sim-scenario.sh --self-test: all 8 watchdog fixtures and the" \
-       "four log-privacy-gate fixture groups passed" \
+  if (( ran != IOS_SIM_SELF_TEST_FIXTURES )); then
+    echo "run-ios-sim-scenario.sh --self-test: FAILED — ran ${ran} case(s)," \
+         "expected exactly ${IOS_SIM_SELF_TEST_FIXTURES}; a case was added or" \
+         "removed without moving the pin" >&2
+    return 1
+  fi
+  echo "run-ios-sim-scenario.sh --self-test: all ${ran} cases passed" \
+       "(${IOS_SIM_WATCHDOG_CASES} watchdog," \
+       "$(( IOS_SIM_SELF_TEST_FIXTURES - IOS_SIM_WATCHDOG_CASES ))" \
+       "log-privacy-gate)" \
        "(a post-build stall is caught, marked and accepted by the classifier," \
        "and stays retryable even when the process we kill overwrites the marker" \
        "on its way out; a running suite, a genuine failure, a slow build, a kill" \
@@ -975,7 +1133,10 @@ run_self_test() {
        "the retry classification with no echo of the transcript beside it," \
        "hands the sourced gate the job's profile, the transcript, a seeded" \
        "position and this lane's own drive floor when it supplies them," \
-       "infers proxy from either recorder" \
+       "refuses at SCRIPT START — before any capture can exist — a drive floor" \
+       "outside the four-line host skeleton an iOS transcript always carries," \
+       "while scanning and containing a capture that does exist whatever that" \
+       "floor says, infers proxy from either recorder" \
        "export and host from neither when no profile is stated, and refuses a" \
        "mistyped profile before the build)."
   return 0
@@ -984,6 +1145,20 @@ run_self_test() {
 if [[ "${1:-}" == "--self-test" ]]; then
   run_self_test
   exit $?
+fi
+
+# THE LANE'S DRIVE FLOOR, VALIDATED ONCE AND FIRST — before the arguments are
+# read, before the build, before anything can have been captured. It used to be
+# checked inside scan_log_or_contain, which runs on the very path the workflows
+# upload `if: failure()`: a mis-set floor refused THERE meant the key-material
+# floor never ran, the transcript was never contained, and the artifact step
+# published it anyway. Refused here, the lane costs seconds and captures
+# nothing; every iOS lane reaches the gate through this script (b4, b7, the
+# profile lane's iOS job and the background-publish wrapper all delegate), so
+# one call covers them all.
+if [[ -n "${HAVEN_LOGSCAN_DRIVE_FLOOR:-}" ]] \
+   && ! ios_drive_floor_ok "${HAVEN_LOGSCAN_DRIVE_FLOOR}"; then
+  exit 2
 fi
 
 SCENARIO_FILE="${1:-}"

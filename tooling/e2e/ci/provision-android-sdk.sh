@@ -296,7 +296,7 @@ provision_android_sdk() {
 # and both clock functions replaced, so nothing here sleeps or waits.
 # ---------------------------------------------------------------------------
 
-readonly SELF_TEST_FIXTURES=14
+readonly SELF_TEST_FIXTURES=15
 
 # write_fake_sdkmanager <root> <mode>
 #
@@ -305,6 +305,15 @@ readonly SELF_TEST_FIXTURES=14
 # fixture can count what ran. Every mode EXITS 0, because that is the harder
 # case to catch: the run is graded by what landed on disk, so an sdkmanager
 # that reports success over nothing must still fail closed.
+#
+# It answers ONE argv — `--install <package> --channel=0`, the shape the
+# production call at the top of this file uses and the shape the runner's own
+# action uses (`sdkmanager --install 'system-images;android-34;google_apis;
+# x86_64' --channel=0`, CI run 35524002720; our own four packages went through
+# it in run 35622556197). Anything else is refused, installs nothing and says
+# so, because a stand-in that says yes to any argv certifies a production call
+# that has drifted away from the one the real binary answers. Fixture (p) is
+# the control that proves the refusal.
 #
 #   ok       installs the package properly. Its emulator behaves like the real
 #            launcher on a HEADLESS host — version line always, rc 0 only with
@@ -322,10 +331,12 @@ write_fake_sdkmanager() {
 set -euo pipefail
 root="${root}"
 mode="${mode}"
-pkg=""
-for a in "\$@"; do
-  case "\${a}" in --*) ;; *) pkg="\${a}" ;; esac
-done
+if (( \$# != 3 )) || [[ "\$1" != "--install" || "\$3" != "--channel=0" ]] \\
+   || [[ -z "\$2" || "\$2" == -* ]]; then
+  echo "fake-sdkmanager: refusing argv; this stand-in answers only --install <package> --channel=0" >&2
+  exit 64
+fi
+pkg="\$2"
 echo "\${pkg}" >> "\${root}/invocations"
 n="\$(wc -l < "\${root}/invocations")"
 if [[ "\${mode}" == "nothing" ]]; then
@@ -579,6 +590,41 @@ run_self_test() {
     fail=1
   fi
 
+  # (p) THE FAKE'S OWN CONTROL. Every fixture above grades production against a
+  #     stand-in, so a stand-in that installs for ANY argv would certify a
+  #     production call that had drifted from the one the real binary answers —
+  #     which is the shape of the failure this whole script exists for: run
+  #     35536892150 reddened 13 lanes because a fake modelled behaviour nobody
+  #     had measured. The contract is `--install <package> --channel=0`, the
+  #     action's own invocation on the runner (CI run 35524002720, job
+  #     106116527092) and ours (run 35622556197, job 106414462323: four
+  #     packages, `verified on attempt 1/3`). So the fake must refuse anything
+  #     else, non-zero, installing nothing and saying so — otherwise dropping
+  #     `--channel=0` from the production call would still pass every fixture.
+  ran=$(( ran + 1 ))
+  root="${tmp}/p"; write_fake_sdkmanager "${root}" ok
+  local fake="${root}/cmdline-tools/latest/bin/sdkmanager" argv
+  for argv in 'install emulator --channel=0' \
+              '--install emulator --channel=0 --verbose' \
+              '--install emulator' \
+              '--install --channel=0'; do
+    rc=0
+    # shellcheck disable=SC2086
+    out="$("${fake}" ${argv} 2>&1)" || rc=$?
+    n="$(invocation_count "${root}")"
+    if (( rc == 0 )) || (( n != 0 )) || [[ "${out}" != *"refusing argv"* ]]; then
+      echo "SELF-TEST FAIL (p): the fake sdkmanager answered '${argv}', which is not --install <package> --channel=0; a yes-machine proves nothing about the production call (rc=${rc}, ${n} invocation(s))" >&2
+      fail=1
+    fi
+  done
+  rc=0
+  "${fake}" --install emulator --channel=0 >/dev/null 2>&1 || rc=$?
+  n="$(invocation_count "${root}")"
+  if (( rc != 0 )) || (( n != 1 )) || [[ ! -x "${root}/emulator/emulator" ]]; then
+    echo "SELF-TEST FAIL (p): the fake refused the production argv itself, so every fixture above is measuring the refusal rather than the behaviour (rc=${rc}, ${n} invocation(s))" >&2
+    fail=1
+  fi
+
   # (i) Static pins that no fixture can reach.
   #
   #   * A `return` with no operand: reached from a trap handler on bash < 5.3
@@ -623,7 +669,7 @@ run_self_test() {
     echo "${SCRIPT_NAME}: SELF-TEST FAILED — ran ${ran} fixture(s), expected exactly ${SELF_TEST_FIXTURES}; a fixture was added or removed without moving the pin" >&2
     return 1
   fi
-  echo "${SCRIPT_NAME}: self-test passed (${ran}/${SELF_TEST_FIXTURES} fixtures: a clean run installs and verifies exactly the four packages the arguments name; two transient failures are ridden out on the third attempt; an sdkmanager that exits 0 having installed nothing fails closed with one ::error:: naming the package, calling it infrastructure and saying no test ran; the fake emulator refuses a probe without -no-window, as a headless runner's does, so the clean run proves the flag is passed; an emulator whose binary does not run is caught by the probe, which says why, and its directory removed before the retry; a system image whose manifest landed without its system.img fails closed naming what is missing, and sdkmanager's download cache does not survive into the retry; an sdkmanager absent from both the SDK root and PATH exits ${RC_BROKEN}, distinct from that, while one reachable only through PATH still provisions; every wrong argument list prints usage, exits ${RC_BROKEN} and runs nothing; a package that exhausts the attempts stops the run at exactly ${PACKAGE_ATTEMPTS} invocations; a spent budget fails closed without starting another attempt, and an attempt that spends it is followed by no backoff; no operand-less \`return\`, no pipeline ending in a quiet grep, one backoff per pause; and the header's worst case is the one the constants add up to)."
+  echo "${SCRIPT_NAME}: self-test passed (${ran}/${SELF_TEST_FIXTURES} fixtures: a clean run installs and verifies exactly the four packages the arguments name; two transient failures are ridden out on the third attempt; an sdkmanager that exits 0 having installed nothing fails closed with one ::error:: naming the package, calling it infrastructure and saying no test ran; the fake emulator refuses a probe without -no-window, as a headless runner's does, so the clean run proves the flag is passed; an emulator whose binary does not run is caught by the probe, which says why, and its directory removed before the retry; a system image whose manifest landed without its system.img fails closed naming what is missing, and sdkmanager's download cache does not survive into the retry; an sdkmanager absent from both the SDK root and PATH exits ${RC_BROKEN}, distinct from that, while one reachable only through PATH still provisions; the fake sdkmanager itself answers ONLY the production argv, \`--install <package> --channel=0\`, refusing a missing --install, a missing package and an extra flag without installing anything, so a production call that drifts reds these fixtures instead of passing against a yes-machine; every wrong argument list prints usage, exits ${RC_BROKEN} and runs nothing; a package that exhausts the attempts stops the run at exactly ${PACKAGE_ATTEMPTS} invocations; a spent budget fails closed without starting another attempt, and an attempt that spends it is followed by no backoff; no operand-less \`return\`, no pipeline ending in a quiet grep, one backoff per pause; and the header's worst case is the one the constants add up to)."
   return 0
 }
 

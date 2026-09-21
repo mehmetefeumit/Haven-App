@@ -47,7 +47,8 @@
 #     path). Returns the seal's rc; 0 without sealing when HAVEN_LOGSCAN is
 #     off or this run's manifest is already there.
 #
-#   logscan_gate_dir <profile> <needle-dir> <dir> <report> [<extra seal arg>...]
+#   logscan_gate_dir <profile> <needle-dir> <dir> <report>
+#                    [<extra seal arg>... | --segments <class>=<n>...]
 #
 #     The same gate over every `*.log` under <dir> (an orchestrator's evidence
 #     directory, uploaded whole), each file typed by its name: `*logcat*` is a
@@ -65,6 +66,14 @@
 #     type itself into the relay class by choosing a prefix. No `*.log` at all
 #     is rc 3: a run that recorded nothing cannot be proven clean. The report
 #     goes where the caller says; never inside <dir>, which is uploaded.
+#
+#     A trailing `--segments <class>=<n>` is the one argument that reaches the
+#     SCAN rather than the seal: a multi-target orchestrator says how many
+#     files a class must have, and the scanner is rc 3 when the walk found a
+#     different number — the only thing that sees a target whose log never
+#     reached <dir>, since the ones that did still clear the floor and still
+#     carry the proof_of_run. Everything else is forwarded to the seal as
+#     before, and with no `--segments` the walk is unchanged.
 #
 #   logscan_permission_extract   (stdin -> stdout)
 #   logscan_http_log_summary     (stdin -> stdout)
@@ -105,6 +114,14 @@ LOGSCAN_GATE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly LOGSCAN_GATE_DIR
 readonly LOGSCAN_DEFAULT_BIN="${LOGSCAN_GATE_DIR}/../../logscan/target/release/haven-logscan"
 readonly LOGSCAN_MANIFEST_SUFFIX='.needles.json'
+# The ONE fake scanner every self-test in this tree injects through
+# HAVEN_LOGSCAN_BIN — this gate's and the three runners' that source it. Four
+# hand-written copies used to accept every argv, so none of them could tell a
+# renamed flag from a working one; tooling/logscan/tests/cli_contract.rs now
+# drives the same argv table through this file and the real binary in the one
+# job that builds it. Declared here rather than in each self-test because the
+# runners already source this library.
+readonly LOGSCAN_FAKE_BIN="${LOGSCAN_GATE_DIR}/fixtures/fake-haven-logscan.sh"
 
 # shellcheck source=tooling/e2e/ci/host-needles.sh
 source "${LOGSCAN_GATE_DIR}/host-needles.sh"
@@ -434,8 +451,41 @@ logscan_http_log_summary() {
 logscan_gate_dir() {
   local profile="$1" needle_dir="$2" dir="$3" report="$4"
   shift 4
-  local -a files=() logcat=() drive=() relay=() diag=() sinks=()
+  # `--segments <class>=<n>` is the ONE trailing argument that is a SCAN claim
+  # rather than a seal one, so it is partitioned out here instead of being
+  # forwarded with the rest: a caller says how many files a class must have in
+  # the scanner's own spelling, and everything else still reaches the seal
+  # verbatim. Absent, nothing is claimed and the walk is what it always was.
+  #
+  # It is worth having only on THIS gate. On a per-target call the sink paths
+  # are argv, so a segment count there restates a constant; here the paths come
+  # from a `find`, and a target whose log never reached <dir> is otherwise
+  # invisible — the remaining files still clear the class floor and still carry
+  # the reporter's proof_of_run, so the class is certified on the targets that
+  # DID land. A single-target lane gains nothing (1 is 1 either way).
+  #
+  # A trailing `--segments` with no value is refused HERE. Left to fall through
+  # it would reach the seal, which rejects it as a flag it does not have — a
+  # fail-closed rc, but one whose message blames the wrong verb and sends the
+  # reader to the seal's argv for a claim the scan never received.
+  local -a files=() logcat=() drive=() relay=() diag=() sinks=() seal=() segments=()
   local f
+  while (( $# > 0 )); do
+    if [[ "$1" == "--segments" ]]; then
+      if (( $# < 2 )); then
+        echo "ERROR: logscan_gate_dir: --segments takes <class>=<n> and this one" \
+             "has no value. It is a SCAN claim, not a seal argument, so a" \
+             "valueless one would otherwise be refused by the seal for a reason" \
+             "that is not this one." >&2
+        return 2
+      fi
+      segments+=(--segments "$2")
+      shift 2
+    else
+      seal+=("$1")
+      shift
+    fi
+  done
   while IFS= read -r f; do files+=("${f}"); done \
     < <(find "${dir}" -type f -name '*.log' 2>/dev/null | LC_ALL=C sort)
   for f in ${files[@]+"${files[@]}"}; do
@@ -462,16 +512,18 @@ logscan_gate_dir() {
   (( ${#relay[@]} == 0 )) || sinks+=(--sink "relay=${relay[*]}")
   (( ${#diag[@]} == 0 )) || sinks+=(--sink "diag=${diag[*]}")
   unset IFS
-  logscan_gate "${profile}" "${needle_dir}" "$@" -- "${sinks[@]}" --report "${report}"
+  logscan_gate "${profile}" "${needle_dir}" ${seal[@]+"${seal[@]}"} -- \
+    "${sinks[@]}" ${segments[@]+"${segments[@]}"} --report "${report}"
 }
 
-# --self-test — the gate's own wiring, end to end: a FAKE haven-logscan
-# (HAVEN_LOGSCAN_BIN, read at call time) that records its argv, the REAL
-# scan-logs.sh and the REAL key-material floor. Under test is that the gate
-# seals from what each profile is given, hands every sink to the wrapper, folds
-# the two verdicts, and contains on a leak — never the scanner's patterns, which
-# are the crate's own tests.
-readonly LOGSCAN_GATE_SELF_TEST_FIXTURES=85
+# --self-test — the gate's own wiring, end to end: the SHARED fake
+# haven-logscan (LOGSCAN_FAKE_BIN, injected through HAVEN_LOGSCAN_BIN, read at
+# call time), which parses the real binary's argv contract and records what it
+# accepted, the REAL scan-logs.sh and the REAL key-material floor. Under test is
+# that the gate seals from what each profile is given, hands every sink to the
+# wrapper, folds the two verdicts, and contains on a leak — never the scanner's
+# patterns, which are the crate's own tests.
+readonly LOGSCAN_GATE_SELF_TEST_FIXTURES=93
 # bash-4-only: mapfile/readarray, coproc, declare -A, case conversion, |&, ;;&,
 # negative substring offsets.
 readonly LOGSCAN_GATE_BASH4_ONLY_RE='(^|[^[:alnum:]_])(mapfile|readarray|coproc)([^[:alnum:]_]|$)|declare[[:space:]]+-[a-zA-Z]*A|\$\{[A-Za-z_][A-Za-z0-9_]*(,,|\^\^)|\|&|;;&|\$\{[^}]*:([[:space:]]+-[0-9]|[0-9]+:[[:space:]]*-[0-9])'
@@ -482,16 +534,18 @@ logscan_gate_self_test() {
   # shellcheck disable=SC2064
   trap "rm -rf '${tmp}'" RETURN
 
-  local fake_bin="${tmp}/fake-logscan" seal_argv="${tmp}/seal-argv" scan_argv="${tmp}/scan-argv"
-  printf '%s\n' \
-    '#!/usr/bin/env bash' \
-    'case "${1:-}" in' \
-    '  seal) printf "%s\n" "$@" > "${FAKE_SEAL_ARGV}"; exit "${FAKE_SEAL_RC:-0}" ;;' \
-    '  scan) printf "%s\n" "$@" > "${FAKE_SCAN_ARGV}"; exit "${FAKE_SCAN_RC:-0}" ;;' \
-    'esac' \
-    'exit 9' \
-    > "${fake_bin}"
-  chmod +x "${fake_bin}"
+  # The SHARED fake, never a copy written here: a fake this file authored could
+  # only ever record what it was handed, so it would answer a renamed flag the
+  # same way it answers a working one. cli_contract.rs holds this one to the
+  # real binary's argv contract.
+  local fake_bin="${LOGSCAN_FAKE_BIN}" seal_argv="${tmp}/seal-argv" scan_argv="${tmp}/scan-argv"
+  ran=$(( ran + 1 ))
+  if [[ ! -x "${fake_bin}" ]]; then
+    echo "SELF-TEST FAIL (fake scanner): ${fake_bin} is missing or not executable;" \
+         "every fixture below would then exercise the gate's absent-binary arm" \
+         "instead of its scanner arm and still pass" >&2
+    fail=1
+  fi
   export FAKE_SEAL_ARGV="${seal_argv}" FAKE_SCAN_ARGV="${scan_argv}"
   local needles="${tmp}/needles" logcat="${tmp}/logcat.log"
   local drive_final="${tmp}/drive-final.log" drive_full="${tmp}/drive-full.log"
@@ -499,6 +553,13 @@ logscan_gate_self_test() {
   : > "${needles}/default.needles.decl"
   local -a sinks=(--sink "logcat=${logcat}" --sink "drive=${drive_final},${drive_full}"
                   --plants-in "drive=${drive_final}" --report "${tmp}/report.ndjson")
+  # The same sinks WITHOUT `--plants-in`, for the rules profile: the scanner
+  # refuses `--rules-only` beside `--plants-in` (a flag it would silently ignore
+  # is a false claim of coverage), so a rules gate handed the manifest profile's
+  # wrapper arguments is rc 2 on its first real run. Measured against the
+  # release binary; cli_contract.rs is where the two are held together.
+  local -a rules_sinks=(--sink "logcat=${logcat}" --sink "drive=${drive_final},${drive_full}"
+                        --report "${tmp}/report.ndjson")
   local -a needle_argv=() host_argv=()
   local line
   while IFS= read -r line; do needle_argv+=("${line}"); done < <(host_needle_args proxy)
@@ -513,21 +574,25 @@ logscan_gate_self_test() {
     printf '===== attempt 1 =====\n00:03 +1: a scenario\n' > "${drive_full}"
     rm -f "${seal_argv}" "${scan_argv}" "${needles}/local-local.needles.json"
   }
-  # gate_case <label> <profile> <want-rc> <deleted|kept> <seal-rc> <scan-rc> [dir]
+  # gate_case <label> <profile> <want-rc> <deleted|kept> <seal-rc> <scan-rc> [dir] [wrapper-arg...]
   #
   # Every call pins the whole environment the gate reads. The guards job
   # inherits GITHUB_RUN_ID/GITHUB_RUN_ATTEMPT from Actions and a lane exports
   # WIRE_UPSTREAM and HAVEN_LOGSCAN, so a fixture that let them through passed
   # on a laptop and failed in CI (run 34766632019). Empty is how the gate reads
-  # "unset". RELAY_URL is the value a lane carries.
+  # "unset". RELAY_URL is the value a lane carries. The wrapper arguments
+  # default to `sinks`; a caller names its own where the profile takes a
+  # different vocabulary.
   gate_case() {
     local label="$1" profile="$2" want="$3" fate="$4" dir="${7:-${needles}}" f
+    local -a wrapper=("${sinks[@]}")
+    (( $# <= 7 )) || wrapper=("${@:8}")
     rc=0
     ran=$(( ran + 1 ))
     GITHUB_RUN_ID= GITHUB_RUN_ATTEMPT= WIRE_UPSTREAM= RELAY_URL=ws://10.0.2.2:7788 \
       SECRET_SCAN= SCAN_LOGS= \
       HAVEN_LOGSCAN=true HAVEN_LOGSCAN_BIN="${fake_bin}" FAKE_SEAL_RC="$5" FAKE_SCAN_RC="$6" \
-      logscan_gate "${profile}" "${dir}" "${floors[@]}" -- "${sinks[@]}" \
+      logscan_gate "${profile}" "${dir}" "${floors[@]}" -- "${wrapper[@]}" \
       > "${tmp}/gate-out" 2>&1 || rc=$?
     if (( rc != want )); then
       echo "SELF-TEST FAIL (${label}): wanted rc ${want}, got ${rc}" >&2
@@ -722,15 +787,24 @@ logscan_gate_self_test() {
   fi
 
   # (4) The rules profile: no seal, the wrapper runs `--rules-only` over the
-  #     same sinks; a leak still contains.
-  reset_logs; gate_case "rules: clean"                        rules 0 kept    0 0 "${tmp}/no-needles"
+  #     same sinks; a leak still contains. The wrapper argv is the plants-free
+  #     one, because that is the only one the scanner accepts beside
+  #     `--rules-only`.
+  reset_logs; gate_case "rules: clean"                        rules 0 kept    0 0 "${tmp}/no-needles" "${rules_sinks[@]}"
   ran=$(( ran + 1 ))
   if [[ -e "${seal_argv}" ]]; then
     echo "SELF-TEST FAIL (rules: no seal): a rules-only gate sealed a manifest" >&2
     fail=1
   fi
-  argv_is "rules: scan argv" "${scan_argv}" scan --rules-only "${sinks[@]}"
-  reset_logs; gate_case "rules: scanner leak contains"        rules 1 deleted 0 1 "${tmp}/no-needles"
+  argv_is "rules: scan argv" "${scan_argv}" scan --rules-only "${rules_sinks[@]}"
+  reset_logs; gate_case "rules: scanner leak contains"        rules 1 deleted 0 1 "${tmp}/no-needles" "${rules_sinks[@]}"
+  # …and the manifest profile's wrapper argv through the rules profile is rc 2,
+  # not a clean scan: the scanner refuses to be handed positive controls it is
+  # not going to reconcile. This fixture used to pass that exact argv and read
+  # 0, because the fake it injected parsed no flag — a rules lane copying a
+  # manifest lane's arguments would have been rc 2 on its first run with the
+  # verdict "clean" in its self-test.
+  reset_logs; gate_case "rules: --plants-in is refused"       rules 2 kept    0 0 "${tmp}/no-needles" "${sinks[@]}"
 
   # (5) The flag-off arm never touches the scanner: with HAVEN_LOGSCAN unset —
   #     pinned empty, so a lane's exported `true` cannot pick the other arm —
@@ -855,6 +929,87 @@ logscan_gate_self_test() {
          "must be forwarded verbatim, directly before --out (it is not)" >&2
     fail=1
   fi
+  # …and `--segments <class>=<n>`, the one trailing argument that is a SCAN
+  # claim: it reaches the wrapper between the sinks and the report, never the
+  # seal. The exact-argv pin above is the other half of the promise — a walk
+  # with no `--segments` hands the scanner exactly what it always did.
+  rm -f "${seal_argv}" "${scan_argv}"
+  rc=0
+  ran=$(( ran + 1 ))
+  GITHUB_RUN_ID= GITHUB_RUN_ATTEMPT= WIRE_UPSTREAM= RELAY_URL=ws://10.0.2.2:7777 \
+    HAVEN_LOGSCAN=true HAVEN_LOGSCAN_BIN="${fake_bin}" FAKE_SEAL_RC=0 FAKE_SCAN_RC=0 \
+    logscan_gate_dir host "${tmp}/no-needles" "${evidence}" "${tmp}/dir.ndjson" \
+    --host-decl coordinate=1.000000,2.000000 --segments drive=2 \
+    > "${tmp}/gate-out" 2>&1 || rc=$?
+  if (( rc != 0 )); then
+    echo "SELF-TEST FAIL (dir walk: segments): wanted rc 0, got ${rc}" >&2
+    fail=1
+  fi
+  argv_is "dir walk: the segment claim reaches the scan" "${scan_argv}" scan \
+    --manifest "${tmp}/no-needles/local-local.needles.json" \
+    --sink "logcat=${evidence}/t1.logcat.log" \
+    --sink "drive=${evidence}/nested/drive.b.log,${evidence}/t1.drive.log" \
+    --sink "relay=${evidence}/strfry.final.log" \
+    --sink "diag=${evidence}/blossom.log,${evidence}/toggle.log" \
+    --segments drive=2 --report "${tmp}/dir.ndjson"
+  ran=$(( ran + 1 ))
+  got="$(argv_line "${seal_argv}")"
+  if [[ "${got}" == *--segments* ]] \
+     || [[ "${got}" != *" --host-decl coordinate=1.000000,2.000000 --out "* ]]; then
+    echo "SELF-TEST FAIL (dir walk: segments are not a seal argument): the seal verb" \
+         "has no --segments and refuses an unknown flag, so routing it there would be" \
+         "rc 2 on every run; the host declaration beside it must still reach the seal" >&2
+    fail=1
+  fi
+  # …and a trailing `--segments` with no value is refused by THIS function,
+  # naming the claim. Falling through to the seal is also non-zero, but the
+  # message would blame the seal for a flag the caller meant for the scan, and
+  # nothing would have run at all.
+  rm -f "${seal_argv}" "${scan_argv}"
+  rc=0
+  ran=$(( ran + 1 ))
+  GITHUB_RUN_ID= GITHUB_RUN_ATTEMPT= WIRE_UPSTREAM= RELAY_URL=ws://10.0.2.2:7777 \
+    HAVEN_LOGSCAN=true HAVEN_LOGSCAN_BIN="${fake_bin}" FAKE_SEAL_RC=0 FAKE_SCAN_RC=0 \
+    logscan_gate_dir host "${tmp}/no-needles" "${evidence}" "${tmp}/dir.ndjson" \
+    --host-decl coordinate=1.000000,2.000000 --segments \
+    > "${tmp}/gate-out" 2>&1 || rc=$?
+  if (( rc != 2 )) || ! grep -qF -- '--segments takes <class>=<n>' "${tmp}/gate-out" \
+     || [[ -e "${seal_argv}" || -e "${scan_argv}" ]]; then
+    echo "SELF-TEST FAIL (dir walk: a valueless segment claim): wanted rc 2 from" \
+         "this function, naming --segments, with neither verb run; got rc ${rc}" \
+         "with '$(tr '\n' ' ' < "${tmp}/gate-out")'" >&2
+    fail=1
+  fi
+  # A target whose log never reached the directory: the walk names ONE drive
+  # path where the caller claimed two, and the scanner answers that mismatch
+  # rc 3 (src/scan.rs's segment loop; the crate's own `I segment
+  # reconciliation` case measures the verdict and its mutation). What THIS gate
+  # owes is to state the claim over what the walk actually found and return the
+  # verdict unchanged with the evidence kept — a shell self-test has no sealed
+  # manifest for the real binary to reconcile against, so the fake stages the
+  # rc and the argv carries the mismatch.
+  local short="${tmp}/evidence-short"
+  rm -rf "${short}"
+  mkdir -p "${short}"
+  printf 'I/flutter ( 111): a\n' > "${short}/t1.logcat.log"
+  printf '00:03 +1: b\n' > "${short}/t1.drive.log"
+  rm -f "${seal_argv}" "${scan_argv}"
+  rc=0
+  ran=$(( ran + 1 ))
+  GITHUB_RUN_ID= GITHUB_RUN_ATTEMPT= WIRE_UPSTREAM= RELAY_URL=ws://10.0.2.2:7777 \
+    HAVEN_LOGSCAN=true HAVEN_LOGSCAN_BIN="${fake_bin}" FAKE_SEAL_RC=0 FAKE_SCAN_RC=3 \
+    logscan_gate_dir host "${tmp}/no-needles" "${short}" "${tmp}/short.ndjson" \
+    --segments drive=2 > "${tmp}/gate-out" 2>&1 || rc=$?
+  if (( rc != 3 )) || [[ ! -e "${short}/t1.drive.log" || ! -e "${short}/t1.logcat.log" ]]; then
+    echo "SELF-TEST FAIL (dir walk: a missing segment): wanted the scanner's rc 3" \
+         "returned unchanged with the evidence kept, got rc ${rc}" >&2
+    fail=1
+  fi
+  argv_is "dir walk: a segment nobody wrote is still claimed" "${scan_argv}" scan \
+    --manifest "${tmp}/no-needles/local-local.needles.json" \
+    --sink "logcat=${short}/t1.logcat.log" \
+    --sink "drive=${short}/t1.drive.log" \
+    --segments drive=2 --report "${tmp}/short.ndjson"
   # typed_as <name> <class> [<body>] — one file alone under a fresh evidence
   # directory lands in exactly that sink class. <body> is written through
   # `%b`, so `\n` separates lines; it defaults to one unremarkable line. One
@@ -1100,7 +1255,7 @@ a plain line no threadtime header covers'
     echo "logscan-gate.sh: SELF-TEST FAILED — ran ${ran} fixture(s), expected exactly ${LOGSCAN_GATE_SELF_TEST_FIXTURES}; a fixture was added or removed without moving the pin" >&2
     return 1
   fi
-  echo "logscan-gate.sh: self-test passed (${ran}/${LOGSCAN_GATE_SELF_TEST_FIXTURES} fixtures: under a pinned environment the proxy profile seals from the sidecar directory with the host needles added, exempting the lane's own endpoints and the bare loopback host without declaring them, then runs scan-logs.sh over every sink, folds the two verdicts, contains on a leak even under a failed seal, fails closed on an absent binary or sidecar, and called twice in one run seals once and scans twice; the host profile seals the host needles alone with no declared plants, treats no sidecar as clean, reuses this run's manifest and still scans; the rules profile seals nothing and runs --rules-only; logscan_seal alone seals the host argv with the caller's floors, reuses this run's manifest and is a no-op flag-off; the flag-off arm is the floor alone over every sink; usage errors run nothing; the directory walker types every *.log by name — each real relay producer as relay, an unknown relay-prefixed name and the blossom log as diag — then by CONTENT, so a threadtime slice under an unknown name is logcat, a SHORT slice whose every line is threadtime is logcat too while one plain line among them, or no line at all, makes it a diag, and a dumpsys dump and a short file holding one logcat-shaped line stay diag, omits absent classes, forwards extra seal arguments, contains on a leak and refuses an empty directory; logscan_permission_extract keeps every android.permission line byte for byte, drops the platform's install paths, signing digests and dexopt state, cannot reach S4's 32-character floor on any line it keeps, and yields the header alone at rc 0 when a dump has no permission line; logscan_http_log_summary counts a third-party server's methods, no-method lines and error keywords while reproducing no digest, npub or auth blob from them, and summarises an empty log as zero lines; no bash-4-only construct, and no bare \`return\` in the library half, which a trap handler on bash < 5.3 would resolve to the status from before the handler)."
+  echo "logscan-gate.sh: self-test passed (${ran}/${LOGSCAN_GATE_SELF_TEST_FIXTURES} fixtures: under a pinned environment the proxy profile seals from the sidecar directory with the host needles added, exempting the lane's own endpoints and the bare loopback host without declaring them, then runs scan-logs.sh over every sink, folds the two verdicts, contains on a leak even under a failed seal, fails closed on an absent binary or sidecar, and called twice in one run seals once and scans twice; the host profile seals the host needles alone with no declared plants, treats no sidecar as clean, reuses this run's manifest and still scans; the rules profile seals nothing and runs --rules-only over a plants-free argv, while the manifest profile's --plants-in through it is the scanner's rc 2; logscan_seal alone seals the host argv with the caller's floors, reuses this run's manifest and is a no-op flag-off; the flag-off arm is the floor alone over every sink; usage errors run nothing; the directory walker types every *.log by name — each real relay producer as relay, an unknown relay-prefixed name and the blossom log as diag — then by CONTENT, so a threadtime slice under an unknown name is logcat, a SHORT slice whose every line is threadtime is logcat too while one plain line among them, or no line at all, makes it a diag, and a dumpsys dump and a short file holding one logcat-shaped line stay diag, omits absent classes, forwards extra seal arguments while routing a \`--segments\` claim to the scan alone — over what the walk actually found, so a class one file short still carries the claim the scanner answers rc 3 for, and a valueless one is refused here rather than by the seal — contains on a leak and refuses an empty directory; logscan_permission_extract keeps every android.permission line byte for byte, drops the platform's install paths, signing digests and dexopt state, cannot reach S4's 32-character floor on any line it keeps, and yields the header alone at rc 0 when a dump has no permission line; logscan_http_log_summary counts a third-party server's methods, no-method lines and error keywords while reproducing no digest, npub or auth blob from them, and summarises an empty log as zero lines; no bash-4-only construct, and no bare \`return\` in the library half, which a trap handler on bash < 5.3 would resolve to the status from before the handler)."
   return 0
 }
 

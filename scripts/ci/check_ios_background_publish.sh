@@ -110,6 +110,9 @@ BURST_COORDINATOR="${REPO_ROOT}/haven/lib/src/services/background_burst_coordina
 STREAM_HANDLER="${REPO_ROOT}/haven/ios/Runner/HavenLocationStreamHandler.swift"
 IOS_SOURCE="${REPO_ROOT}/haven/lib/src/services/ios_location_source.dart"
 PBXPROJ="${REPO_ROOT}/haven/ios/Runner.xcodeproj/project.pbxproj"
+BG_PUBLISH_WRAPPER="${REPO_ROOT}/tooling/e2e/ci/run-ios-bg-publish.sh"
+BG_PUBLISH_PROBE="${REPO_ROOT}/tooling/e2e/ci/bgp-wire-probe.dart"
+LOCATION_CONSTANTS="${REPO_ROOT}/haven/lib/src/constants/location.dart"
 
 FAILED=0
 fail() {
@@ -1745,6 +1748,139 @@ check_poll_leg_tier() { # <workflow yml>
   return "$_lf"
 }
 
+# check_p3_host_wire_oracle <wrapper> <probe> <drive> <location constants> —
+# P3's settle window must have an oracle that OUTLIVES the app, and the branch
+# where the app dies must end on a proven verdict.
+#
+# The phase this guards is the only stretch of the lane where the app holds no
+# execution claim — that absence IS the guarantee — so iOS may take the
+# process at any point inside it, and in CI runs 35397118356 and 35622556197 it
+# did. Until this check there was one oracle, it lived in the app, and when the
+# app went away the wrapper said P3 was "neither proved nor disproved" and
+# exited non-zero: an indeterminate result reported as a failure, i.e. a flaky
+# lane by construction. The fix is a host-side wire probe plus a verdict
+# function with no default-to-green, and all four of its premises are things
+# only a source-shape check can hold:
+#
+#   * The WINDOW. Two oracles now measure one window — the drive's event-id
+#     diff and the host's count — and they agree only because three numbers in
+#     three files agree. A drift is silent and two-sided: a host window that
+#     opened earlier would count the app's own in-flight tick as a leak, and
+#     one that closed later would count the post-window foreground publish the
+#     wrapper itself provokes.
+#   * The PREMISE of a count. The host cannot tell Alice's kind-445 from the
+#     synthetic peer's — the author is an ephemeral per-message key and the `h`
+#     tag is shared — so counting ALL of them is only an answer while the peer
+#     is gone. The drive disposes him before P3 for exactly that reason; move
+#     that line after the disable and the host's oracle starts reporting his
+#     traffic as Alice's leak.
+#   * The INSTRUMENT. A probe that reads nothing answers "silent" for every
+#     relay there is. So it carries TWO controls whose answers cannot be zero
+#     and a range filter of its own, and the wrapper proves it on the runner
+#     before depending on it — the lesson of the emulator-probe round, where a
+#     fake that returned success for any argv made a broken verifier look
+#     healthy. The second control is the one that tests the CLASS: a relay
+#     answering kind-30443 while no longer serving kind-445 would report a
+#     silent window on a lane whose own P1/P2 have already asserted that
+#     kind-445s were being published seconds earlier.
+#   * The EXCUSE. A host-proved P3 lets the completion gate drop the two
+#     markers a reclaimed process could not print. That is the one place in
+#     this lane where a green is granted over a missing proof, so its single
+#     source and its exact width are pinned here.
+check_p3_host_wire_oracle() { # <wrapper> <probe> <drive> <constants>
+  local wrapper="$1" probe="$2" drive="$3" constants="$4"
+  _lf=0
+  if [[ ! -f "$probe" ]]; then
+    lfail "tooling/e2e/ci/bgp-wire-probe.dart is missing — P3's settle window has no oracle that survives the app, so a run where iOS reclaims the process inside it goes back to being an unconditional red whose own message says the phase was neither proved nor disproved"
+    return "$_lf"
+  fi
+  if [[ ! -f "$wrapper" ]]; then
+    lfail "tooling/e2e/ci/run-ios-bg-publish.sh is missing — this check has nothing to read"
+    return "$_lf"
+  fi
+  # The wrapper's own --self-test quotes these literals inside its fixtures, so
+  # everything below reads the REAL RUN only: a scan over the whole file would
+  # accept a wrapper whose wiring survives solely as prose about itself.
+  #
+  # ONE assertion is the exception, and says so where it stands: the
+  # completion-gate excuse lives in `bgp_unexcused_proofs`, a function DEFINED
+  # above the `# Real run` boundary, so it is read from `$wrapper_code` — the
+  # whole file with its comment lines stripped, which is what keeps prose from
+  # satisfying it.
+  local body wrapper_code
+  body="$(sed -n '/^# Real run$/,$p' "$wrapper" | grep -v '^[[:space:]]*#')"
+  wrapper_code="$(grep -v '^[[:space:]]*#' "$wrapper")"
+  if [[ -z "$body" ]]; then
+    lfail "run-ios-bg-publish.sh no longer has a '# Real run' boundary, so this check cannot separate its real wiring from the fixtures that quote it. Restore the marker or re-point this check in the same commit"
+    return "$_lf"
+  fi
+
+  # --- The one window, across three files. ----------------------------------
+  local max_interval addend grace_dart window_sh grace_sh
+  max_interval="$(sed -n 's/^const Duration kLocationPublishMaxInterval = Duration(seconds: \([0-9]*\));$/\1/p' "$constants")"
+  addend="$(sed -n 's/^.*kLocationPublishMaxInterval + const Duration(seconds: \([0-9]*\));$/\1/p' "$drive")"
+  grace_dart="$(sed -n 's/^const int _inFlightGraceSecs = \([0-9]*\);$/\1/p' "$drive")"
+  window_sh="$(sed -n 's/^readonly SETTLE_WINDOW_SECS=\([0-9]*\)$/\1/p' "$wrapper")"
+  grace_sh="$(sed -n 's/^readonly LEAK_GRACE_SECS=\([0-9]*\)$/\1/p' "$wrapper")"
+  if [[ -z "$max_interval" || -z "$addend" || -z "$grace_dart" ||
+        -z "$window_sh" || -z "$grace_sh" ]]; then
+    lfail "one of P3's window terms is no longer readable (kLocationPublishMaxInterval in haven/lib/src/constants/location.dart, the drive's _negativeSettleWindow addend and _inFlightGraceSecs, the wrapper's SETTLE_WINDOW_SECS and LEAK_GRACE_SECS) — an unreadable term is not a matching one, and the two oracles would go on measuring windows nothing compares"
+  else
+    if (( max_interval + addend != window_sh )); then
+      lfail "P3's settle window disagrees across the two oracles: the drive waits ${max_interval}+${addend}s and run-ios-bg-publish.sh's SETTLE_WINDOW_SECS says ${window_sh}. The host's wire verdict must measure the SAME window the drive's diff does — a shorter host window misses a leak the drive would catch, a longer one counts the foreground publish the host's own re-foreground provokes"
+    fi
+    if (( grace_dart != grace_sh )); then
+      lfail "P3's in-flight grace disagrees: the drive tolerates ${grace_dart}s and run-ios-bg-publish.sh's LEAK_GRACE_SECS says ${grace_sh}. The app's last tick before the disable would then be a straggler to one oracle and a leak to the other, on a perfectly healthy run"
+    fi
+  fi
+
+  # --- The premise a COUNT rests on: the peer is gone before P3 starts. ------
+  local drive_code dispose_line disable_line
+  drive_code="$(strip_strings <<<"$(code_view "$drive")")"
+  dispose_line="$(code_line_of 'bob\.dispose\(\)' <<<"$drive_code")"
+  disable_line="$(code_line_of 'setEnabled\(enabled: false\)' <<<"$drive_code")"
+  if [[ -z "$dispose_line" || -z "$disable_line" ]]; then
+    lfail "ios_bg_publish_test.dart no longer disposes the synthetic peer, or no longer disables background sharing where this check can see it — the host's settle-window oracle counts EVERY kind-445 in the window because only Alice can author one there, and that is true only while the peer is gone"
+  elif (( dispose_line >= disable_line )); then
+    lfail "ios_bg_publish_test.dart disposes the synthetic peer at line ${dispose_line}, at or AFTER the disable at line ${disable_line}. The host's wire oracle cannot tell his kind-445 from Alice's — the author is an ephemeral per-message key and the h tag is the same — so a peer still publishing inside P3's window reports as a leak and reds the lane for the app behaving correctly"
+  fi
+
+  # --- The instrument: two controls that cannot be zero, and its own range. --
+  code_has 'reading.controlCount <= 0' "$probe" ||
+    lfail "bgp-wire-probe.dart no longer distinguishes 'the relay answered nothing' from 'the probe could not read the relay' — without the control branch an unread relay reports as a silent window and P3 passes vacuously on exactly the runs it was added for"
+  code_has 'reading.preDisableCount <= 0' "$probe" ||
+    lfail "bgp-wire-probe.dart no longer requires a kind-445 from BEFORE the disable — the KeyPackage control only proves the relay answers, not that it still serves the kind the settle window is read for, so a relay that stopped serving 445 would report a silent window on a lane whose own P1/P2 just asserted that 445s were being published"
+  code_has 'createdAt >= since' "$probe" ||
+    lfail "bgp-wire-probe.dart no longer checks an event's created_at against the window's START — it would count the app's in-flight tick, which the in-flight grace exists to tolerate"
+  code_has 'createdAt <= until' "$probe" ||
+    lfail "bgp-wire-probe.dart no longer checks an event's created_at against the window's END — the wrapper re-foregrounds the app when the window closes and a foregrounded Haven publishes BY DESIGN, so the lane would red for the app behaving correctly"
+
+  # --- The wrapper: prove the instrument, then use it, then excuse exactly
+  #     the two proofs a dead process owes. --------------------------------
+  grep -qF '"${DART_BIN}" "${WIRE_PROBE}" --self-test' <<<"$body" ||
+    lfail "run-ios-bg-publish.sh no longer runs the wire probe's own --self-test in its preflight — the lane would depend on an instrument nothing on that runner has exercised, which is how a broken verifier looked healthy in CI run 35536892150"
+  grep -qF 'if [[ -z "${DART_BIN}" ]]; then' <<<"$body" ||
+    lfail "run-ios-bg-publish.sh no longer fails closed when there is no 'dart' to run the wire probe with — a missing instrument must stop the lane, never silently reduce P3 to the in-app half"
+  grep -qF 'bgp_p3_host_verdict' <<<"$body" ||
+    lfail "run-ios-bg-publish.sh no longer takes a host verdict on P3 — the branch where iOS reclaims the app is then back to printing a diagnosis and falling through to the drive's rc, which is an indeterminate outcome reported as a failure"
+  local proven_count holds_arm
+  proven_count="$(grep -cF 'P3_PROVEN_BY_HOST=1' <<<"$body" || true)"
+  if [[ "$proven_count" != '1' ]]; then
+    lfail "run-ios-bg-publish.sh sets P3_PROVEN_BY_HOST in ${proven_count} place(s), not exactly one. That flag excuses two terminal proofs and converts a non-zero drive rc into a green, so it may have exactly ONE source: the 'holds' verdict"
+  fi
+  holds_arm="$(sed -n '/^        holds)$/,/^          ;;$/p' <<<"$body" || true)"
+  if ! grep -qF 'P3_PROVEN_BY_HOST=1' <<<"$holds_arm"; then
+    lfail "run-ios-bg-publish.sh's P3_PROVEN_BY_HOST is not set under the 'holds' arm of the host verdict — set anywhere else it would excuse the silence and disarm proofs on a run where the wire was never read, the app came back, or the disable was never signalled"
+  fi
+  # The one assertion outside `$body` — see the note where `wrapper_code` is
+  # built. `bgp_unexcused_proofs` is defined with the other helpers, above the
+  # real-run boundary, so scoping this to the real run would make it vacuous.
+  grep -qF '| grep -vFx -e "${SILENCE_MARKER}" -e "${DISARMED_MARKER}" || true' \
+    <<<"$wrapper_code" ||
+    lfail "run-ios-bg-publish.sh's completion-gate excuse is no longer exactly the two markers a reclaimed process cannot print (NEGATIVE_SILENCE_OK, SESSION_DISARMED). Widening it would let a drive that stopped in an EARLIER phase buy a green off P3's verdict, which says nothing about that phase"
+  return "$_lf"
+}
+
 check_pbxproj_stream_handler() { # <project.pbxproj>
   local pbx="$1"
   _lf=0
@@ -2153,6 +2289,25 @@ check_poll_path_background_wake "$MAP_SHELL" || FAILED=1
 # ---------------------------------------------------------------------------
 check_poll_leg_tier "$BG_PUBLISH_WORKFLOW" || FAILED=1
 
+# ---------------------------------------------------------------------------
+# 19. P3's settle window must have an oracle that OUTLIVES the app.
+#
+#     The disable is what removes the app's claim to execute in the
+#     background, so from that instant iOS owns the process — and twice now it
+#     has taken it mid-window (CI runs 35397118356, 35622556197; the second
+#     one's sim-lifecycle.log names runningboardd, an expired FinishTask
+#     assertion and OS_REASON_RUNNINGBOARD, with no jetsam, crash or
+#     watchdog). A healthy product therefore REACHES that outcome, and the
+#     lane must end there on a proven verdict rather than on "neither proved
+#     nor disproved". What makes the host's answer trustworthy is four source
+#     facts nothing behavioural can see: the two oracles measure one window,
+#     the synthetic peer is gone before the count begins, the probe carries a
+#     control and its own range, and the completion gate's single excuse has
+#     exactly two markers in it.
+# ---------------------------------------------------------------------------
+check_p3_host_wire_oracle "$BG_PUBLISH_WRAPPER" "$BG_PUBLISH_PROBE" \
+  "$BG_PUBLISH_DRIVE" "$LOCATION_CONSTANTS" || FAILED=1
+
 fi
 
 # ---------------------------------------------------------------------------
@@ -2183,7 +2338,7 @@ fi
 # hide under the slack.
 # ---------------------------------------------------------------------------
 self_test() {
-  local -r SELF_TEST_FIXTURES=195
+  local -r SELF_TEST_FIXTURES=209
   local tmp fails=0 checked=0
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
@@ -4934,6 +5089,136 @@ EOF
 				DEADBEEF00000000000000001 /* HavenLocationStreamHandler.swift */,
 				DEADBEEF00000000000000002 /* HavenLocationStreamHandler.swift in Sources */,'
 
+  # --- check_p3_host_wire_oracle --------------------------------------------
+  #
+  # Every fixture below leaves all four files readable and internally sensible
+  # — the failure this guard exists for is not a broken file, it is two
+  # oracles that quietly stopped measuring the same thing, a counting oracle
+  # whose premise was moved out from under it, or an excuse that grew. The two
+  # anti-vacuity directions are here too: an unreadable window term and a
+  # wrapper with no real-run boundary must FAIL rather than pass over nothing.
+  local p3_constants='const Duration kLocationPublishMaxInterval = Duration(seconds: 168);'
+  local p3_drive='const int _inFlightGraceSecs = 10;
+final Duration _negativeSettleWindow =
+    kLocationPublishMaxInterval + const Duration(seconds: 32);
+Future<void> body() async {
+  await bob.dispose();
+  await bgNotifier.setEnabled(enabled: false);
+}'
+  local p3_probe='int verdict(ProbeReading reading) {
+  if (reading.controlCount <= 0) {
+    return 4;
+  }
+  if (reading.preDisableCount <= 0) {
+    return 4;
+  }
+  return 0;
+}
+void count(int createdAt) {
+  if (createdAt >= since && createdAt <= until) {
+    windowCount++;
+  }
+}'
+  local p3_wrapper='readonly SETTLE_WINDOW_SECS=200
+readonly LEAK_GRACE_SECS=10
+bgp_unexcused_proofs() {
+  printf '"'"'%s\n'"'"' "${missing}" \
+    | grep -vFx -e "${SILENCE_MARKER}" -e "${DISARMED_MARKER}" || true
+}
+# Real run
+if [[ -z "${DART_BIN}" ]]; then
+  exit 2
+fi
+if ! PROBE_SELFTEST="$("${DART_BIN}" "${WIRE_PROBE}" --self-test 2>&1)"; then
+  exit 2
+fi
+    P3_HOST_VERDICT="$(bgp_p3_host_verdict "${DISABLE_RC}" \
+      "${DRIVE_EXIT_APP_STATE}" "${APP_STATE_AT_WINDOW_END}" "${WIRE_RC}")"
+    if (( RECLAIMED_INSIDE_WINDOW == 1 )); then
+      case "${P3_HOST_VERDICT}" in
+        holds)
+          P3_PROVEN_BY_HOST=1
+          ;;
+      esac
+    fi'
+
+  _p3oracle() { # <label> <want-rc> <wrapper> <probe> <drive> <constants>
+    local got=0
+    printf '%s\n' "$3" >"${tmp}/run-ios-bg-publish.sh"
+    printf '%s\n' "$5" >"${tmp}/ios_bg_publish_test.dart"
+    printf '%s\n' "$6" >"${tmp}/location.dart"
+    rm -f "${tmp}/bgp-wire-probe.dart"
+    if [[ -n "$4" ]]; then
+      printf '%s\n' "$4" >"${tmp}/bgp-wire-probe.dart"
+    fi
+    ( check_p3_host_wire_oracle "${tmp}/run-ios-bg-publish.sh" \
+        "${tmp}/bgp-wire-probe.dart" "${tmp}/ios_bg_publish_test.dart" \
+        "${tmp}/location.dart" ) >/dev/null 2>&1 || got=$?
+    _record "$1" "$2" "${got}"
+  }
+
+  _p3oracle 'p3 oracle: the wired shape passes' 0 \
+    "${p3_wrapper}" "${p3_probe}" "${p3_drive}" "${p3_constants}"
+  # 168+32 is 200; a wrapper that says 210 measures ten seconds the drive does
+  # not, and both oracles still look perfectly reasonable on their own.
+  _p3oracle 'p3 oracle: the settle window drifts between the two oracles' 1 \
+    "${p3_wrapper/SETTLE_WINDOW_SECS=200/SETTLE_WINDOW_SECS=210}" \
+    "${p3_probe}" "${p3_drive}" "${p3_constants}"
+  _p3oracle 'p3 oracle: the in-flight grace drifts' 1 \
+    "${p3_wrapper/LEAK_GRACE_SECS=10/LEAK_GRACE_SECS=12}" \
+    "${p3_probe}" "${p3_drive}" "${p3_constants}"
+  # The premise of counting EVERY kind-445: the peer must already be gone.
+  _p3oracle 'p3 oracle: the peer is disposed AFTER the disable' 1 \
+    "${p3_wrapper}" "${p3_probe}" \
+    'const int _inFlightGraceSecs = 10;
+final Duration _negativeSettleWindow =
+    kLocationPublishMaxInterval + const Duration(seconds: 32);
+Future<void> body() async {
+  await bgNotifier.setEnabled(enabled: false);
+  await bob.dispose();
+}' "${p3_constants}"
+  _p3oracle 'p3 oracle: the probe loses the window'"'"'s upper bound' 1 \
+    "${p3_wrapper}" "${p3_probe/ \&\& createdAt <= until/}" \
+    "${p3_drive}" "${p3_constants}"
+  _p3oracle 'p3 oracle: the probe loses its control arm' 1 \
+    "${p3_wrapper}" "${p3_probe/reading.controlCount <= 0/false}" \
+    "${p3_drive}" "${p3_constants}"
+  # The SECOND control, dropped on its own. A relay that answers kind-30443 and
+  # serves no kind-445 satisfies the first one perfectly while proving nothing
+  # about the kind P3's window is read for.
+  _p3oracle 'p3 oracle: the probe loses its pre-disable 445 control' 1 \
+    "${p3_wrapper}" "${p3_probe/reading.preDisableCount <= 0/false}" \
+    "${p3_drive}" "${p3_constants}"
+  _p3oracle 'p3 oracle: the preflight stops proving the instrument' 1 \
+    "${p3_wrapper/\"\$\{DART_BIN\}\" \"\$\{WIRE_PROBE\}\" --self-test/\"\$\{DART_BIN\}\" --version}" \
+    "${p3_probe}" "${p3_drive}" "${p3_constants}"
+  # A second assignment is the mutation that matters: the flag would then be
+  # set on a run whose verdict was never `holds`.
+  _p3oracle 'p3 oracle: the proven flag gains a second source' 1 \
+    "${p3_wrapper}
+P3_PROVEN_BY_HOST=1" "${p3_probe}" "${p3_drive}" "${p3_constants}"
+  _p3oracle 'p3 oracle: the completion-gate excuse widens' 1 \
+    "${p3_wrapper/-e \"\$\{DISARMED_MARKER\}\" || true/-e \"\$\{DISARMED_MARKER\}\" -e \"\$\{ARMED_MARKER\}\" || true}" \
+    "${p3_probe}" "${p3_drive}" "${p3_constants}"
+  # The excuse is the ONE assertion read from the whole file rather than the
+  # real-run section, so it is the one that has to prove it reads CODE: a
+  # wrapper that keeps the line only as a comment excuses nothing at runtime
+  # and must not pass here.
+  _p3oracle 'p3 oracle: the excuse surviving only as a comment is not the excuse' 1 \
+    "${p3_wrapper/    | grep -vFx/    # | grep -vFx}" \
+    "${p3_probe}" "${p3_drive}" "${p3_constants}"
+  _p3oracle 'p3 oracle: the probe file is gone' 1 \
+    "${p3_wrapper}" '' "${p3_drive}" "${p3_constants}"
+  # Anti-vacuity, both directions.
+  # `${var/#…}` would anchor to the start of the string, so the boundary is
+  # broken by renaming it rather than by a pattern that begins with `#`.
+  _p3oracle 'p3 oracle: a wrapper with no real-run boundary is refused' 1 \
+    "${p3_wrapper/Real run/Real ran}" "${p3_probe}" "${p3_drive}" \
+    "${p3_constants}"
+  _p3oracle 'p3 oracle: an unreadable window term is refused' 1 \
+    "${p3_wrapper}" "${p3_probe}" "${p3_drive}" \
+    'const Duration kPublishMaxInterval = Duration(seconds: 168);'
+
   if (( checked != SELF_TEST_FIXTURES )); then
     echo "SELF-TEST FAIL: ran ${checked} fixture(s), expected ${SELF_TEST_FIXTURES}" >&2
     fails=1
@@ -4955,4 +5240,4 @@ if [[ "$FAILED" -ne 0 ]]; then
   echo "iOS background publish guard FAILED — see failures above." >&2
   exit 1
 fi
-echo "OK: iOS background publish invariants hold (plist mode, one stream boundary per platform, toggle-keyed iOS route with a background branch that cannot fall through to the one-shot, native owner's session shape + two accuracy tiers + sink-only refusals + transient-error filter + only-Best cache in all three copies, bounded anchor staleness in both the controller and the serving path, fail-closed background-launch provider guard, C4 watcher + its opt-out release issued on every path, burst plane entered only from the running process and native wakes with one receive-only door into Dart, presence-only logs, tier-based session/indicator policy with a session-scoped confirmation and an unconditional disarm, AppDelegate wiring order, unfaked bg-publish drive, background-capable stream established before the drive backgrounds the app, P2c's receive oracle read from the subscription count and never from the paused flag and P2d's from the persisted last-known store, each with its terminal proof printed after the assertion it stands for, relaunch region coupled to SLC, stream handler compiled into the Xcode project, every leg's drive Timeout inside its own per-attempt retry deadline, one poll-path receive cadence across the product and the drive, the poll path's sweep declaring itself a background wake so the C3 consent chokepoint applies, and every poll leg held at the when-in-use grant P2d's attribution depends on)."
+echo "OK: iOS background publish invariants hold (plist mode, one stream boundary per platform, toggle-keyed iOS route with a background branch that cannot fall through to the one-shot, native owner's session shape + two accuracy tiers + sink-only refusals + transient-error filter + only-Best cache in all three copies, bounded anchor staleness in both the controller and the serving path, fail-closed background-launch provider guard, C4 watcher + its opt-out release issued on every path, burst plane entered only from the running process and native wakes with one receive-only door into Dart, presence-only logs, tier-based session/indicator policy with a session-scoped confirmation and an unconditional disarm, AppDelegate wiring order, unfaked bg-publish drive, background-capable stream established before the drive backgrounds the app, P2c's receive oracle read from the subscription count and never from the paused flag and P2d's from the persisted last-known store, each with its terminal proof printed after the assertion it stands for, relaunch region coupled to SLC, stream handler compiled into the Xcode project, every leg's drive Timeout inside its own per-attempt retry deadline, one poll-path receive cadence across the product and the drive, the poll path's sweep declaring itself a background wake so the C3 consent chokepoint applies, every poll leg held at the when-in-use grant P2d's attribution depends on, and P3's settle window measured by the same numbers from both sides with a host-side wire oracle that outlives the app, two controls it cannot read nothing through — one that the relay answers at all, one that it still serves the kind the window is read for — and a completion-gate excuse of exactly two markers from exactly one source)."

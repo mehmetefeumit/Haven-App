@@ -48,6 +48,15 @@ concurrency:
 jobs:
   flake_stress:
     name: flake_stress
+    # HAVEN_GRADLE_CACHE-EXEMPT: this job's cap is already GitHub's 360-minute
+    # ceiling and cannot rise, and its step caps plus declared uncapped minutes
+    # leave 0.8 of headroom — less than a cache-restore step's cap. Funding one
+    # would mean taking minutes off the stress loop, i.e. paying for a build
+    # optimisation with test coverage, on the one lane whose entire purpose is
+    # to run the suite enough times to catch a flake. It still builds through
+    # the classified retry, and still gets the widened in-Gradle 429 window from
+    # haven/android/gradle.properties; only the warm cache is missing. Revisit
+    # if the cap ceiling rises or the loop is re-sized.
     runs-on: ubuntu-latest
     # The loop is N x one e2e_combined drive (the ~12-minute e2e_combined
     # ceiling bounds its main scenario) plus a relay reset per iteration.
@@ -210,9 +219,7 @@ jobs:
           # builds the heavy debug Rust lib for all three ABIs (cargokit auto-adds
           # the targets), wasting build time and runner disk. No effect on what is
           # tested — the suite runs on the x64 AVD.
-          flutter build apk \
-            --debug \
-            --target-platform android-x64 \
+          ../scripts/ci/build_apk_with_retry.sh android-x64 \
             --target=integration_test/e2e/e2e_combined.dart \
             --dart-define=HAVEN_E2E_RELAY="${HAVEN_E2E_RELAY}" \
             --dart-define=HAVEN_LIVE_SYNC="${HAVEN_LIVE_SYNC}"
@@ -355,7 +362,23 @@ jobs:
       - name: Capture host + emulator diagnostics
         if: always()
         run: |
+          # `adb` reaches PATH only through the emulator action's
+          # core.addPath(<sdk>/platform-tools); when that action never ran the
+          # slices below were `command not found`, and `|| true` kept it silent
+          # (run 35536892150). Resolve it from the SDK instead, and say in
+          # fixed words which case this diag is.
+          sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          if [ -n "${sdk}" ]; then PATH="${sdk}/platform-tools:${PATH}"; fi
+          if command -v adb >/dev/null 2>&1; then adb_state=resolved; else adb_state=absent; fi
+          devices=""
+          if [ "${adb_state}" = resolved ]; then devices="$(adb devices 2>/dev/null || true)"; fi
+          # Materialised: `adb devices | grep -q` reports the producer's
+          # SIGPIPE under pipefail, not the match.
+          if grep -qE '^[^[:space:]]+[[:space:]]+[a-z]+$' <<<"${devices}"; then device_state=present; else device_state=none; fi
           {
+            echo "adb: ${adb_state}"
+            echo "device: ${device_state}"
+            echo
             echo "=== df -h ==="
             df -h || true
             echo
@@ -399,7 +422,7 @@ jobs:
         run: |
           rc=0
           bash tooling/e2e/ci/scan-logs.sh \
-            --manifest /tmp/haven-soak/needles/*.needles.json \
+            --manifest-dir /tmp/haven-soak/needles \
             --sink diag=/tmp/diag.log \
             --report /tmp/logscan-report-upload.ndjson || rc=$?
           exit "${rc}"

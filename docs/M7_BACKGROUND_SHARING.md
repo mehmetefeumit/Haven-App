@@ -1548,3 +1548,44 @@ nostr_group_id_hex=?` in the `delete_circle` cascade (`storage.rs:824-877`) = wi
   wait's drive-exited branch now says so, with the app's process state beside it (calibrated at
   READY, so a read that never saw the app reports `unknown` rather than blaming iOS), instead of
   leaving an rc=79 to be read as an assertion failure.
+- 2026-09-21 — **It was `runningboardd`, and P3 no longer needs the app to survive its own window
+  (CI run 35622556197, job 106414462583, `when-in-use-live-sync`).** The 2026-09-18 entry above left
+  one thing unproven — *which process ended it* — and added `sim-lifecycle.log` so the next
+  occurrence would answer it. This is that occurrence, and it does. The drive printed every proof
+  through `BACKGROUND_RECEIVE_OK`, disabled at `16:50:04.64`, and died 38 s later. In order:
+  `16:50:04.44` the app releases every CoreLocation claim (`stopLocation_nl`, the SLC unsubscribe,
+  `CLBackgroundActivitySession … dealloc`, `cancelAllTaskRequests`) — so **P3's native half
+  demonstrably ran, from the app, before anything killed it**; `16:50:05.49` `runningboardd`
+  invalidates the assertion `locationd` held on the app *because* the app stopped being a location
+  client, and activates the delayed shared `FinishTask` assertion in its place; `16:50:34.74`
+  "Assertions for process will expire soon"; `16:50:37.84` "Assertion did invalidate due to
+  timeout"; `16:50:41.43` "Timed-out waiting for process … to invalidate assertion … Suspending
+  task."; `16:50:41.82` "Terminating with context: `<RBSTerminateContext| code:0x2182BAD2 …
+  maxTerminationResistance:Interactive>`"; `16:50:42.05` `launchd_sim` records
+  `OS_REASON_RUNNINGBOARD`, "ran for 396864ms". **No jetsam of the app, no crash report, no
+  `EXC_*`, no `0x8badf00d` watchdog** — and the assertion nobody ever ended is the DEBUG Flutter
+  engine's own `Flutter debug task` (taskIDs 4 and 6, created at the backgrounding), which UIKit
+  itself warns about in every run of this lane: *"was created over 30 seconds ago. In applications
+  running in the background, this creates a risk of termination."* So the terminator is the ordinary
+  RunningBoard expiry that follows an app losing its background claim, and the app lost it because
+  the disable worked. **Not a product defect: the reclaim is the privacy-best outcome.** Whether the
+  frozen process acknowledges the suspension inside RunningBoard's few seconds is an OS scheduling
+  race, which is why the same leg was green in 35524002720 (the app stayed suspended for the whole
+  207 s and finished P3 after the wake-up).
+  Fix: P3's wire half moved to a witness the OS cannot reclaim. `tooling/e2e/ci/bgp-wire-probe.dart`
+  (standalone Dart, `dart:io` only) asks the lane's own relay, on EVERY path once the window has
+  elapsed, whether any kind-445 was created inside it; `run-ios-bg-publish.sh` holds the window open
+  when the drive dies early (capped by the wake-up budget it replaces, so the lane costs no extra
+  wall clock) and ends on one of four PROVEN verdicts — `holds`, `leak`, `relaunched`, `unproven` —
+  with no default-to-green. Only `holds` excuses anything, and only the two markers a dead process
+  could not print. The native half on that path is carried by the reclaim itself: an app still
+  holding a location keep-alive is an app iOS keeps executing, which P2a/P2b measure for 400+ s
+  every run, and a simulator has no jetsam. What it does **not** prove is that the release was
+  *prompt* — the drive's own disarm poll owns that, and the other two legs run it. The count is an
+  answer only because the drive disposes the synthetic peer before P3 (the host cannot tell two
+  authors apart: ephemeral per-message keys, one shared `h` tag), and the probe carries a control
+  question whose answer cannot be zero, so an unread relay is never reported as a silent window.
+  Guard **check 19** of `scripts/ci/check_ios_background_publish.sh` pins all four premises (one
+  window across three files, the peer disposed first, the probe's control and range, the excuse's
+  single source and exact width), mutation-tested; the probe proves itself on the runner in the
+  wrapper's preflight.

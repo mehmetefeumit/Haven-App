@@ -287,10 +287,10 @@ no external read is possible once `flutter test` removes the app.
 separate CI step. Assert it inside the test (which runs in the app's sandbox), or
 use `flutter drive` (Android) which leaves the app installed.
 
-## Failure mode 6 — Gradle build fails with HTTP 403 (transient Maven Central)
+## Failure mode 6 — Gradle build fails resolving dependencies (transient 403/429)
 
-**Symptom.** `BUILD FAILED` during "Build M7 target APKs" (or any Gradle build),
-BEFORE the emulator runs:
+**Symptom.** `BUILD FAILED` during any Gradle build step, BEFORE the emulator
+runs:
 
 ```
 Could not resolve org.jetbrains.kotlin:kotlin-stdlib:2.0.21.
@@ -299,23 +299,66 @@ Could not resolve org.jetbrains.kotlin:kotlin-stdlib:2.0.21.
 
 **Root cause.** Transient infrastructure — Maven Central (`repo.maven.apache.org`)
 / `plugins.gradle.org` rate-limit or hiccup on shared GH-runner IPs and return
-403/429/5xx during `:classpath` dependency resolution. NOT a code error, NOT
-reproducible locally, and it can hit ANY Gradle lane — only the unlucky one fails
-a given run (in run 29054586352, e2e_android + every Android build passed; only
-e2e_m7 drew the 403). Because it fails at the build step, it can mask/pre-empt the
-runtime phases entirely.
+403/429/5xx during dependency resolution. NOT a code error, NOT reproducible
+locally, and it can hit ANY Gradle lane — only the unlucky one fails a given run
+(in run 29054586352, e2e_android + every Android build passed; only e2e_m7 drew
+the 403; in run 35622556197 one lane drew HTTP 429 six times over 2m47s while
+twelve siblings built the same commit clean). Because it fails at the build
+step, it can mask/pre-empt the runtime phases entirely.
 
-**Fix.** `build-integration-apks.sh` wraps each `flutter build apk` in a bounded
-retry (`HAVEN_BUILD_MAX_ATTEMPTS`, default 3; `HAVEN_BUILD_RETRY_DELAY_SECS`, 20).
-Gradle caches what it already fetched within the job, so a retry only re-fetches
-the artifacts the transient failure missed. This hardens the **m7 + integration**
-lanes (both invoke the script). A genuine compile error still fails all attempts
-and surfaces normally.
+**The fix is the CACHE; the retry is the backstop.** A cold `~/.gradle` makes a
+lane fetch hundreds of POMs before it compiles anything, and every one of them
+is a chance to be rate-limited. MEASURED across 182 samples in 22 green runs: a
+cold `assembleDebug` takes 455-946 s, a warm one 29-48 s. The warm build does
+not make the requests, so it cannot draw the limit.
 
-**If it recurs on a lane that does NOT use that script** (e2e-android /
-android-build / release-build build via Gradle directly): apply the same
-bounded-retry pattern to that build invocation — no Android lane caches Gradle
-dependencies, so all share this latent flake.
+Every Gradle-building job therefore restores a shared, read-only dependency
+cache (`~/.gradle/caches/modules-2` + `~/.gradle/wrapper`) on one canonical key
+before its first build — 13 restore steps today. Exactly ONE job writes that key,
+`build-check.yml`'s `android`, from a successful build only, under the restore
+step's own `cache-primary-key` output; a lane that wipes `~/.gradle` for disk
+headroom (e2e-relay-customization) must never be able to publish the hole. Every
+restore is `continue-on-error: true` under a `timeout-minutes`, because an
+optimisation must never redden a lane that would have built cold.
+
+Two jobs are exempt, each with its reason on the line above its `runs-on`:
+`release-build.yml`'s `android`, because it signs and ships the artifact and
+nothing would authenticate what a restored cache put on disk (no
+`verification-metadata.xml`, no `distributionSha256Sum`), and
+`e2e-flakiness-stress.yml`'s `flake_stress`, whose job cap is already GitHub's
+360-minute ceiling with 0.8 min of headroom, less than a restore step's cap.
+`scripts/ci/check_gradle_build_hardened.sh` enforces all of this (C1-C6).
+
+**The retry.** Every Gradle build a workflow invokes DIRECTLY — the E2E lanes'
+and `build-check.yml`'s — goes through `scripts/ci/build_apk_with_retry.sh`; a
+bare `flutter build apk` in a workflow is a C3 violation. (The exception is
+`release-build.yml`, which calls `scripts/build_release.sh`, and that script
+runs `flutter build` itself; a transient on a tag is a human re-run, not an
+in-job recovery. Its only retry is the widened in-Gradle window from
+`haven/android/gradle.properties`, which every Gradle build here gets.) The
+wrapper makes up to 4 attempts
+with a fixed 20/45/75 s ladder (`HAVEN_BUILD_MAX_ATTEMPTS`,
+`HAVEN_BUILD_RETRY_BUDGET_SECS`), inside a 180 s wall-clock budget shared by the
+WHOLE step — so a seven-APK step cannot spend it seven times over — and it
+refuses to start an attempt whose projected cost will not fit. It CLASSIFIES:
+only a dependency-resolution signature is retried, a disk/OOM signature is
+never retried (that would turn a capacity problem into a green build), and
+anything unclassified fails immediately with the build's own exit code.
+
+Note what it cannot decide. `Could not resolve all files for configuration ...`
+is what Gradle prints both for a transient and for a dependency version this
+commit got wrong, so the retry class covers both. The verdict annotation is
+where that is told honestly, and it has **three wordings** — read which one you
+got before re-running:
+
+| The output carried | The annotation says | What to do |
+|---|---|---|
+| `status code 429` | a repository rate-limited this runner; INFRASTRUCTURE, not a product failure | re-run on a different runner; a recurrence means the cache is not being restored |
+| `Could not find …` + `Searched in the following locations` | Gradle could not find a coordinate in any repository, and that is also what a wrong version prints | read the Gradle error FIRST — if this commit changed a dependency, no re-run will fix it |
+| neither | no HTTP status was reported, so the cause is not knowable from here | usually infrastructure, but check the diff for a dependency change |
+
+The original Gradle output is always printed above the annotation, unaltered;
+the annotation never reprints the coordinate itself.
 
 ## Failure mode 7 — cold worker panics "android context was not initialized"
 
@@ -577,26 +620,59 @@ test.
 `tooling/e2e/ci/app-install-lib.sh`: `install_fresh` clears any prior install
 first, `install_app` installs over whatever is there, and after any install
 that was FRESH — the package absent beforehand — both check it landed and then
-block on `cmd package wait-for-handler` followed by
-`am wait-for-broadcast-barrier --flush-broadcast-loopers`, so the broadcast is
-delivered before anything launches the app. PackageManagerService posts the
-send to its own handler and only then answers the installer
-(`android-14.0.0_r1`, `InstallPackageHelper.handlePackagePostInstall`), so a
-bare barrier taken as `adb install` returns can pass before the broadcast is
-enqueued. Draining that handler is what closes the gap: the loopers flag alone
-covers it only once it has sent some broadcast before (`BroadcastLoopers`
-registers loopers lazily), which on a freshly booted guest it may not have.
-Both commands are in that release's source. `flutter drive`'s own reinstall
-(it always reinstalls) is a REPLACE, as is any install over an installed
-package, and the overlay manager ignores a replace for a package that neither
-declares nor is targeted by an overlay. So a replace takes no barrier, and a
-sound lane never reds on a wait that could not have mattered.
-What the barrier cannot reach are the in-process hops after hand-over
-(FgThread, the overlay manager's thread, FgThread again) — a margin of
-everything before the drive's launch, not a barrier. A queue that does not
-drain within `INSTALL_BARRIER_SECS` (120 s, a library constant no lane can
-tighten), a device that cannot run the barrier, and a failed install each fail
-the lane by name rather than driving into the race.
+block on one round trip that runs four `;`-separated commands on the guest:
+
+```
+cmd package wait-for-handler --timeout 120000 ; h=$?
+am wait-for-broadcast-barrier --flush-broadcast-loopers ; b=$?
+cmd package haven-not-a-command ; c=$?      # control
+am         haven-not-a-command ; a=$?       # control
+echo "haven-barrier-rc $h $b $c $a"
+```
+
+`;` and not `&&`, so a half that fails still reports its own code instead of
+vanishing into a short circuit, and the host branches only on that
+guest-printed verdict line — never on a number adb reports or a word the
+framework prints. PackageManagerService posts the `PACKAGE_ADDED` send to its
+own handler and only then answers the installer (`android-14.0.0_r1`,
+`InstallPackageHelper.handlePackagePostInstall`), so a bare barrier taken as
+`adb install` returns can pass before the broadcast is enqueued. Draining that
+handler is what closes the gap: the loopers flag alone covers it only once it
+has sent some broadcast before (`BroadcastLoopers` registers loopers lazily),
+which on a freshly booted guest it may not have. Both commands are in that
+release's source. `flutter drive`'s own reinstall (it always reinstalls) is a
+REPLACE, as is any install over an installed package, and the overlay manager
+ignores a replace for a package that neither declares nor is targeted by an
+overlay. So a replace takes no barrier, and a sound lane never reds on a wait
+that could not have mattered. What the barrier cannot reach are the in-process
+hops after hand-over (FgThread, the overlay manager's thread, FgThread again) —
+a margin of everything before the drive's launch, not a barrier.
+
+**The two controls are ADVISORY, for now.** An rc of 0 from a command that does
+not exist reads exactly like an rc of 0 from one that ran, so a guest that
+answered 0 to everything is the single shape that would make the whole barrier
+a no-op nobody could see. The basis for expecting non-zero is SOURCE, not a
+run we have: both `cmd package` and `am` fall through to
+`BasicShellCommandHandler.handleDefaultCommands`, which prints `Unknown
+command: <cmd>` and returns -1, which `cmd.cpp` hands back as exit status 255.
+Until a lane has shown that, a control answering 0 emits `::warning::` and the
+install proceeds — a refusal resting on an unmeasured probe is exactly what
+cost run 35536892150 thirteen Android lanes. The success line records all four
+codes on every fresh install (`install broadcasts flushed (handler/barrier rc
+0/0, unknown-command control rc 255/255)`), so the first green run is the
+measurement, after which the warning becomes the refusal it describes.
+
+**Fail-closed outcomes**, each named rather than driven into the race: a failed
+install; a queue that has not drained within `INSTALL_BARRIER_SECS` (120 s, a
+library constant no lane can tighten — rc 124); a verdict line that is absent,
+truncated or unparseable, i.e. the guest exited 0 without saying what the
+barrier's own commands returned; a non-zero `h` or `b`, which is what a guest
+predating either command reports; and **rc 125-127, which is this runner
+failing to execute the command at all** rather than any device fault — the
+chain ends in an `echo`, so no guest-side failure can reach adb's own exit
+status. That last one is what `timeout … adb` returned in eight of run
+35536892150's thirteen Android lane jobs, with adb off the PATH, and it says
+so: *"nothing was asked of `<device>` … That is this runner's tooling."*
 
 Where each lane installs: `run-single-avd-scenario.sh` Phase 2 (and through it
 e2e-android, e2e-profile, e2e-integration, e2e-relay-customization and
@@ -614,14 +690,20 @@ B1 keeps its own Phase-4 barrier as well: that one runs after launch, for the
 drive's force-stop and replace broadcasts that reset LocationManagerService's
 registrations, and neither barrier covers the other's broadcast.
 
-Two repo-guards steps keep it that way. `app-install-lib.sh --self-test` pins
-the order, the handler drain and the loopers flag, the bound, the check that a
-fresh install landed, the fail-closed paths and the no-barrier-on-a-replace
-rule against a stub device. `app-install-lib.sh
---check-installs` fails if any lane installs the app another way, redefines
-those functions, or talks to adb and launches the app with `flutter drive`,
-`flutter test` or `flutter run` without also installing through them — so a new
-lane written the ordinary way cannot miss the barrier.
+Two repo-guards steps keep it that way. `app-install-lib.sh --self-test` runs
+80 fixtures (the count is pinned by equality) against a stub device: the order,
+the handler drain and the loopers flag, the bound, the check that a fresh
+install landed, the verdict line and every way it can be missing or wrong, the
+two unknown-command controls including the guest that answers 0 to everything,
+each fail-closed path, and the no-barrier-on-a-replace rule. Its first suite
+runs the stub `timeout` and coreutils' real one side by side on the same
+inputs, because `install_app` reads 124 (a queue that never drained), the
+command's own rc, and 125-127 (this runner) as three different verdicts that a
+fake could silently flatten into one. `app-install-lib.sh --check-installs`
+fails if any lane installs the app another way, redefines those functions, or
+talks to adb and launches the app with `flutter drive`, `flutter test` or
+`flutter run` without also installing through them — so a new lane written the
+ordinary way cannot miss the barrier.
 
 **Not covered.**
 
@@ -810,7 +892,14 @@ the iOS lanes, the runner's own choice elsewhere):
 
 The wrapper folds the two verdicts as `1 > 2 > 3 > 4 > 0`; its last line names
 both scanners' codes, the sink count and the manifest's basename (or
-`rules-only`). The failing line above it is one of three shapes:
+`rules-only`, or `no manifest resolved from the needle directory`). Workflows
+hand the wrapper the needle DIRECTORY (`--manifest-dir`), never a glob: it
+resolves the one `*.needles.json` itself, after the key-material floor has run.
+An empty directory is rc 4 and means the lane died before it sealed a manifest;
+a directory that does not exist is rc 4 and means the path is wrong; two
+manifests is rc 2 — the directory was not rotated, and the wrapper will not
+choose between this run's needles and a stale run's. The failing line above it
+is one of three shapes:
 
 **rc 1 — `LEAK: <sink>:<line> [<class>/<encoding>|<rule>] tag=<tag> ×<n>`,
 then `secret-leak guard tripped … removed the scanned logs`.** A declared
@@ -908,11 +997,17 @@ unified-log export, 100 for a drive transcript, 20 for a test transcript, 5 for
 a proxy log, 1 for a relay log (the hermetic host relay prints one listen line
 for a whole run) and 1 for a diag. A lane whose captures are legitimately
 smaller passes its own `--floor <class>=<n>` at its seal rather than lowering a
-default, with the measured basis and the run it came from stated beside it:
-integration and relay-customization take `drive=20` (a target is one or two
-tests), `logcat=300` (logcat is captured per target, not per scenario) and
-`relay=7`; background-catchup takes `drive=9 relay=7` and KeyPackage-rotation
-`drive=43 relay=7` (one drive target each).
+default, with its basis and the runs it came from stated beside it: integration
+and relay-customization take `drive=18` (each target is gated as
+`--sink drive=<final>,<full>` and a floor sums its class's files, so it is twice
+the 9 lines the host prints per slice), `logcat=300` (logcat is captured per
+target, not per scenario) and `relay=7`; background-catchup and FGS-publish take
+`drive=9 relay=7` (both keep the app running, so both carry the ninth line),
+KeyPackage-rotation, real-GPS, provider-toggle, clock-skew and network-reconnect
+`drive=8 relay=7`, and permission-revocation `drive=7 relay=7`
+— that lane alone drops the verdict line from its count, because ACT 1's green
+shape is the app dying under the driver, which ends the transcript in a
+`DriverError` instead.
 
 For a **`drive` sink the line count is not what proves a test ran** — a
 transcript's length is the tool's own output plus whatever logcat furniture the
@@ -930,18 +1025,63 @@ reporter's progress line (`HH:MM +N: <name>`, forwarded by logcat as
 has no progress line at all, which is what made CI run 35478132251's Flutter
 coverage job rc 4 over 4 673 passing tests. An ANDROID drive floor is
 therefore calibrated to the lines `flutter drive` prints on the HOST alone — the
-`Installing …` line, the six `VMServiceFlutterDriver:` lines, the verdict and
-`Leaving the application running.` where the lane keeps the app alive (9 in
-every complete background-catchup transcript of run 35464818348, 8 in every
-other Android lane's, which let the driver stop the app) — and never
-re-measured from a transcript that also carries forwarded device chatter.
-Background-catchup is so far the ONLY floor derived that way; the other Android
-numbers above are still transcript-measured and are re-derived like this when
-one next reds, rather than chased down by the length of whatever capture reddened
-it. An iOS capture carries none of that skeleton — the simulator forwards no
-device chatter and `flutter drive` prints only the reporter's own lines — so the
-iOS floors below stay measured, with `proof_of_run` answering "did anything run"
-there too.
+`Installing …` line (there is no already-installed shortcut in
+`AndroidDevice.startApp`), the six `VMServiceFlutterDriver:` connect lines, the
+verdict and `Leaving the application running.` where the lane keeps
+the app alive — and never re-measured from a transcript that also carries
+forwarded device chatter. That skeleton is 8, or 9 with `--keep-app-running`,
+in EVERY drive transcript of four green runs (35311161479, 35376588206,
+35397118356, 35524002720) while the transcripts themselves swing by half their
+length, so every Android lane's floor is now derived from it and each runner's
+`--self-test` reds if its floor exceeds its own skeleton fixture.
+
+Four of the six connect lines are unconditional — `Connecting to Flutter
+application at …`, `Isolate found with number: …`, `Isolate <n> is runnable.`
+and `Connected to Flutter application.` — and two are not: `Isolate is paused at
+start.` and `Attempting to resume isolate` sit inside
+`if (isolate.pauseEvent.kind == kPauseStart)` in `flutter_driver`'s
+`vmservice_driver.dart`, whose sibling branches print `Isolate is paused
+mid-flight.` or `Isolate is not paused. Assuming application is ready.` and
+whose own comment names the race — another tool, "usually a debugger", having
+resumed the isolate first. Counting them is still honest here, and that is the
+whole reason the floor stays a lower bound: `flutter drive` defaults
+`--start-paused` to `true` (`drive.dart`'s `startPausedDefault`), and in drive
+mode flutter_tools launches the app, starts DDS and hands the VM to the driver
+script without resuming anything, so a freshly launched app IS at `kPauseStart`
+and the other branches are reachable only when something outside the lane
+resumed it. Nothing in these lanes does, which is why both lines are in every
+measured transcript — three of three drives in the background-catchup lane of
+run 35524002720, to name the capture that is cheapest to re-read. If a lane ever
+attaches a debugger, its floor drops by two before that lane lands, not after.
+
+That proof has a second half, `proof_of_run_excludes`, because both reporters
+render the SUITE they are LOADING through the very shape above and a load is not
+a run. The expanded reporter opens every iOS transcript with
+`00:00 +0: loading <path>` — **before** the Xcode build, not after it — and the
+github reporter renders a suite that failed to load as
+`::group::❌ loading <path> (failed)`; a third exclusion covers
+`HH:MM +N: Some tests failed.`, which `_onDone` writes as a progress line for a
+run whose suite never loaded. Each is anchored on the reporter's prefix to its
+left and the suite path's `.dart` to its right, so a test whose NAME says
+"loading" is still proof. Until they existed an iOS capture of a build that
+never launched read as a run, which is why the iOS floors were measurements.
+
+An iOS capture carries no forwarded device chatter, so its host skeleton is the
+four lines a `flutter test -d <udid>` transcript always has: the reporter's
+`HH:MM +N: loading <path>` and its first test-start line, and flutter_tools'
+`Running Xcode build...` / `Xcode build done.` pair, which an incremental build
+prints exactly as a cold one does. Every iOS lane's floor is now that **4**, and
+`run-ios-sim-scenario.sh` refuses a `HAVEN_LOGSCAN_DRIVE_FLOOR` outside `1..4`
+at SCRIPT START — before the arguments are read, before the build, before
+anything can have been captured — so no iOS lane can be re-pinned from a
+transcript's length, and every iOS lane is covered because every one of them
+(b4, b7, the profile lane's iOS job, background-publish) reaches the gate
+through this script. The refusal deliberately does NOT live on the gate path:
+one that did meant a mis-set floor skipped the key-material floor and the
+scanner both, leaving the transcript uncontained while the `if: failure()`
+upload still ran. What
+the old numbers caught and 4 does not — a drive that built and never launched —
+is the fixed `proof_of_run`'s job, at any floor.
 
 The core-flow iOS lane keeps the default of 100 and clears it a different way:
 it drives TWO scenarios through the one fixed transcript path, which the runner
@@ -949,17 +1089,19 @@ truncates per invocation, so each invocation preserves its own as
 `/tmp/flutter-ios-test.<scenario>.log` and both the second gate and the
 workflow's scan step weigh them together — without that, the
 mirror check's ~14 lines would be rc 4 on every green run. The four
-single-scenario iOS lanes take theirs from CI run 35280144455's complete
-transcripts — `drive=22` for
-iOS real-GPS (45 lines), `drive=24` for the profile lane's iOS job (49),
-`drive=27` for iOS auth-tier (54, per tier) and `drive=56` for iOS
-background-publish (112) — each half its measured capture, because the default
-of 100 is the core-flow drive's and read every green single-scenario run as
-truncated. Every strfry lane takes `relay=7`
-for the same reason: strfry's `docker logs` dump is 14-23 lines for a full run,
-while the same command against a container the runner has already torn down
-prints ONE line of error text, and with the structural rules off for this class
-the floor is the only thing that tells a dead capture from a live one. Below
+single-scenario iOS lanes all take `drive=4`, the host skeleton above — iOS
+real-GPS, the profile lane's iOS job, iOS auth-tier (per tier) and iOS
+background-publish, whose belt sums two copies of the one transcript and passes
+the same number, a floor being a minimum. They replace 22, 24, 27 and 56, each
+of which was half a transcript measured in CI run 35280144455 (45, 49, 54 and
+112 lines) and each of which would redden a lane that printed less than it did
+that day. Every strfry lane takes `relay=7`
+for the same reason: strfry's `docker logs` dump opens with a fixed 9-line
+startup block and grows only with traffic (9-49 lines across the fleet's green
+runs, exactly 9 where the relay serves nothing it logs), while the same command
+against a container the runner has already torn down prints ONE line of error
+text, and with the structural rules off for this class the floor is the only
+thing that tells a dead capture from a live one. Below
 either kind of floor, the scan proved too little to be called clean. `no manifest` on a device lane means the
 seal never ran or refused — read its error above; on a rules-only lane it is
 the summary line, not a failure.
@@ -1152,12 +1294,63 @@ Standing rule: a nightly-only lane is invisible to a push. After any change to
 the scanner, the gate or the shared harness, read the next morning's nightly and
 stress results, or replay their uploaded artifacts.
 
+## Failure mode 17 — iOS bg-publish: the drive "did not complete" right after `BACKGROUND_SHARING_DISABLED`
+
+The transcript ends at the disable, the test AND its `tearDownAll` are reported
+as `did not complete`, the drive exits 79, and `ios-flake-lib.sh` correctly
+refuses to retry it (the verdict is `genuine`, which is not the one retryable
+signature). **This is normally not a failure at all** — it is iOS reclaiming
+the app inside P3's settle window, and P3 is the phase that takes the app's
+right to run in the background away.
+
+What actually happens, measured on CI run 35622556197 (`when-in-use-live-sync`,
+`sim-lifecycle.log`): the disable drops every CoreLocation claim ~0.2 s after
+`BACKGROUND_SHARING_DISABLED`; `runningboardd` invalidates the assertion
+`locationd` held on the app one second later; the shared `FinishTask` grace
+that replaces it expires ~30 s on; RunningBoard suspends and then terminates
+the process for not invalidating it — `OS_REASON_RUNNINGBOARD`, code
+`0x2182bad2`. **No jetsam, no crash report, no watchdog** (`0x8badf00d` appears
+nowhere). The assertion nobody ended is the DEBUG Flutter engine's own
+`Flutter debug task`, which UIKit warns about in every run of this lane
+(`"was created over 30 seconds ago … this creates a risk of termination"`).
+Whether the process gets to acknowledge the suspension in time is an OS
+scheduling race, which is why the same leg is green on most runs.
+
+Since then the wrapper does not end there. It holds P3's window open from the
+host and asks the relay — `tooling/e2e/ci/bgp-wire-probe.dart`, run against
+the lane's own `haven-local-relay` — whether any kind-445 was created inside
+it, and prints one of four verdicts. Read the log for them:
+
+| Line | Meaning | Who to blame |
+|---|---|---|
+| `P3 HOLDS on the wire` | silent for the whole window, process stayed gone, disable applied in-process | nobody — the lane goes green with the two markers the dead process could not print excused BY NAME |
+| `ERROR: P3 — kind-445 event(s) reached the relay INSIDE the settle window` | publishing outlived consent, from the app or from a background relaunch | the product (privacy Rule 10) |
+| `ERROR: P3 — the settle window ended with the app RUNNING again` | something re-armed a background wake after consent was withdrawn | the product |
+| `ERROR: P3 has NO verdict on this run` / `could not read the relay` | the oracle failed, not the promise | the harness — fix the probe, never the expectation |
+
+Two things make that green trustworthy, and both are pinned by check 19 of
+`scripts/ci/check_ios_background_publish.sh`: the host counts EVERY kind-445 in
+the window, which is only an answer because the drive disposes the synthetic
+peer **before** P3 (the host cannot tell two authors apart — ephemeral
+per-message keys, one shared `h` tag); and the probe carries a control question
+whose answer cannot be zero, so an unread relay is never reported as a silent
+one. The probe runs its own `--self-test` in the wrapper's preflight, so an
+instrument that stopped reading fails the lane at minute two instead of
+passing P3 for free at minute forty.
+
+If the same message appears with the app `running` or `unknown` instead of
+`gone`, none of the above applies: the drive died with its app still there, and
+that is the drive's own failure to explain from its transcript.
+
 ## What these lanes do NOT cover
 
 The iOS simulator keeps the app alive and the VM-service attached, so it does
 **not** reproduce real-device background **suspension**. A "background execution
 stops" bug will not surface here — that class needs a physical device, which is
-out of scope for GitHub-hosted runners.
+out of scope for GitHub-hosted runners. The one exception is the window after
+`BACKGROUND_SHARING_DISABLED`, where the app deliberately holds no claim and
+the OS does take it (failure mode 17) — proving that publishing has stopped, not
+that background execution survives.
 
 ## Feature flags seen in these lanes
 
