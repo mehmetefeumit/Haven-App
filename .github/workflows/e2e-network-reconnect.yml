@@ -376,7 +376,9 @@ jobs:
             echo "diag uncertified (rc=${diag_scan_rc}): absent, unreadable, empty, or no manifest to scan against" \
               > /tmp/b9-logs/DIAG_UNSCANNABLE.txt
             echo "ERROR: diag log could not be scanned (rc=${diag_scan_rc})." >&2
-            exit 1
+            # The scanner's own code, never 1: on this step 1 means a leak, and the
+            # job summary shows nothing but the code.
+            exit "${diag_scan_rc}"
           fi
 
       # if: always() so a green run still surfaces the measured recovery

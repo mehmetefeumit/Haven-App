@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# CI guard: no Android lane can boot an emulator against an unverified SDK.
+# CI guard: no Android lane can boot an emulator against an unverified SDK, or
+# boot a different emulator binary from the one that was verified.
 #
 # # The invariant
 #
 # Every workflow job that uses `reactivecircus/android-emulator-runner` runs
 # `tooling/e2e/ci/provision-android-sdk.sh` first, unconditionally, with the
-# api/target/arch that job's action steps declare.
+# api/target/arch that job's action steps declare — and every such step boots
+# headless, because headless is what the provisioning step verified.
 #
 # # Why
 #
@@ -31,6 +33,14 @@
 # provisioning step that installs `android-34` in front of an action asking for
 # `android-35` would be a silent no-op followed by the same red.
 #
+# The provisioning step proves the emulator runs with `emulator -no-window
+# -version`, and `-no-window` is how the launcher picks the HEADLESS qemu
+# binary; the windowed one links desktop libraries a runner does not have (CI
+# run 35536892150: 13 lanes red on a probe that omitted the flag). That probe
+# vouches for a lane only while the lane boots the same binary, so every
+# emulator step must say `-no-window` itself — the action's default options
+# include it today, and a default nothing here pins is one that can change.
+#
 # # Checks
 #
 #   P1  A job with an emulator step has a provisioning step.
@@ -42,6 +52,8 @@
 #       one provisioning call has to cover all of them.
 #   P6  No provisioning step in a job that has no emulator step: a stale step is
 #       indistinguishable, in review, from a backstop.
+#   P7  Every emulator step declares `emulator-options` carrying the token
+#       `-no-window` — the binary the provisioning step verified.
 #
 # Pure bash/awk over the checked-out tree, no toolchain and no Android SDK —
 # belongs in repo-guards.yml.
@@ -52,7 +64,7 @@
 #
 # Exit codes:
 #   0  every emulator job provisions its SDK first
-#   1  a job violates one of P1-P6
+#   1  a job violates one of P1-P7
 #   2  the extractor cannot read a step list it must grade, or the self-test
 #      failed (the guard itself cannot vouch for the lanes)
 
@@ -79,7 +91,13 @@ note_violation() { fail_msg "$*"; VIOLATIONS=$((VIOLATIONS + 1)); }
 # has none.
 #
 # One TSV record per step:
-#   file  job  index  name  uses  api  target  arch  has_if  provision_args
+#   file  job  index  name  uses  api  target  arch  has_if  headless
+#   provision_args
+#
+# `headless` is "yes" when the step's `emulator-options` holds the token
+# `-no-window`, "no" when it holds options without it, "-" when the step
+# declares none. The value is read inline or from a block scalar (`>`, `|`, with
+# any chomping indicator), whose lines are the ones indented past the key.
 #
 # `provision_args` is the three arguments of a provisioning invocation in the
 # step's body, or "-". Full-line comments never reach the body, so a
@@ -97,19 +115,21 @@ extract_steps() {
           gsub(/^ +| +$/, "", args)
           gsub(/ +/, " ", args)
         }
-        printf "%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-          file, job, idx, stepname, uses, api, target, arch, has_if, args
+        headless = "-"
+        if (has_opts) headless = ((" " opts " ") ~ / -no-window /) ? "yes" : "no"
+        printf "%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+          file, job, idx, stepname, uses, api, target, arch, has_if, headless, args
         idx++
       }
       in_step = 0
       stepname = "(unnamed)"; uses = "-"; api = "-"; target = "-"; arch = "-"
-      has_if = "no"; body = ""
+      has_if = "no"; body = ""; has_opts = 0; in_opts = 0; opts = ""
     }
     function value(line) { sub(/^[^:]*:[[:space:]]*/, "", line); sub(/[[:space:]]+#.*$/, "", line); return line }
     BEGIN {
       job = "-"; idx = 0; in_jobs = 0; in_steps = 0; in_step = 0
       stepname = "(unnamed)"; uses = "-"; api = "-"; target = "-"; arch = "-"
-      has_if = "no"; body = ""
+      has_if = "no"; body = ""; has_opts = 0; in_opts = 0; opts = ""
     }
     /^[A-Za-z_][A-Za-z0-9_-]*:/ { flush_step(); in_steps = 0; in_jobs = ($0 ~ /^jobs:/); next }
     !in_jobs { next }
@@ -134,6 +154,14 @@ extract_steps() {
     /^          api-level:/ { api = value($0) }
     /^          target:/ { target = value($0) }
     /^          arch:/ { arch = value($0) }
+    in_opts {
+      if ($0 ~ /^           /) opts = opts " " $0
+      else if (NF) in_opts = 0
+    }
+    /^          emulator-options:/ {
+      has_opts = 1; opts = value($0)
+      if (opts ~ /^[>|][-+0-9]*$/) { in_opts = 1; opts = "" }
+    }
     { gsub(/\t/, " "); body = body " " $0 }
     END { flush_step() }
   ' "${file}"
@@ -164,13 +192,19 @@ check_dir() {
   EMU_STEPS=0
   GRADED_JOBS=0
 
-  local file job idx name uses api target arch has_if args
+  local file job idx name uses api target arch has_if headless args base
   for f in "${files[@]}"; do
+    base="${f##*/}"
     local -A emu_first=() emu_spec=() emu_mixed=() prov_first=() prov_args=() prov_if=() jobs_seen=()
-    while IFS=$'\t' read -r file job idx name uses api target arch has_if args; do
+    while IFS=$'\t' read -r file job idx name uses api target arch has_if headless args; do
       jobs_seen[${job}]=1
       if is_emulator_step "${uses}"; then
         EMU_STEPS=$((EMU_STEPS + 1))
+        # P7 — per step, not per job: the snapshot step boots an emulator too.
+        case "${headless}" in
+          no) note_violation "P7 ${base} :: ${job}: '${name}' (step ${idx}) passes emulator-options without \`-no-window\`. ${PROVISION_SH} verifies the HEADLESS emulator binary (\`emulator -no-window -version\`); without the flag this step boots the windowed one, which nothing verified and which links desktop libraries a runner does not have." ;;
+          -) note_violation "P7 ${base} :: ${job}: '${name}' (step ${idx}) declares no emulator-options. The action's default options happen to include \`-no-window\`, but a default this repo does not pin is a default that can change — declare the options and keep \`-no-window\` among them." ;;
+        esac
         local spec="${api}/${target}/${arch}"
         if [[ -z "${emu_first[${job}]:-}" ]]; then
           emu_first[${job}]="${idx}:${name}"
@@ -187,7 +221,6 @@ check_dir() {
       fi
     done < <(extract_steps "${f}")
 
-    local base="${f##*/}"
     while IFS= read -r job; do
       [[ -n "${job}" ]] || continue
       local label="${base} :: ${job}"
@@ -251,7 +284,7 @@ check_extractor_sees_the_dir() {
 # Self-test (hermetic: synthetic workflows in a temp dir, no repo access)
 # ---------------------------------------------------------------------------
 
-readonly SELF_TEST_FIXTURES=12
+readonly SELF_TEST_FIXTURES=16
 
 write_wf() {
   local path="$1"; shift
@@ -260,6 +293,10 @@ write_wf() {
 
 # A job body with the real shape: a provisioning step, then the AVD-snapshot
 # step, then the drive step. The arguments follow so a fixture can bend one.
+# The two steps spell their options in the two forms the reader takes, and the
+# drive script names the flag as well, at the block's own depth: a reader that
+# ran the folded block past its end would find `-no-window` there and pass
+# fixtures (13) and (16).
 compliant_job() {
   local prov_args="${1:-34 google_apis x86_64}"
   printf '%s\n' \
@@ -277,12 +314,18 @@ compliant_job() {
     '          api-level: 34' \
     '          target: google_apis' \
     '          arch: x86_64' \
+    '          emulator-options: -no-window -gpu swiftshader_indirect' \
     '      - name: Drive' \
     '        uses: reactivecircus/android-emulator-runner@v2' \
     '        with:' \
     '          api-level: 34' \
     '          target: google_apis' \
-    '          arch: x86_64'
+    '          arch: x86_64' \
+    '          emulator-options: >-' \
+    '            -no-snapshot-save -no-window -gpu swiftshader_indirect' \
+    '            -noaudio -no-boot-anim -camera-back none' \
+    '          script: |' \
+    '            echo booted with -no-window'
 }
 
 # run_case <dir> -> rc of a full check over <dir>, with the counters reset.
@@ -303,6 +346,20 @@ expect_rc() {
   got="$(run_case "${dir}")"
   if [[ "${got}" != "${want}" ]]; then
     echo "SELF-TEST FAIL (${label}): want rc=${want}, got rc=${got}" >&2
+    return 1
+  fi
+  return 0
+}
+
+# expect_p7 <label> <dir> <step> — rc 1 alone would not do: every check exits 1,
+# so the fixture must fail for P7, on the named job and step, and for nothing
+# else.
+expect_p7() {
+  local label="$1" dir="$2" step="$3" out
+  expect_rc "${label}" 1 "${dir}" || return 1
+  out="$(check_dir "${dir}" 2>&1 >/dev/null)"
+  if [[ "$(grep -c 'FAIL:' <<<"${out}" || true)" != 1 || "${out}" != *"P7 lane.yml :: lane: '${step}'"* ]]; then
+    echo "SELF-TEST FAIL (${label}): want exactly one violation, P7 naming lane.yml :: lane: '${step}'" >&2
     return 1
   fi
   return 0
@@ -337,6 +394,7 @@ run_self_test() {
     '          api-level: 34' \
     '          target: google_apis' \
     '          arch: x86_64' \
+    '          emulator-options: -no-window -gpu swiftshader_indirect' \
     '      - name: Provision the Android SDK' \
     '        run: bash tooling/e2e/ci/provision-android-sdk.sh 34 google_apis x86_64'
   expect_rc 3 1 "${d}" || fail=1
@@ -406,6 +464,28 @@ run_self_test() {
     '        api-level: 34'
   expect_rc 12 2 "${d}" || fail=1
 
+  # (13) P7 — the drive step drops `-no-window`; the snapshot step keeps it.
+  ran=$(( ran + 1 )); d="${tmp}/windowed"; mkdir -p "${d}"
+  compliant_job | sed 's/-no-snapshot-save -no-window -gpu/-no-snapshot-save -gpu/' > "${d}/lane.yml"
+  expect_p7 13 "${d}" 'Drive' || fail=1
+
+  # (14) P7 — an emulator step with no emulator-options at all.
+  ran=$(( ran + 1 )); d="${tmp}/defaulted"; mkdir -p "${d}"
+  grep -v 'emulator-options: -no-window' <(compliant_job) > "${d}/lane.yml"
+  expect_p7 14 "${d}" 'Create AVD snapshot' || fail=1
+
+  # (15) The flag on the SECOND continuation line of the folded form counts.
+  ran=$(( ran + 1 )); d="${tmp}/secondline"; mkdir -p "${d}"
+  compliant_job \
+    | sed 's/-no-snapshot-save -no-window -gpu/-no-snapshot-save -gpu/; s/-noaudio -no-boot-anim/-noaudio -no-window -no-boot-anim/' \
+    > "${d}/lane.yml"
+  expect_rc 15 0 "${d}" || fail=1
+
+  # (16) P7 — the token, not a substring.
+  ran=$(( ran + 1 )); d="${tmp}/substring"; mkdir -p "${d}"
+  compliant_job | sed 's/-no-snapshot-save -no-window -gpu/-no-snapshot-save -no-window-foo -gpu/' > "${d}/lane.yml"
+  expect_p7 16 "${d}" 'Drive' || fail=1
+
   VIOLATIONS=0
   if (( fail )); then
     echo "${SCRIPT_NAME}: SELF-TEST FAILED" >&2
@@ -415,7 +495,7 @@ run_self_test() {
     echo "${SCRIPT_NAME}: SELF-TEST FAILED — ran ${ran} fixture(s), expected exactly ${SELF_TEST_FIXTURES}; a fixture was added or removed without moving the pin" >&2
     return 1
   fi
-  echo "${SCRIPT_NAME}: self-test passed (${ran}/${SELF_TEST_FIXTURES} fixtures: the real lane shape passes; a missing provisioning step, one placed after the first use of the action, a wrong api level, target or arch, a commented-out one, and one gated on an \`if:\` each fail; a job that boots no emulator needs none while a provisioning step left in one fails; two emulator steps asking for different images fail; and a step list this reader cannot parse stops the guard rather than passing it)."
+  echo "${SCRIPT_NAME}: self-test passed (${ran}/${SELF_TEST_FIXTURES} fixtures: the real lane shape passes; a missing provisioning step, one placed after the first use of the action, a wrong api level, target or arch, a commented-out one, and one gated on an \`if:\` each fail; a job that boots no emulator needs none while a provisioning step left in one fails; two emulator steps asking for different images fail; a step list this reader cannot parse stops the guard rather than passing it; and an emulator step that drops \`-no-window\`, declares no emulator-options, or carries only \`-no-window-foo\` fails P7 naming its job and step, while the flag on the second line of a folded block passes)."
   return 0
 }
 
@@ -436,7 +516,7 @@ check_extractor_sees_the_dir "${WORKFLOW_DIR}"
 (( GRADED_JOBS > 0 )) || misconfig "no job uses ${EMULATOR_ACTION}; this guard has gone blind rather than found a clean tree."
 
 if (( VIOLATIONS > 0 )); then
-  fail_msg "${VIOLATIONS} violation(s). Every job that boots an emulator must run ${PROVISION_SH} first, unconditionally, with that job's own api/target/arch."
+  fail_msg "${VIOLATIONS} violation(s). Every job that boots an emulator must run ${PROVISION_SH} first, unconditionally, with that job's own api/target/arch, and every emulator step must boot with \`-no-window\`."
   exit 1
 fi
-log "OK — ${GRADED_JOBS} job(s) with ${EMU_STEPS} emulator step(s); each provisions and verifies its SDK first."
+log "OK — ${GRADED_JOBS} job(s) with ${EMU_STEPS} emulator step(s); each provisions and verifies its SDK first, and every emulator step boots the headless binary that was verified."

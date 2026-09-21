@@ -1079,6 +1079,17 @@ zip, where the package directory is complete and the binary does not run. The
 retry answers the first; grading each attempt by what is on disk (never by
 `sdkmanager`'s exit code, in either direction) answers the second.
 
+**Read the reason before blaming the mirror.** Every rejected attempt prints why
+under its `did NOT verify` line: no directory, no sdkmanager manifest, no
+launcher, or the emulator probe's exit code and last lines. The probe is
+`emulator -no-window -version`, because `-no-window` is what selects the
+headless qemu binary the lanes boot; the windowed one links desktop libraries a
+runner does not have. CI run 35536892150 is the case where the fault was the
+verifier: the probe then omitted `-no-window`, the launcher printed its version
+and exited 255, and a sound emulator was rejected and deleted in all thirteen
+lanes with `sdkmanager rc 0` on every attempt. The same package failing in every
+lane at once, with rc 0, is that signature — a mirror outage is not that tidy.
+
 **If it recurs.** Three attempts per package (10 s then 30 s apart), each capped
 at 180 s, under a 360 s whole-step budget — so a red means three failures or a
 genuine stall, not one unlucky request. Re-running the job is reasonable exactly
@@ -1091,7 +1102,9 @@ inside the action, with the emulator's adb-port message.
 **What keeps it wired.** `scripts/ci/check_android_sdk_provisioned.sh` fails the
 repo-guards job if any job that uses the emulator action lacks the step, places
 it after the action's first use, gates it on an `if:`, or passes api/target/arch
-that differ from what that job's action steps declare.
+that differ from what that job's action steps declare. It also fails any
+emulator step whose `emulator-options` lacks `-no-window` (or is absent): the
+step verifies the headless emulator binary, so that is the one a lane must boot.
 
 ## Failure mode 16 — `E2E Flakiness Stress` fails the same scenario every iteration
 

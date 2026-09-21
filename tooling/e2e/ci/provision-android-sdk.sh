@@ -27,11 +27,20 @@
 # The retry is what answers the observed failure. The verification is what
 # makes the retry safe to believe, and what answers the corrupt-zip one: every
 # attempt is graded by what landed on disk — the package directory with its
-# sdkmanager-written manifest, and for the emulator a binary that actually runs
-# — never by sdkmanager's exit code, in either direction. A directory that
-# fails that grading is REMOVED before the retry: a half-extracted package that
-# keeps its directory would be read as installed by the next attempt and by the
-# action alike.
+# sdkmanager-written manifest, for the emulator a binary that actually runs and
+# for the system image a non-empty `system.img` — never by sdkmanager's exit
+# code, in either direction. A directory that fails that grading is REMOVED
+# before the retry, together with sdkmanager's download cache: a half-extracted
+# package that keeps its directory would be read as installed by the next
+# attempt and by the action alike, and an archive kept from the failed attempt
+# would make the retry an unzip of the same bytes.
+#
+# The grading has limits, stated so nobody reads more into an OK than is there:
+# only the emulator is EXECUTED. A system image whose `system.img` is present
+# but damaged passes here and fails at boot, inside the action. And the removal
+# is of whatever sits at the package path, including a copy the runner image
+# shipped — harmless on an ephemeral runner, and the reason this step has no
+# business on a persistent one.
 #
 # ## Bounds, and the worst case the step timeout derives from
 #
@@ -90,14 +99,18 @@ readonly SCRIPT_NAME="provision-android-sdk.sh"
 # not merely the first one repeated.
 readonly PACKAGE_ATTEMPTS=3
 readonly BACKOFF_SECS=(10 30)
-# ~5x the worst single-package install measured on a cold runner (34.7 s, the
-# system image), so it bounds a stall and never a slow day.
+# ~3.6x the worst single-package install measured on a cold runner (the system
+# image: 28.6, 29.2, 34.7 and 49.5 s across the four Android jobs of CI run
+# 35524002720), so it bounds a stall and not a slow day.
 readonly ATTEMPT_TIMEOUT_SECS=180
 # The whole-run budget. See the worst case above.
 readonly BUDGET_SECS=360
 # The emulator smoke probe. It runs once per emulator attempt, so it is a term
 # of the worst case; 30 s is far past the ~1 s it takes to print a version.
 readonly EMULATOR_PROBE_SECS=30
+# How much of a failed probe's output is shown: its LAST lines, which is where a
+# loader error lands.
+readonly PROBE_TAIL_LINES=6
 
 readonly RC_BROKEN=2
 readonly RC_PROVISION_FAILED=3
@@ -137,14 +150,46 @@ package_dir() { printf '%s/%s\n' "${SDK_ROOT}" "${1//;//}"; }
 # the sdkmanager-written manifest must be in it, and the emulator must also RUN:
 # that is the check that catches the corrupt-zip variant, where every file is in
 # place and the binary is not an executable.
+#
+# The probe is `-no-window -version`, never bare `-version`. The launcher does
+# not answer `-version` itself: it hands it to a qemu binary, and WITHOUT
+# `-no-window` that is the windowed one, which links desktop libraries
+# (libpulse, libxkbfile, libnss3, ...) a CI runner does not have. There the
+# launcher prints its version line and then exits 255, so bare `-version`
+# rejected — and deleted — a sound emulator three times in every lane of CI run
+# 35536892150. `-no-window` selects the headless binary, which is the one every
+# lane boots (check_android_sdk_provisioned.sh P7 holds them to it), so the
+# probe runs what the lane will run.
+#
+# A rejection says WHY, on stderr: a verifier that discards its own evidence
+# turns one wrong predicate into a run nobody can diagnose from its log.
 verify_package() {
-  local pkg="$1" dir
+  local pkg="$1" dir probe_out probe_rc
   dir="$(package_dir "${pkg}")"
-  [[ -d "${dir}" ]] || return 1
-  [[ -f "${dir}/source.properties" || -f "${dir}/package.xml" ]] || return 1
+  if [[ ! -d "${dir}" ]]; then
+    printf '%s:   %s: no package directory.\n' "${SCRIPT_NAME}" "${pkg}" >&2
+    return 1
+  fi
+  if [[ ! -f "${dir}/source.properties" && ! -f "${dir}/package.xml" ]]; then
+    printf '%s:   %s: directory present, sdkmanager manifest absent.\n' "${SCRIPT_NAME}" "${pkg}" >&2
+    return 1
+  fi
+  if [[ "${pkg}" == system-images\;* && ! -s "${dir}/system.img" ]]; then
+    printf '%s:   %s: manifest present, system.img absent or empty.\n' "${SCRIPT_NAME}" "${pkg}" >&2
+    return 1
+  fi
   if [[ "${pkg}" == "emulator" ]]; then
-    [[ -x "${dir}/emulator" ]] || return 1
-    timeout "${EMULATOR_PROBE_SECS}" "${dir}/emulator" -version >/dev/null 2>&1 || return 1
+    if [[ ! -x "${dir}/emulator" ]]; then
+      printf '%s:   emulator: the launcher is missing or not executable.\n' "${SCRIPT_NAME}" >&2
+      return 1
+    fi
+    probe_rc=0
+    probe_out="$(timeout "${EMULATOR_PROBE_SECS}" "${dir}/emulator" -no-window -version 2>&1)" || probe_rc=$?
+    if (( probe_rc != 0 )); then
+      printf '%s:   emulator: `-no-window -version` exited %d; its last lines:\n' "${SCRIPT_NAME}" "${probe_rc}" >&2
+      tail -n "${PROBE_TAIL_LINES}" <<<"${probe_out}" | sed 's/^/    | /' >&2
+      return 1
+    fi
   fi
   return 0
 }
@@ -155,8 +200,13 @@ remove_partial() {
   local pkg="$1" dir
   dir="$(package_dir "${pkg}")"
   # Never anything but a directory strictly inside the SDK root.
-  [[ "${dir}" == "${SDK_ROOT}/"?* && -d "${dir}" ]] || return 0
-  rm -rf "${dir}"
+  if [[ "${dir}" == "${SDK_ROOT}/"?* && -d "${dir}" ]]; then
+    rm -rf "${dir}"
+  fi
+  # sdkmanager's own scratch. Whether it reuses an archive found here is not
+  # something this script has measured, and it does not need to be: with these
+  # gone the retry downloads again whatever the answer is.
+  rm -rf "${SDK_ROOT}/.downloadIntermediates" "${SDK_ROOT}/.temp"
   return 0
 }
 
@@ -246,7 +296,7 @@ provision_android_sdk() {
 # and both clock functions replaced, so nothing here sleeps or waits.
 # ---------------------------------------------------------------------------
 
-readonly SELF_TEST_FIXTURES=12
+readonly SELF_TEST_FIXTURES=14
 
 # write_fake_sdkmanager <root> <mode>
 #
@@ -256,11 +306,14 @@ readonly SELF_TEST_FIXTURES=12
 # case to catch: the run is graded by what landed on disk, so an sdkmanager
 # that reports success over nothing must still fail closed.
 #
-#   ok       installs the package properly (the emulator's binary prints a
-#            version and exits 0)
+#   ok       installs the package properly. Its emulator behaves like the real
+#            launcher on a HEADLESS host — version line always, rc 0 only with
+#            -no-window — so a probe that drops the flag reds fixture (a)
 #   flaky    installs nothing for the first two invocations, properly after
 #   nothing  installs nothing, ever — the "Failed to download package!" shape
 #   corrupt  installs the emulator with a binary that exits non-zero
+#   hollow   installs the system image with its manifest and NO system.img, and
+#            leaves an archive in the download cache as a failed unzip would
 write_fake_sdkmanager() {
   local root="$1" mode="$2" bin="$1/cmdline-tools/latest/bin"
   mkdir -p "${bin}"
@@ -286,11 +339,26 @@ fi
 dir="\${root}/\${pkg//;//}"
 mkdir -p "\${dir}"
 printf 'Pkg.Revision=1\n' > "\${dir}/source.properties"
+if [[ "\${pkg}" == system-images\;* ]]; then
+  if [[ "\${mode}" == "hollow" ]]; then
+    mkdir -p "\${root}/.downloadIntermediates"
+    echo stale > "\${root}/.downloadIntermediates/image.zip"
+  else
+    echo img > "\${dir}/system.img"
+  fi
+fi
 if [[ "\${pkg}" == "emulator" ]]; then
   if [[ "\${mode}" == "corrupt" ]]; then
-    printf '#!/usr/bin/env bash\nexit 1\n' > "\${dir}/emulator"
+    printf '#!/usr/bin/env bash\necho "fake-emulator: cannot execute binary file" >&2\nexit 1\n' > "\${dir}/emulator"
   else
-    printf '#!/usr/bin/env bash\necho "Android emulator version 0.0.0"\n' > "\${dir}/emulator"
+    # The real launcher on a host with no desktop libraries: it always prints
+    # its version line, and exits 0 only when -no-window sent it to the
+    # headless qemu binary. Measured on emulator 36.3.10 with the windowed
+    # binary withheld: bare -version is rc 255, -no-window -version is rc 0.
+    printf '%s\n' '#!/usr/bin/env bash' 'echo "Android emulator version 0.0.0"' \
+      'for a in "\$@"; do [[ "\$a" == "-no-window" ]] && exit 0; done' \
+      'echo "fake-emulator: error while loading shared libraries: libpulse.so.0" >&2' \
+      'exit 255' > "\${dir}/emulator"
   fi
   chmod +x "\${dir}/emulator"
 fi
@@ -333,6 +401,17 @@ run_self_test() {
     fail=1
   fi
 
+  # (a2) The fixture's own control. (a) only proves the probe passes -no-window
+  #      if the fake emulator really refuses a probe without it, as the real
+  #      launcher does on a runner with no desktop libraries.
+  ran=$(( ran + 1 ))
+  rc=0
+  "${root}/emulator/emulator" -version >/dev/null 2>&1 || rc=$?
+  if (( rc != 255 )); then
+    echo "SELF-TEST FAIL (a2): the fake emulator accepted a bare -version (rc=${rc}); it no longer models a headless host, so (a) cannot see a probe that dropped -no-window" >&2
+    fail=1
+  fi
+
   # (b) Two failures then a success: the retry is what installs the package.
   ran=$(( ran + 1 ))
   root="${tmp}/b"; write_fake_sdkmanager "${root}" flaky
@@ -372,8 +451,28 @@ run_self_test() {
     echo "SELF-TEST FAIL (d): an emulator whose binary does not run must fail closed; got rc=${rc}" >&2
     fail=1
   fi
+  if [[ "${out}" != *"exited 1"* || "${out}" != *"cannot execute binary file"* ]]; then
+    echo "SELF-TEST FAIL (d): a rejected emulator must say why — the probe's exit code and its last lines — or a wrong predicate is undiagnosable from the job log" >&2
+    fail=1
+  fi
   if [[ -e "${root}/emulator" ]]; then
     echo "SELF-TEST FAIL (d): the unusable emulator package survived — the next attempt, and the action, would read it as installed" >&2
+    fail=1
+  fi
+
+  # (d2) A system image whose manifest landed and whose image did not. The
+  #      manifest alone would have passed it; the reason must name what is
+  #      missing, and the download cache must not survive into the retry.
+  ran=$(( ran + 1 ))
+  root="${tmp}/d2"; write_fake_sdkmanager "${root}" hollow
+  rc=0
+  out="$(ANDROID_HOME="${root}" ANDROID_SDK_ROOT="" provision_android_sdk 34 google_apis x86_64 2>&1)" || rc=$?
+  if (( rc != RC_PROVISION_FAILED )) || [[ "${out}" != *"::error::"*"system-images;android-34;google_apis;x86_64"* ]] || [[ "${out}" != *"system.img absent or empty"* ]]; then
+    echo "SELF-TEST FAIL (d2): a system image with no system.img must fail closed, name the package and say what is missing; got rc=${rc}" >&2
+    fail=1
+  fi
+  if [[ -e "${root}/.downloadIntermediates" || -e "${root}/system-images/android-34/google_apis/x86_64" ]]; then
+    echo "SELF-TEST FAIL (d2): the hollow image or sdkmanager's download cache survived — the retry would unzip the same archive" >&2
     fail=1
   fi
 
@@ -524,7 +623,7 @@ run_self_test() {
     echo "${SCRIPT_NAME}: SELF-TEST FAILED — ran ${ran} fixture(s), expected exactly ${SELF_TEST_FIXTURES}; a fixture was added or removed without moving the pin" >&2
     return 1
   fi
-  echo "${SCRIPT_NAME}: self-test passed (${ran}/${SELF_TEST_FIXTURES} fixtures: a clean run installs and verifies exactly the four packages the arguments name; two transient failures are ridden out on the third attempt; an sdkmanager that exits 0 having installed nothing fails closed with one ::error:: naming the package, calling it infrastructure and saying no test ran; an emulator whose binary does not run is caught by the probe and its directory removed before the retry; an sdkmanager absent from both the SDK root and PATH exits ${RC_BROKEN}, distinct from that, while one reachable only through PATH still provisions; every wrong argument list prints usage, exits ${RC_BROKEN} and runs nothing; a package that exhausts the attempts stops the run at exactly ${PACKAGE_ATTEMPTS} invocations; a spent budget fails closed without starting another attempt, and an attempt that spends it is followed by no backoff; no operand-less \`return\`, no pipeline ending in a quiet grep, one backoff per pause; and the header's worst case is the one the constants add up to)."
+  echo "${SCRIPT_NAME}: self-test passed (${ran}/${SELF_TEST_FIXTURES} fixtures: a clean run installs and verifies exactly the four packages the arguments name; two transient failures are ridden out on the third attempt; an sdkmanager that exits 0 having installed nothing fails closed with one ::error:: naming the package, calling it infrastructure and saying no test ran; the fake emulator refuses a probe without -no-window, as a headless runner's does, so the clean run proves the flag is passed; an emulator whose binary does not run is caught by the probe, which says why, and its directory removed before the retry; a system image whose manifest landed without its system.img fails closed naming what is missing, and sdkmanager's download cache does not survive into the retry; an sdkmanager absent from both the SDK root and PATH exits ${RC_BROKEN}, distinct from that, while one reachable only through PATH still provisions; every wrong argument list prints usage, exits ${RC_BROKEN} and runs nothing; a package that exhausts the attempts stops the run at exactly ${PACKAGE_ATTEMPTS} invocations; a spent budget fails closed without starting another attempt, and an attempt that spends it is followed by no backoff; no operand-less \`return\`, no pipeline ending in a quiet grep, one backoff per pause; and the header's worst case is the one the constants add up to)."
   return 0
 }
 

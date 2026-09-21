@@ -504,7 +504,8 @@ jobs:
       # lane restarts the recorder per attempt, so the log can hold several
       # summaries and every one must be healthy. Counts only. Standard guard
       # condition, not `always()`: the stop step is `always()`, so an absent
-      # summary is a broken recorder, not a skipped run.
+      # summary is a broken recorder or a lane that died before the recorder
+      # started. Red either way: no summary is no account of the channel.
       - name: Proxy declaration channel stayed healthy
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash tooling/e2e/ci/check-proxy-sidecar-summary.sh /tmp/haven-wire-proxy.log

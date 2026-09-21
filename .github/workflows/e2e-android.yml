@@ -538,7 +538,9 @@ jobs:
       # is visible anywhere else. Counts only, so this step's log carries
       # nothing a value could ride on. Standard guard condition, not
       # `always()`: the summary is written on every outcome (the stop step is
-      # `always()`), so its absence is a broken recorder, not a skipped run.
+      # `always()`), so its absence is a broken recorder or a lane that died
+      # before the recorder started (a failed provisioning step, CI run
+      # 35536892150). Red either way: no summary is no account of the channel.
       - name: Proxy declaration channel stayed healthy
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash tooling/e2e/ci/check-proxy-sidecar-summary.sh /tmp/haven-wire-proxy.log

@@ -478,7 +478,17 @@
 #     action's own `sdkmanager --install` exits 0 after "Failed to download
 #     package!", so an unprovisioned lane boots an emulator that was never
 #     installed and reds on the missing emulator instead — no test run, and
-#     nothing in the log to say the fault was a download.
+#     nothing in the log to say the fault was a download. Every emulator step
+#     must also pass `-no-window`: provisioning verifies the HEADLESS binary,
+#     so that is the only one it can vouch for.
+#
+#   Diag-scan exit codes              scripts/ci/check_diag_scan_exit_codes.sh
+#     In a step that writes a `*_LEAK.txt` marker, exit code 1 means a leak
+#     and nothing else: the only literal `exit 1` is the leak branch's, and
+#     the branch that writes `*_UNSCANNABLE.txt` exits with the scanner's own
+#     code. The job summary shows a failed step's code and nothing more, so
+#     when both branches said 1, seven lanes with no manifest to scan against
+#     (no test had run) each reported a leak.
 #
 #   Skip-manifest self-test           scripts/ci/check_no_undeclared_skips.sh
 #     The guard that fails a run when a test SKIPS without being declared in
@@ -1408,15 +1418,19 @@ jobs:
       # first; this keeps that step present, ahead of the job's FIRST use of
       # the action (the AVD snapshot boots one too), unconditional (the AVD
       # cache holds the AVD alone, so a hit still needs the emulator and the
-      # system image) and carrying that job's own api/target/arch.
+      # system image) and carrying that job's own api/target/arch. It also
+      # holds every emulator step to `-no-window`, because the headless binary
+      # is the one provisioning ran: in CI run 35536892150 a probe of the
+      # windowed one rejected a sound emulator in every lane.
       - name: Android SDK is provisioned before every emulator step
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_android_sdk_provisioned.sh
 
       # Both directions, since a guard that only ever passes is decoration: a
       # missing step, one placed after the action, a wrong api level, target or
-      # arch, a commented-out one and one gated on an `if:` each fail; a job
-      # that boots no emulator needs none. A step list the reader cannot parse
+      # arch, a commented-out one, one gated on an `if:` and an emulator step
+      # without the `-no-window` token each fail; a job that boots no emulator
+      # needs none. A step list the reader cannot parse
       # stops the guard rather than passing it, and the case count is pinned by
       # equality.
       - name: Android SDK provisioning guard self-test
@@ -1426,10 +1440,32 @@ jobs:
       # The provisioning step itself: an sdkmanager that exits 0 having
       # installed nothing, and a package whose binary does not run, must both
       # fail CLOSED and say infrastructure — the two shapes that reached CI as
-      # a story about the emulator.
+      # a story about the emulator. Its fake emulator refuses a probe without
+      # `-no-window`, as a runner with no desktop libraries does, so a probe
+      # that drops the flag reds here and not in thirteen lanes.
       - name: E2E harness self-test (Android SDK provisioning)
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash tooling/e2e/ci/provision-android-sdk.sh --self-test
+
+      # The same lanes' diagnostics step scans what it wrote and fails two
+      # ways: a leak, or a log nothing could certify. Both said `exit 1` until
+      # CI run 35536892150, where seven jobs that never ran a test (no manifest,
+      # scanner rc 2) each reported the LEAK code. 1 now belongs to the leak
+      # branch alone and the other exits with the scanner's code; this keeps it
+      # so, and refuses to pass on fewer such steps than are known to exist.
+      - name: Exit code 1 is reserved for a leak in diag-scan steps
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_diag_scan_exit_codes.sh
+
+      # Both directions: the regression fails under two marker spellings; a
+      # stray `exit 1`, an unscannable branch exiting a constant, an uncaptured
+      # variable or nothing, and a leak branch without its `exit 1` each fail
+      # for the check under test alone; a comment, an `exit 10` and a step with
+      # no leak marker pass. An unreadable step list stops the guard, and the
+      # case count is pinned by equality.
+      - name: Diag-scan exit-code guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_diag_scan_exit_codes.sh --self-test
 
       # The inner deadline itself. Its critical fixture is exit-code
       # PASS-THROUGH: if a genuine test failure were ever reported as 124,
