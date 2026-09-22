@@ -213,7 +213,7 @@ check_policy() { # check_policy <policy> <readme>
     if [[ -n "${STRUCTURAL_RULES_OFF[${name}]+x}" ]]; then
       [[ "${v}" == "false" ]] || violation "${rel}: sink \`${name}\` is listed in STRUCTURAL_RULES_OFF (${STRUCTURAL_RULES_OFF[${name}]}) but has structural_rules = ${v:-<absent>}. Re-decide: switch it off, or delete the entry from the list in the same change."
     elif [[ "${v}" != "true" ]]; then
-      violation "${rel}: sink \`${name}\` has structural_rules = ${v:-<absent>}. Every sink runs S1–S12 unless it is in STRUCTURAL_RULES_OFF with its reason; switching a sink's rules off silently widens what \"clean\" means in every lane that scans it."
+      violation "${rel}: sink \`${name}\` has structural_rules = ${v:-<absent>}. Every sink runs S1–S13 unless it is in STRUCTURAL_RULES_OFF with its reason; switching a sink's rules off silently widens what \"clean\" means in every lane that scans it."
     fi
     v="$(field_of "${body}" declared_plants_expected)"
     if [[ -z "${v}" ]]; then

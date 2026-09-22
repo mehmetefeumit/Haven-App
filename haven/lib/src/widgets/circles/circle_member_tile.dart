@@ -388,7 +388,10 @@ class CircleMemberTile extends ConsumerWidget {
   /// Gated on [kMemberAgePillThreshold] — the marker age pill's own bound — so
   /// a member the map shows without a pill never gets an age here either.
   /// Minutes at every age, for the same reason the pill is: one unit means the
-  /// two surfaces cannot round differently and read as different ages.
+  /// two surfaces cannot round differently and read as different ages. The
+  /// gate also swallows the NEGATIVE age a clock-ahead peer's future-dated fix
+  /// produces, which is why one reads as fresh rather than as "-59 minutes
+  /// ago" (pinned in `circle_member_tile_test.dart`).
   String? _lastSeenLabel(AppLocalizations l10n) {
     final at = lastSeen;
     if (at == null) return null;

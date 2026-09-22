@@ -29,6 +29,7 @@ MemberLocation _loc({
     geohash: 'u173',
     timestamp: expiresAt.subtract(const Duration(hours: 1)),
     expiresAt: expiresAt,
+    receivedAt: null,
   );
 }
 

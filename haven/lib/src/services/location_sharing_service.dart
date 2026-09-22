@@ -29,6 +29,7 @@ class MemberLocation {
     required this.geohash,
     required this.timestamp,
     required this.expiresAt,
+    required this.receivedAt,
     this.displayName,
   });
 
@@ -53,8 +54,88 @@ class MemberLocation {
   /// Display name from local contacts (if available).
   final String? displayName;
 
+  /// When THIS device wrote the fix — the one instant in the row a peer cannot
+  /// forge, and the same value the store keeps in
+  /// `last_known_locations.updated_at`.
+  ///
+  /// `null` only where there is no receipt instant to state, in which case
+  /// [freshness] falls back to the sender's [timestamp]. Required rather than
+  /// defaulted so every construction site has to say which it is.
+  final DateTime? receivedAt;
+
   /// Whether this location's freshness window has expired.
   bool get isExpired => DateTime.now().isAfter(expiresAt);
+
+  /// The rank the row itself records: [timestamp], bounded above by
+  /// [receivedAt].
+  ///
+  /// Mirrors `min(timestamp, updated_at)` in the `last_known_locations` upsert
+  /// (`circle/storage.rs`) so the in-memory cache and the persisted store
+  /// cannot disagree about which fix is freshest — if they did, the next
+  /// hydration would move the marker to a fix one layer had rejected.
+  DateTime get freshness {
+    final at = receivedAt;
+    return (at != null && timestamp.isAfter(at)) ? at : timestamp;
+  }
+
+  /// Whether this fix, ARRIVING now, should replace [stored].
+  ///
+  /// Mirrors the `last_known_locations` upsert's `WHERE` clause exactly, so
+  /// the write this comparison guards and the write the store performs for the
+  /// same event always reach the same verdict.
+  ///
+  /// Bounding the rank by receipt is what stops a peer whose clock runs fast
+  /// from pinning its own marker: an hour-ahead [timestamp] ranks at its
+  /// ARRIVAL, so a fix captured after that arrival wins instead of comparing
+  /// older for an hour. The trade-off is that ranking by arrival ALONE would
+  /// be wrong the other way — the convergence replay delivers genuinely old
+  /// fixes late, and one would overwrite a fresher live row — so the sender's
+  /// own reading still decides whenever it is in the past, and a rank tie
+  /// breaks on it too.
+  ///
+  /// The ceiling is the LATER of the two receipt instants, matching the SQL's
+  /// `max(excluded.updated_at, <stored>.updated_at)`. An arriving fix stamped
+  /// EARLIER than the row it meets can only be the receiver's own clock
+  /// stepping back — a message does not arrive before one already here — and a
+  /// ceiling taken from this fix alone would then bound every arrival below
+  /// [stored]'s rank and drop the peer's whole stream until the clock
+  /// recovered, permanently: the engine delivers each message at most once.
+  /// Raising the ceiling makes that case tie, and the sender's reading breaks
+  /// the tie. It also makes this relation deliberately NOT antisymmetric —
+  /// "arriving now" is an asymmetry of the caller, not of the two rows — which
+  /// is why a comparison between two rows that have BOTH already been ranked
+  /// uses [isFresherThan] instead.
+  bool outranks(MemberLocation stored) {
+    final ceiling = _laterOf(receivedAt, stored.receivedAt);
+    final mine = (ceiling != null && timestamp.isAfter(ceiling))
+        ? ceiling
+        : timestamp;
+    return _ranksAbove(mine, stored);
+  }
+
+  /// Whether this row is the fresher of two rows that have each ALREADY been
+  /// ranked — neither is arriving, so both receipt instants are historical
+  /// fact and the recorded [freshness] values compare directly.
+  ///
+  /// This is the hydration question, where a snapshot can be older than what
+  /// the cache already holds. Using [outranks] there would raise a stored
+  /// future-dated row's ceiling to the cache row's later receipt, tie, and let
+  /// the inflated reading win the tie-break — handing the pin straight back.
+  /// Comparing recorded ranks instead reproduces the verdict the store itself
+  /// already reached on the same pair, which is what makes the two layers
+  /// agree.
+  bool isFresherThan(MemberLocation other) => _ranksAbove(freshness, other);
+
+  bool _ranksAbove(DateTime rank, MemberLocation other) {
+    final cmp = rank.compareTo(other.freshness);
+    return cmp > 0 || (cmp == 0 && timestamp.isAfter(other.timestamp));
+  }
+
+  static DateTime? _laterOf(DateTime? a, DateTime? b) {
+    if (a == null) return b;
+    if (b == null) return a;
+    return a.isAfter(b) ? a : b;
+  }
 
   /// Returns a copy with the given fields overridden.
   MemberLocation copyWith({String? displayName}) {
@@ -66,6 +147,7 @@ class MemberLocation {
       timestamp: timestamp,
       expiresAt: expiresAt,
       displayName: displayName ?? this.displayName,
+      receivedAt: receivedAt,
     );
   }
 }
@@ -231,6 +313,12 @@ class LocationSharingService {
   final ClockSkewDetector? _clockSkewDetector;
   final CircleHealthService? _healthService;
   final DateTime Function() _now;
+
+  /// Drops sub-second precision, so a receipt instant the cache ranks by and
+  /// the one the store persists are the same value rather than the same second.
+  static DateTime _toWholeSeconds(DateTime at) => at.isUtc
+      ? DateTime.utc(at.year, at.month, at.day, at.hour, at.minute, at.second)
+      : DateTime(at.year, at.month, at.day, at.hour, at.minute, at.second);
 
   /// Cached lowercase-hex own pubkey. Resolved lazily once per process and
   /// used to skip persisting echoed self-broadcasts. Stored lowercase so the
@@ -709,7 +797,7 @@ class LocationSharingService {
         final member = circle.members
             .where((m) => m.pubkey == row.senderPubkey)
             .firstOrNull;
-        cache[row.senderPubkey] = MemberLocation(
+        final hydrated = MemberLocation(
           pubkey: row.senderPubkey,
           latitude: row.latitude,
           longitude: row.longitude,
@@ -717,7 +805,25 @@ class LocationSharingService {
           timestamp: row.timestamp,
           expiresAt: row.expiresAt,
           displayName: member?.displayName,
+          // The instant the STORE ranks this row by, not the instant we read
+          // it back. Re-stamping a future-dated row with "now" would rank it
+          // ABOVE the store's own rank, so a fix landing between the two would
+          // be accepted by the store and rejected here — and the next
+          // hydration would jump the marker to it.
+          receivedAt: row.receivedAt ?? _toWholeSeconds(_now()),
         );
+        // Through the rank, not a blind assign: this snapshot can be older
+        // than what the cache already holds. Two ways, both live. The
+        // `_hydratedCircles` claim above is taken BEFORE the snapshot is
+        // awaited, so a live-sync ingest landing during that await updates the
+        // cache and the store while the in-flight snapshot still carries the
+        // pre-ingest row; and a store write that throws is swallowed, leaving
+        // the fix in the cache only. `isFresherThan`, not `outranks` — neither
+        // row is arriving here.
+        final existing = cache[row.senderPubkey];
+        if (existing == null || hydrated.isFresherThan(existing)) {
+          cache[row.senderPubkey] = hydrated;
+        }
       }
       debugPrint(
         '[LocationService] Hydrated '
@@ -1031,6 +1137,13 @@ class LocationSharingService {
         .where((m) => m.pubkey == decrypted.senderPubkey)
         .firstOrNull;
 
+    // Whole seconds, because that is the only resolution `updated_at` survives
+    // at: the store keeps Unix seconds, so a sub-second value here would give
+    // the cache a ceiling up to a second above the one the store ranks by, and
+    // "the two layers reach the same verdict" would be true only to the
+    // second. Every other instant in the comparison is already second-granular
+    // (the wire carries whole seconds).
+    final receivedAt = _toWholeSeconds(_now());
     final location = MemberLocation(
       pubkey: decrypted.senderPubkey,
       latitude: decrypted.latitude,
@@ -1039,6 +1152,7 @@ class LocationSharingService {
       timestamp: decrypted.timestamp,
       expiresAt: decrypted.expiresAt,
       displayName: member?.displayName,
+      receivedAt: receivedAt,
     );
 
     // Persist with the fixed 1-day receiver retention window. The
@@ -1056,7 +1170,10 @@ class LocationSharingService {
         timestamp: decrypted.timestamp,
         expiresAt: decrypted.expiresAt,
         purgeAfter: purgeAfter,
-        updatedAt: DateTime.now(),
+        // The SAME receipt instant the cache row ranks by: `updated_at` is the
+        // store's upper bound on the rank, so two different "now"s here would
+        // let the cache and the store pick different freshest fixes.
+        updatedAt: receivedAt,
         displayName: member?.displayName,
       );
     } on Object catch (e) {
@@ -1076,10 +1193,11 @@ class LocationSharingService {
       at: _now(),
     );
 
-    // Merge into the in-memory cache. Newer-timestamp wins.
+    // Merge into the in-memory cache. Freshest rank wins — see
+    // [MemberLocation.outranks].
     final cache = _locationCache.putIfAbsent(circleKey, () => {});
     final existing = cache[location.pubkey];
-    if (existing == null || location.timestamp.isAfter(existing.timestamp)) {
+    if (existing == null || location.outranks(existing)) {
       cache[location.pubkey] = location;
     }
   }
@@ -1399,9 +1517,11 @@ class LocationSharingService {
   /// Ingests ONE decrypted location pushed from the engine stream.
   ///
   /// Reuses the same persist + cache path as [fetchMemberLocations]; self-echoes
-  /// are dropped. Idempotent against re-delivery — the timestamp-wins cache merge
-  /// (and the idempotent `upsertLastKnownLocation`) dedup by `(sender,
-  /// timestamp)`, so no event-id gate is needed (the stream carries no id).
+  /// are dropped. Idempotent against re-delivery — the rank-wins cache merge
+  /// ([MemberLocation.outranks]) and the idempotent `upsertLastKnownLocation`
+  /// both dedup by `(sender, timestamp)`, so no event-id gate is needed (the
+  /// stream carries no id). A re-delivery can only refresh the row's receipt
+  /// instant, never the position or the timestamp anything displays.
   Future<void> ingestStreamedLocation({
     required Circle circle,
     required DecryptedLocation decrypted,

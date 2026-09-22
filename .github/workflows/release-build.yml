@@ -100,10 +100,10 @@ jobs:
     # unverified cache is not an input a release build should take to save one
     # cold build per release. Nothing here would check what a restore put on
     # disk: there is no haven/android/gradle/verification-metadata.xml (Gradle
-    # dependency verification is off) and gradle-wrapper.properties carries no
-    # distributionSha256Sum, so a poisoned `~/.gradle/caches/modules-2` can
-    # substitute a dependency and a poisoned `~/.gradle/wrapper` the Gradle
-    # distribution itself, into the one build whose output users install. The
+    # dependency verification is off), so a poisoned `~/.gradle/caches/modules-2`
+    # can substitute a dependency into the one build whose output users install
+    # (the distribution itself is pinned by gradle-wrapper.properties'
+    # distributionSha256Sum, so `~/.gradle/wrapper` is no longer the hole). The
     # E2E lanes take that trade because they ship nothing; this job does not.
     # It still gets the widened in-Gradle 429 window from
     # haven/android/gradle.properties (5 tentatives, 2 s doubling backoff),

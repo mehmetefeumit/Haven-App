@@ -110,8 +110,8 @@
 /// ## Two senders, because `memberLocationsProvider` keeps one entry per
 /// sender
 ///
-/// The cache is latest-per-sender, strictly-newer-wins
-/// (`location_sharing_service.dart`), so a post-restore event from BOB would
+/// The cache is latest-per-sender, ranked by `min(timestamp, receipt)`
+/// (`MemberLocation.outranks`), so a post-restore event from BOB would
 /// overwrite the older backlog entry the moment both land in the same replay
 /// — and a 3-second sampler would see only the newer one, reporting a
 /// delivered backlog as dropped. The backlog therefore comes from BOB and

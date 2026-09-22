@@ -345,6 +345,7 @@ void main() {
         geohash: '9q8',
         timestamp: DateTime.now(),
         expiresAt: DateTime.now().add(const Duration(hours: 23)),
+        receivedAt: null,
       );
     }
 

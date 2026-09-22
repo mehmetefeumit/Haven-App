@@ -581,7 +581,8 @@ async fn an_expired_replayed_location_is_persisted_and_cannot_overwrite_a_freshe
     assert_eq!(row.timestamp, stale.timestamp.timestamp());
 
     // A fresher row already in the store survives an older replayed fix: the
-    // upsert is strictly-newer-wins, and a replay is by definition late.
+    // upsert ranks a fix by `min(timestamp, ceiling)`, so arriving late does
+    // not make a replay fresh — and a replay is by definition late.
     let fresh = aged_location(10.0, 20.0, 0, 900);
     fx.alice
         .upsert_last_known_location(&LastKnownLocation {

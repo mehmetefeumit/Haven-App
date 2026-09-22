@@ -327,6 +327,7 @@ void main() {
             geohash: 'u4pruy',
             timestamp: fabricated,
             expiresAt: fabricated.add(const Duration(minutes: 4)),
+            receivedAt: null,
           ),
         ],
       )..health.stored = CircleHealthTimestamps(lastPeerEventAt: _t0);

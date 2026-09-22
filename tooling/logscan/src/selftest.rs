@@ -63,7 +63,7 @@ const SEALED_DROPPED: usize = 94;
 /// fixture values are too short for.
 const SEALED_COVERAGE_GAPS: usize = 33;
 /// Lines of `dirty.logcat.log` that must each be caught, individually.
-const DIRTY_RULE_LINES: usize = 12;
+const DIRTY_RULE_LINES: usize = 13;
 /// Lines of `dirty.logcat.log` that must each stay clean: the vendor line (tag
 /// scoping) and the alias-only Haven line.
 const DIRTY_CLEAN_LINES: usize = 2;
@@ -92,7 +92,7 @@ const IOS_NEEDLE_LINES: [u64; 3] = [68, 78, 79];
 /// Lines of it, pinned so a fixture that lost a variant cannot pass quietly.
 const IOS_FORMAT_LINES: u64 = 79;
 /// Structural rules, all of which the dirty fixture must exercise.
-const RULE_COUNT: usize = 12;
+const RULE_COUNT: usize = 13;
 /// Bytes the CLI's throughput probe generates.
 const FULL_PROBE_BYTES: u64 = 64 * 1024 * 1024;
 /// Bytes `cargo test`'s run of the self-test generates. The single-pass property
@@ -1531,8 +1531,9 @@ mod tests {
     fn disabling_one_rule_turns_the_self_test_red() {
         // S2 and S6 are in the list because they are the two the cargo
         // exemption skips on one shape: a suppression that went unnoticed there
-        // is exactly the hole the narrowed shape exists to close.
-        for rule in ["S1", "S2", "S5", "S6", "S10", "S12"] {
+        // is exactly the hole the narrowed shape exists to close. S13 is here
+        // because it is the one rule a marker list can silence by narrowing.
+        for rule in ["S1", "S2", "S5", "S6", "S10", "S12", "S13"] {
             let mut out = Vec::new();
             let mut err = Vec::new();
             let result = run_with(&mut out, &mut err, SMALL_PROBE_BYTES, Some(rule));

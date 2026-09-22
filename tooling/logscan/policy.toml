@@ -78,7 +78,7 @@ plant = { kind = "plant" }
 # an `NSLog` record would carry Foundation's emitter instead, and `Foundation` is
 # the library on tens of thousands of vendor lines per capture, so it can never
 # be owned). `Flutter` is the engine's image, which carries Dart's own output as
-# `flutter: <msg>`: not owning it would mean S1-S12 silently stop the day the
+# `flutter: <msg>`: not owning it would mean S1-S13 silently stop the day the
 # engine routes Haven's Dart text there, and every `(Flutter)` line the real
 # captures hold is clean once the lane's loopback is exempt. `rust_lib_haven`
 # and `Runner` are Haven's own images — the latter a fallback for a record with

@@ -10,5 +10,6 @@
 09-12 11:00:10.001  1234  1290 I flutter: display_name=Kristin saved
 09-12 11:00:11.001  1234  1290 I flutter: published since 1789000000
 09-12 11:00:12.001  1234  1301 D haven_core: endpoint 192.168.1.22 unreachable
-09-12 11:00:13.001   999   999 I WifiService: vendor scan 5f3a9c2e1b7d408695a4c3e2f1d0b9a85f3a9c2e1b7d408695a4c3e2f1d0b9a8 at 10.0.0.1
-09-12 11:00:14.001  1234  1301 D haven_core: circle#a91f3c epoch+2, members bucket 2-4
+09-12 11:00:13.001  1234  1290 I flutter: Connection closed before full header was received, uri = https://relay.example.com
+09-12 11:00:14.001   999   999 I WifiService: vendor scan 5f3a9c2e1b7d408695a4c3e2f1d0b9a85f3a9c2e1b7d408695a4c3e2f1d0b9a8 at 10.0.0.1
+09-12 11:00:15.001  1234  1301 D haven_core: circle#a91f3c epoch+2, members bucket 2-4

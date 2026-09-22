@@ -47,6 +47,7 @@ MemberLocation _loc({
   geohash: 'gcpvh',
   timestamp: DateTime(2026),
   expiresAt: DateTime(2026).add(const Duration(hours: 1)),
+  receivedAt: null,
   displayName: displayName,
 );
 

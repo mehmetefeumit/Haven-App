@@ -323,8 +323,9 @@ optimisation must never redden a lane that would have built cold.
 
 Two jobs are exempt, each with its reason on the line above its `runs-on`:
 `release-build.yml`'s `android`, because it signs and ships the artifact and
-nothing would authenticate what a restored cache put on disk (no
-`verification-metadata.xml`, no `distributionSha256Sum`), and
+nothing would authenticate the dependencies a restored cache put on disk (no
+`verification-metadata.xml`; the Gradle distribution itself is pinned by
+`distributionSha256Sum`), and
 `e2e-flakiness-stress.yml`'s `flake_stress`, whose job cap is already GitHub's
 360-minute ceiling with 0.8 min of headroom, less than a restore step's cap.
 `scripts/ci/check_gradle_build_hardened.sh` enforces all of this (C1-C6).

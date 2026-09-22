@@ -2110,6 +2110,7 @@ class NostrCircleService implements CircleService {
               geohash: row.geohash,
               timestamp: _timestampToDateTime(row.timestamp),
               expiresAt: _timestampToDateTime(row.expiresAt),
+              receivedAt: _timestampToDateTime(row.updatedAt),
             ),
           )
           .toList();

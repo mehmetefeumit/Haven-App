@@ -446,12 +446,71 @@ optional to record:
   authoritatively — catch-up runs first after every open and folds both events
   to a `GroupUpdate`. The deviation is recorded here and at the function itself;
   the same FFI widening closes it.
-- **A sender-declared `timestamp` is not bounded from above.** The last-known
-  store's newer-wins guard compares sender-supplied instants, so a peer with a
-  fast or hostile clock can pin its own marker until that timestamp passes.
-  Pre-existing on every receive path, not introduced by the replay work, and a
-  clamp would reject fixes from legitimately clock-skewed peers — **owner
-  decision**. Do not describe the monotonic guard as a defence against it.
+- **A sender-declared `timestamp` is still not bounded from above; only its
+  RANK is.** Nothing constrains the instant a peer stamps inside the ciphertext,
+  and Haven deliberately keeps it verbatim — clamping what is stored would
+  discard an honest, legitimately clock-skewed peer's own data (**owner
+  decision**). What changed is the newer-wins guard it used to drive. A fix now
+  ranks by `min(timestamp, updated_at)` — the sender's reading bounded above by
+  the instant THIS device received it, ties breaking on the raw `timestamp` —
+  in the `last_known_locations` upsert (`circle/storage.rs`) and, identically,
+  in the Flutter in-memory cache; the two must agree, or the next hydration
+  moves the marker to a fix one layer rejected. The cache asks that in two
+  shapes: an ARRIVING fix against a cached row uses `MemberLocation.outranks`,
+  the `WHERE` clause's mirror, while two rows that have BOTH already been
+  ranked — the hydration case — use `MemberLocation.isFresherThan` and compare
+  recorded ranks. The distinction is load-bearing: raising a stored
+  future-dated row's ceiling to the other row's later receipt at hydration ties
+  the two and lets the inflated reading win the tie-break, handing the pin
+  straight back.
+  The ceiling is monotonic per row (`max` of the two receipt instants) because
+  the RECEIVER's clock can step back too, and a ceiling taken from the arriving
+  fix alone would then discard the peer's whole stream until it recovered —
+  permanently, since the engine delivers each message at most once.
+  So what **now holds**: an hour-ahead fix ranks at its ARRIVAL, so a fast or
+  hostile clock can no longer pin a marker for the length of its skew.
+  Ranking by arrival ALONE would have been wrong the other way — the
+  convergence replay delivers genuinely old fixes late, and one would overwrite
+  a fresher live row — which is why the sender's reading still decides whenever
+  it is in the past. Each of the rule's three elements — the ceiling, the
+  sender's reading, and the ceiling's monotonicity — has a mutation that the
+  other two pins survive:
+  `last_known_upsert_takes_an_honest_fix_after_a_future_dated_one`,
+  `last_known_upsert_ignores_a_replayed_old_fix_received_later` and
+  `last_known_upsert_survives_a_receiver_clock_stepping_backwards`.
+  What does **NOT** hold, and the list is not closed:
+  - The pin is bounded by a DELIVERY LATENCY, not by nothing. A fix only
+    outranks the poisoned one if it was CAPTURED after the poisoned one
+    ARRIVED, so the poisoned position holds for however long that round trip
+    took: up to a fetch interval in poll mode, and after a replay, however
+    late the replay was. For a one-off future-dated fix it is therefore not
+    "the peer's next fix" that displaces it but the first fix captured after
+    that arrival. (Sub-second resolution would not change this; `updated_at`
+    being second-resolution only affects the same-second tie, which the
+    `timestamp` tie-break already resolves in the peer's favour.)
+  - A skewed peer's own marker can move BACKWARDS by up to the skew. Once the
+    future-dated row's rank is pulled down to its arrival, ANY later-arriving
+    fix from that peer with a `timestamp` between that arrival and the inflated
+    reading displaces it — including a genuinely older one. This is inherent to
+    the owner's decision: once a sender's claim is untrusted there is no
+    trustworthy order between it and that sender's other claims.
+  - Under a backward step of the RECEIVER's clock the surviving row is
+    order-dependent: A(ts 100, received 100) then B(ts 110, received 50) ends
+    on B, while B then A ends on A. Bounded by the size of the step and
+    self-healing once the clock passes the stored receipt again, and the cache
+    and the store stay in agreement throughout — they evaluate the same rule on
+    the same pair — so what varies is which of two near-contemporaneous fixes
+    is shown, never whether the two layers hold different ones.
+  - A skewed peer's own marker still reads as freshly seen for as long as their
+    clock leads, because the display buckets a negative age into the same
+    untagged bucket as a fresh fix (`kMemberAgePillThreshold`,
+    `widgets/map/member_marker.dart`) rather than rendering a wall-clock
+    reading of somebody else's device as "-59m".
+  - Sender-controlled RETENTION is not bounded at all: `expires_at` /
+    `purge_after` derive from the same unbounded `timestamp`, so a future-dated
+    fix lingers in the cache and the store longer than an honest one.
+
+  Do not describe the rank bound as a defence against any of these.
 - **A drained `GroupEvolution`'s welcomes are not published.** `CommitToPublish`
   carries no welcomes, so a queued invite released by a convergence drain hands
   back a commit whose invitees receive nothing. Pre-existing in

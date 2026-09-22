@@ -413,6 +413,27 @@ void main() {
       await tester.pump(const Duration(milliseconds: 200));
       expect(find.text('5m'), findsNothing);
     });
+
+    testWidgets('buckets a clock-ahead peer as fresh, never as a future age', (
+      tester,
+    ) async {
+      // A peer whose clock runs fast stamps its fix in the future. Its age is
+      // NEGATIVE, and it must land in the same untagged bucket as a fresh fix
+      // — a "-59m" pill would be a wall-clock reading of another person's
+      // device presented as staleness.
+      final ahead = DateTime.now().add(const Duration(minutes: 59));
+      await tester.pumpWidget(
+        _wrap(_marker(displayName: 'Jane', lastSeen: ahead)),
+      );
+      await tester.pump(const Duration(milliseconds: 200));
+      expect(find.textContaining('m'), findsNothing);
+      expect(find.textContaining('-'), findsNothing);
+      expect(
+        tester.getSemantics(find.byType(MemberMarker)).label,
+        'Jane member marker',
+        reason: 'a screen reader must not announce a negative age either',
+      );
+    });
   });
 
   group('MemberMarker interaction', () {

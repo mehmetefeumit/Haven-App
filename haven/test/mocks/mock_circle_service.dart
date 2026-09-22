@@ -6,6 +6,7 @@ library;
 
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:haven/src/services/circle_service.dart';
 
 /// A test pubkey in hex, paired with [kTestNpub].
@@ -494,8 +495,33 @@ class MockCircleService implements CircleService {
     }
   }
 
-  /// Last-known location rows stored in the mock.
+  /// Last-known location rows stored in the mock — at most one per
+  /// `(nostrGroupId, senderPubkey)`, exactly as the real table's primary key
+  /// enforces.
   final List<Map<String, Object?>> lastKnownRows = [];
+
+  /// Whether an arriving fix outranks the stored row, mirroring the
+  /// `last_known_locations` upsert's `WHERE` clause
+  /// (`haven-core/src/circle/storage.rs`).
+  ///
+  /// A fake that accepted every write could never disagree with the in-memory
+  /// cache, so the one defect this models — the store keeping a fix the cache
+  /// rejected, or the reverse — would be invisible to every test that uses it.
+  /// Rank is `min(timestamp, ceiling)` where the ceiling is the LATER of the
+  /// two `updatedAt`s; ties break on `timestamp`.
+  static bool _outranksStoredRow(
+    Map<String, Object?> stored, {
+    required DateTime timestamp,
+    required DateTime updatedAt,
+  }) {
+    final storedTs = stored['timestamp']! as DateTime;
+    final storedAt = stored['updatedAt']! as DateTime;
+    final ceiling = updatedAt.isAfter(storedAt) ? updatedAt : storedAt;
+    final mine = timestamp.isAfter(ceiling) ? ceiling : timestamp;
+    final theirs = storedTs.isAfter(storedAt) ? storedAt : storedTs;
+    final rank = mine.compareTo(theirs);
+    return rank > 0 || (rank == 0 && timestamp.isAfter(storedTs));
+  }
 
   @override
   Future<void> upsertLastKnownLocation({
@@ -511,6 +537,23 @@ class MockCircleService implements CircleService {
     String? displayName,
   }) async {
     methodCalls.add('upsertLastKnownLocation');
+    final existing = lastKnownRows
+        .where(
+          (r) =>
+              r['senderPubkey'] == senderPubkey &&
+              listEquals(r['nostrGroupId']! as List<int>, nostrGroupId),
+        )
+        .firstOrNull;
+    if (existing != null &&
+        !_outranksStoredRow(
+          existing,
+          timestamp: timestamp,
+          updatedAt: updatedAt,
+        )) {
+      // Silently ignored, exactly as the SQL's `WHERE` does.
+      return;
+    }
+    if (existing != null) lastKnownRows.remove(existing);
     lastKnownRows.add({
       'nostrGroupId': nostrGroupId,
       'senderPubkey': senderPubkey,

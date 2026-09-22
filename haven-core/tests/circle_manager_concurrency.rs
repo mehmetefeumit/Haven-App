@@ -170,9 +170,10 @@ fn concurrent_last_known_upserts_are_idempotent() {
     let ngid = [42u8; 32];
     let sender = pubkey(7);
 
-    // 16 threads × 50 writes for the SAME (circle, sender). The store's SQL
-    // uses `WHERE excluded.timestamp > last_known_locations.timestamp`, so
-    // only the row with the highest timestamp survives regardless of
+    // 16 threads × 50 writes for the SAME (circle, sender). The store ranks a
+    // fix by `min(timestamp, ceiling)` with ties on `timestamp`, and each
+    // write's `updated_at` is its own `timestamp` (`make_location`), so every
+    // rank collapses to the timestamp and the maximum survives regardless of
     // thread scheduling order.
     let handles: Vec<_> = (0..16i64)
         .map(|t| {

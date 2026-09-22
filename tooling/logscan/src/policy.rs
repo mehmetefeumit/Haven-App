@@ -822,7 +822,7 @@ ios = { term_floor = 8, declared_plants_expected = false, structural_rules = tru
             assert_eq!(policy.sinks[sink].cargo_status, expected, "`{sink}`");
         }
         // And the exemption never stands in for the rules being off: the sink
-        // that skips cargo's lines still runs S1–S12 over every other one.
+        // that skips cargo's lines still runs S1–S13 over every other one.
         assert!(policy.sinks["rust-test"].structural_rules);
         assert!(policy.sinks["soak"].structural_rules);
     }

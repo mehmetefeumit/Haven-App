@@ -68,6 +68,7 @@ MemberLocation _member(double lat, double lng) => MemberLocation(
       geohash: 'u10h',
       timestamp: DateTime(2025),
       expiresAt: DateTime(2025).add(const Duration(hours: 1)),
+      receivedAt: null,
     );
 
 // ---------------------------------------------------------------------------

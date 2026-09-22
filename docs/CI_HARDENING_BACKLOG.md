@@ -1,7 +1,7 @@
 # CI Hardening Backlog
 
 Tracking document for the CI/privacy-verification audit of 2026-08-01.
-**Last updated 2026-08-18.** Items are open unless marked DONE, FIXED,
+**Last updated 2026-09-22.** Items are open unless marked DONE, FIXED,
 IMPLEMENTED or RESOLVED. Each carries evidence so it can be picked up cold.
 
 > **Historical note (2026-08-29).** The Settings → Privacy page and every
@@ -4768,3 +4768,93 @@ exists, and the promise it guarded is held more strongly by cases 19 and 20,
 which assert the composed paragraph by EQUALITY in both indicator states and
 therefore fail on ANY third sentence, inducement or not. That reasoning was
 moved into the group header so the next reader does not re-derive it.
+
+## Owner decisions from the CI-harness hardening round — 2026-09-22
+
+The round (commits 548d4f5 and 12fce46 plus the follow-up staged the same day)
+closed with eight decisions handed to the owner. Five were implemented at once:
+the CLAUDE.md sentence for the iOS background-publish lane's toggle-off proof;
+the Security Rule 13 clause that an `Err` from `confirm_published` is not a
+publish failure; `distributionSha256Sum` for gradle-8.14-all in
+`gradle-wrapper.properties` (checked against both `services.gradle.org`'s
+`.sha256` and the human-facing gradle.org/release-checksums page); the log
+scanner's rule for a relay host that `dart:io` spells as `https://` when a
+WebSocket dial fails; and the future-dated location timestamp (a peer with a
+fast clock could pin its marker). The three below are deferred or declined, each
+with the reasoning so it can be picked up cold.
+
+### DEFERRED · Send-path eviction with live sync off
+
+**What.** An eviction (a peer's SelfRemove commit) that the engine surfaces
+during one of this device's own sends is recorded as owed
+(`owe_removal_publish`) and only a foreground live-sync burst redeems it
+(`redeem_removal_deferrals`, `live_sync/session.rs`). A build with
+`HAVEN_LIVE_SYNC=false` has neither the redeemer nor the reporter, so the
+commit stays staged, unpublished and unreported until the next foreground
+live-sync open. Recorded as an accepted residual in `haven-core/SECURITY.md`
+("Publish resolution: what the engine replays, and what Haven owes it").
+
+**Why deferred.** Closing it means `encrypt_location` returning
+`Vec<CommitToPublishFfi>` alongside the ciphertext — an FFI shape change with
+bridge regeneration and a Dart caller on every send plane (foreground, FGS,
+deferred send). Live sync defaults ON, so today's exposure is the flag-off
+rollback path only.
+
+**When.** After Soak Phase 2 starts, as its own change: the soak rig is the
+right place to prove the flag-off plane redeems within one send.
+
+### DEFERRED · Gradle dependency verification
+
+**What.** `haven/android/gradle/verification-metadata.xml` does not exist, so
+Gradle checks no checksum or signature on anything it resolves. That is why
+`release-build.yml` declares `HAVEN_GRADLE_CACHE-EXEMPT` and builds cold: a
+restored `~/.gradle/caches/modules-2` would be an unverified input to the
+signed artifact. The distribution half is now pinned (`distributionSha256Sum`).
+
+**How.** `./gradlew --write-verification-metadata sha256 help` from
+`haven/android`, commit the file, and keep it maintained on every dependency
+bump (a stale file fails the build, by design). Then revisit the release
+exemption in `scripts/ci/check_gradle_build_hardened.sh` C5.
+
+**When.** A quiet week; it is a maintenance commitment, not a one-off.
+
+### DECLINED · Release build through the retry wrapper
+
+`scripts/build_release.sh` calls `flutter build` directly, so a Maven 429 in a
+release run fails with no in-job retry (the only retry on that path is the
+widened in-Gradle window from `haven/android/gradle.properties`). Left as is:
+releases are rare, a re-run costs one cold build, and routing the signed path
+through `scripts/ci/build_apk_with_retry.sh` adds a moving part to the artifact
+users install. Revisit only if a release run actually hits a 429.
+
+### DECLINED · Gradle cache on the flakiness-stress lane
+
+`e2e-flakiness-stress.yml` declares a C1 exemption: its job cap is already
+GitHub's 360-minute ceiling with 0.8 min of headroom, less than a restore
+step's 2-minute cap, so a cache would take minutes from the stress loop — the
+one lane whose purpose is repetition. It keeps the classified retry and the
+gradle.properties window. If the ceiling ever binds, shorten the loop rather
+than remove the exemption silently.
+
+### DEFERRED · `--segments` on the remaining multi-target lanes
+
+`run-integration-tests.sh` and `run-relay-customization.sh` declare
+`--segments drive=<targets>` on their aggregate gate. `run-m7-background-catchup.sh`
+and `run-b5-permission-revocation.sh` do not, because their per-target
+transcripts are written directly into `LOG_DIR` by the redirect that follows the
+counter, so a count there cannot fail for the reason it would claim. Revisit
+only if either lane starts staging transcripts outside `LOG_DIR`.
+
+### DEFERRED · Sub-second `updated_at` and a round-tripping mock store
+
+Two small items the freshness-rank review (2026-09-22) recorded rather than
+fixed. The `last_known_locations` receipt instant is stored at whole seconds,
+so a future-dated fix and an honest one admitted in the same second tie on
+rank and the tie-break hands it to the higher sender timestamp; the latency
+bound in `haven-core/SECURITY.md` already contains this and a millisecond
+column would not shorten it, so there is nothing to do unless that bound is
+ever tightened. `MockCircleService.snapshotLastKnownForCircle` serves an
+override or nothing, never the rows the mock's own upsert kept, so the
+cross-layer tests seed both sides by hand; letting the snapshot fall back to
+`lastKnownRows` would state the store/cache agreement property once. Neither
+blocks anything.

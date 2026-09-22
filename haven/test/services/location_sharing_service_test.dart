@@ -65,6 +65,7 @@ void main() {
         geohash: '9q8yyk8',
         timestamp: DateTime.now().subtract(const Duration(hours: 25)),
         expiresAt: DateTime.now().subtract(const Duration(hours: 1)),
+        receivedAt: null,
       );
       expect(loc.isExpired, isTrue);
     });
@@ -77,8 +78,156 @@ void main() {
         geohash: '9q8yyk8',
         timestamp: DateTime.now(),
         expiresAt: DateTime.now().add(const Duration(hours: 23)),
+        receivedAt: null,
       );
       expect(loc.isExpired, isFalse);
+    });
+  });
+
+  group('MemberLocation freshness rank', () {
+    // A peer supplies its own `timestamp`, so nothing bounds it from above.
+    // Ranking on it alone let a clock-ahead peer PIN its own marker: every
+    // honest later fix compared older and was discarded until wall-clock
+    // caught up. The rank is bounded by the receipt instant instead — and only
+    // the rank, never what is stored or displayed.
+    final at = DateTime.utc(2026, 9, 21, 12);
+
+    MemberLocation fix({
+      required Duration senderOffset,
+      required Duration receiptOffset,
+      double latitude = 0,
+    }) => MemberLocation(
+      pubkey: 'peer',
+      latitude: latitude,
+      longitude: 0,
+      geohash: '9q8',
+      timestamp: at.add(senderOffset),
+      expiresAt: at.add(senderOffset + const Duration(minutes: 4)),
+      receivedAt: at.add(receiptOffset),
+    );
+
+    test('a future-dated fix ranks at the instant it arrived', () {
+      final ahead = fix(
+        senderOffset: const Duration(hours: 1),
+        receiptOffset: Duration.zero,
+      );
+      expect(ahead.freshness, at);
+      expect(
+        ahead.timestamp,
+        at.add(const Duration(hours: 1)),
+        reason: 'the sender reading itself is kept verbatim, never clamped',
+      );
+    });
+
+    test('an honest fix ranks at its own timestamp', () {
+      final honest = fix(
+        senderOffset: const Duration(minutes: -3),
+        receiptOffset: Duration.zero,
+      );
+      expect(honest.freshness, at.subtract(const Duration(minutes: 3)));
+    });
+
+    test('a later honest fix outranks an hour-ahead one', () {
+      final ahead = fix(
+        senderOffset: const Duration(hours: 1),
+        receiptOffset: Duration.zero,
+      );
+      final honest = fix(
+        senderOffset: const Duration(seconds: 10),
+        receiptOffset: const Duration(seconds: 10),
+      );
+      expect(honest.outranks(ahead), isTrue);
+      expect(
+        ahead.isFresherThan(honest),
+        isFalse,
+        reason: 'as two already-ranked rows — the hydration question — the '
+            'hour-ahead one is pinned at its arrival and loses',
+      );
+    });
+
+    test('an arriving fix stamped before the stored row still wins', () {
+      // Only the receiver's own clock stepping back can produce this, and the
+      // arrival is later in reality, so it must replace what is there. Ranking
+      // it below the stored row would drop the peer's whole stream until the
+      // clock recovered — permanently, since each message is delivered once.
+      final stored = fix(
+        senderOffset: Duration.zero,
+        receiptOffset: Duration.zero,
+      );
+      final afterStep = fix(
+        senderOffset: const Duration(seconds: 10),
+        receiptOffset: const Duration(minutes: -10),
+      );
+      expect(afterStep.outranks(stored), isTrue);
+    });
+
+    test('a replayed old fix never outranks a fresher live one', () {
+      // The convergence replay delivers genuinely old fixes late: ranking on
+      // arrival ALONE would let this one overwrite the live row.
+      final live = fix(
+        senderOffset: Duration.zero,
+        receiptOffset: Duration.zero,
+      );
+      final replayed = fix(
+        senderOffset: const Duration(minutes: -20),
+        receiptOffset: const Duration(minutes: 5),
+      );
+      expect(replayed.outranks(live), isFalse);
+    });
+
+    test('a rank tie breaks on the sender reading', () {
+      // Both future-dated and admitted at the same instant — receipt order
+      // cannot separate them, so the sender's own ordering decides.
+      final earlier = fix(
+        senderOffset: const Duration(hours: 1),
+        receiptOffset: Duration.zero,
+      );
+      final later = fix(
+        senderOffset: const Duration(hours: 2),
+        receiptOffset: Duration.zero,
+      );
+      expect(later.freshness, earlier.freshness);
+      expect(later.outranks(earlier), isTrue);
+      expect(earlier.outranks(later), isFalse);
+    });
+
+    test('re-delivery of the same fix does not outrank itself', () {
+      final first = fix(
+        senderOffset: Duration.zero,
+        receiptOffset: Duration.zero,
+      );
+      final redelivered = fix(
+        senderOffset: Duration.zero,
+        receiptOffset: const Duration(minutes: 2),
+      );
+      expect(redelivered.outranks(first), isFalse);
+    });
+
+    test('an unknown receipt instant ranks on the sender reading alone', () {
+      final base = MemberLocation(
+        pubkey: 'peer',
+        latitude: 0,
+        longitude: 0,
+        geohash: '9q8',
+        timestamp: at.add(const Duration(hours: 1)),
+        expiresAt: at,
+        receivedAt: null,
+      );
+      expect(base.freshness, base.timestamp);
+    });
+
+    test('copyWith carries the receipt instant', () {
+      final named = fix(
+        senderOffset: const Duration(hours: 1),
+        receiptOffset: Duration.zero,
+      ).copyWith(displayName: 'Alice');
+      expect(named.receivedAt, at);
+      expect(
+        named.freshness,
+        at,
+        reason: 'dropping it on copy would restore the pin for any row that '
+            'later picks up a petname',
+      );
     });
   });
 
@@ -2196,6 +2345,356 @@ void main() {
           );
           expect(circle.methodCalls, contains('getMembers'));
           expect(circle.methodCalls, contains('removeLastKnownMember'));
+        },
+      );
+    });
+
+    group('clock-ahead peer', () {
+      final testCircle = TestCircleFactory.createCircle(
+        displayName: 'Test',
+        members: [
+          TestCircleFactory.createMember(
+            pubkey: 'sender1',
+            displayName: 'Alice',
+          ),
+        ],
+      );
+
+      DecryptedLocation peerFix({
+        required DateTime timestamp,
+        required double latitude,
+        DateTime? receivedAt,
+      }) => DecryptedLocation(
+        senderPubkey: 'sender1',
+        latitude: latitude,
+        longitude: -122,
+        geohash: '9q8',
+        timestamp: timestamp,
+        expiresAt: timestamp.add(const Duration(minutes: 4)),
+        receivedAt: receivedAt,
+      );
+
+      /// Writes [fix] into the mock's persistent store as the row a previous
+      /// session left behind, stamped with the receipt instant [at].
+      Future<void> seedStore(
+        MockCircleService circle,
+        DecryptedLocation fix, {
+        required DateTime at,
+      }) => circle.upsertLastKnownLocation(
+        nostrGroupId: testCircle.nostrGroupId,
+        senderPubkey: fix.senderPubkey,
+        latitude: fix.latitude,
+        longitude: fix.longitude,
+        geohash: fix.geohash,
+        timestamp: fix.timestamp,
+        expiresAt: fix.expiresAt,
+        purgeAfter: fix.timestamp.add(const Duration(days: 1)),
+        updatedAt: at,
+      );
+
+      test(
+        "a future-dated fix does not pin the peer's marker: the next honest "
+        'fix replaces it',
+        () async {
+          final start = DateTime.utc(2026, 9, 21, 12);
+          var clock = start;
+          final circle = MockCircleService();
+          final svc = LocationSharingService(
+            circleService: circle,
+            relayService: MockRelayService(),
+            now: () => clock,
+          );
+
+          await svc.ingestStreamedLocation(
+            circle: testCircle,
+            decrypted: peerFix(
+              timestamp: start.add(const Duration(hours: 1)),
+              latitude: 1,
+            ),
+          );
+          final pinned = await svc.cachedLocations(testCircle);
+          expect(pinned.single.latitude, 1.0);
+          expect(
+            pinned.single.timestamp,
+            start.add(const Duration(hours: 1)),
+            reason: 'the peer reading reaches the model unclamped — clamping '
+                "it would discard an honest skewed peer's own data",
+          );
+
+          clock = start.add(const Duration(seconds: 10));
+          await svc.ingestStreamedLocation(
+            circle: testCircle,
+            decrypted: peerFix(timestamp: clock, latitude: 2),
+          );
+
+          final after = await svc.cachedLocations(testCircle);
+          expect(
+            after.single.latitude,
+            2.0,
+            reason: 'ranking on the sender reading alone leaves the marker at '
+                'the future-dated fix for a whole hour',
+          );
+        },
+      );
+
+      test(
+        'a replayed older fix still loses to a fresher cached one',
+        () async {
+          final start = DateTime.utc(2026, 9, 21, 12);
+          var clock = start;
+          final circle = MockCircleService();
+          final svc = LocationSharingService(
+            circleService: circle,
+            relayService: MockRelayService(),
+            now: () => clock,
+          );
+
+          await svc.ingestStreamedLocation(
+            circle: testCircle,
+            decrypted: peerFix(timestamp: start, latitude: 3),
+          );
+
+          // The commit-gap replay hands back a genuinely old fix minutes later.
+          clock = start.add(const Duration(minutes: 5));
+          await svc.ingestStreamedLocation(
+            circle: testCircle,
+            decrypted: peerFix(
+              timestamp: start.subtract(const Duration(minutes: 20)),
+              latitude: 4,
+            ),
+          );
+
+          final after = await svc.cachedLocations(testCircle);
+          expect(
+            after.single.latitude,
+            3.0,
+            reason: 'ranking by arrival alone would overwrite the live fix '
+                'with a 20-minute-old replayed one',
+          );
+          expect(
+            circle.lastKnownRows.single['latitude'],
+            3.0,
+            reason: 'and the STORE must refuse the same write, or the two '
+                'layers hold different fixes until the next hydration',
+          );
+        },
+      );
+
+      test(
+        'the store is given the same receipt instant the cache ranks by',
+        () async {
+          // Two different notions of "now" would let the cache and the store
+          // pick different freshest fixes, so a restart would move the marker.
+          // The clock deliberately carries milliseconds the store's
+          // Unix-seconds column cannot hold: without dropping them here the
+          // two layers agree only to the second.
+          final start = DateTime.utc(2026, 9, 21, 12);
+          final circle = MockCircleService();
+          final svc = LocationSharingService(
+            circleService: circle,
+            relayService: MockRelayService(),
+            now: () => start.add(const Duration(milliseconds: 750)),
+          );
+
+          await svc.ingestStreamedLocation(
+            circle: testCircle,
+            decrypted: peerFix(
+              timestamp: start.add(const Duration(hours: 1)),
+              latitude: 5,
+            ),
+          );
+
+          final cached = await svc.cachedLocations(testCircle);
+          expect(circle.lastKnownRows.single['updatedAt'], start);
+          expect(cached.single.receivedAt, start);
+          expect(
+            cached.single.receivedAt,
+            circle.lastKnownRows.single['updatedAt'],
+            reason: 'the value, not just the second — the store persists Unix '
+                'seconds and cannot keep anything finer',
+          );
+        },
+      );
+
+      test(
+        'a rehydrated future-dated row is replaced by the next fix',
+        () async {
+          // The store keeps the peer reading verbatim, so the pin survives a
+          // restart unless hydration bounds the row's rank too.
+          final start = DateTime.utc(2026, 9, 21, 12);
+          var clock = start;
+          final circle = MockCircleService()
+            ..snapshotLastKnownRows = [
+              peerFix(
+                timestamp: start.add(const Duration(hours: 1)),
+                latitude: 6,
+                receivedAt: start,
+              ),
+            ];
+          final svc = LocationSharingService(
+            circleService: circle,
+            relayService: MockRelayService(),
+            now: () => clock,
+          );
+
+          expect((await svc.cachedLocations(testCircle)).single.latitude, 6.0);
+
+          clock = start.add(const Duration(seconds: 10));
+          await svc.ingestStreamedLocation(
+            circle: testCircle,
+            decrypted: peerFix(timestamp: clock, latitude: 7),
+          );
+
+          expect(
+            (await svc.cachedLocations(testCircle)).single.latitude,
+            7.0,
+            reason: 'a hydrated row that ranks on its future reading pins the '
+                'marker again on every restart',
+          );
+        },
+      );
+
+      test(
+        'hydration keeps the rank the STORE gave the row, so the two layers '
+        'accept the same fix',
+        () async {
+          // Re-stamping a rehydrated row with "now" ranks a future-dated one
+          // ABOVE the rank the store holds it at, and every fix landing in
+          // between is then accepted by the store and rejected by the cache —
+          // so the NEXT resume's hydration jumps the marker to it. Every
+          // resume re-hydrates (onAppPaused clears `_hydratedCircles`) and the
+          // first fetch after one reaches ≥60 s back, so the window is
+          // ordinary, not exotic.
+          final wrote = DateTime.utc(2026, 9, 21, 12);
+          final resume = wrote.add(const Duration(minutes: 30));
+          final pinned = peerFix(
+            timestamp: wrote.add(const Duration(hours: 1)),
+            latitude: 6,
+            receivedAt: wrote,
+          );
+
+          final circle = MockCircleService();
+          await seedStore(circle, pinned, at: wrote);
+          circle.snapshotLastKnownRows = [pinned];
+
+          var clock = resume;
+          final svc = LocationSharingService(
+            circleService: circle,
+            relayService: MockRelayService(),
+            now: () => clock,
+          );
+          expect(
+            (await svc.cachedLocations(testCircle)).single.latitude,
+            6.0,
+            reason: 'anti-vacuity: the pinned row really is what hydrated',
+          );
+
+          // Captured after the pinned fix ARRIVED but before this resume —
+          // exactly the window the re-stamp would have hidden.
+          clock = resume.add(const Duration(seconds: 1));
+          await svc.ingestStreamedLocation(
+            circle: testCircle,
+            decrypted: peerFix(
+              timestamp: wrote.add(const Duration(minutes: 10)),
+              latitude: 9,
+            ),
+          );
+
+          final cached = (await svc.cachedLocations(testCircle)).single;
+          final stored = circle.lastKnownRows.single;
+          expect(
+            cached.latitude,
+            stored['latitude'],
+            reason: 'the cache and the store must survive on the same fix, or '
+                'the next hydration moves the marker to one of them',
+          );
+          expect(cached.latitude, 9.0);
+        },
+      );
+
+      test(
+        'a live-sync fix already in the cache is not overwritten by an older '
+        'store row',
+        () async {
+          // Live-sync writes the cache before anything hydrates it, so the
+          // store row the first hydration returns is not automatically the
+          // fresher of the two.
+          final start = DateTime.utc(2026, 9, 21, 12);
+          final circle = MockCircleService()
+            ..snapshotLastKnownRows = [
+              peerFix(
+                timestamp: start.subtract(const Duration(minutes: 20)),
+                latitude: 2,
+                receivedAt: start.subtract(const Duration(minutes: 20)),
+              ),
+            ];
+          final svc = LocationSharingService(
+            circleService: circle,
+            relayService: MockRelayService(),
+            now: () => start,
+          );
+
+          await svc.ingestStreamedLocation(
+            circle: testCircle,
+            decrypted: peerFix(timestamp: start, latitude: 4),
+          );
+
+          expect(
+            (await svc.cachedLocations(testCircle)).single.latitude,
+            4.0,
+            reason: 'a blind assign at hydration drops the fresher live fix',
+          );
+        },
+      );
+
+      test(
+        'hydrating a stale future-dated snapshot over a live fix keeps the '
+        "store's own verdict",
+        () async {
+          // The hydration comparison is between two ALREADY-RANKED rows, so it
+          // uses the recorded ranks. Asking the ARRIVAL question here instead
+          // would raise the stale row's ceiling to the live fix's later
+          // receipt, tie, and hand the tie-break to the inflated reading — the
+          // pin, straight back, on a snapshot that merely predates the ingest.
+          final start = DateTime.utc(2026, 9, 21, 12);
+          final pinned = peerFix(
+            timestamp: start.add(const Duration(hours: 1)),
+            latitude: 6,
+            receivedAt: start,
+          );
+
+          final circle = MockCircleService();
+          await seedStore(circle, pinned, at: start);
+          // Set, but never hydrated before the ingest: this models the
+          // snapshot that was already in flight when the live fix landed.
+          circle.snapshotLastKnownRows = [pinned];
+
+          var clock = start;
+          final svc = LocationSharingService(
+            circleService: circle,
+            relayService: MockRelayService(),
+            now: () => clock,
+          );
+
+          clock = start.add(const Duration(seconds: 10));
+          await svc.ingestStreamedLocation(
+            circle: testCircle,
+            decrypted: peerFix(timestamp: clock, latitude: 7),
+          );
+          expect(
+            circle.lastKnownRows.single['latitude'],
+            7.0,
+            reason: 'anti-vacuity: the STORE took the live fix, so the stale '
+                'snapshot really is the losing row',
+          );
+
+          final cached = (await svc.cachedLocations(testCircle)).single;
+          expect(cached.latitude, 7.0);
+          expect(
+            cached.latitude,
+            circle.lastKnownRows.single['latitude'],
+            reason: 'hydration must reach the verdict the store already did',
+          );
         },
       );
     });

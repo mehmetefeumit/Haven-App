@@ -78,6 +78,12 @@ const Duration kMemberAgePillThreshold = Duration(minutes: 5);
 /// Reporting minutes without an upper bound also degrades gracefully: if the
 /// eviction window is ever widened, a stale marker reads "90m" rather than
 /// silently losing its age pill.
+///
+/// The bound is a LOWER one too, and deliberately: a peer whose clock runs
+/// fast stamps a fix in the future, whose age is negative, and that falls in
+/// the same no-pill bucket as a fresh fix — never a "-59m" pill. Any branch
+/// added here must stay BELOW this gate, or a future timestamp starts
+/// rendering as a negative age (pinned in `member_marker_test.dart`).
 String? _formatAge(AppLocalizations l10n, Duration age) {
   if (age < kMemberAgePillThreshold) return null;
   return l10n.memberMarkerMinutesShort(age.inMinutes);

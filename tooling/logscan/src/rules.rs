@@ -1,4 +1,4 @@
-//! Structural rules S1–S12 and the allowlist that can forgive one.
+//! Structural rules S1–S13 and the allowlist that can forgive one.
 //!
 //! A needle rule catches the values this run declared. The structural rules
 //! catch the ones it did not: a pubkey minted by a peer, an event id the relay
@@ -124,7 +124,47 @@ const RULES: &[Rule] = &[
             r"(?i)(?:^|[^A-Za-z0-9_:])((?:[0-9a-f]{1,4}:){7}[0-9a-f]{1,4}|(?:[0-9a-f]{1,4}:){1,7}:(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){0,6})?|::(?:[0-9a-f]{1,4}:){0,6}[0-9a-f]{1,4})(?:[^A-Za-z0-9_:]|$)",
         ],
     },
+    Rule {
+        id: "S13",
+        // The relay host in the ONE spelling S7 cannot see. `WebSocket.connect`
+        // re-schemes `wss`→`https` (and `ws`→`http`) before its upgrade request
+        // — dart-sdk `lib/_http/websocket_impl.dart:1082-1091` — so a dial that
+        // fails reports the relay as `https://<host>`, and `wss?://` never
+        // matches it. `is_real_hit` is the rest of the rule: the line must say
+        // a dial FAILED ([`DIAL_FAILURE`]), because the engine, the driver and
+        // the toolchain print deliberate `https://` URLs on every green run,
+        // and the host must not be one the run declared exempt.
+        patterns: &[r#"(?i)https?://[^\s"'<>\\]+"#],
+    },
 ];
+
+/// What S13 accepts as "this line is about a dial that failed", each shape from
+/// the `dart:io` source that renders the URL.
+///
+/// `uri\s*=` is the tail `HttpException::toString` appends
+/// (`lib/_http/http.dart:2108-2116`), which is why it covers every message that
+/// class carries a URI for — the `SocketException`/`TlsException` messages it
+/// forwards verbatim included (`lib/_http/http_impl.dart:2227`, `:2254`), whose
+/// text this list could never enumerate. The two class names are what Dart
+/// prints when the exception is rendered whole, and what Flutter's test
+/// framework writes on the line ABOVE the message (`The following
+/// HttpException was thrown running a test:`, measured in CI run 35664400984).
+/// The rest are the messages that reach a line carrying neither:
+/// `Connection closed`
+/// (`lib/_http/http_parser.dart:942`, `:953`, `:970`, `:983` and
+/// `lib/_http/http_impl.dart:2261`, `:2412`), `Socket closed` (`:2282`),
+/// `not upgraded to websocket` (`lib/_http/websocket_impl.dart:1149`), a TLS
+/// `handshake` failure forwarded through the two lines above, and the API name
+/// itself.
+///
+/// The bare word `upgrade` is deliberately NOT here. It is an ordinary word in
+/// vendor output — `gmscore_upgrade` beside a URL in two of this tree's
+/// captures — while the SDK's own message carries the whole phrase.
+const DIAL_FAILURE: &str = concat!(
+    r"(?i)uri\s*=|httpexception|websocketexception|",
+    r"connection closed|socket closed|not upgraded to websocket|",
+    r"websocket\.connect|handshake",
+);
 
 /// The ONE cargo status line that trips a structural rule: a crate being built,
 /// with its version and, for a git or path dependency, its source.
@@ -253,6 +293,7 @@ pub struct RuleSet {
     ids: Vec<&'static str>,
     set: RegexSet,
     cargo_status: Regex,
+    dial_failure: Regex,
     entropy_bits: f64,
     epoch_window: (u64, u64),
     exempt: BTreeSet<String>,
@@ -304,6 +345,8 @@ impl RuleSet {
             set,
             cargo_status: Regex::new(CARGO_STATUS)
                 .map_err(|e| format!("the cargo status shape does not compile: {e}"))?,
+            dial_failure: Regex::new(DIAL_FAILURE)
+                .map_err(|e| format!("the dial-failure markers do not compile: {e}"))?,
             entropy_bits,
             // Floor: 2020-01-01. Ceiling: a year out, so a fixture's fixed
             // timestamp stays inside the window forever while a future stamp
@@ -418,6 +461,17 @@ impl RuleSet {
                 }
                 !self.is_exempt_endpoint(literal)
             }),
+            // Either the line says the dial failed, or the URL IS the line:
+            // Flutter's test framework wraps an exception message at 65 and at
+            // 100 columns and a URL is one unbreakable token, so the narrow
+            // rendering puts it on a line of its own, away from its marker
+            // (measured twice in CI run 35664400984 — the same failure, one
+            // rendering apart). A URL alone on a Haven-owned line is a host and
+            // nothing else, which is what Rule 15 forbids outright.
+            "S13" => {
+                (self.dial_failure.is_match(line) || line.trim() == whole)
+                    && !self.is_exempt_url_host(whole)
+            }
             _ => true,
         }
     }
@@ -429,6 +483,35 @@ impl RuleSet {
     fn is_exempt_endpoint(&self, matched: &str) -> bool {
         let trimmed = matched.trim_end_matches(['/', ',', ';', ')', '"', '\'']);
         self.exempt.iter().any(|e| e.eq_ignore_ascii_case(trimmed))
+    }
+
+    /// Whether the HOST of a matched URL is one the run declared exempt.
+    ///
+    /// S13 reports a host, so its exemption is a host too — unlike S7's, which
+    /// is the whole spelling and nothing under it. That is what makes an
+    /// exempted `ws://10.0.2.2:7777` forgive the `http://10.0.2.2:7777` a
+    /// failed dial to the same hermetic relay prints, without S7 forgiving a
+    /// `ws://10.0.2.2:7777/<anything>`: the expansion in
+    /// [`crate::manifest::endpoint_spellings`] already publishes `host:port`
+    /// and `host` beside the declared URL, and the bare-host claim every lane
+    /// makes (`--exempt-endpoint 127.0.0.1`) is what covers the engine's
+    /// VM-service URL on whatever port it drew. Forgiving the path costs
+    /// nothing: every other rule still reads it, so a value printed there is
+    /// reported by whichever rule its shape belongs to.
+    fn is_exempt_url_host(&self, url: &str) -> bool {
+        if self.is_exempt_endpoint(url) {
+            return true;
+        }
+        // A URL at the end of a sentence carries the period into the match.
+        let url = url.trim_end_matches(['.', ',', ';', ')', '"', '\'']);
+        let Some((_, rest)) = url.split_once("://") else {
+            return false;
+        };
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+        self.is_exempt_endpoint(authority)
+            || authority.rsplit_once(':').is_some_and(|(host, port)| {
+                port.bytes().all(|b| b.is_ascii_digit()) && self.is_exempt_endpoint(host)
+            })
     }
 
     fn is_allowlisted(&self, id: &str, line: &str, sink_path: &str, tag: Option<&str>) -> bool {
@@ -827,6 +910,11 @@ mod tests {
                 "haven: endpoint 10.0.2.2 unreachable",
                 "haven: endpoint relay#0b12cc unreachable",
             ),
+            (
+                "S13",
+                "haven: HttpException: Connection closed before full header was received, uri = https://relay.example-nostr.net",
+                "haven: dial attempt 2 of 3 failed for relay#0b12cc",
+            ),
         ];
         assert_eq!(
             cases.len(),
@@ -1040,7 +1128,7 @@ mod tests {
         assert!(engine.is_cargo_furniture("S2", line));
         assert!(engine.is_cargo_furniture("S6", line));
         for other in [
-            "S1", "S3", "S4", "S5", "S7", "S8", "S9", "S10", "S11", "S12",
+            "S1", "S3", "S4", "S5", "S7", "S8", "S9", "S10", "S11", "S12", "S13",
         ] {
             assert!(
                 !engine.is_cargo_furniture(other, line),
@@ -1087,6 +1175,89 @@ mod tests {
             "haven: [abc::def] resolved",
         ] {
             assert!(!hits(clean).contains(&"S12"), "must not fire on {clean:?}");
+        }
+    }
+
+    /// S13 reads the spelling a FAILED dial produces, and not the `https` URLs
+    /// a green run prints on purpose.
+    ///
+    /// `WebSocket.connect` re-schemes `wss`→`https` before its upgrade request
+    /// (dart-sdk `lib/_http/websocket_impl.dart:1082-1091`), so the relay host
+    /// reaches the log in a spelling S7 cannot match. Every clean line is
+    /// verbatim from a real capture: the driver's and the engine's VM-service
+    /// lines, which every `flutter drive` transcript carries; the
+    /// plugin-deprecation notice the iOS engine prints under an emitter Haven
+    /// owns (`fixtures/buildonly.ios.drive.log:25`); cargo's own crate-build
+    /// source; and a dial failure that names no host at all
+    /// (`fixtures/clean.drive.log:7`).
+    #[test]
+    fn s13_reads_a_failed_dials_rescheme_and_not_a_deliberate_url() {
+        for dirty in [
+            "haven: HttpException: Connection closed before full header was received, uri = https://relay.example-nostr.net",
+            "haven: WebSocket.connect failed for http://relay.example-nostr.net:7777",
+            "haven: WebSocketException: Connection to 'https://relay.example-nostr.net' was not upgraded to websocket, HTTP status code: 404",
+            "haven: Socket closed before request was sent, uri = https://relay.example-nostr.net",
+            "haven: handshake failed against https://relay.example-nostr.net",
+            // The wrap artifact: no marker anywhere, because the wrap left the
+            // URL alone on the line.
+            "https://relay.example-nostr.net",
+            "  http://relay.example-nostr.net:7777  ",
+        ] {
+            assert!(hits(dirty).contains(&"S13"), "must fire on {dirty:?}");
+        }
+        for clean in [
+            "VMServiceFlutterDriver: Connecting to Flutter application at http://127.0.0.1:33145/F8Ight0smlM=/",
+            "The Dart VM service is listening on http://127.0.0.1:33287/gDMQDQMzl-k=/",
+            "To ensure your app continues to launch on upcoming iOS versions, UIScene lifecycle support will soon be required. Please see https://flutter.dev/to/uiscene-migration for the migration guide.",
+            "   Compiling cgka-session v0.9.4 (https://github.com/marmot-protocol/mdk?rev=e391adc133a9b60e420da7a0446f014a180ac8d2#e391adc1)",
+            "[Relay] dial attempt 2 of 3 failed: SocketException",
+        ] {
+            assert!(!hits(clean).contains(&"S13"), "must not fire on {clean:?}");
+        }
+    }
+
+    /// An exempted endpoint is exempt in the re-schemed spelling too — and only
+    /// in the host, so S7 keeps its own, stricter exemption.
+    ///
+    /// The first line is verbatim from the drive transcript and the logcat of CI
+    /// run 35664400984 (`flutter-drive.log:40`, `logcat.b6.log:11178`), where
+    /// the harness's first dial to the HERMETIC relay failed: the `ws://` URL
+    /// the lane declared and the `http://` one the failure printed are the same
+    /// endpoint, and a run that must delete its own evidence over its own relay
+    /// is a guard that gets switched off.
+    #[test]
+    fn an_exempt_endpoint_is_exempt_in_the_rescheme_spelling_the_failure_prints() {
+        let exempt = [
+            crate::manifest::endpoint_spellings("ws://10.0.2.2:7777"),
+            crate::manifest::endpoint_spellings("127.0.0.1"),
+        ]
+        .concat();
+        let engine = RuleSet::new(4.2, 1_800_000_000, &exempt, Vec::new()).expect("rules");
+        let hits = |line: &str| -> Vec<&'static str> {
+            engine
+                .evaluate(line, "/tmp/fixture.log", Some("flutter"))
+                .into_iter()
+                .map(|h| h.rule)
+                .collect()
+        };
+        for clean in [
+            "Connection closed before full header was received, uri = http://10.0.2.2:7777",
+            "HttpException: handshake failed, uri = https://10.0.2.2:7777",
+            // The wrap artifact of the same failure, and the bare-host claim
+            // covering the VM service on whatever port it drew.
+            "http://10.0.2.2:7777",
+            "Connection closed before full header was received, uri = http://127.0.0.1:41597/F8Ight0smlM=/",
+        ] {
+            assert!(hits(clean).is_empty(), "must stay clean: {clean:?}");
+        }
+        // One hop away is still a host: the port, the path and the sentence
+        // period are not what the exemption is about.
+        for dirty in [
+            "Connection closed before full header was received, uri = http://10.0.2.3:7777",
+            "Connection closed, uri = https://relay.example-nostr.net:7777",
+            "http://relay.example-nostr.net",
+        ] {
+            assert!(hits(dirty).contains(&"S13"), "must fire on {dirty:?}");
         }
     }
 

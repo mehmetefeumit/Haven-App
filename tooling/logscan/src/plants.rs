@@ -299,7 +299,8 @@ mod tests {
     ///
     /// * no `1` at all, so S3's bech32 separator and S11's `1<9 digits>` epoch
     ///   cannot occur;
-    /// * no `.`, `:`, `=`, `/` or `[`, so S5, S7, S9, S10 and S12 cannot occur;
+    /// * no `.`, `:`, `=`, `/` or `[`, so S5, S7, S9, S10, S12 and S13 — which
+    ///   needs a `://` — cannot occur;
     /// * every alphanumeric run is at most 10 characters, so S1 (64 hex), S2 (32
     ///   hex), S4 (32 base64) and S8 (a 24-character blob) cannot occur;
     /// * a `gh`/`geo` inside the random part is either preceded by an

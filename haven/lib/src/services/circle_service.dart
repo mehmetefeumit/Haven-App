@@ -384,6 +384,7 @@ class DecryptedLocation {
     required this.geohash,
     required this.timestamp,
     required this.expiresAt,
+    this.receivedAt,
   });
 
   /// Sender's Nostr public key (hex-encoded).
@@ -403,6 +404,17 @@ class DecryptedLocation {
 
   /// When this location expires.
   final DateTime expiresAt;
+
+  /// When THIS device wrote the row this location was read back from — the
+  /// `last_known_locations.updated_at` the store ranks it by.
+  ///
+  /// Set only by [CircleService.snapshotLastKnownForCircle]; `null` for a
+  /// freshly decrypted message, whose receipt instant is the decrypt itself.
+  /// Carried across so a rehydrated row keeps the rank the store gave it: a
+  /// cache that re-stamped it with "now" would rank a future-dated row ABOVE
+  /// the store's own rank, and the two layers would then accept different
+  /// fixes.
+  final DateTime? receivedAt;
 
   /// Whether this location has expired.
   bool get isExpired => DateTime.now().isAfter(expiresAt);

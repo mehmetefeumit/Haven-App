@@ -2201,7 +2201,7 @@ mod tests {
         );
     }
 
-    /// Owning the Flutter engine's image is what keeps S1-S12 over Dart's own
+    /// Owning the Flutter engine's image is what keeps S1-S13 over Dart's own
     /// output, and it costs nothing on the lines the lanes really produce.
     ///
     /// `debugPrint` CAN reach the unified log as `Runner: (Flutter) flutter:

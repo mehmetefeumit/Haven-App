@@ -2115,8 +2115,29 @@ impl CircleStorage {
     /// Upserts a last-known location row.
     ///
     /// If a row already exists for `(nostr_group_id, sender_pubkey)`, it is
-    /// updated **only** when the incoming `timestamp` is strictly newer than
-    /// the stored one. Stale / out-of-order events are silently ignored.
+    /// updated **only** when the incoming fix outranks the stored one. A fix
+    /// ranks by `min(timestamp, ceiling)` — the sender's own reading bounded
+    /// above by the instant this device received it — and ties break on the
+    /// raw `timestamp`. Stale / out-of-order events are silently ignored.
+    ///
+    /// The bound is what stops a peer whose clock runs fast from pinning its
+    /// own row: an hour-ahead `timestamp` ranks at its ARRIVAL, so a fix
+    /// captured after that arrival outranks it instead of comparing older for
+    /// an hour. Ranking by arrival ALONE would be wrong the other way — a
+    /// replayed backlog fix arrives late but is genuinely old, and would
+    /// overwrite a fresher row — so the sender's reading still decides
+    /// whenever it is in the past. What is STORED is never clamped: a
+    /// legitimately skewed peer's own reading is kept verbatim, and the
+    /// display layer buckets it.
+    ///
+    /// The ceiling is `max(excluded.updated_at, <stored>.updated_at)`, i.e.
+    /// monotonic per row, because the RECEIVER's clock can step backwards too
+    /// (NTP correction, user change). A bare `excluded.updated_at` would then
+    /// bound every arriving fix below the stored rank and discard the peer's
+    /// whole stream until the clock recovered — and the engine hands
+    /// `MessageReceived` back at most once, so those fixes are gone, not
+    /// deferred. Under the monotonic ceiling a backward step ties on rank and
+    /// the sender's reading breaks the tie.
     ///
     /// Callers are expected to have already derived
     /// `purge_after = timestamp + LOCATION_RETENTION_SECS` (1 day) — the
@@ -2149,7 +2170,13 @@ impl CircleStorage {
                 expires_at      = excluded.expires_at,
                 purge_after     = excluded.purge_after,
                 updated_at      = excluded.updated_at
-            WHERE excluded.timestamp > last_known_locations.timestamp
+            WHERE (min(excluded.timestamp,
+                       max(excluded.updated_at,
+                           last_known_locations.updated_at)),
+                   excluded.timestamp)
+                > (min(last_known_locations.timestamp,
+                       last_known_locations.updated_at),
+                   last_known_locations.timestamp)
             ",
             params![
                 &location.nostr_group_id[..],
@@ -4251,6 +4278,81 @@ mod tests {
         assert_eq!(snapshot.len(), 1);
         assert_eq!(snapshot[0].timestamp, 2_000_000);
         assert!((snapshot[0].latitude - 41.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn last_known_upsert_takes_an_honest_fix_after_a_future_dated_one() {
+        // A peer whose clock runs an hour fast must not pin its own row: its
+        // future-dated fix ranks at the instant it ARRIVED, so the peer's very
+        // next honest fix outranks it — not one an hour from now.
+        let storage = CircleStorage::in_memory().unwrap();
+
+        let mut ahead = create_test_last_known(1, "alice", 1_003_600);
+        ahead.updated_at = 1_000_000; // received an hour before it claims
+        ahead.latitude = 1.0;
+        storage.upsert_last_known_location(&ahead).unwrap();
+
+        let stored = storage.snapshot_last_known_for_circle(&[1; 32], 0).unwrap();
+        assert_eq!(
+            stored[0].timestamp, 1_003_600,
+            "the sender's own reading is stored verbatim, never clamped"
+        );
+
+        let mut honest = create_test_last_known(1, "alice", 1_000_010);
+        honest.latitude = 2.0;
+        storage.upsert_last_known_location(&honest).unwrap();
+
+        let snapshot = storage.snapshot_last_known_for_circle(&[1; 32], 0).unwrap();
+        assert_eq!(snapshot.len(), 1);
+        assert!(
+            (snapshot[0].latitude - 2.0).abs() < f64::EPSILON,
+            "a later-received honest fix must outrank a future-dated one"
+        );
+    }
+
+    #[test]
+    fn last_known_upsert_ignores_a_replayed_old_fix_received_later() {
+        // The convergence replay hands back genuinely old peer fixes long after
+        // they were captured. Ranking on arrival alone would let one overwrite
+        // a fresher row, which is why the sender's reading still decides
+        // whenever it is in the past.
+        let storage = CircleStorage::in_memory().unwrap();
+        let live = create_test_last_known(1, "alice", 2_000_000);
+        storage.upsert_last_known_location(&live).unwrap();
+
+        let mut replayed = create_test_last_known(1, "alice", 1_000_000);
+        replayed.updated_at = 3_000_000; // arrived long after the live fix
+        replayed.latitude = 9.0;
+        storage.upsert_last_known_location(&replayed).unwrap();
+
+        let snapshot = storage.snapshot_last_known_for_circle(&[1; 32], 0).unwrap();
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].timestamp, 2_000_000);
+        assert!((snapshot[0].latitude - 40.7128).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn last_known_upsert_survives_a_receiver_clock_stepping_backwards() {
+        // The RECEIVER's clock can step back (NTP correction, user change). A
+        // ceiling taken from the arriving row alone would then bound every
+        // fresh fix below the stored rank and discard the peer's whole stream
+        // until the clock recovered — and the engine delivers each message at
+        // most once, so those fixes are lost, not deferred.
+        let storage = CircleStorage::in_memory().unwrap();
+        let stored = create_test_last_known(1, "alice", 1_000_000);
+        storage.upsert_last_known_location(&stored).unwrap();
+
+        let mut after_step = create_test_last_known(1, "alice", 1_000_010);
+        after_step.updated_at = 999_400; // local clock moved back 600 s
+        after_step.latitude = 8.0;
+        storage.upsert_last_known_location(&after_step).unwrap();
+
+        let snapshot = storage.snapshot_last_known_for_circle(&[1; 32], 0).unwrap();
+        assert_eq!(snapshot.len(), 1);
+        assert!(
+            (snapshot[0].latitude - 8.0).abs() < f64::EPSILON,
+            "a fresh peer fix must survive the receiver's own clock going back"
+        );
     }
 
     #[test]

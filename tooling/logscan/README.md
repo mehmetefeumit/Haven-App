@@ -718,11 +718,72 @@ and `KeyCipherImplementationRSA18` are identifiers rather than key material ·
 delimited by non-word characters on both sides and carrying a digit — the
 delimiters and the digit are what keep the rule off `haven_core::relay::manager`
 and `Option::Some`, which the first CI run of this scanner read as addresses
-hundreds of times per transcript.
+hundreds of times per transcript · `S13` an `https?://` URL on a line that says
+a **dial failed**, or alone on a line — see below, because that is S7's blind
+spot rather than a second URL rule.
 
-Five things narrow what the scanner catches — two rule qualifiers, one
+### S13: the relay host in the spelling S7 cannot see
+
+`dart:io`'s `WebSocket.connect` re-schemes before it dials: `wss://host` becomes
+`https://host` and `ws://host` becomes `http://host`, and only then does the
+upgrade request go out (`lib/_http/websocket_impl.dart:1082-1091` of the
+Flutter-bundled SDK). Every failure after that point therefore names the relay in
+the HTTP spelling — `HttpException`'s `toString` appends `, uri = $uri`
+(`lib/_http/http.dart:2108-2116`) — and S7, which matches `wss?://` only, passes
+it. That is a relay HOST in an uploaded artifact, which the log-anonymity pillar
+forbids outright, and it is not hypothetical: a planted
+`https://relay.example-nostr.net` on an owned `flutter` line of a real logcat
+produced **zero** structural hits before this rule existed.
+
+Haven's own relay sockets are Rust-side, so today the only Dart WebSocket in the
+tree is the E2E harness's `TestRelay` client — and the flake-stress lane drives
+it against a real endpoint spelling. The measured occurrence is CI run
+35664400984, whose harness lost its first dial to the hermetic relay and printed
+`Connection closed before full header was received, uri = http://10.0.2.2:7777`
+into both the logcat and the drive transcript.
+
+Two things make it a rule rather than a widening of S7:
+
+* **a failure marker on the line.** The engine, the driver and the toolchain
+  print deliberate `https://` URLs on every green run — the VM service's
+  loopback (`VMServiceFlutterDriver: Connecting to Flutter application at
+  http://127.0.0.1:<port>/<token>/`, in every `flutter drive` transcript), the
+  iOS plugin-deprecation notice under an emitter Haven owns, cargo's crate
+  sources — so an unqualified `https?://` rule would redden every lane. The
+  markers are derived from the SDK text that renders the URL, not guessed:
+  `uri =` (the tail above, which covers even the `SocketException`/
+  `TlsException` messages `http_impl.dart:2227,:2254` forward verbatim), the
+  class names `HttpException`/`WebSocketException`, and the four messages that
+  reach a line carrying neither — `Connection closed`
+  (`http_parser.dart:942,:953,:970,:983`, `http_impl.dart:2261,:2412`),
+  `Socket closed` (`:2282`), `not upgraded to websocket`
+  (`websocket_impl.dart:1149`) and a TLS `handshake` failure — plus
+  `WebSocket.connect` itself. The bare word `upgrade` is deliberately excluded:
+  it is ordinary vendor prose (`gmscore_upgrade` sits beside a URL in two of
+  this tree's captures) while the SDK's own message carries the whole phrase.
+* **or the URL alone on the line**, because Flutter's test framework wraps an
+  exception message at 65 and at 100 columns and a URL is one unbreakable
+  token: run 35664400984 carries the SAME failure in both renderings, and the
+  narrow one puts `http://10.0.2.2:7777` on a line by itself, away from its
+  marker. A long enough host wraps in both. A URL alone on a Haven-owned line
+  is a host and nothing else, and across every real transcript this tree has
+  captured (389 logs from eight CI runs: Android logcats and drive transcripts,
+  device-wide iOS exports, relay and diag files, both `flutter test`
+  renderings) the only such line is that wrap artifact.
+
+Its exemption is the **host**, not the whole spelling like S7's: the expansion
+in `manifest.rs`'s `endpoint_spellings` already publishes `host:port` and `host`
+beside a declared URL, so `--exempt-endpoint ws://10.0.2.2:7777` forgives the
+`http://10.0.2.2:7777` a failed dial to the same hermetic relay prints, and the
+bare `--exempt-endpoint 127.0.0.1` every lane claims forgives the VM service on
+whatever port it drew. Forgiving the path costs nothing here, because every
+other rule still reads it — a value printed after the host is reported by
+whichever rule its shape belongs to — while S7 keeps its stricter exemption, so
+`ws://10.0.2.2:7777/<anything>` is still a hit.
+
+Six things narrow what the scanner catches — three rule qualifiers, one
 sink-class rule exemption, one per-emitter NEEDLE scope and one property of the
-escape stripper — so all five are written down as **declared residuals**, the
+escape stripper — so all six are written down as **declared residuals**, the
 same discipline the ledger's `not_gaps` follow: a boundary stated in one
 sentence beats a boundary discovered by an adversarial reader later.
 
@@ -730,16 +791,20 @@ sentence beats a boundary discovered by an adversarial reader later.
 |---|---|---|
 | **S4** | a base64 run of 32 or more characters with no `=` padding whose digits are absent or all in ONE contiguous run (roughly one random 44-character blob in a hundred and sixty) | S1/S2 for the hex spellings, S8 when a key word is within 24 characters, the needle search for every value the run declared, and `scan-logs-for-secrets.sh`'s keyword-anchored patterns |
 | **S6** | a geohash cell immediately followed by `_`, `(` or `::` | the needle search for a declared coordinate's `geohash` renderings; an undeclared cell in that position is a code path in every capture this tree has produced |
+| **S13** | an `https?://` URL sitting mid-line with neither a dial-failure marker nor solitude — a Haven line that printed a host inside prose of its own composition | the needle search for a declared `relay_url` (whose `scheme-alt`, `host-only` and `with-port` labels are searched), S7 for the `wss?://` spellings, S12 when the host is an address, and the source guards, which are what keep Haven's own code from composing such a line at all |
 | **cargo's crate-build line** (`rust-test` and `soak` only) | **S2 and S6 only**, and only on a `Compiling\|Checking\|Downloaded <name> v<semver> [(<source>)]` line: a 32–63-hex run or a geohash-shaped token in the crate-name or source-URL slot. Every other rule still fires on that line, and cargo's other status lines are not exempt at all | the needle search, which reads those lines byte for byte like any other; S1 for a 64-hex run; and the shape itself, which has to be produced deliberately |
 | **`locationd` / `com.apple.locationd.Position`** (`ios` only) | the `coordinate` NEEDLE, on records whose process AND emitter are exactly those: a lane injects the fix into that daemon, so it holds the value by construction | every other program (Haven's own included, and that same subsystem inside Haven's process), every other class on the same records, every structural rule, and the other sinks — the same coordinate in a logcat, a drive transcript or a relay log is reported as before |
 | **escaped value** | a value the app printed immediately after a LITERAL `ESC [` it emitted itself: the CSI consumer eats the parameter bytes (digits, `;`, `:`, `<=>?`) up to the first `@`–`~`, so the head of such a value is removed before matching | `tooling/e2e/ci/scan-logs-for-secrets.sh`, which runs FIRST and over raw bytes; and the fact that nothing in this tree emits a bare `ESC [` — the app's own log backends do not colour |
 
-The first three were each paid for by a real transcript and are in
-`furniture.rust-test.log` / `furniture.flutter-test.log` now; the fourth was
+S4, S6 and the cargo line were each paid for by a real transcript and are in
+`furniture.rust-test.log` / `furniture.flutter-test.log` now; S13's is the price
+of not reddening the deliberate URLs above, and its controls are the VM-service
+and plugin-notice lines in `s13_reads_a_failed_dials_rescheme_and_not_a_deliberate_url`
+and the clean scan of `buildonly.ios.drive.log`; the `locationd` scope was
 paid for by CI run 35311161479 and its control is the owned/un-owned pair at the
-foot of `format.ios.log`, which case P pins in both directions; the fifth is a
-property of the stripper rather than a line anyone has captured, and its control
-is the unit test that plants an escape inside a hex run. S4's entropy floor
+foot of `format.ios.log`, which case P pins in both directions; the escaped
+value is a property of the stripper rather than a line anyone has captured, and
+its control is the unit test that plants an escape inside a hex run. S4's entropy floor
 cannot separate `kBackgroundSessionReclaimAtMsKey` (4.33 bits) from a 32-byte
 base64 blob (4.5–5.0), and base64 punctuation cannot either, because
 `App/haven/test/providers/identity` is a path made of `/`; what a base64 payload
@@ -833,9 +898,11 @@ declared value across the split. The seven patterns of
 `tooling/e2e/ci/scan-logs-for-secrets.sh` are **not** duplicated here; that
 script stays the toolchain-free key-material floor and the wrapper runs both.
 
-Only S7 and S12 have a RULE exemption, and only for the endpoints the run
+Only S7, S12 and S13 have a RULE exemption, and only for the endpoints the run
 declares with `seal --exempt-endpoint` (the lane's own loopback relay and proxy,
-in host, `host:port` and URL spellings — never a path under them). The cargo
+in host, `host:port` and URL spellings — never a path under them for S7 and S12;
+S13 forgives the path, because what it reports is the host and every other rule
+still reads what follows it). The cargo
 crate-build line above is the only SINK-CLASS one: one shape, two rules, one sink
 class, and a declared residual. Everything else needs an `allowlist.json` entry.
 

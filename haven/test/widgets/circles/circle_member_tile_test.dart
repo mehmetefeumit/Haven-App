@@ -1904,6 +1904,30 @@ void main() {
       expect(find.text(l10n.circleMemberLastSeenMinutes(90)), findsOneWidget);
     });
 
+    testWidgets('is absent for a clock-ahead peer, not a negative age', (
+      tester,
+    ) async {
+      // A peer whose clock runs fast stamps its fix in the future, so its age
+      // is NEGATIVE. It reads as fresh — the same bucket the marker puts it in
+      // — rather than as "-59 minutes ago".
+      final l10n = await AppLocalizations.delegate.load(const Locale('en'));
+      await pumpTile(
+        tester,
+        member: buildMember(pubkey: otherPubkey),
+        identity: buildIdentity(),
+        lastSeen: _tileNow.add(const Duration(minutes: 59)),
+        now: () => _tileNow,
+      );
+
+      expect(find.text(l10n.circleMemberLastSeenMinutes(-59)), findsNothing);
+      expect(find.textContaining('-59'), findsNothing);
+      expect(
+        find.textContaining(RegExp('ago')),
+        findsNothing,
+        reason: 'no age line at all is the freshest bucket here',
+      );
+    });
+
     testWidgets('is absent when the member has no location at all', (
       tester,
     ) async {
