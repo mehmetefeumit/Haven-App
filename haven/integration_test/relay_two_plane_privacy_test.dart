@@ -49,8 +49,8 @@ void main() {
     // Process-global default seed = [R1] only.
     await TestUser.bootstrapProcess(relays: [defaultStrfryUrl]);
 
-    r1 = await TestRelay.connect(url: defaultStrfryUrl);
-    r2 = await TestRelay.connect(url: secondStrfryUrl);
+    r1 = await connectProbeRelay(defaultStrfryUrl);
+    r2 = await connectProbeRelay(secondStrfryUrl);
     alice = await TestUser.alice();
   });
 

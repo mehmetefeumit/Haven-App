@@ -95,18 +95,31 @@ const Duration _budgetBelowDetection = Duration(milliseconds: 50);
 /// including a wrong one.
 final Duration _verdictWindow = _fastPing * 2 + const Duration(seconds: 1);
 
+/// The dial budget `connectProbeRelay` ships with.
+///
+/// Written out here as an INDEPENDENT expected value rather than read back off
+/// the helper, for the reason [_verdictWindow] gives: a bound taken from the
+/// expression under test agrees with any value that expression ever produces.
+const int _probeDialBudget = 3;
+
 void main() {
   late _FakeRecorder recorder;
   late _Splice splice;
   late TestRelay relay;
+  // [connect] is not every test's opening move: the arithmetic group opens no
+  // socket, and the cold-dial group's bound test proves a dial that never
+  // yields one. Without this the teardown's outcome would depend on an
+  // earlier test having left [relay] assigned.
+  var relayIsOpen = false;
 
   setUp(() async {
     recorder = await _FakeRecorder.start();
     splice = await _Splice.start(recorder.port);
+    relayIsOpen = false;
   });
 
   tearDown(() async {
-    await relay.dispose();
+    if (relayIsOpen) await relay.dispose();
     await splice.stop();
     await recorder.stop();
   });
@@ -116,6 +129,7 @@ void main() {
       url: 'ws://127.0.0.1:${splice.port}',
       pingInterval: _fastPing,
     );
+    relayIsOpen = true;
   }
 
   group('the liveness check is armed', () {
@@ -504,6 +518,114 @@ void main() {
       );
     });
   });
+
+  group('the FIRST dial, which no reconnect budget covers', () {
+    // `TestRelay`'s reconnect ladder only exists once a socket has existed, so
+    // the opening dial of a lane — made while the hermetic relay, its port
+    // forwarder and the emulator's NAT are all seconds old — is the one dial
+    // with nothing behind it. On CI run 35664400984 it lost the
+    // provider-toggle lane eight seconds in, and the scenario's oracle then
+    // printed eight PRODUCT findings for a failure in which no app assertion
+    // had run.
+
+    test('a handshake destroyed before its headers is retried, not raised',
+        () async {
+      // Precondition: the fixture reproduces THAT failure, not merely some
+      // failure. `dart:io` never gets a response to decide about, so it has
+      // no `WebSocketException` to raise and the loss surfaces as a bare
+      // `HttpException` ("Connection closed before full header was
+      // received") — which `TestRelay.connect` passes straight out, because
+      // b9's reachability oracle needs it to.
+      final refusing = await _ColdRelay.start(
+        upstreamPort: recorder.port,
+        coldDials: 1,
+      );
+      addTearDown(refusing.stop);
+      await expectLater(
+        TestRelay.connect(url: refusing.url, pingInterval: _fastPing),
+        throwsA(isA<HttpException>()),
+      );
+
+      final cold = await _ColdRelay.start(
+        upstreamPort: recorder.port,
+        coldDials: 1,
+      );
+      addTearDown(cold.stop);
+
+      final probe = await connectProbeRelay(cold.url);
+      addTearDown(probe.dispose);
+
+      expect(
+        cold.connectionCount,
+        2,
+        reason: 'one destroyed handshake and one that completed: a helper '
+            'that gave up on the first could not have returned, and one that '
+            're-dialled a relay that had already answered would show it here',
+      );
+
+      final (accepted, _) = await probe.publishAndAwaitOk(_event('c1'));
+      expect(accepted, isTrue);
+      expect(
+        recorder.publishedEventIds,
+        contains('c1'),
+        reason: 'the promise is a WORKING probe, not an object: a scenario '
+            'that got back a half-built relay would fail later, in the '
+            "app's own assertions, exactly as the lost lane did",
+      );
+    });
+
+    test('a relay that refuses the whole budget fails as HARNESS, naming '
+        'nothing', () async {
+      // Cold for exactly the budget, so the relay WOULD serve dial four. The
+      // count below is therefore a property of the helper's bound and not of
+      // the fixture running out of refusals.
+      final cold = await _ColdRelay.start(
+        upstreamPort: recorder.port,
+        coldDials: _probeDialBudget,
+      );
+      addTearDown(cold.stop);
+
+      Object? thrown;
+      try {
+        await connectProbeRelay(cold.url);
+      } on Object catch (error) {
+        thrown = error;
+      }
+
+      expect(
+        thrown,
+        isA<StateError>(),
+        reason: 'a relay that refuses every dial must not yield a TestRelay',
+      );
+      final message = (thrown! as StateError).message;
+
+      expect(
+        message,
+        contains('HARNESS'),
+        reason: 'the one sentence a CI reader needs: the app was never '
+            'reached, so nothing below this line is a finding about Haven',
+      );
+      expect(
+        message,
+        isNot(
+          anyOf(
+            contains(cold.url),
+            contains('127.0.0.1'),
+            contains('${cold.port}'),
+          ),
+        ),
+        reason: 'Rule 15 holds for a harness error string too — it reaches an '
+            'uploaded lane log. The exception TYPE is what separates "closed '
+            'mid-handshake" from "refused"',
+      );
+      expect(
+        cold.connectionCount,
+        _probeDialBudget,
+        reason: 'a retry loop with no bound turns a dead relay into a lane '
+            'that hangs until its step deadline, which reports nothing at all',
+      );
+    });
+  });
 }
 
 /// A minimal signed-shaped Nostr event; only `id` is read by `TestRelay`.
@@ -656,4 +778,76 @@ class _Splice {
 /// One spliced connection's state.
 class _SplicedPair {
   bool orphaned = false;
+}
+
+/// A relay that is still coming up.
+///
+/// Its first `coldDials` connections are accepted and destroyed once the
+/// upgrade request is in but before a byte of a response — the shape a relay
+/// container, a port forwarder or a just-re-plumbed NAT leaves in the seconds
+/// after it starts, and the one `dart:io` reports as a bare `HttpException`
+/// rather than a `WebSocketException`, because there is no response for it to
+/// decide anything about. Every connection after those is spliced to the
+/// recorder behind it and upgrades normally.
+///
+/// Destroying on the REQUEST rather than on accept is what makes this the
+/// measured failure: a connection closed before the request is written fails
+/// while sending, which is a different error from a different place.
+class _ColdRelay {
+  _ColdRelay._(this._server, this._upstreamPort, this._coldDials) {
+    unawaited(_serve());
+  }
+
+  static Future<_ColdRelay> start({
+    required int upstreamPort,
+    required int coldDials,
+  }) async =>
+      _ColdRelay._(
+        await ServerSocket.bind(InternetAddress.loopbackIPv4, 0),
+        upstreamPort,
+        coldDials,
+      );
+
+  final ServerSocket _server;
+  final int _upstreamPort;
+  final int _coldDials;
+
+  /// Connections accepted so far, destroyed ones included.
+  int connectionCount = 0;
+
+  int get port => _server.port;
+
+  String get url => 'ws://127.0.0.1:$port';
+
+  Future<void> _serve() async {
+    await for (final downstream in _server) {
+      connectionCount += 1;
+      if (connectionCount <= _coldDials) {
+        downstream.listen(
+          (_) => downstream.destroy(),
+          onError: (Object _) {},
+          cancelOnError: false,
+        );
+        continue;
+      }
+      final upstream = await Socket.connect(
+        InternetAddress.loopbackIPv4,
+        _upstreamPort,
+      );
+      downstream.listen(
+        upstream.add,
+        onError: (Object _) {},
+        onDone: () => unawaited(upstream.close().catchError((Object _) {})),
+        cancelOnError: false,
+      );
+      upstream.listen(
+        downstream.add,
+        onError: (Object _) {},
+        onDone: () => unawaited(downstream.close().catchError((Object _) {})),
+        cancelOnError: false,
+      );
+    }
+  }
+
+  Future<void> stop() => _server.close();
 }

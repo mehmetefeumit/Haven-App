@@ -81,8 +81,8 @@ void main() {
     // Open probe connections.  These are read-only observers; they never
     // publish events themselves (except for [SyntheticUser.bootstrap] which
     // uses [TestRelay.publishAndAwaitOk] to seed KeyPackages).
-    r1 = await TestRelay.connect(url: defaultStrfryUrl);
-    r2 = await TestRelay.connect(url: secondStrfryUrl);
+    r1 = await connectProbeRelay(defaultStrfryUrl);
+    r2 = await connectProbeRelay(secondStrfryUrl);
 
     // Bootstrap Alice's identity (no CircleManagerFfi yet — each test
     // creates its own).

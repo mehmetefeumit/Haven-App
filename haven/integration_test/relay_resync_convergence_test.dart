@@ -97,8 +97,8 @@ void main() {
     // only. Must be called before any FFI operation.
     await TestUser.bootstrapProcess(relays: [defaultStrfryUrl]);
 
-    r1 = await TestRelay.connect(url: defaultStrfryUrl);
-    r2 = await TestRelay.connect(url: secondStrfryUrl);
+    r1 = await connectProbeRelay(defaultStrfryUrl);
+    r2 = await connectProbeRelay(secondStrfryUrl);
 
     // Alice's identity — no CircleManagerFfi here; each test creates its own.
     alice = await TestUser.alice();

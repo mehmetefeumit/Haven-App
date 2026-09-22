@@ -204,7 +204,7 @@ void main() {
         secretBytes = await alice.getSecretBytes();
 
         // Connect the R2 observer BEFORE wiring the container.
-        final r2 = await TestRelay.connect(url: secondStrfryUrl);
+        final r2 = await connectProbeRelay(secondStrfryUrl);
         try {
           // Register the observer BEFORE any state mutation.
           final r2EventFuture = r2.firstWhere(

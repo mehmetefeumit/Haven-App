@@ -190,16 +190,20 @@ install_app() {
   barrier="${BASH_REMATCH[2]}"
   ctl_cmd="${BASH_REMATCH[3]}"
   ctl_am="${BASH_REMATCH[4]}"
-  # Reported, not refused — yet. That an unknown command answers non-zero is read
-  # from source and has been seen on no lane; a refusal resting on it would red
-  # every Android lane at once if this image differs, which is how an unmeasured
-  # probe cost a whole run in CI run 35536892150. The success line below records
-  # the pair on every install, so the first run is the measurement; once a lane
-  # has shown non-zero codes this warning becomes the refusal it describes.
+  # MEASURED before it became a refusal: every Android lane of CI run
+  # 35664400984 (twelve, api-34 google_apis x86_64) printed
+  # `unknown-command control rc 255/255` — the -1 AOSP's
+  # BasicShellCommandHandler.handleDefaultCommands returns, as cmd.cpp exits it.
+  # A guest that answers 0 here makes the barrier's own 0 worthless, so the
+  # install is refused rather than driven into the race this file exists to
+  # remove. The codes are printed so a new image that differs is diagnosable
+  # from the log, not from a guess.
   if (( ctl_cmd == 0 || ctl_am == 0 )); then
-    echo "::warning::${device} answered 0 to a command it cannot have (cmd" \
-         "${ctl_cmd}, am ${ctl_am}), so the install barrier's own 0 is not" \
-         "evidence that the barrier exists on this guest." >&2
+    echo "ERROR: ${device} answered 0 to a command it cannot have (cmd" \
+         "${ctl_cmd}, am ${ctl_am}), so the install barrier's own 0 proves" \
+         "nothing about a command this guest may equally not have. Refusing" \
+         "to drive an install whose broadcasts may not have flushed." >&2
+    return 1
   fi
   if (( drain != 0 || barrier != 0 )); then
     echo "ERROR: the install barrier failed on ${device}: the package-manager" \
@@ -858,12 +862,11 @@ _ai_suite_app() {
 
   # (8e) A guest that answers 0 to a command it cannot have makes the barrier's
   #      own 0 worthless: rc 0 from a command that ran and rc 0 from one that
-  #      does not exist are the same line. Until a lane has shown what a real
-  #      guest answers, that is ANNOTATED and the install proceeds (see
-  #      install_app); what must never happen is that it passes in silence.
+  #      does not exist are the same line. Nothing else here would notice, and
+  #      the lane would drive into the race this file exists to remove.
   _ai_run install_app absent ok lying-shell
-  _ai_expect_ok 8e
-  _ai_expect_named 8f '^::warning::.*answered 0 to a command it cannot have \(cmd 0, am 0\)'
+  _ai_expect_refused 8e
+  _ai_expect_named 8f 'answered 0 to a command it cannot have \(cmd 0, am 0\)'
 
   # (8g) An adb that exits 0 having said nothing about the barrier's commands
   #      proves nothing was flushed — whether the guest ran them or adb dropped

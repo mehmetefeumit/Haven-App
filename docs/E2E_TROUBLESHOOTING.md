@@ -648,19 +648,20 @@ that could not have mattered. What the barrier cannot reach are the in-process
 hops after hand-over (FgThread, the overlay manager's thread, FgThread again) —
 a margin of everything before the drive's launch, not a barrier.
 
-**The two controls are ADVISORY, for now.** An rc of 0 from a command that does
-not exist reads exactly like an rc of 0 from one that ran, so a guest that
-answered 0 to everything is the single shape that would make the whole barrier
-a no-op nobody could see. The basis for expecting non-zero is SOURCE, not a
-run we have: both `cmd package` and `am` fall through to
+**The two controls refuse a guest that answers 0 — and were measured before
+they did.** An rc of 0 from a command that does not exist reads exactly like an
+rc of 0 from one that ran, so a guest that answered 0 to everything is the
+single shape that would make the whole barrier a no-op nobody could see. The
+expected answer comes from source — both `cmd package` and `am` fall through to
 `BasicShellCommandHandler.handleDefaultCommands`, which prints `Unknown
-command: <cmd>` and returns -1, which `cmd.cpp` hands back as exit status 255.
-Until a lane has shown that, a control answering 0 emits `::warning::` and the
-install proceeds — a refusal resting on an unmeasured probe is exactly what
-cost run 35536892150 thirteen Android lanes. The success line records all four
-codes on every fresh install (`install broadcasts flushed (handler/barrier rc
-0/0, unknown-command control rc 255/255)`), so the first green run is the
-measurement, after which the warning becomes the refusal it describes.
+command: <cmd>` and returns -1, which `cmd.cpp` hands back as exit status 255 —
+and was confirmed on the runner before it became a refusal: all twelve Android
+lanes of CI run 35664400984 (api-34 `google_apis` x86_64) printed `install
+broadcasts flushed (handler/barrier rc 0/0, unknown-command control rc
+255/255)`. Until then the control only warned, because a refusal resting on an
+unmeasured probe is what cost run 35536892150 thirteen Android lanes. The
+success line still records all four codes on every fresh install, so a future
+image that answers differently is diagnosable from the log.
 
 **Fail-closed outcomes**, each named rather than driven into the race: a failed
 install; a queue that has not drained within `INSTALL_BARRIER_SECS` (120 s, a

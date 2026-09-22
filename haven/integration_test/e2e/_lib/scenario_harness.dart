@@ -86,7 +86,7 @@ abstract final class ScenarioHarness {
       relays: <String>[relayUrl],
       profileRelays: profileRelays,
     );
-    final relay = await TestRelay.connect(url: relayUrl);
+    final relay = await connectProbeRelay(relayUrl);
     final role = ScenarioRole.fromEnvironment();
     // No relay URL here (Log anonymity pillar: no relay URLs, the hermetic
     // pool included) — `role` alone is enough to confirm bootstrap ran.

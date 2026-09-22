@@ -315,6 +315,42 @@ class TestRelayEvent {
   }
 }
 
+/// Dials [url] for a harness probe, retrying a transport failure.
+///
+/// The FIRST dial is the one [TestRelay]'s reconnect budget cannot cover, and
+/// it lands at the youngest moment of a lane — the hermetic relay and its port
+/// forwarder are seconds old and the emulator's NAT has just been re-plumbed.
+/// A handshake closed before its response headers arrive leaves `dart:io` no
+/// `WebSocketException` to raise: `_WebSocketImpl.connect` re-schemes the URL
+/// to a plain HTTP one and wraps no transport error — only the failures it
+/// decides about a response it already has — so the loss comes out as a bare
+/// `HttpException`, with no stack. CI run 35664400984 lost the provider-toggle
+/// lane to one and reported eight PRODUCT findings for it.
+///
+/// Retried HERE and not in [TestRelay.connect], which
+/// `b9_network_reconnect_test`'s `_relayReachable` uses as a fail-fast
+/// reachability oracle. No per-dial timeout: the measured failure is an error,
+/// not a hang, and a timed-out dial that later completed would leak a socket
+/// (and, on a proxy lane, a stray harness-socket declaration); a hang stays
+/// bounded by the lane's step deadline.
+Future<TestRelay> connectProbeRelay(String url, {int attempts = 3}) async {
+  for (var attempt = 1;; attempt++) {
+    try {
+      return await TestRelay.connect(url: url);
+    } on Object catch (error) {
+      if (attempt >= attempts) {
+        // No URL, no host, no error text (Rule 15): the type alone separates
+        // "closed mid-handshake" from "refused".
+        throw StateError(
+          'HARNESS, not product: the probe relay refused all $attempts dials '
+          '(last: ${error.runtimeType}). No app assertion ran.',
+        );
+      }
+      await Future<void>.delayed(Duration(seconds: attempt));
+    }
+  }
+}
+
 /// Observes a hermetic Nostr relay (strfry) for E2E test assertions and
 /// cross-process barriers.
 ///

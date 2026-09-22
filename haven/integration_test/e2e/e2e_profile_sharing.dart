@@ -147,7 +147,8 @@ import '_lib/fake_location_service.dart';
 import '_lib/pump_helpers.dart';
 import '_lib/scenario_harness.dart';
 import '_lib/synthetic_user.dart' show SyntheticUser;
-import '_lib/test_relay.dart' show TestRelay, TestRelayEvent, defaultStrfryUrl;
+import '_lib/test_relay.dart'
+    show TestRelay, TestRelayEvent, connectProbeRelay, defaultStrfryUrl;
 import '_lib/test_user.dart';
 import '_lib/throw_time_error_capture.dart';
 
@@ -553,7 +554,7 @@ void main() {
     // for a fresh Alice; steps 2/4/5 wait for her kind-0 on ALL of them, which
     // is what makes Bob's salted relay choice irrelevant.
     for (final url in _profileRelayUrls) {
-      profilePool.add(await TestRelay.connect(url: url));
+      profilePool.add(await connectProbeRelay(url));
     }
 
     // Pre-seed Alice's identity and skip onboarding — the production identity
