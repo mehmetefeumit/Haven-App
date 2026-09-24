@@ -1829,6 +1829,82 @@ who never saw the round would otherwise take P2a's green suite as evidence it wa
   `summarize-created-at-gaps.sh` already use — and the same shape CI-R8 asks for in
   `check_location_access_gate.sh`, which still prints its count without pinning it.
 
+**FIELD FIX — 2026-09-23: a registration the platform kills is re-armed in `kStreamErrorRearmDelay`, not in a
+watchdog period.** Same clause as the record above: this is what ships, and it specialises the two lane bounds
+named below rather than the Design.
+- **The wedge, MEASURED (CI run 35950857266, lane `E2E FGS Publish (Android)`).** Haven's registration lives in the
+  process that serves the `fused` provider, and Play services reaps that process on its OWN schedule — here to
+  reload a configuration, 17 s into a 62 s interval. The stream reported `LocationServiceDisabledException` 1 s
+  later; the isolate marked the registration suspect and then did nothing for **67 s**, because re-arming was left
+  to the next `kBackgroundRepeatInterval` tick. The proof window closed with two publishes and NOT ONE of them
+  delivery-driven: P2a's cadence had silently degraded to the watchdog and its cache-miss one-shot, which is the
+  `docs/BACKGROUND_SHARING_FAILURE_ANALYSIS.md` wedge class, in a phase built to close it. The run before it
+  (35690725254) took the same reap 1.115 s BEFORE its first registration (`gms.persistent` died 06:04:33.537,
+  `registration armed (73s)` 06:04:34.652), which therefore bound to the new provider
+  instance, and was green — so the lane's colour was a coin toss on the reap's phase, and the product's half of that
+  was real.
+- **What ships.** `onError` and `onDone` schedule ONE recovery cycle `kStreamErrorRearmDelay` (5 s) later, logged
+  `[BackgroundTask] cycle trigger=stream-error`; `onDone` also prints `[BackgroundTask] fix stream closed`, because
+  that path raises no error and a silent recovery is one the lane's triage cannot attribute. **5 s is sized off when
+  the provider can ANSWER again, not off the process restart**, and the difference is the whole of it: in that
+  capture the replacement process started 0.066 s after the death and `ServiceWatcher` chose the new `fused`
+  implementation at +0.318 s, but `[fused] connected` only at **+2.306 s** — 1.3 s AFTER Haven's own error handler
+  ran (`logcat.b1.log:16074,16144,16211,16343,16505`). Re-listening at the error instant therefore binds to a
+  provider still reconnecting; 5 s clears the connect by ~3.7 s and is still an order of magnitude inside the
+  watchdog it replaces. A **cycle**, never a registration: `_ensureRegistration` stays reachable from `_publishCycle`
+  alone, below the consent, ownership and disclosure gates, so `check_android_location_power.sh` check (5) still
+  reads exactly 2 call sites and the recovery collects nothing for a user who has since opted out. It publishes only
+  what is due — a recovery mid-interval costs one cancel + listen and nothing else.
+- **Bounded to ONE recovery per registration that has not proved itself**, restored by the first NEW fix and by
+  nothing else. A provider the user switched OFF errors again the moment it is re-listened to, and B6's contract is
+  that publishing then stops and is surfaced — not that the isolate re-arms every 5 s forever. The watchdog owns the
+  second failure. `_cancelRegistration` (which `onDestroy` runs first) cancels a pending recovery, and the callback
+  re-checks the stop signal, so a timer that outlives the service prints nothing and starts nothing.
+- **A recovery whose error landed BELOW step 7c waits for the cycle rather than standing down.** The first shape of
+  this fix bailed on `_inFlightPublish != null`, on the premise that the running cycle re-arms on its way past —
+  true only above 7c. An error during the fix acquisition or the publish burst would then have dropped the recovery
+  for good: the allowance was already spent, only a NEW fix restores it, and no new fix can arrive on a registration
+  nothing is going to replace. `_runStreamErrorRecovery` now re-arms its own timer in that case and terminates on
+  either "somebody re-armed" (`_fixSub` live and no longer suspect) or the stop signal.
+- **It specialises two B1 bounds, and both are now attributed per sample instead of asserted everywhere.** A
+  recovery re-aims at a due-time that has NOT moved, so it asks the platform for the REMAINDER of an interval
+  already at least `kLocationPublishMinInterval` long — below 62 s by construction, and right to be (asking for 62 s
+  there publishes late; asking for nothing leaves the cadence on the watchdog). So: step (5)'s "no request under
+  62 s after the first publish" now holds for every sample EXCEPT one whose request was ARMED by a `stream-error`
+  cycle, where the binding floor is `kMinFixRequestInterval` (31 s) — which is exactly what
+  `INV-L-ANDROID-BACKGROUND-SINGLE-GNSS-REQUEST` already said in its own words ("interval ≥ `kMinFixRequestInterval`;
+  for the circle just published ≥ 62 s"), and the Acceptance paragraph above is the specialisation, not the rule.
+  Step (7)'s 55 s delivery floor likewise becomes 90 % of the interval THAT registration asked for when a
+  `stream-error` cycle armed it. **Attributed by the ARMING CYCLE and never by proximity or by the interval alone**,
+  and both halves of that matter. By proximity, because a registration OUTLIVES the cycle that armed it — a delivery
+  landing more than `kBackgroundFixHorizon − kBackgroundFixLeadTime` before the aim publishes nothing and re-arms
+  nothing (`registrationIsAligned`), which is the red capture's own shape at a harmless 128 s and would red a
+  CORRECT build at 39 s. By interval, because run 34511084722's 40 s registration — armed by a delivery-driven cycle
+  through the overdue-planning defect, delivering at 45 s — has to stay the failure it is. Self-test fixtures (34e),
+  (70) and (71e) pin the three readings against each other. The interval-0 carve-out gains `stream-error` beside
+  `watchdog` and stays keyed on PROXIMITY, because a one-shot is taken inside the cycle that needs it.
+  **Not carved out, deliberately:** a watchdog re-aim on a suspect registration with nothing due asks for the
+  remainder too, and step (5) still fails it. That is pre-existing, it has never fired in-window, and it is B6's
+  second-failure path — not this carve-out's to widen.
+- **The recovery's own bound is now asserted on the device, not only on the host.** Step (7) requires consecutive
+  `cycle trigger=stream-error` lines in the proof window to be ≥ `kMinFixRequestInterval` apart. Derived, not
+  chosen: a second recovery may only follow a NEW delivery (that is what restores the allowance) and a delivery
+  cannot precede the interval the previous recovery asked for. Without it a 5 s re-arm loop at the platform floor
+  would leave a delivery-driven publish in the window and pass every other clause in the step.
+- **Lane diagnostics.** A step-(7) failure now prints, as CONTEXT and with no effect on the exit code, every
+  `ActivityManager: Process com.google.android.gms* … has died` line and every `[BackgroundTask] fix stream error:`
+  / `fix stream closed` line inside the proof window, verbatim and in ONE pass so capture order is preserved — so
+  the next reader sees the provider death instead of re-deriving it from ~26 000 logcat lines, and a window with
+  none of the three says so explicitly. Fixture (71b) replays run 35950857266's own lines and asserts the lane still
+  FAILS them: the product fix changes what the next run does, never what that capture says.
+- **Tests** (`background_location_task_delivery_cycle_test.dart`, group "a registration the platform kills is
+  re-armed promptly"): the recovery happens with no watchdog tick fired at all and the next delivery on the new
+  registration publishes; the recovery cycle publishes nothing that is not due and collects nothing; it re-aims at
+  the SAME due instant and never under the platform floor; `onDone` gets the same treatment as `onError`; a second
+  error on a registration that has not delivered waits for the watchdog, and a delivery restores the allowance; a
+  recovery pending when the service stops prints no trigger marker and starts no cycle; and the production delay is
+  the constant, positive and ten times inside the watchdog period.
+
 ### 5.3 Phase P3 — iOS native location owner with accuracy profiles + tier-based indicator/session policy + copy/l10n (D1, D2) [OD1]
 
 **Goal / non-goals.** Background sharing ON, stationary: the GNSS receiver is no longer held at Best 24/7; while

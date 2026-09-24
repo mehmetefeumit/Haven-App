@@ -134,6 +134,29 @@ bool backgroundPublishDisclosureAccepted({
   required bool? backgroundAccepted,
 }) => (foregroundAccepted ?? false) && (backgroundAccepted ?? false);
 
+/// How long the isolate waits after the platform kills its location
+/// registration before running ONE recovery cycle to re-arm it.
+///
+/// The registration is bound to the process that serves the fused provider, and
+/// that process is reaped for reasons that have nothing to do with Haven. The
+/// wait is sized off the one thing that matters — when the provider can answer
+/// again — measured from CI run 35950857266's capture (`logcat.b1.log`, lines
+/// cited so the next reader does not re-derive them): `gms.persistent` died at
+/// 04:02:58.184 (`:16074`), the replacement process started 0.066 s later
+/// (`:16144`) and `ServiceWatcher` chose the new `fused` implementation at
+/// +0.318 s (`:16211`) — but the provider was only CONNECTED at +2.306 s
+/// (`:16505`), which is 1.3 s AFTER Haven's own handler ran (`:16343`). So
+/// re-listening at the error instant binds to a provider still reconnecting;
+/// 5 s clears the connect by ~3.7 s, and is still an order of magnitude inside
+/// [kBackgroundRepeatInterval] — the alternative, which in that run left the
+/// delivery-driven cadence dead for 67 s and the whole proof window on the
+/// watchdog fallback.
+///
+/// Bounded to ONE recovery per registration that has not proved itself (see
+/// `_scheduleStreamErrorRearm`), so a provider the user has genuinely switched
+/// off cannot turn this into a 5 s re-arm loop.
+const Duration kStreamErrorRearmDelay = Duration(seconds: 5);
+
 /// Handles periodic location publishing in the background.
 ///
 /// Lifecycle:
@@ -339,6 +362,23 @@ class BackgroundLocationTaskHandler extends TaskHandler {
   /// and `onListen` returns silently until it is bound, so a registration can
   /// be live, aligned and delivering nothing at all.
   bool _registrationSuspect = false;
+
+  /// The pending recovery cycle [kStreamErrorRearmDelay] after the platform
+  /// reported the registration dead, or `null`.
+  ///
+  /// Cancelled by [_cancelRegistration] — which `onDestroy` and every re-aim
+  /// run — because a registration that is gone owes no recovery.
+  Timer? _streamErrorRearm;
+
+  /// A recovery has already been spent on the live registration.
+  ///
+  /// Restored by the first NEW fix and by nothing else: a delivery is the only
+  /// evidence that the request the recovery armed actually works. Without that
+  /// asymmetry a provider the user switched off — which errors again the moment
+  /// it is re-listened to — would re-arm every [kStreamErrorRearmDelay] for as
+  /// long as sharing stays on. The watchdog owns the second failure, and B6's
+  /// contract is that publishing then STOPS and is surfaced.
+  bool _streamErrorRearmSpent = false;
 
   /// Completed by the first delivery while a cycle is waiting for one.
   Completer<void>? _firstDeliveryWaiter;
@@ -722,6 +762,13 @@ class BackgroundLocationTaskHandler extends TaskHandler {
     _lastConsumedFixTs = fix.timestamp;
     _lastDeliveryAt = DateTime.now();
 
+    // The registration works, so it earns back the one recovery a later error
+    // may spend — and a recovery still pending for an error it has evidently
+    // survived is not needed.
+    _streamErrorRearmSpent = false;
+    _streamErrorRearm?.cancel();
+    _streamErrorRearm = null;
+
     // A cycle that is waiting for its first fix takes this one directly; it
     // must not also read as pending, or the cycle would follow itself up.
     final waiter = _firstDeliveryWaiter;
@@ -785,12 +832,20 @@ class BackgroundLocationTaskHandler extends TaskHandler {
               '[BackgroundTask] fix stream error: ${e.runtimeType}',
             );
             _registrationSuspect = true;
+            _scheduleStreamErrorRearm();
           },
           onDone: () {
-            // The stream ended (a closed provider). Back to Idle so the
-            // watchdog re-arms rather than waiting on a dead registration.
+            // The stream ended (a closed provider). Back to Idle, and re-armed
+            // promptly rather than a watchdog period later.
+            //
+            // Announced, because this path reports no error and the B1 lane's
+            // cadence triage reads "was the registration disturbed?" off these
+            // two lines: a silent `onDone` would make a done-driven recovery
+            // look like a cycle nothing asked for. Fixed words (Rule 15).
+            debugPrint('[BackgroundTask] fix stream closed');
             _fixSub = null;
             _registeredTarget = null;
+            _scheduleStreamErrorRearm();
           },
         );
     _registeredTarget = target;
@@ -800,8 +855,64 @@ class BackgroundLocationTaskHandler extends TaskHandler {
     );
   }
 
+  /// Runs ONE recovery cycle [streamErrorRearmDelay] after the platform
+  /// reported the registration dead.
+  ///
+  /// The registration is the whole cadence, so losing it silently demotes
+  /// background sharing to the [kBackgroundRepeatInterval] watchdog and its
+  /// one-shot — the delivery-driven publish just stops, which is the wedge
+  /// class `docs/BACKGROUND_SHARING_FAILURE_ANALYSIS.md` is about. The
+  /// platform's own retry produces no app callback, so nothing else would say
+  /// so before the next tick.
+  ///
+  /// A CYCLE, never a registration: `_ensureRegistration` is reachable from
+  /// `_publishCycle` alone, below the consent, ownership and disclosure gates
+  /// (`check_android_location_power.sh` check 5), and a recovery is not a
+  /// reason to collect location for a user who has since said stop. The cycle
+  /// publishes only what is due, so a recovery mid-interval costs one cancel +
+  /// listen and nothing else.
+  void _scheduleStreamErrorRearm() {
+    if (_shuttingDown || _streamErrorRearmSpent) return;
+    _streamErrorRearmSpent = true;
+    _streamErrorRearm?.cancel();
+    _streamErrorRearm = Timer(streamErrorRearmDelay, _runStreamErrorRecovery);
+  }
+
+  /// The recovery itself: re-armed, deferred, or dropped as a no-op.
+  void _runStreamErrorRecovery() {
+    _streamErrorRearm = null;
+    // Stopping: say nothing and do nothing. `onDestroy`'s own
+    // [_cancelRegistration] normally gets here first, but this must not depend
+    // on that — and the marker below is what the B1 oracle attributes power
+    // samples to, so one printed by a torn-down isolate mis-reads whatever
+    // follows it.
+    if (_shuttingDown) return;
+    // Somebody already re-armed: a live registration that is no longer suspect
+    // is one `_ensureRegistration` has replaced since the error, which is the
+    // ordinary case when a cycle was running ABOVE step 7c. Nothing is owed.
+    if (_fixSub != null && !_registrationSuspect) return;
+    // A cycle IS running and has NOT re-armed, so the error landed below step
+    // 7c — during the fix acquisition or the publish burst. Standing down here
+    // would drop the recovery for good, because `_streamErrorRearmSpent` is
+    // already spent and only a NEW fix restores it, and no new fix can arrive
+    // on a registration nothing is going to replace. So wait for the cycle
+    // instead; it is bounded, and the two guards above end this.
+    if (_inFlightPublish != null) {
+      _streamErrorRearm = Timer(streamErrorRearmDelay, _runStreamErrorRecovery);
+      return;
+    }
+    debugPrint('[BackgroundTask] cycle trigger=stream-error');
+    _trackCycle(_runCycleWithIdleTracking(DateTime.now()));
+  }
+
   /// Releases the platform registration, if any. Idempotent.
   Future<void> _cancelRegistration() async {
+    // A registration that is gone owes no recovery: either a cycle is about to
+    // arm a fresh one (this is `_ensureRegistration`'s first step) or the
+    // isolate is standing down, and in both cases a timer that fired afterwards
+    // would run a cycle nothing asked for.
+    _streamErrorRearm?.cancel();
+    _streamErrorRearm = null;
     final sub = _fixSub;
     _fixSub = null;
     _registeredTarget = null;
@@ -2312,6 +2423,14 @@ class BackgroundLocationTaskHandler extends TaskHandler {
   /// and `background_location_task_delivery_cycle_test.dart` pins that.
   @visibleForTesting
   Duration firstDeliveryWait = kFirstDeliveryWait;
+
+  /// Test-only override for [kStreamErrorRearmDelay] — same reason as
+  /// [firstDeliveryWait]. What a test asserts is that the recovery runs at all,
+  /// on its own timer and ahead of any watchdog tick; the LENGTH is a property
+  /// of the constant, pinned against `kBackgroundRepeatInterval` in
+  /// `background_location_task_delivery_cycle_test.dart`.
+  @visibleForTesting
+  Duration streamErrorRearmDelay = kStreamErrorRearmDelay;
 
   /// Test seam for [_ensureSession].
   ///

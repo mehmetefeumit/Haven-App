@@ -460,6 +460,17 @@ class FakeLocationService extends Fake implements GeolocatorLocationService {
     controller.addError(error);
   }
 
+  /// Ends the live registration without an error, as the plugin does when the
+  /// provider it was bound to is removed rather than failed: the subscriber's
+  /// `onDone` runs and no `onError` ever does.
+  void endStream() {
+    final controller = _controller;
+    if (controller == null || !controller.hasListener) {
+      throw StateError('no live registration to end');
+    }
+    controller.close();
+  }
+
   /// Feeds [fix] to the live registration, exactly as a platform delivery
   /// would: the subscriber runs SYNCHRONOUSLY (the real service's outer
   /// controller is `sync: true`), so a test never has to pump and hope.
@@ -750,7 +761,14 @@ class BackgroundTaskHarness {
       // (the historical delivery a fake registration schedules) still runs
       // before a zero-duration timer, so a delivered fix always wins the race
       // and an undelivered one costs the suite nothing.
-      ..firstDeliveryWait = Duration.zero;
+      ..firstDeliveryWait = Duration.zero
+      // Same discipline as `firstDeliveryWait`: the LENGTH of the stream-error
+      // recovery wait is pinned against the watchdog period in
+      // `background_location_task_delivery_cycle_test.dart`, and what the cycle
+      // tests are about is whether the recovery runs at all and what it does.
+      // Zero keeps that deterministic — a zero-duration timer fires on the next
+      // event-loop turn, so `pumpEventQueue` settles it with no wall clock.
+      ..streamErrorRearmDelay = Duration.zero;
     if (injectManager) handler.overrideCircleManager = theManager;
     await handler.startWithoutBridgeForTest(
       identityManager: FakeIdentityManager(pubkey: identityPubkey),

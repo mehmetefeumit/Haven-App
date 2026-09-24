@@ -1415,6 +1415,89 @@ the simulator or the runner is the suspect, not the commit. Any line of the form
 `HH:MM +N: <something other than loading>` after the build = a test ran, and
 whatever follows is the product's failure to explain.
 
+## Failure mode 19 — B1 step 7: "not one publish in the window was delivery-driven"
+
+**Symptom.** Lane `E2E FGS Publish (Android)`, oracle step (7):
+
+```
+FAIL: not one publish in the window was delivery-driven, so the spacing this step
+exists to measure was never measured. 2 publish(es) reached the relay, none of them
+behind a '[BackgroundTask] cycle trigger=delivery' …
+```
+
+Two publishes DID reach the relay, so nothing looks broken at a glance — which is
+the point of the step. It says the cadence was not the one P2a promises.
+
+**Read the CONTEXT block under the verdict first.** Step (7) now prints, verbatim
+and in one pass so capture order is preserved, every Play-services process death
+and every `[BackgroundTask] fix stream error:` / `fix stream closed` line inside
+the proof window. It has no effect on the exit code:
+
+```
+  CONTEXT (not a verdict): the platform's location provider was disturbed inside
+  the proof window. Verbatim, in capture order:
+    … ActivityManager: Process com.google.android.gms.persistent (pid …) has died: fg  BTOP
+    … flutter : [BackgroundTask] fix stream error: LocationServiceDisabledException
+```
+
+**What that combination means** (measured: run 35950857266, and its green
+predecessor 35690725254). Haven's one background registration lives in the process
+that serves the `fused` provider. Play services reaps that process on its own
+schedule — `TimedProcessReaper: Scheduling killing of process to refresh
+configuration` — and the registration dies with it. geolocator surfaces the
+provider's `onLocationAvailability(false)` as `LocationServiceDisabledException`,
+whose name is misleading: **location was never disabled, the provider process
+died**. The replacement starts almost at once (+0.066 s) and `ServiceWatcher`
+picks the new `fused` implementation at +0.318 s, but the provider is only
+`connected` at **+2.306 s** — 1.3 s *after* Haven's error handler ran, which is
+why the recovery waits 5 s rather than re-listening on the spot. In 35950857266
+the reap landed 17 s into a 62 s interval and the window closed 67 s later with the
+cadence on the watchdog; in 35690725254 the same reap landed 1.115 s BEFORE the
+first registration, which therefore bound to the new instance, and the lane was
+green. Same build, opposite verdicts.
+
+**What the product does now.** `onError` and `onDone` schedule ONE recovery cycle
+`kStreamErrorRearmDelay` (5 s) later — `[BackgroundTask] cycle trigger=stream-error`
+— which re-arms the registration at the unchanged due-time, below the same consent,
+ownership and disclosure gates as every other cycle. `onDone` raises no error, so it
+prints `[BackgroundTask] fix stream closed` to leave the same evidence. It is bounded
+to one recovery per registration that has not yet delivered: a provider the USER
+switched off errors again on the next listen, and then the 72 s watchdog owns it
+(B6's contract is that publishing stops and is surfaced, not that the service re-arms
+forever). If the disturbance lands *during* a cycle, past the registration step, the
+recovery waits for that cycle and then runs — it does not stand down.
+
+**So, triage** ("a disturbance" = a reap, a `fix stream error:` or a `fix stream
+closed`; all three are in the CONTEXT block):
+
+| What the capture shows | Verdict |
+|---|---|
+| a disturbance, then `cycle trigger=stream-error` within ~5 s, and still no delivery-driven publish | the recovery ran and the platform still did not deliver — look at the emulator's GNSS feed and at `dumpsys location`, not at the FGS |
+| a disturbance and NO `stream-error` cycle after it | the recovery did not run. Check `_scheduleStreamErrorRearm`'s two callers, the one-per-registration allowance (`_streamErrorRearmSpent`, restored only by a NEW fix) and whether `onDestroy` had already started |
+| two `stream-error` cycles under `kMinFixRequestInterval` apart (step 7 fails on this by itself) | a re-arm loop, or an allowance being restored by something other than a delivery |
+| no disturbance at all (the CONTEXT block says so explicitly) | the provider was up throughout, so this is a cadence defect in the FGS itself — start at the `registration armed (Ns)` lines and the interval they asked for |
+
+**A recovery registration is legitimately shorter than 62 s**, because it asks for
+the REMAINDER of the interval the platform killed. Steps (5) and (7) attribute that
+per sample, **by the cycle that ARMED the request** — not by whichever cycle was
+running when the sample was taken. A registration outlives its cycle: a delivery
+landing more than `kBackgroundFixHorizon − kBackgroundFixLeadTime` before the aim
+publishes nothing and re-arms nothing, so a recovery's request is still the live one
+under later `trigger=delivery` cycles (the red capture's own shape, harmless there
+only because the request was 128 s). Below 62 s is allowed only for a
+`stream-error`-armed request, never below `kMinFixRequestInterval` (31 s), and the
+delivery after such a registration is measured against 90 % of what THAT
+registration asked for. On every other cycle the 62 s / 55 s floors are unchanged —
+including the 40 s registration run 34511084722 produced from a delivery-driven
+cycle, which stays a failure (self-test fixtures `(34c)`, `(34e)`, `(70)`, `(71e)`).
+
+**One shape is deliberately NOT carved out**, so it is not rediscovered as a
+regression: a *watchdog* re-aim on a suspect registration with nothing due asks for
+the remainder too, and step (5) still fails it. That is pre-existing — it is the
+second-failure path the recovery hands back to the watchdog (B6) — and it has never
+fired inside a proof window. If it ever does, it is a finding to file, not a floor
+to widen.
+
 ## What these lanes do NOT cover
 
 The iOS simulator keeps the app alive and the VM-service attached, so it does

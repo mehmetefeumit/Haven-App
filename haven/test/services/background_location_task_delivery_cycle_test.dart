@@ -123,6 +123,20 @@ class _SwitchableStagger extends PublishStagger {
 const String _coldAsk = '[BackgroundTask] cold fix: asking the platform';
 const String _coldInHand = '[BackgroundTask] cold fix: in hand';
 
+/// Runs the recovery timer a stream error scheduled, and awaits whatever cycle
+/// it started.
+///
+/// [pumpEventQueue] advances no clock — it hops the event queue — so a recovery
+/// that did not take the injected
+/// [BackgroundLocationTaskHandler.streamErrorRearmDelay] (a hard-coded wait, or
+/// one left to the watchdog) never runs inside it. That is what makes the
+/// assertions after it about the re-arm and not about the pump.
+Future<void> _settleRearm(BackgroundTaskHarness harness) async {
+  await pumpEventQueue();
+  final cycle = harness.handler.inFlightPublishForTest;
+  if (cycle != null) await cycle;
+}
+
 /// Captures `debugPrint` output for the current test, restoring the original
 /// in a tear-down. Returns the live log list.
 List<String?> _captureDebugPrint() {
@@ -803,6 +817,294 @@ void main() {
 
       expect(harness.location.capturedProfiles, hasLength(2));
       expect(harness.location.streamListeners, 1);
+    });
+  });
+
+  group('a registration the platform kills is re-armed promptly', () {
+    // The wedge this group exists for, measured: in CI run 35950857266 Play
+    // services reaped its own persistent process to reload a configuration, the
+    // FGS's stream reported `LocationServiceDisabledException` 1 s later, and
+    // the isolate then sat on a dead registration for 67 s until the watchdog
+    // noticed. Two publishes reached the relay in that proof window and NEITHER
+    // was delivery-driven: the cadence P2a promises had silently degraded to
+    // the cache-miss fallback the watchdog exists to be. Nothing in the app
+    // said so, which is the signature of the FA wedge class.
+
+    test('a stream error re-arms without waiting for a watchdog tick, and the '
+        'next delivery on the new registration publishes', () async {
+      final harness = await deliveringHarness();
+      await harness.tick(DateTime.now());
+      expect(harness.location.capturedProfiles, hasLength(1));
+      expect(harness.manager.encryptCalls, hasLength(1));
+
+      final log = _captureDebugPrint();
+      harness.location.failStream(Exception('provider process died'));
+      await _settleRearm(harness);
+
+      expect(
+        harness.location.capturedProfiles,
+        hasLength(2),
+        reason: 'no tick was fired, so a second registration here can only '
+            'have come from the error itself — which is the whole point: the '
+            'watchdog is up to kBackgroundRepeatInterval away, and until it '
+            'arrives the delivery-driven cadence is dead',
+      );
+      expect(harness.location.streamListeners, 1);
+      expect(
+        log,
+        contains('[BackgroundTask] cycle trigger=stream-error'),
+        reason: 'the B1 oracle classifies cycles by this marker; a recovery '
+            'that announced itself as a delivery would be counted as one',
+      );
+
+      // The circle comes due and the RE-ARMED registration is what serves it.
+      harness.handler.dueTrackerForTest.markBurstPublished(
+        [scheduleKeyOf(circleFixture(seed: 1))],
+        DateTime.now(),
+      );
+      await harness.deliverFix(freshFix(latitude: 40.7128, longitude: -74));
+
+      expect(harness.manager.encryptCalls, hasLength(2));
+      expect(
+        harness.manager.encryptCalls.last.latitude,
+        40.7128,
+        reason: "the publish rides the recovered registration's own delivery "
+            '— not a one-shot the watchdog paid for later',
+      );
+      expect(
+        harness.location.oneShotRequests,
+        0,
+        reason: 'a recovery that restored the cadence costs no acquisition '
+            'beyond the one the circle was going to need anyway',
+      );
+    });
+
+    test('the recovery cycle publishes nothing that is not due', () async {
+      final harness = await deliveringHarness();
+      await harness.tick(DateTime.now());
+      final publishes = harness.manager.encryptCalls.length;
+      final fixes = harness.location.fixRequests;
+
+      harness.location.failStream(Exception('provider process died'));
+      await _settleRearm(harness);
+
+      expect(
+        harness.location.capturedProfiles,
+        hasLength(2),
+        reason: 'the anti-vacuity half: everything below is about what a '
+            'recovery cycle did NOT do, which is worthless if none ran',
+      );
+      expect(
+        harness.manager.encryptCalls,
+        hasLength(publishes),
+        reason: 'the circle is armed 100 s out; a recovery is a re-aim, not a '
+            'publish trigger, or every provider hiccup would spend an extra '
+            'kind-445 and pull the decorrelated schedule forward',
+      );
+      expect(
+        harness.location.fixRequests,
+        fixes,
+        reason: 'nothing due means the cycle returns above the one gated '
+            'coordinate producer — it never collects at all',
+      );
+      expect(harness.location.oneShotRequests, 0);
+    });
+
+    test('the recovery re-aims at the SAME due instant, never under the '
+        'platform floor', () async {
+      final harness = await deliveringHarness();
+      await harness.tick(DateTime.now());
+      expectAimedAt(harness, 0, dueIn: const Duration(seconds: 100));
+
+      harness.location.failStream(Exception('provider process died'));
+      await _settleRearm(harness);
+
+      expect(harness.location.capturedProfiles, hasLength(2));
+      expectAimedAt(harness, 1, dueIn: const Duration(seconds: 100));
+      expect(
+        registeredInterval(harness, 1),
+        greaterThanOrEqualTo(kMinFixRequestInterval),
+        reason: 'a recovery asks for the REMAINDER of an interval already at '
+            'least kLocationPublishMinInterval long, so it can legitimately '
+            'sit below the 62 s steady-state figure — but never below the '
+            'platform floor, which is not a cadence choice',
+      );
+    });
+
+    test('a registration the platform ENDS is re-armed the same way, and says '
+        'so', () async {
+      // `onDone`, not `onError`: a provider that is removed rather than failed
+      // completes the stream. The isolate is then Idle with a schedule it can
+      // no longer serve, and only this or the watchdog can say so.
+      final harness = await deliveringHarness();
+      await harness.tick(DateTime.now());
+      expect(harness.location.streamListeners, 1);
+
+      final log = _captureDebugPrint();
+      harness.location.endStream();
+      await _settleRearm(harness);
+
+      expect(harness.location.capturedProfiles, hasLength(2));
+      expect(harness.location.streamListeners, 1);
+      expect(
+        log,
+        contains('[BackgroundTask] fix stream closed'),
+        reason: 'this path reports no error, so without its own line the B1 '
+            "lane's triage reads a done-driven recovery as a cycle nothing "
+            'asked for',
+      );
+    });
+
+    test('an error below the registration step still gets its recovery, after '
+        'the cycle', () async {
+      // The error lands DURING the publish burst — past step 7c, so the cycle
+      // in flight has already re-armed for a schedule that no longer exists and
+      // will not re-arm again. Standing the recovery down for "a cycle is
+      // running" would drop it for good: the allowance is already spent, and
+      // only a NEW fix restores it — which cannot arrive on a registration
+      // nothing is going to replace. Silent, indefinite, and exactly the wedge
+      // this whole mechanism exists to close.
+      final harness = await deliveringHarness();
+      var failed = false;
+      harness.relay.onPublish = (_) {
+        if (failed) return;
+        failed = true;
+        harness.location.failStream(Exception('provider process died'));
+      };
+      // The cycle is PARKED in its fetch step, so "the recovery timer fired
+      // while a cycle was in flight" is an ordering the test establishes rather
+      // than one it hopes for. Awaiting the tick instead would let the cycle
+      // finish first on some schedulings and the hole would go unexercised.
+      final parked = Completer<void>();
+      harness.sharing.onFetch = (_) => parked.future;
+
+      final cycle = harness.tick(DateTime.now());
+      await pumpEventQueue();
+      expect(harness.manager.encryptCalls, hasLength(1));
+      expect(
+        harness.handler.inFlightPublishForTest,
+        isNotNull,
+        reason: 'the park must hold, or the timer below fires with no cycle in '
+            'flight and this test asserts the easy case',
+      );
+      final registrations = harness.location.capturedProfiles.length;
+
+      parked.complete();
+      await cycle;
+      await _settleRearm(harness);
+
+      expect(
+        harness.location.capturedProfiles,
+        hasLength(registrations + 1),
+        reason: 'the recovery waits for the cycle it cannot interrupt, then '
+            'runs — once',
+      );
+      expect(harness.location.streamListeners, 1);
+    });
+
+    test('a second error on the re-armed registration waits for the watchdog',
+        () async {
+      final harness = await deliveringHarness();
+      final base = DateTime.now();
+      await harness.tick(base);
+
+      harness.location.failStream(Exception('provider process died'));
+      await _settleRearm(harness);
+      expect(harness.location.capturedProfiles, hasLength(2));
+
+      // Nothing has been delivered on the new registration, so nothing says it
+      // works. A provider the USER switched off errors again the moment it is
+      // re-listened to, and B6's contract is that publishing then stops and is
+      // surfaced — not that the isolate re-arms every few seconds forever.
+      harness.location.failStream(Exception('provider process died'));
+      await _settleRearm(harness);
+
+      expect(
+        harness.location.capturedProfiles,
+        hasLength(2),
+        reason: 'one recovery per registration that has not proved itself; a '
+            'second is a re-arm loop against a provider that cannot answer',
+      );
+
+      // And the watchdog still owns it, so the bound costs no liveness.
+      await harness.tick(base.add(kBackgroundRepeatInterval));
+      expect(harness.location.capturedProfiles, hasLength(3));
+    });
+
+    test('a delivery restores the allowance the recovery spent', () async {
+      // The other half of the bound: "one per registration" must mean one per
+      // registration, not one per service lifetime, or a device that recovers
+      // and then loses the provider again hours later waits out the watchdog
+      // for no reason.
+      final harness = await deliveringHarness();
+      await harness.tick(DateTime.now());
+
+      harness.location.failStream(Exception('provider process died'));
+      await _settleRearm(harness);
+      expect(harness.location.capturedProfiles, hasLength(2));
+
+      harness.handler.dueTrackerForTest.markBurstPublished(
+        [scheduleKeyOf(circleFixture(seed: 1))],
+        DateTime.now(),
+      );
+      await harness.deliverFix(freshFix(latitude: 40.7128, longitude: -74));
+      final registrations = harness.location.capturedProfiles.length;
+
+      harness.location.failStream(Exception('provider process died'));
+      await _settleRearm(harness);
+
+      expect(harness.location.capturedProfiles, hasLength(registrations + 1));
+    });
+
+    test('a recovery pending when the service stops starts no cycle at all',
+        () async {
+      final harness = await deliveringHarness();
+      await harness.tick(DateTime.now());
+      final registrations = harness.location.capturedProfiles.length;
+      final cycles = harness.manager.rosterReads;
+
+      final log = _captureDebugPrint();
+      harness.location.failStream(Exception('provider process died'));
+      await harness.handler.onDestroy(DateTime.now(), false);
+      await _settleRearm(harness);
+
+      expect(
+        log,
+        isNot(contains('[BackgroundTask] cycle trigger=stream-error')),
+        reason: '`_publishCycle` would stand a late cycle down on its own stop '
+            'check, so the outcome alone proves nothing about this timer — the '
+            'marker does. It is also not cosmetic: the B1 oracle attributes '
+            'every power sample to the most recent trigger line, and one '
+            'printed by a torn-down isolate mis-attributes whatever follows it',
+      );
+      expect(
+        harness.location.capturedProfiles,
+        hasLength(registrations),
+        reason: 'a timer that outlived onDestroy would arm a platform location '
+            'request underneath a torn-down isolate — nobody to publish it, '
+            'and nobody left to cancel it',
+      );
+      expect(harness.manager.rosterReads, cycles);
+      expect(harness.location.streamListeners, 0);
+    });
+
+    test('the recovery waits the production constant, well inside the watchdog '
+        'period', () {
+      // The harness zeroes the wait so the cycle tests above are about WHAT the
+      // recovery does. Nothing else would notice if the seam's default drifted:
+      // a production zero would re-listen before the provider process that just
+      // died has reloaded (2 s in the capture this was measured from), and a
+      // production value near the watchdog period would make the whole
+      // mechanism a no-op.
+      expect(
+        BackgroundLocationTaskHandler().streamErrorRearmDelay,
+        kStreamErrorRearmDelay,
+      );
+      expect(kStreamErrorRearmDelay, greaterThan(Duration.zero));
+      expect(
+        kStreamErrorRearmDelay * 10,
+        lessThanOrEqualTo(kBackgroundRepeatInterval),
+      );
     });
   });
 
