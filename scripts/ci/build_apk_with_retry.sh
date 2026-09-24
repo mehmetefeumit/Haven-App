@@ -40,10 +40,13 @@
 # VERDICT: it converts an anonymous "exit code 1" from a job that ran no test
 # into a message that says INFRASTRUCTURE. The cache is what removes the class.
 #
-# The measurement that makes that case: a COLD Gradle build (buildscript
-# classpath resolved over the network) takes 455-946 s, a WARM one 29-48 s —
-# 182 samples across 22 green runs. Roughly 20x, and every one of those cold
-# POM fetches is a chance to be rate-limited.
+# What the cache does NOT buy is time. A job's first `assembleDebug` takes
+# 429-638 s with the dependency cache HIT (run 35813757227) and 33-61 s for its
+# later builds; that gap is Gradle configuration, cargokit's Rust cross-compiles
+# (x86_64 and i686 Android targets) and the Kotlin compile, which live outside
+# `~/.gradle/caches/modules-2`. The cache's whole product is that the classpath
+# resolves from disk and issues no request that can draw the limit — four
+# cached jobs, zero 429s.
 #
 # ## Gradle's OWN retry, and why it is not enough (VERIFIED, 8.14)
 #

@@ -34,9 +34,11 @@
 #
 # Gradle resolves the buildscript classpath over the network before it compiles
 # anything, so a cold `~/.gradle` makes a lane fetch hundreds of POMs from a
-# shared runner egress IP. MEASURED: a cold `assembleDebug` takes 455-946 s and
-# a warm one 29-48 s (182 samples over 22 green runs) — every second of that gap
-# is POM traffic, and Maven Central rate-limits it. CI run 35622556197 job
+# shared runner egress IP, and Maven Central rate-limits it. The cache buys
+# safety, not time: with it HIT, a job's first `assembleDebug` still takes
+# 429-638 s (run 35813757227) against 33-61 s for its later ones, because that
+# gap is Gradle configuration, cargokit's Rust cross-compiles and the Kotlin
+# compile, none of which the dependency cache holds. CI run 35622556197 job
 # 106414462454 lost a whole lane to HTTP 429 on the classpath with no test run,
 # while twelve sibling Android lanes built the same commit clean; run
 # 30732662493 job 91456350943 lost the `arm` leg the same way in August.

@@ -308,9 +308,14 @@ step, it can mask/pre-empt the runtime phases entirely.
 
 **The fix is the CACHE; the retry is the backstop.** A cold `~/.gradle` makes a
 lane fetch hundreds of POMs before it compiles anything, and every one of them
-is a chance to be rate-limited. MEASURED across 182 samples in 22 green runs: a
-cold `assembleDebug` takes 455-946 s, a warm one 29-48 s. The warm build does
-not make the requests, so it cannot draw the limit.
+is a chance to be rate-limited. The warm build does not make the requests, so
+it cannot draw the limit — the first four cached jobs (run 35813757227) drew
+zero 429s. Do not expect it to make the build FAST: a job's first
+`assembleDebug` still took 429-638 s with the cache hit, against 33-61 s for
+its later builds, because that gap is Gradle configuration (~2 min), cargokit
+cross-compiling the Rust core for the x86_64 and i686 Android targets (~4 min)
+and the Kotlin compile — none of it dependency traffic. Trimming that is a
+separate optimisation (`docs/CI_HARDENING_BACKLOG.md`).
 
 Every Gradle-building job therefore restores a shared, read-only dependency
 cache (`~/.gradle/caches/modules-2` + `~/.gradle/wrapper`) on one canonical key

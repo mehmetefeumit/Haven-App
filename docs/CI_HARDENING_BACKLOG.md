@@ -4858,3 +4858,25 @@ override or nothing, never the rows the mock's own upsert kept, so the
 cross-layer tests seed both sides by hand; letting the snapshot fall back to
 `lastKnownRows` would state the store/cache agreement property once. Neither
 blocks anything.
+
+### DEFERRED · The cold Android build is the Rust cross-compile, not the dependency fetch
+
+The Gradle dependency cache landed in 12fce46 on the premise that a cold
+`assembleDebug` (455-946 s) versus a warm one (29-48 s) was POM traffic. The
+first cached runs (nightly 35813757227, cache HIT in all three Android jobs)
+disproved the attribution while confirming the purpose: zero 429s, and a first
+build of 429-638 s anyway. Decomposition of the 429 s integration build, from
+the job's timestamps: Gradle configuration and the CMake install 03:20:02 to
+03:22:18; cargokit `rust_lib_haven` for `x86_64-linux-android` 03:22:19 to
+03:23:52; `i686-linux-android` toolchain install and build 03:23:52 to
+03:25:17; a second `x86_64-linux-android` build 03:25:17 onwards; then the
+Kotlin compile and packaging to 03:26:24. Every later build in the same job is
+33-61 s because Gradle's build cache and the Rust target directory are warm.
+
+Two leads, both unmeasured beyond that log: every E2E lane pins
+`--target-platform android-x64`, so the i686 build (and the second x86_64
+one) may be avoidable — read why cargokit builds three times under that flag
+before touching anything; and `Swatinem/rust-cache` covers `haven-core` and
+`tooling/logscan` workspaces only, not the directory cargokit builds into, so
+the Rust cross-compile is repeated on every runner. Either could take several
+minutes off every Android lane. Neither is a correctness issue.
