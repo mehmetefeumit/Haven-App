@@ -39,6 +39,22 @@
 # comments already claimed, now confirmed: ~5% of attempts, always post-build
 # and always pre-test.
 #
+# CI run 35690725254 (job 106630995666, 2026-09-22) measured the TOOL'S OWN
+# spelling of that same signature:
+#
+#     Xcode build done.                                           647.3s
+#     No tests ran.
+#     Error waiting for a debug connection: The log reader failed unexpectedly
+#     <the process never exits; the outer 30-minute timeout kills the attempt>
+#
+# flutter_tools printed those two lines itself — lib/src/ios/simulators.dart
+# prints exactly that pair when the launched app never publishes a VM-service
+# URI and it returns `LaunchResult.failed()`. The app built and installed and no
+# Dart code ever ran: the same fact the watchdog infers from silence, stated by
+# the tool. It is admitted below as a second FORM of the one signature, never as
+# a second signature — every other clause still has to hold, and "no test ran"
+# here is the tool's own account rather than our inference.
+#
 # That is the ONE signature admitted here. Nothing else observed in that window
 # is retryable, and no signature is admitted that has not been seen — an invented
 # pattern is indistinguishable from a blanket retry with extra steps.
@@ -136,7 +152,7 @@ ios_stall_marker_line() {
 # child's OWN file offset, landing exactly on the 22-byte prefix
 # "IOS-WATCHDOG: no on-de" the watchdog had just appended. The marker was
 # mangled into "vice test started within 300s…", so clause (b) failed; and the
-# teardown line matched IOS_TEST_ACTIVITY_RE, so clause (d) failed too. Verdict:
+# teardown line matched the test-start predicate, so clause (d) failed too. Verdict:
 # `genuine`, retry refused, lane red on an infrastructure stall the watchdog had
 # correctly identified.
 #
@@ -172,32 +188,72 @@ ios_clear_stall_evidence() {
   rm -f "$(ios_stall_flag_path "${log}")" "$(ios_prekill_log_path "${log}")"
 }
 
-# Evidence that the on-device suite got as far as SAYING something. Independent
-# signals, because the two reporters `flutter test` can pick emit nothing in
-# common:
+# WHAT COUNTS AS "A TEST STARTED" — and, since CI run 35690725254, what does not.
 #
-#   1. The GitHub reporter — what flutter_tools selects on its own when
-#      GITHUB_ACTIONS is set. run-ios-sim-scenario.sh no longer lets it (see
-#      the `--reporter expanded` note in spawn_ios_test), but the shapes stay
-#      matched: this predicate also reads logs from older attempts and from
-#      lanes that invoke `flutter test` themselves. test_core's github.dart
-#      writes `✅ <name>` for a test with no output and `::group::✅ <name>` for
-#      one with output, `❌` for failed, `❎` for skipped, `🎉 N tests passed.`
-#      on success and `::error::N tests passed, M failed.` on failure.
-#      Anchoring to line-start or to `::group::` keeps this matching the
-#      REPORTER rather than any app chatter that happens to contain an emoji.
-#   2. The compact and expanded reporters — expanded is what CI now pins and
-#      what a local `bash run-ios-sim-scenario.sh` gets: `MM:SS +N` progress
-#      lines, emitted when a test STARTS rather than when it ends, and the
-#      `All tests passed!` / `Some tests failed.` summaries. This is the
-#      alternative the watchdog actually rides on.
-#   3. `All tests skipped.` / `No tests ran.` — a suite that ran nothing has
-#      proven nothing, and must fail rather than be retried into a green.
+# One predicate answers one question for two callers: run-ios-sim-scenario.sh's
+# watchdog ("the suite is running, stand down") and clause (d) below ("a test
+# ran, so this is not a launch stall"). Both need a test-START event, and the
+# predicate this replaces matched the wrong thing twice over:
 #
-# Over-matching here is the SAFE direction: a false positive only means an
-# attempt is not retried. A false negative would let a suite that spoke be
-# treated as one that never started.
-readonly IOS_TEST_ACTIVITY_RE='(^|::group::)(✅|❌|❎) |🎉 [0-9]+ tests? (passed|skipped)|::error::[0-9]+ tests? passed|^[0-9]{2}:[0-9]{2} \+[0-9]+|All tests (passed!|skipped\.)|Some tests failed\.|No tests ran\.'
+#   1. It scanned the WHOLE log. The expanded reporter's first line is
+#      `00:00 +0: loading <suite>.dart`, printed while the suite is being LOADED
+#      — before flutter_tools has even started the Xcode build (green run
+#      35664400984: `loading` at 23:37:55, `Xcode build done.` at 23:51:37, the
+#      first test at 23:52:20). It matched the progress-line alternative, so on
+#      the FIRST poll after arming the watchdog concluded the suite had spoken.
+#      The watchdog could not fire at all on current Flutter output, and clause
+#      (d) was unsatisfiable with it.
+#   2. `No tests ran.` was in the set — the line the expanded reporter prints
+#      when the engine finished with ZERO live tests, i.e. the exact opposite of
+#      a test starting.
+#
+# So: only the SUFFIX after the build marker is scanned, and a suite LOAD is not
+# a start. What a progress line's subject can be is enumerated by the reporter
+# itself (test_core's runner/reporter/expanded.dart): a test's name — with
+# `(setUpAll)` and `(tearDownAll)` ordinary synthetic test names — `loading
+# <path>`, and the `All tests passed!` / `All tests skipped.` / `Some tests
+# failed.` summaries. `No tests ran.` is NOT among them: it is written bare,
+# with no `HH:MM +N:` prefix, which is why nothing below has to name it.
+# Excluding `loading` therefore leaves only subjects that imply a test ran, and
+# the three summaries need no rule of their own — none is reachable without a
+# live test, so none can precede a start line.
+#
+# This mirrors tooling/logscan/policy.toml's `proof_of_run_excludes`, which
+# subtracts the same suite-load shape from the same question for the same
+# measured reason (the `drive` entry cites run 35280144455, where an iOS
+# build-only prefix read as a run). They are meant to agree on that, and they are
+# duplicated because this runs on a macOS runner's /bin/bash at a point where the
+# Rust scanner has not been built — and on attempts where it never will be. Where
+# they differ, each errs toward its own noisier answer: the scanner also refuses
+# `Some tests failed.` as proof of a run, while here that line implies a test
+# STARTED and therefore vetoes the retry, so neither reading can quietly turn a
+# failure into a pass.
+#
+# Over-matching is still the SAFE direction: a false positive only means an
+# attempt is not retried, while a false negative would let a suite that RAN be
+# treated as one that never started. That is why the GitHub reporter's shapes
+# stay in the set even though every iOS lane pins `--reporter expanded` (see
+# spawn_ios_test): this predicate also reads logs from older attempts and from
+# lanes that invoke `flutter test` themselves. test_core's github.dart writes
+# `✅ <name>` for a test with no output and `::group::✅ <name>` for one with
+# output, `❌` for failed, `❎` for skipped, `🎉 N tests passed.` on success and
+# `::error::N tests passed, M failed.` on failure; anchoring to line-start or to
+# `::group::` keeps this matching the REPORTER rather than app chatter that
+# happens to carry an emoji.
+readonly IOS_TEST_STARTED_RE='(^|::group::)(✅|❌|❎) |🎉 [0-9]+ tests? (passed|skipped)|::error::[0-9]+ tests? passed|^[0-9]{2}:[0-9]{2} \+[0-9]+( -[0-9]+)?( ~[0-9]+)?: '
+
+# A progress line whose subject is a suite LOAD. Subtracted from the candidate
+# lines before the match above, because ERE has no negative lookahead; anchored
+# identically, so it can only ever remove the reporter's own load line.
+readonly IOS_SUITE_LOAD_RE='^[0-9]{2}:[0-9]{2} \+[0-9]+( -[0-9]+)?( ~[0-9]+)?: loading '
+
+# flutter_tools' OWN account of a failed attach, measured verbatim in CI run
+# 35690725254 and emitted by its lib/src/ios/simulators.dart when the launched
+# app never publishes a VM-service URI. Only the stable head is matched, as a
+# fixed string: the tail is either `The log reader failed unexpectedly` or an
+# arbitrary exception rendering, and pattern-matching an exception's text is how
+# a predicate starts depending on prose nobody controls.
+readonly IOS_ATTACH_FAILURE_MARKER='Error waiting for a debug connection'
 
 # Same rationale as drive-log-lib.sh's `_drive_log_decolour`: reporter output can
 # carry SGR escapes that split a pattern in half, and depending on a colour
@@ -220,19 +276,56 @@ _ios_log_decolour() {
 # deleted `|| true` away from a predicate that silently stops matching. With
 # `< <(…)` the status is grep's alone and does not depend on that at all.
 
-# ios_log_test_activity <log> — 0 (true) when the log shows the on-device suite
-# emitted ANYTHING. A missing log returns 1: it cannot show activity it does not
-# contain, and callers treat "no log" as their own error.
-ios_log_test_activity() {
+# _ios_log_after_build_done <log> — the decoloured log from the line AFTER the
+# build marker to EOF, and EMPTY when the build never finished. That emptiness
+# is what makes every predicate built on it fail closed on a build failure.
+#
+# The LAST occurrence is the anchor. `flutter test` prints the marker once per
+# invocation and the runner truncates the log per invocation, so today "last" is
+# "the only one"; taking the last is what keeps the answer about the build that
+# just finished if a future flutter ever rebuilds mid-run.
+#
+# Watchdog marker lines are excluded from the SEARCH for the build marker, for
+# the same reason clause (c) excludes them: the marker line is free text, and one
+# that came to quote the build-done literal would otherwise move this window
+# onto itself.
+_ios_log_after_build_done() {
+  local log="${1:-}" last=''
+  [[ -f "${log}" ]] || return 0
+  # `|| last=''` because "no build-done line" is an answer here, not an error,
+  # and every runner sourcing this sets errexit and pipefail.
+  last="$(_ios_log_decolour "${log}" \
+            | LC_ALL=C grep -anF -- "${IOS_BUILD_DONE_MARKER}" \
+            | LC_ALL=C grep -avF -- "${IOS_STALL_MARKER}" \
+            | LC_ALL=C tail -n 1 | LC_ALL=C cut -d: -f1)" || last=''
+  [[ -n "${last}" ]] || return 0
+  _ios_log_decolour "${log}" | LC_ALL=C tail -n +"$(( last + 1 ))"
+}
+
+# ios_log_test_started <log> — 0 (true) when a TEST started after the build
+# finished. A missing log returns 1: it cannot show a start it does not contain,
+# and callers treat "no log" as their own error.
+ios_log_test_started() {
   local log="${1:-}"
   [[ -f "${log}" ]] || return 1
-  LC_ALL=C grep -aqE -- "${IOS_TEST_ACTIVITY_RE}" < <(_ios_log_decolour "${log}")
+  LC_ALL=C grep -aqE -- "${IOS_TEST_STARTED_RE}" \
+    < <(_ios_log_after_build_done "${log}" | LC_ALL=C grep -avE -- "${IOS_SUITE_LOAD_RE}")
+}
+
+# ios_log_reports_attach_failure <log> — 0 (true) when flutter_tools itself said,
+# after the build, that it could not attach to the app it had just launched. The
+# second admitted form of clause (b); see there for why it does not widen the
+# retry.
+ios_log_reports_attach_failure() {
+  local log="${1:-}"
+  [[ -f "${log}" ]] || return 1
+  LC_ALL=C grep -aqF -- "${IOS_ATTACH_FAILURE_MARKER}" < <(_ios_log_after_build_done "${log}")
 }
 
 # ios_log_is_launch_stall <log> — 0 (true, RETRYABLE) iff the log is the one
-# admitted infrastructure signature: the Xcode build completed, the watchdog
-# then fired because no test started, and nothing anywhere in the log says a
-# test ran or failed.
+# admitted infrastructure signature: the Xcode build completed, no test started
+# after it, somebody observed that (our watchdog, or flutter_tools reporting a
+# failed attach), and nothing anywhere in the log says a test ran or failed.
 #
 # Every clause is a veto, and every clause requires evidence rather than
 # assuming it:
@@ -242,21 +335,38 @@ ios_log_test_activity() {
 #       (A4) established that missing input must never read as the benign case.
 #       Here the benign-for-retry case is "infrastructure flake", so no evidence
 #       means no retry — the run stays red and a human reads the artifact.
-#   (b) The watchdog must have fired: either its out-of-band flag file exists or
-#       its marker is in the evidence log. Positive evidence, produced by our own
-#       watchdog at a moment it could still observe that no test had started.
-#       Without it, "built then silence" is indistinguishable from "killed by the
-#       outer timeout mid-suite". The flag is checked FIRST because it is the
-#       only one of the two a dying child cannot corrupt (see above).
+#   (b) Somebody must have OBSERVED that no test started, in one of three forms:
+#       the watchdog's out-of-band flag file, the watchdog's marker in the
+#       evidence log, or flutter_tools' own `Error waiting for a debug
+#       connection` after the build. The first two are positive evidence
+#       produced by our own watchdog at a moment it could still see that no test
+#       had started; the flag is checked FIRST because it is the one a dying
+#       child cannot corrupt (see above). The third is the SAME observation
+#       spelled by the tool instead of by us: it prints that line only after it
+#       has launched the app and given up waiting for a VM service, i.e. no Dart
+#       code ran, by its own account. Without one of the three, "built then
+#       silence" is indistinguishable from "killed by the outer timeout
+#       mid-suite".
+#
+#       The third form widens nothing: it substitutes for the WITNESS, never for
+#       a clause. (c) still requires the build to have finished — and the
+#       attach-failure search is scoped to the post-build suffix, so a build
+#       failure cannot supply it at all — (d) still requires that no test
+#       started, and (e) still lets any self-reported failure veto. A run that
+#       reached test code and then failed carries a test-start line and a
+#       failure, so it cannot reach this verdict however flutter_tools worded
+#       its exit.
 #   (c) `Xcode build done.` must be present, so this is provably a launch/attach
 #       stall and not a hung or failed BUILD. A build failure is deterministic
 #       and reproducible; retrying it buys nothing and hides it for 10 minutes.
-#   (d) No test activity in the EVIDENCE log. Closes the watchdog/first-test
-#       race: if the suite started in the window between the watchdog's last
-#       look and its kill, the attempt is NOT retried. Scoped to the pre-kill
+#   (d) No test STARTED after the build, in the EVIDENCE log. Closes the
+#       watchdog/first-test race: if the suite started in the window between the
+#       watchdog's last look and its kill, the attempt is NOT retried. Scoped to
+#       the build-done suffix (the reporter's pre-build `loading` line is not a
+#       start — see IOS_TEST_STARTED_RE) and to the pre-kill
 #       snapshot rather than "anywhere", deliberately — `flutter test`'s SIGTERM
 #       handler prints "🎉 0 tests passed." as it dies, which matches
-#       IOS_TEST_ACTIVITY_RE but is teardown noise, not the suite speaking. The
+#       IOS_TEST_STARTED_RE but is teardown noise, not the suite speaking. The
 #       snapshot ends before we signalled, so everything the suite ACTUALLY said
 #       is still in scope and only our own kill's artefacts are excluded. Note
 #       this is why clause (e) below reads BOTH logs: an unambiguous
@@ -278,8 +388,10 @@ ios_log_is_launch_stall() {
   [[ -s "${evidence}" ]] || evidence="${log}"
 
   [[ -s "${evidence}" ]] || return 1
-  if [[ ! -f "${flag}" ]]; then
-    LC_ALL=C grep -aqF -- "${IOS_STALL_MARKER}" < <(_ios_log_decolour "${evidence}") || return 1
+  if [[ ! -f "${flag}" ]] \
+     && ! LC_ALL=C grep -aqF -- "${IOS_STALL_MARKER}" < <(_ios_log_decolour "${evidence}") \
+     && ! ios_log_reports_attach_failure "${evidence}"; then
+    return 1
   fi
   # The build-done evidence is taken from lines that are NOT the watchdog's own.
   # The marker line is free text written by the runner; if it ever came to quote
@@ -287,7 +399,7 @@ ios_log_is_launch_stall() {
   # about itself and a build failure would become retryable. Fixture 8 pins this.
   LC_ALL=C grep -aqF -- "${IOS_BUILD_DONE_MARKER}" \
     < <(_ios_log_decolour "${evidence}" | LC_ALL=C grep -avF -- "${IOS_STALL_MARKER}") || return 1
-  if ios_log_test_activity "${evidence}"; then return 1; fi
+  if ios_log_test_started "${evidence}"; then return 1; fi
   # Clause (e) is checked against the snapshot AND the full log. A suite that
   # reported a real failure vetoes the retry no matter when it said so, and the
   # post-SIGTERM teardown line does not match this predicate, so the extra read
@@ -585,7 +697,7 @@ ios_flake_lib_self_test() {
   # (13) THE SHAPE ONLY drive-log-lib.sh CATCHES. `(setUpAll) [E]` and a bare
   #      `+0 -1:` counter that is NOT at line start (indented, or forwarded with
   #      an `I/flutter (pid):` prefix) miss every signal in
-  #      IOS_TEST_ACTIVITY_RE, which anchors its compact-reporter rule to line
+  #      IOS_TEST_STARTED_RE, which anchors its progress-line rule to line
   #      start. Without this fixture the reuse of drive-log-lib.sh is untested
   #      overlap and could be deleted with every other fixture still green — so
   #      this is what makes clause (e) load-bearing. MUST NOT be retryable.
@@ -731,6 +843,125 @@ ios_flake_lib_self_test() {
   fi
   ios_clear_stall_evidence "${tmp}/flagged-buildfail.log"
 
+  # (17) THE ADMITTED SIGNATURE, SPELLED AS A REAL TRANSCRIPT. Fixture (1) starts
+  #      at the build, which no `flutter test` log does: the expanded reporter's
+  #      `loading <suite>.dart` is line 1 and lands MINUTES before the build
+  #      finishes (green run 35664400984: 23:37:55 vs 23:51:37). While the
+  #      predicate scanned the whole log that line read as the suite speaking, so
+  #      clause (d) vetoed and this exact log — the one the lane exists to
+  #      retry — was classified GENUINE. MUST be retryable.
+  printf '%s\n' \
+    '00:00 +0: loading /Users/runner/work/Haven-App/Haven-App/haven/integration_test/e2e/e2e_combined.dart' \
+    'Running Xcode build...' \
+    'Xcode build done.                                           496.3s' \
+    "$(ios_stall_marker_line 300)" \
+    > "${tmp}/loading-stall.log"
+  if ! ios_log_is_launch_stall "${tmp}/loading-stall.log"; then
+    echo "SELF-TEST FAIL (17): a post-build stall whose transcript carries the" \
+         "reporter's pre-build 'loading' line was classified as GENUINE — a" \
+         "suite LOAD is not a test start" >&2
+    fail=1
+  fi
+
+  # (17b) NEITHER HALF OF "A TEST STARTED" IS DECORATION. Fixture (17) is the
+  #       measured transcript, and either half of the definition alone satisfies
+  #       it — so without this fixture one of them could be deleted with
+  #       everything still green, and the watchdog would go vacuous again the
+  #       next time the SDK moved a literal neither this file nor
+  #       tooling/logscan/policy.toml owns. This log pins both at once:
+  #
+  #         * a progress line BEFORE the build under a subject the suite-load
+  #           rule does not recognise — the window is "since the build", and
+  #           nothing printed before it can be a test starting on a device the
+  #           app has not been installed on yet;
+  #         * a suite LOAD after it — measured at line 1 in every transcript
+  #           (runs 35664400984 and 35690725254 both put it ~11 min ahead of
+  #           `Xcode build done.`), but this predicate must not depend on an
+  #           ordering flutter_tools is free to change, because the cost of
+  #           being wrong is a watchdog that cannot fire at all.
+  #
+  #       Neither is a start, so this MUST be retryable.
+  printf '%s\n' \
+    '00:00 +0: compiling /Users/runner/work/Haven-App/Haven-App/haven/integration_test/e2e/e2e_combined.dart' \
+    'Running Xcode build...' \
+    'Xcode build done.                                           496.3s' \
+    '00:00 +0: loading /Users/runner/work/Haven-App/Haven-App/haven/integration_test/e2e/e2e_combined.dart' \
+    "$(ios_stall_marker_line 300)" \
+    > "${tmp}/loading-both.log"
+  if ! ios_log_is_launch_stall "${tmp}/loading-both.log"; then
+    echo "SELF-TEST FAIL (17b): a post-build stall was classified as GENUINE on" \
+         "the strength of reporter output that started no test — either the" \
+         "build-done window or the suite-load rule has been dropped" >&2
+    fail=1
+  fi
+
+  # (18) CI RUN 35690725254, VERBATIM. flutter_tools said `No tests ran.` and
+  #      that it could not attach, then hung until the outer timeout — so there
+  #      is no flag and no marker, and the verdict rests entirely on the tool's
+  #      own account. MUST be retryable, or this failure keeps costing a lane 30
+  #      unattributed minutes.
+  printf '%s\n' \
+    '00:00 +0: loading /Users/runner/work/Haven-App/Haven-App/haven/integration_test/e2e/e2e_profile_sharing.dart' \
+    'Running Xcode build...' \
+    'Xcode build done.                                           647.3s' \
+    'No tests ran.' \
+    'Error waiting for a debug connection: The log reader failed unexpectedly' \
+    > "${tmp}/attach-failed.log"
+  if ! ios_log_is_launch_stall "${tmp}/attach-failed.log"; then
+    echo "SELF-TEST FAIL (18): flutter_tools' own report that it attached to" \
+         "nothing and ran no test was classified as GENUINE" >&2
+    fail=1
+  fi
+
+  # (19) …AND IT IS NOT A BLANKET RETRY TICKET. Same attach-failure line, but a
+  #      test DID start after the build (flutter_tools can print it while tearing
+  #      a running suite down). Clause (d) must still veto. MUST NOT be
+  #      retryable.
+  printf '%s\n' \
+    'Running Xcode build...' \
+    'Xcode build done.                                           647.3s' \
+    '00:00 +0: (setUpAll)' \
+    'Error waiting for a debug connection: The log reader failed unexpectedly' \
+    > "${tmp}/attach-failed-after-start.log"
+  if ios_log_is_launch_stall "${tmp}/attach-failed-after-start.log"; then
+    echo "SELF-TEST FAIL (19): a suite that HAD started was retried because" \
+         "flutter_tools also reported a failed attach" >&2
+    fail=1
+  fi
+
+  # (20) …and it cannot rescue a BUILD failure either. Differs from (18) by
+  #      exactly the build-done line, and clause (c) is what vetoes. MUST NOT be
+  #      retryable.
+  printf '%s\n' \
+    'Running pod install...' \
+    'Error running pod install' \
+    'Error waiting for a debug connection: The log reader failed unexpectedly' \
+    > "${tmp}/attach-failed-no-build.log"
+  if ios_log_is_launch_stall "${tmp}/attach-failed-no-build.log"; then
+    echo "SELF-TEST FAIL (20): a build-phase failure carrying an attach-failure" \
+         "line was classified as retryable" >&2
+    fail=1
+  fi
+
+  # (20b) THE ATTACH EVIDENCE MUST BE ABOUT THIS BUILD'S LAUNCH. An attach
+  #       failure that PREDATES the build says nothing about the app that was
+  #       installed after it; what followed this build is unattributed silence,
+  #       and fixture (9) is the rule that such silence is never retryable —
+  #       "the log ends after the build" must not become a retry ticket because
+  #       an older line happens to be in the file. Pins the post-build scope of
+  #       ios_log_reports_attach_failure, which clause (c) does not reach here:
+  #       the build DID finish. MUST NOT be retryable.
+  printf '%s\n' \
+    'Error waiting for a debug connection: The log reader failed unexpectedly' \
+    'Running Xcode build...' \
+    'Xcode build done.                                           496.3s' \
+    > "${tmp}/attach-failed-before-build.log"
+  if ios_log_is_launch_stall "${tmp}/attach-failed-before-build.log"; then
+    echo "SELF-TEST FAIL (20b): post-build silence was classified as retryable on" \
+         "the strength of an attach failure reported BEFORE the build" >&2
+    fail=1
+  fi
+
   # --- Gate fixtures — THE WIRING, not the predicate ----------------------
   #
   # The predicate can be perfect and the lane still retry everything, because
@@ -873,9 +1104,12 @@ ios_flake_lib_self_test() {
     echo "ios-flake-lib.sh --self-test: FAILED" >&2
     return 1
   fi
-  echo "ios-flake-lib.sh --self-test: all 19 predicate + 8 gate + 2 recording fixtures passed" \
-       "(the one admitted stall retries; genuine failures, vacuous suites," \
-       "build failures, empty/absent logs and unattributed silence do not)."
+  echo "ios-flake-lib.sh --self-test: all 25 predicate + 8 gate + 2 recording fixtures passed" \
+       "(the one admitted stall retries in both its spellings — our watchdog's" \
+       "and flutter_tools' own failed attach — including when the transcript" \
+       "opens with the reporter's pre-build suite load; genuine failures," \
+       "vacuous suites, build failures, a started suite, empty/absent logs and" \
+       "unattributed silence do not)."
   return 0
 }
 

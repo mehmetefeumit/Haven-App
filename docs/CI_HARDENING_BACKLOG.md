@@ -1503,7 +1503,7 @@ launched.
 | What attempt 1 did | Attempts | Retried? |
 |---|---|---|
 | Failed fast with reporter output naming the failure | 19 | yes, every one |
-| Built, then never emitted a single reporter line, until the attempt timeout | 8 | yes — 4 then went GREEN |
+| Built, then no test ever STARTED — silence until the attempt timeout, or flutter_tools' own `Error waiting for a debug connection` (the second spelling, measured in run 35690725254) | 8 | yes — 4 then went GREEN |
 
 The 19 include `::error::9 tests passed, 1 failed.` (job 89823392716), the FE-2
 member-count `TestFailure` (job 88159861218) and the `set_profile_relays_for_test
@@ -1542,7 +1542,7 @@ outer-timeout SIGKILL, an unparseable verdict — makes attempt 2 exit immediate
 with the original code. Fails closed: absence of evidence is not evidence of a
 flake, which is A4's lesson pointed the other way.
 
-*Gated by two `--self-test`s in `repo-guards.yml`* (19 predicate + 8 gate + 2
+*Gated by two `--self-test`s in `repo-guards.yml`* (25 predicate + 8 gate + 2
 recording fixtures; 7 watchdog fixtures). The watchdog set drives the REAL
 watchdog against a stubbed process and then hands its output to the REAL
 classifier, so the marker one writes and the marker the other requires cannot

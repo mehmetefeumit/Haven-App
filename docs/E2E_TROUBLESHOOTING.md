@@ -1344,6 +1344,72 @@ If the same message appears with the app `running` or `unknown` instead of
 `gone`, none of the above applies: the drive died with its app still there, and
 that is the drive's own failure to explain from its transcript.
 
+## Failure mode 18 — iOS: `No tests ran.` + `Error waiting for a debug connection` after the build
+
+**Symptom.** Any iOS lane. The step log stops dead at `Xcode build done.`, prints
+nothing for the rest of the attempt, and ends on
+`##[warning]Attempt 1 failed. Reason: Timeout of 1800000ms hit`. Attempt 2 then
+refuses immediately: *"The previous attempt's verdict is 'unproven' (attempt did
+not reach classification), which is NOT the one retryable signature"*. The
+uploaded `flutter-ios-test.log` is the only place the reason appears, and it is
+19 lines long:
+
+```
+00:00 +0: loading /Users/runner/work/.../e2e_profile_sharing.dart
+… build output …
+Xcode build done.                                           647.3s
+No tests ran.
+Error waiting for a debug connection: The log reader failed unexpectedly
+```
+
+**What happened** (measured: run 35690725254, job 106630995666
+`e2e_profile / e2e_profile_ios`, 1 red of 42, nothing in the commit touching
+iOS). 05:55:26 attempt 1 starts · 06:10:54 `Xcode build done. 647.3s` · 06:11:30
+the app launches on the simulator (`Runner[…]` in `sim-unified.log`) · the app
+never publishes a VM-service URI, so flutter_tools gives up waiting, prints those
+two lines and — having nothing to attach to and nothing to tear down cleanly —
+does not exit · 06:25:37 the outer `nick-fields/retry` `timeout_minutes: 30`
+kills the attempt. No test code ran at any point. The green run of the same job
+for comparison (35664400984): first test 43 s after the build.
+
+**Why the watchdog did not save it.** It could not fire at all, on any run. The
+first-test watchdog arms at `Xcode build done.` and stands down as soon as the
+suite "spoke", and "spoke" was matched over the WHOLE log — but the expanded
+reporter's first line, `00:00 +0: loading <suite>.dart`, is printed while the
+suite is being LOADED, minutes *before* the build (green run: `loading` 23:37:55,
+`Xcode build done.` 23:51:37). It matched the progress-line rule, so on the first
+poll after arming the watchdog concluded a test was running and exited. The
+classifier's "no test ran" clause was unsatisfiable for the same reason. Second
+defect, independent: `No tests ran.` was itself in the set — the line the
+reporter prints when ZERO tests ran counted as a test running.
+
+**What happens now.** "The suite started" means *a test-start line in the part of
+the log after the `Xcode build done.` marker*, and a suite LOAD is not a start
+(`IOS_TEST_STARTED_RE` / `IOS_SUITE_LOAD_RE` in `tooling/e2e/ci/ios-flake-lib.sh`,
+mirroring `tooling/logscan/policy.toml`'s `proof_of_run_excludes`). So the
+watchdog fires at build-done + `FIRST_TEST_WATCHDOG_SECS` (300 s), kills the
+hung process, leaves its marker, `.stall` flag and `.prekill` snapshot, and the
+attempt is classified instead of timing out anonymously.
+
+**The retry classifier admits two spellings of this one signature**, and both
+still have to satisfy every other clause (the build finished, no test started, no
+failure reported anywhere):
+
+| Evidence | When you see it |
+|---|---|
+| our watchdog's `.stall` flag / `IOS-WATCHDOG: no on-device test started` marker | flutter_tools hangs after the failed attach (the measured case) |
+| flutter_tools' own `Error waiting for a debug connection` after the build | flutter_tools gives up and exits on its own |
+
+Both end as verdict `launch-stall` → the one sanctioned retry. A run that reached
+test code cannot reach either: it carries a test-start line, which vetoes.
+
+**So: is a red here infrastructure or a bug?** Read `flutter-ios-test.log`. No
+test-start line after `Xcode build done.` = the app never attached, i.e.
+infrastructure — the lane retries once, and if the retry also fails to attach,
+the simulator or the runner is the suspect, not the commit. Any line of the form
+`HH:MM +N: <something other than loading>` after the build = a test ran, and
+whatever follows is the product's failure to explain.
+
 ## What these lanes do NOT cover
 
 The iOS simulator keeps the app alive and the VM-service attached, so it does

@@ -125,11 +125,18 @@ source "${SCRIPT_DIR}/ios-flake-lib.sh"
 # shellcheck source=tooling/e2e/ci/logscan-gate.sh
 source "${SCRIPT_DIR}/logscan-gate.sh"
 
-# How long after the Xcode build finishes the on-device suite has to say
-# ANYTHING before the watchdog calls it a launch/attach stall. Measured over 164
-# real attempts, build-done → first reporter line is 32s median, 53s p90, 94s
-# max, so 300s is >3x the worst observed and cannot trip a healthy (if slow)
-# launch. It must also stay well UNDER the caller's per-attempt
+# How long after the Xcode build finishes the on-device suite has to START A
+# TEST before the watchdog calls it a launch/attach stall. Measured over 164 real
+# attempts, build-done → first TEST-START line is 32s median, 53s p90, 94s max,
+# so 300s is >3x the worst observed and cannot trip a healthy (if slow) launch.
+#
+# The first REPORTER line is a different thing and comes much earlier: the
+# expanded reporter prints `00:00 +0: loading <suite>.dart` while the suite is
+# being loaded, i.e. BEFORE the build (measured 13m42s ahead of it in green run
+# 35664400984). Counting that as the suite speaking is what left this watchdog
+# unable to fire at all until CI run 35690725254 exposed it; the predicate now
+# reads only the suffix after the build marker, and a suite load is not a start
+# (ios-flake-lib.sh). It must also stay well UNDER the caller's per-attempt
 # `timeout_minutes` (20-45 min), because a stall that the OUTER timeout kills
 # first is never classified and therefore — by design — never retried.
 #
@@ -200,9 +207,10 @@ spawn_ios_test() {
   # its publish wait was killed at 300 s, misfiled as a launch/attach stall, and
   # retried into the identical kill.
   #
-  # `expanded` writes a line per event, starting with `00:00 +0: <name>` the
-  # moment a test STARTS — which is exactly the event the watchdog needs and is
-  # already the second alternative in IOS_TEST_ACTIVITY_RE. `flutter test
+  # `expanded` writes a line per event, including `00:00 +0: <name>` the moment
+  # a test STARTS — which is exactly the event the watchdog needs, and is what
+  # IOS_TEST_STARTED_RE matches once the reporter's own pre-build `loading
+  # <suite>.dart` line is subtracted from it. `flutter test
   # --help` describes it as preferred "when logging to a file or in continuous
   # integration", which is both of the things this is. The cost is GitHub's
   # collapsible groups; the gain is that the log streams live through the
@@ -221,10 +229,12 @@ spawn_ios_test() {
 # watchdog. Sets `ios_test_rc` for the caller.
 #
 # The watchdog arms only once `Xcode build done.` appears, and from that instant
-# the suite has FIRST_TEST_WATCHDOG_SECS to emit any reporter output. It cannot
-# mask a real failure: it fires only while there is provably NO test activity,
-# and it re-checks both the activity and the process at the deadline so a suite
-# that started in the final poll window is never killed as a stall.
+# the suite has FIRST_TEST_WATCHDOG_SECS to START A TEST — reporter output from
+# BEFORE the build (the suite-load line) does not count, which is the whole
+# reason it can fire at all. It cannot mask a real failure: it fires only while
+# no test has provably started, and it re-checks both that and the process at
+# the deadline so a suite that started in the final poll window is never killed
+# as a stall.
 #
 # It deliberately does NOT bound the BUILD. A build legitimately takes 7-11 min
 # (measured) and a cold cache can take longer, and a hung or failed build is
@@ -261,31 +271,31 @@ run_ios_test_with_watchdog() {
         fi
         continue
       fi
-      # The suite spoke — the test is running; the caller's attempt timeout
+      # A test started — the suite is running; the caller's attempt timeout
       # governs from here, exactly as a post-connect hang does on Android.
       # (`if …; then exit 0; fi` rather than `pred && exit 0` for the same
       # reason run-single-avd-scenario.sh's watchdog uses it: the intent is a
       # branch, not a side effect. Both are errexit-safe — bash exempts every
       # command in an AND-list but the last — so this is style, not a fix.)
-      if ios_log_test_activity "${log}"; then exit 0; fi
+      if ios_log_test_started "${log}"; then exit 0; fi
       waited=$(( waited + WATCHDOG_POLL_SECS ))
       (( waited >= FIRST_TEST_WATCHDOG_SECS )) || continue
       # Deadline. Re-check both facts so a run that just started, or just
       # exited in the last few microseconds, is never mislabelled a stall —
       # the boundary false-positive guard, as on Android.
       #
-      # This activity check and the one above are deliberately REDUNDANT: they
+      # This start check and the one above are deliberately REDUNDANT: they
       # run in the same loop iteration, so removing either alone changes
       # nothing observable and no hermetic fixture can separate them (the
       # window between them is microseconds). Removing BOTH is a real defect —
       # the watchdog would then kill running suites — and that IS covered:
       # fixture W2 fails the moment neither check remains.
       kill -0 "${test_pid}" 2>/dev/null || exit 0
-      if ios_log_test_activity "${log}"; then exit 0; fi
+      if ios_log_test_started "${log}"; then exit 0; fi
       ios_stall_marker_line "${FIRST_TEST_WATCHDOG_SECS}" >> "${log}"
       # Capture the verdict OUT OF BAND, before signalling. Both land after the
       # two re-checks above, so they exist only when the watchdog has positively
-      # observed a live process with no test activity — a suite that failed on
+      # observed a live process with no test started — a suite that failed on
       # its own never reaches here. The snapshot is the evidence the watchdog
       # actually acted on; the flag is the one artefact the dying child has no
       # descriptor to and therefore cannot corrupt.
@@ -471,8 +481,8 @@ scenario_transcript() {
 # over a case somebody deleted, which is how the floor cases added in
 # 2026-09 went in with nothing pinning them.
 # ---------------------------------------------------------------------------
-readonly IOS_SIM_SELF_TEST_FIXTURES=30
-readonly IOS_SIM_WATCHDOG_CASES=9
+readonly IOS_SIM_SELF_TEST_FIXTURES=33
+readonly IOS_SIM_WATCHDOG_CASES=12
 
 run_self_test() {
   # Drive the watchdog on a compressed clock. The deadline constants are
@@ -497,12 +507,28 @@ run_self_test() {
   local real_spawn
   real_spawn="$(declare -f spawn_ios_test)"
 
+  # THE REAL TRANSCRIPT'S FIRST LINE. The expanded reporter prints it while the
+  # suite is being LOADED, minutes before the build finishes (green run
+  # 35664400984: 23:37:55 here, `Xcode build done.` at 23:51:37). Every stub
+  # below emits it, because a stub whose log starts at the build cannot
+  # reproduce the vacuity it caused — while the predicate scanned the whole log
+  # this line stood the watchdog down on its first poll, so the watchdog could
+  # not fire on ANY real run and none of these fixtures could see that. Dynamic
+  # scoping is what carries it into the stubs, the same way W8's SCENARIO_FILE
+  # reaches the shipped spawn_ios_test.
+  local loading='00:00 +0: loading /Users/runner/work/Haven-App/Haven-App/haven/integration_test/e2e/e2e_combined.dart'
+
   ran=$(( ran + 1 ))
-  # (W1) THE ADMITTED FLAKE — build completes, then the suite never speaks.
-  #      The watchdog MUST fire, mark the log, and kill the run, and the REAL
-  #      classifier MUST accept the result as retryable.
+  # (W1) THE ADMITTED FLAKE — build completes, then the suite never starts a
+  #      test. The watchdog MUST fire, mark the log, and kill the run, and the
+  #      REAL classifier MUST accept the result as retryable.
+  #
+  #      This is also the regression pin for the DEAD watchdog: with the
+  #      pre-build load line present, restoring the old whole-log predicate
+  #      makes the watchdog stand down here and this fixture reds.
   spawn_ios_test() {
     {
+      echo "${loading}"
       echo 'Running Xcode build...'
       echo 'Xcode build done.                                           400.0s'
       sleep 20
@@ -525,6 +551,78 @@ run_self_test() {
   fi
 
   ran=$(( ran + 1 ))
+  # (W1b) CI RUN 35690725254, AS IT HAPPENED. flutter_tools failed to attach,
+  #       said so in its own words, and then did NOT exit. `No tests ran.` used
+  #       to be in the activity set, so the watchdog treated the sentence "no
+  #       test ran" as a test running and stood down; the outer 30-minute
+  #       timeout did the killing, the attempt never reached classification, and
+  #       the verdict stayed `unproven` so attempt 2 refused. The watchdog MUST
+  #       fire here, and the verdict MUST be the launch stall.
+  spawn_ios_test() {
+    {
+      echo "${loading}"
+      echo 'Running Xcode build...'
+      echo 'Xcode build done.                                           647.3s'
+      echo 'No tests ran.'
+      echo 'Error waiting for a debug connection: The log reader failed unexpectedly'
+      sleep 20
+    } > "$1" 2>&1 &
+  }
+  run_ios_test_with_watchdog "${log}" >/dev/null 2>&1
+  if ! LC_ALL=C grep -aqF -- "${IOS_STALL_MARKER}" "${log}"; then
+    echo "SELF-TEST FAIL (W1b): the watchdog stood down on 'No tests ran.' — the" \
+         "line flutter_tools prints when NOTHING ran, so the attempt runs into" \
+         "the outer timeout unclassified (CI run 35690725254)" >&2
+    fail=1
+  fi
+  if (( ios_test_rc == 0 )); then
+    echo "SELF-TEST FAIL (W1b): a killed stall reported success" >&2
+    fail=1
+  fi
+  if ! ios_log_is_launch_stall "${log}"; then
+    echo "SELF-TEST FAIL (W1b): a failed attach that ran no test was classified" \
+         "as GENUINE" >&2
+    fail=1
+  fi
+
+  ran=$(( ran + 1 ))
+  # (W1c) THE SAME FAILURE, SPELLED BY THE TOOL AND THEN EXITING. flutter_tools
+  #       is entitled to give up rather than hang, and then the watchdog never
+  #       fires: the process is gone before the deadline, so there is no marker,
+  #       no flag and no snapshot. The verdict rests ENTIRELY on flutter_tools'
+  #       own account of the attach, which is what makes this the fixture that
+  #       reds if that form of clause (b) is dropped.
+  spawn_ios_test() {
+    {
+      echo "${loading}"
+      echo 'Running Xcode build...'
+      echo 'Xcode build done.                                           647.3s'
+      echo 'No tests ran.'
+      echo 'Error waiting for a debug connection: The log reader failed unexpectedly'
+      exit 1
+    } > "$1" 2>&1 &
+  }
+  run_ios_test_with_watchdog "${log}" >/dev/null 2>&1
+  if LC_ALL=C grep -aqF -- "${IOS_STALL_MARKER}" "${log}" \
+     || [[ -f "$(ios_stall_flag_path "${log}")" ]]; then
+    echo "SELF-TEST FAIL (W1c): the watchdog left evidence for a process that" \
+         "had already exited, so this fixture no longer proves the tool's own" \
+         "report carries the verdict on its own" >&2
+    fail=1
+  fi
+  if (( ios_test_rc != 1 )); then
+    echo "SELF-TEST FAIL (W1c): the real exit code was lost (got ${ios_test_rc})" >&2
+    fail=1
+  fi
+  if ! ios_log_is_launch_stall "${log}"; then
+    echo "SELF-TEST FAIL (W1c): flutter_tools reported that it attached to" \
+         "nothing and ran no test, and the attempt was still classified as" \
+         "GENUINE — the same infrastructure failure as W1b, and it must end" \
+         "attributed rather than as an anonymous outer timeout" >&2
+    fail=1
+  fi
+
+  ran=$(( ran + 1 ))
   # (W2) A HEALTHY, SLOW SUITE — it STARTS, then keeps working well past the
   #      watchdog deadline. The watchdog MUST stand down: killing a running
   #      suite at a fixed deadline would be a self-inflicted flake, and it is
@@ -537,10 +635,17 @@ run_self_test() {
   #      before sleeping proves only "a finished test stands the watchdog
   #      down", which is the weaker property and the one that held while this
   #      lane was dying.
+  #
+  #      `(setUpAll)` is what a healthy iOS run actually prints first (green run
+  #      35664400984, 43 s after the build): a synthetic test name from
+  #      test_core, and an ordinary progress-line subject — which is why this
+  #      case is also the proof that a healthy start is never killed, and why
+  #      there is no separate fixture for it.
   spawn_ios_test() {
     {
+      echo "${loading}"
       echo 'Xcode build done.                                           400.0s'
-      echo '00:00 +0: iOS bg-publish: publishes continue across a backgrounding'
+      echo '00:00 +0: (setUpAll)'
       sleep 6
       echo '00:06 +1: All tests passed!'
     } > "$1" 2>&1 &
@@ -557,9 +662,12 @@ run_self_test() {
 
   ran=$(( ran + 1 ))
   # (W3) A GENUINE FAST FAILURE. The watchdog must not touch it, the true exit
-  #      code must survive, and the classifier must refuse to retry it.
+  #      code must survive, and the classifier must refuse to retry it. Spelled
+  #      in the GitHub reporter's shapes; W3b is the same event under the
+  #      reporter this lane actually pins.
   spawn_ios_test() {
     {
+      echo "${loading}"
       echo 'Xcode build done.                                           400.0s'
       echo '::group::❌ (setUpAll) (failed)'
       echo '::error::0 tests passed, 1 failed.'
@@ -577,11 +685,44 @@ run_self_test() {
   fi
 
   ran=$(( ran + 1 ))
+  # (W3b) A GENUINE FAILURE UNDER THE REPORTER THIS LANE PINS. Every iOS lane
+  #       runs `--reporter expanded`, and nothing else here drives a real
+  #       assertion failure through it end to end — W3 is the github reporter's
+  #       shapes, which CI has not emitted since that pin. A test STARTS, fails,
+  #       and the suite exits: the watchdog must not touch it and the verdict
+  #       must be `genuine`, whatever the transcript's opening line says.
+  spawn_ios_test() {
+    {
+      echo "${loading}"
+      echo 'Xcode build done.                                           400.0s'
+      echo '00:00 +0: the kind-0 plane resolved onto the hermetic pool'
+      echo '00:03 +0 -1: the kind-0 plane resolved onto the hermetic pool [E]'
+      echo '00:03 +0 -1: Some tests failed.'
+      exit 1
+    } > "$1" 2>&1 &
+  }
+  run_ios_test_with_watchdog "${log}" >/dev/null 2>&1
+  if LC_ALL=C grep -aqF -- "${IOS_STALL_MARKER}" "${log}"; then
+    echo "SELF-TEST FAIL (W3b): the watchdog fired on a suite that ran and failed" >&2
+    fail=1
+  fi
+  if (( ios_test_rc != 1 )); then
+    echo "SELF-TEST FAIL (W3b): the real exit code was lost (got ${ios_test_rc})" >&2
+    fail=1
+  fi
+  if ios_log_is_launch_stall "${log}"; then
+    echo "SELF-TEST FAIL (W3b): an expanded-reporter test failure was classified" \
+         "as retryable — the reporter every iOS lane pins" >&2
+    fail=1
+  fi
+
+  ran=$(( ran + 1 ))
   # (W4) THE BUILD IS NOT WATCHED. A build that outlives the deadline must NOT
   #      arm the watchdog: a hung or failed build is deterministic, and retrying
   #      it hides it for another ten minutes.
   spawn_ios_test() {
     {
+      echo "${loading}"
       echo 'Running pod install...'
       sleep 6
       echo 'Error running pod install'
@@ -614,6 +755,7 @@ run_self_test() {
   spawn_ios_test() {
     {
       trap 'printf "\n\360\237\216\211 0 tests passed.\n"; exit 1' TERM
+      echo "${loading}"
       echo 'Running Xcode build...'
       echo 'Xcode build done.                                           400.0s'
       sleep 20 & wait
@@ -680,6 +822,7 @@ run_self_test() {
   #      become a retry ticket and the blanket retry is back.
   local orphan="${tmp}/orphan.log"
   {
+    echo "${loading}"
     echo 'Running Xcode build...'
     echo 'Xcode build done.                                           400.0s'
     printf '\n\360\237\216\211 0 tests passed.\n'
@@ -697,6 +840,7 @@ run_self_test() {
   #      would inherit attempt 1's retryable verdict.
   spawn_ios_test() {
     {
+      echo "${loading}"
       echo 'Xcode build done.                                           400.0s'
       echo '::group::❌ (setUpAll) (failed)'
       echo '::error::0 tests passed, 1 failed.'
@@ -1123,8 +1267,12 @@ run_self_test() {
        "$(( IOS_SIM_SELF_TEST_FIXTURES - IOS_SIM_WATCHDOG_CASES ))" \
        "log-privacy-gate)" \
        "(a post-build stall is caught, marked and accepted by the classifier," \
-       "and stays retryable even when the process we kill overwrites the marker" \
-       "on its way out; a running suite, a genuine failure, a slow build, a kill" \
+       "over a transcript that opens the way a real one does — with the" \
+       "reporter's pre-build suite load, which is what the watchdog used to" \
+       "stand down on — and stays retryable even when the process we kill" \
+       "overwrites the marker on its way out, or when flutter_tools reports the" \
+       "failed attach itself and hangs, or reports it and exits; a running" \
+       "suite, a genuine failure under either reporter, a slow build, a kill" \
        "this watchdog did not perform, and a previous attempt's stale verdict" \
        "are all correctly NOT retried; the streaming reporter the whole" \
        "deadline rests on is still passed to flutter test; and the log-privacy" \
@@ -1413,9 +1561,10 @@ if [[ "${TEST_RC}" -ne 0 ]]; then
   if ios_record_failure_verdict "${VERDICT_FILE}" "${LOG_FILE}" "${TEST_RC}"; then
     echo "WARN: iOS e2e scenario '${SCENARIO_FILE}' hit a simulator" \
          "LAUNCH/ATTACH STALL (rc=${TEST_RC}) — the app built and installed but" \
-         "the suite never emitted a single reporter line within" \
-         "${FIRST_TEST_WATCHDOG_SECS}s, so no test code ran. This is the one" \
-         "failure this lane retries; a retry may follow." >&2
+         "no test ever started: either the suite was still silent" \
+         "${FIRST_TEST_WATCHDOG_SECS}s after the build and the watchdog killed" \
+         "it, or flutter_tools reported that it could not attach. This is the" \
+         "one failure this lane retries; a retry may follow." >&2
   fi
   echo "ERROR: iOS e2e scenario '${SCENARIO_FILE}' failed (rc=${TEST_RC})" >&2
   exit "${TEST_RC}"
