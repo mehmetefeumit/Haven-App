@@ -45,7 +45,8 @@ use crate::profiles::{ProfileName, ProfileSpec, WorldShape};
 use crate::rc::{Rc, Verdicts};
 use crate::relay::SimRelay;
 use crate::rig::{
-    sim_magnitude, CapturedLine, DeclareSink, DeviceTag, RelayTag, RigError, SimWorld,
+    sim_magnitude, CapturedLine, DeclareSink, DeviceTag, RelayTag, RigError, SessionStoreUse,
+    SimWorld,
 };
 use crate::scenarios::{Scenario, ScenarioReport, ScenarioWorld};
 use crate::timeline::{self, Snapshot, Timeline};
@@ -137,7 +138,10 @@ async fn run_inner(plan: &RunPlan) -> Result<Rc, Refusal> {
         eprintln!("haven-soak: {}", VerdictError::Unvalidated);
     }
 
-    let measured = Measured::new(started.elapsed());
+    let measured = Measured::new(
+        started.elapsed(),
+        SessionStoreUse::of(outcome.session_store_peak),
+    );
     banner
         .write_to(&dir, Some(measured))
         .map_err(|_| Refusal::Artifact)?;
@@ -247,6 +251,10 @@ async fn drive(plan: &RunPlan, timeline: &Timeline, dir: &Path) -> Result<Outcom
 struct Outcome {
     verdicts: Verdicts,
     violation: Option<Violation>,
+    /// The largest session store any world reached, in bytes. Raw: it is
+    /// compared against the ceiling in process and reaches the banner only as
+    /// a quarter of it.
+    session_store_peak: u64,
 }
 
 /// Drives one run under an already-held capture lease.
@@ -277,6 +285,7 @@ async fn drive_with(
         stopped: false,
         phase_started: tokio::time::Instant::now(),
         active: Vec::new(),
+        session_store_peak: 0,
     };
 
     run.nemesis_phase(&plan.spec.world, plan.schedule.clone(), timeline)
@@ -287,6 +296,7 @@ async fn drive_with(
     Ok(Outcome {
         verdicts: run.verdicts,
         violation: run.first_violation,
+        session_store_peak: run.session_store_peak,
     })
 }
 
@@ -405,6 +415,10 @@ struct Run {
     /// tick. Carried so a snapshot says what was wrong with the world at the
     /// moment the oracle looked, rather than what the schedule held overall.
     active: Vec<ScheduledOp>,
+    /// The largest session store any world of this run has reached, sampled
+    /// as each world ends. A `SQLite` file never shrinks without a vacuum, so
+    /// the end-of-world reading is the world's peak.
+    session_store_peak: u64,
 }
 
 impl Run {
@@ -429,8 +443,24 @@ impl Run {
         // Torn down whatever the walk answered: a world left standing holds a
         // Rule-14 session and the process-wide capture lease with it.
         let walked = self.walk(&mut world, &ops, last, &manifest).await;
+        let guarded = self.note_session_store(&world);
         let torn = teardown_then(world, ()).await;
-        walked.and(torn)
+        walked.and(guarded).and(torn)
+    }
+
+    /// Reads the world's largest session store before it goes, folds the
+    /// rig's own ceiling, and keeps the peak for the banner.
+    ///
+    /// Over the ceiling is rc 3 and nothing else: the sim hit its own guard,
+    /// which says the world grew past what the rig declared it would tolerate
+    /// and nothing about the subject. The reading is a raw count and stays
+    /// one — the banner gets a quarter of the ceiling.
+    fn note_session_store(&mut self, world: &RunWorld) -> Result<(), Refusal> {
+        let bytes = world.session_store_bytes()?;
+        self.session_store_peak = self.session_store_peak.max(bytes);
+        self.verdicts
+            .fold_invariant(SessionStoreUse::of(bytes).rc());
+        Ok(())
     }
 
     /// Walks every tick of the schedule and grades what the world came out as.
@@ -443,7 +473,7 @@ impl Run {
     ) -> Result<(), Refusal> {
         let scheduled_faults = ops
             .iter()
-            .filter(|op| matches!(op.op, Op::Fault { .. }))
+            .filter(|op| matches!(op.op, Op::Fault { .. } | Op::DeviceFault { .. }))
             .count();
         let scheduled_probes = ops.iter().filter(|op| op.op == Op::Probe).count();
         let mut applied_faults = 0_usize;
@@ -469,7 +499,7 @@ impl Run {
             if report.applied == due.len() {
                 applied_faults += due
                     .iter()
-                    .filter(|op| matches!(op.op, Op::Fault { .. }))
+                    .filter(|op| matches!(op.op, Op::Fault { .. } | Op::DeviceFault { .. }))
                     .count();
             }
             if report.probe_requested {
@@ -583,9 +613,10 @@ impl Run {
             row_envelope: 0,
             burst_opened: &[],
             classified: &[],
-            // The schedule's own rounds feed no retention edge: the window is
-            // a scenario's subject, not the background nemesis's.
+            // The schedule's own rounds feed no retention edge and no removal
+            // probe: both are a scenario's subject, not the background nemesis's.
             retention: &[],
+            forward_secrecy: &[],
         };
         let verdict = Invariant::LocationRoundTrip.check(world, &round).await?;
         self.report_oracle(world, Invariant::LocationRoundTrip, verdict)
@@ -619,6 +650,7 @@ impl Run {
             burst_opened: &[],
             classified: &[],
             retention: &[],
+            forward_secrecy: &[],
         };
         for invariant in [
             Invariant::LocationRoundTrip,
@@ -717,8 +749,9 @@ impl Run {
         let graded = self
             .graded(scenario, label, arm, &mut world, &manifest)
             .await;
+        let guarded = self.note_session_store(&world);
         let torn = teardown_then(world, ()).await;
-        graded.and(torn)
+        graded.and(guarded).and(torn)
     }
 
     /// Runs one arm over `world` and folds everything it answered.
@@ -1155,6 +1188,7 @@ mod tests {
             stopped: false,
             phase_started: tokio::time::Instant::now(),
             active: Vec::new(),
+            session_store_peak: 0,
         }
     }
 
@@ -1280,6 +1314,19 @@ mod tests {
         assert!(
             target.exists(),
             "the same phase, unstopped, builds its worlds and seals what they mint"
+        );
+        // The same worlds were measured against the rig's own ceiling before
+        // they went: a guard that read the nemesis world alone would let a
+        // flood arm grow unwatched. Two cheap arms sit far under it, so a
+        // breach here is a stale pin rather than a flood.
+        assert!(
+            running.session_store_peak > 0,
+            "a run that built worlds measured their session stores"
+        );
+        assert!(
+            crate::rig::SessionStoreUse::of(running.session_store_peak).rc() == Rc::Clean
+                && running.verdicts.invariant() == Rc::Clean,
+            "the guard folded nothing into a run that stayed under the ceiling"
         );
         drop(running);
         drop(dir);

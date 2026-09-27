@@ -16,6 +16,8 @@
 
 use std::fmt;
 
+use haven_core::nostr::KIND_GROUP_MESSAGE;
+use nostr::{Event, Kind, TagKind};
 use serde::{Serialize, Serializer};
 use sha2::{Digest, Sha256};
 
@@ -140,6 +142,54 @@ impl Serialize for ByteCap {
     }
 }
 
+/// The class of a server→client `EVENT` frame a plane can withhold.
+///
+/// The one discriminator the rig owns, used by the proxy that drops a class and
+/// by the publish ladder that picks a class's ladder, so the two cannot
+/// diverge. It is the wire's own and the product's: the engine stamps a NIP-40
+/// `expiration` on kind-445 APPLICATION messages and never on a commit or a
+/// proposal (`haven-core/src/nostr/mls/manager.rs`, the `message-retention.v1`
+/// component), so the complement of an application 445 is a commit OR a
+/// proposal — which is why the class is `Handshake`, not `Commit` — and a
+/// welcome is a kind-1059 gift wrap with no expiration at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DropClass {
+    /// A kind-445 application message: a location.
+    Application,
+    /// A kind-445 commit or proposal.
+    Handshake,
+    /// A kind-1059 gift wrap: a welcome.
+    GiftWrap,
+}
+
+impl DropClass {
+    /// The class `event` falls in, or `None` for a frame no class names.
+    #[must_use]
+    pub fn of(event: &Event) -> Option<Self> {
+        if event.kind == Kind::GiftWrap {
+            return Some(Self::GiftWrap);
+        }
+        if event.kind.as_u16() != KIND_GROUP_MESSAGE {
+            return None;
+        }
+        Some(if event.tags.find(TagKind::Expiration).is_some() {
+            Self::Application
+        } else {
+            Self::Handshake
+        })
+    }
+
+    /// The digest discriminant.
+    const fn code(self) -> u8 {
+        match self {
+            Self::Application => 0,
+            Self::Handshake => 1,
+            Self::GiftWrap => 2,
+        }
+    }
+}
+
 /// One thing that can be wrong with a relay.
 ///
 /// Exactly what the scenarios need and nothing speculative: a fault nobody
@@ -164,7 +214,8 @@ pub enum Fault {
     SwallowOk,
     /// Every event is delivered twice.
     DoubleEveryEvent,
-    /// Stored-event pages are delivered newest-first.
+    /// Stored-event pages are delivered in the reverse of the order the
+    /// relay serves them: the store serves newest first, so oldest first.
     ReversePages,
     /// `EOSE` is sent naming a different subscription.
     EoseForAnotherSubscription,
@@ -180,6 +231,11 @@ pub enum Fault {
         /// The largest frame payload the plane will forward.
         max_bytes: ByteCap,
     },
+    /// Every server→client `EVENT` frame of this class is dropped instead of
+    /// written. The relay stores and acknowledges as it always did: the
+    /// partition is between the relay and ONE endpoint, which is what makes it
+    /// a per-device fault and not an outage.
+    DropClass(DropClass),
     /// Everything above is undone.
     Heal,
 }
@@ -201,6 +257,7 @@ impl Fault {
             Self::EoseForAnotherSubscription => "eose-for-another-subscription",
             Self::Inject(_) => "inject",
             Self::RefuseOversize { .. } => "refuse-oversize",
+            Self::DropClass(_) => "drop-class",
             Self::Heal => "heal",
         }
     }
@@ -219,6 +276,7 @@ impl Fault {
             Self::Inject(_) => 9,
             Self::RefuseOversize { .. } => 10,
             Self::Heal => 11,
+            Self::DropClass(_) => 12,
         };
         buf.push(code);
         match self {
@@ -236,6 +294,7 @@ impl Fault {
             Self::RefuseOversize { max_bytes } => {
                 buf.extend_from_slice(&(max_bytes.bytes() as u64).to_be_bytes());
             }
+            Self::DropClass(class) => buf.push(class.code()),
             _ => {}
         }
     }
@@ -300,6 +359,16 @@ pub enum Op {
         /// What happens to it.
         fault: Fault,
     },
+    /// Apply a fault to ONE device's endpoint on one relay plane, leaving the
+    /// plane's canonical endpoint and every other device's alone.
+    DeviceFault {
+        /// Which relay.
+        relay: RelayTag,
+        /// Whose endpoint.
+        device: DeviceTag,
+        /// What happens to it.
+        fault: Fault,
+    },
     /// Do something to one device.
     Device {
         /// Which device.
@@ -318,7 +387,7 @@ impl Op {
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Fault { fault, .. } => fault.label(),
+            Self::Fault { fault, .. } | Self::DeviceFault { fault, .. } => fault.label(),
             Self::Device { op, .. } => op.label(),
             Self::Probe => "probe",
         }
@@ -337,6 +406,16 @@ impl Op {
                 op.encode_into(buf);
             }
             Self::Probe => buf.push(2),
+            Self::DeviceFault {
+                relay,
+                device,
+                fault,
+            } => {
+                buf.push(3);
+                buf.extend_from_slice(&relay.ordinal().to_be_bytes());
+                buf.extend_from_slice(&device.ordinal().to_be_bytes());
+                fault.encode_into(buf);
+            }
         }
     }
 }
@@ -544,6 +623,89 @@ mod tests {
             heal_at: None,
         }]);
         assert_ne!(one.digest(), other.digest());
+    }
+
+    #[test]
+    fn two_faults_that_differ_only_in_their_dropped_class_digest_differently() {
+        let dropping = |class| {
+            Schedule::new(vec![ScheduledOp {
+                tick: 1,
+                op: Op::Fault {
+                    relay: RelayTag::new(0),
+                    fault: Fault::DropClass(class),
+                },
+                heal_at: None,
+            }])
+        };
+        assert_ne!(
+            dropping(DropClass::Application).digest(),
+            dropping(DropClass::Handshake).digest()
+        );
+        assert_ne!(
+            dropping(DropClass::Handshake).digest(),
+            dropping(DropClass::GiftWrap).digest()
+        );
+        // The same class aimed at a device's endpoint is a different op from
+        // the same class aimed at the plane, and two devices are two ops.
+        let aimed = |device| {
+            Schedule::new(vec![ScheduledOp {
+                tick: 1,
+                op: Op::DeviceFault {
+                    relay: RelayTag::new(0),
+                    device: DeviceTag::new(device),
+                    fault: Fault::DropClass(DropClass::Application),
+                },
+                heal_at: None,
+            }])
+        };
+        assert_ne!(aimed(0).digest(), dropping(DropClass::Application).digest());
+        assert_ne!(aimed(0).digest(), aimed(1).digest());
+        assert_eq!(
+            Op::DeviceFault {
+                relay: RelayTag::new(0),
+                device: DeviceTag::new(1),
+                fault: Fault::DropClass(DropClass::GiftWrap),
+            }
+            .label(),
+            "drop-class"
+        );
+    }
+
+    #[test]
+    fn a_frames_class_is_read_off_the_wire_and_names_the_products_own_discriminator() {
+        use nostr::{EventBuilder, Keys, Tag, Timestamp};
+
+        let keys = Keys::generate();
+        let application = EventBuilder::new(Kind::Custom(KIND_GROUP_MESSAGE), "x")
+            .tag(Tag::expiration(Timestamp::from(
+                Timestamp::now().as_secs() + 228,
+            )))
+            .sign_with_keys(&keys)
+            .expect("signs");
+        let handshake = EventBuilder::new(Kind::Custom(KIND_GROUP_MESSAGE), "x")
+            .sign_with_keys(&keys)
+            .expect("signs");
+        let welcome = EventBuilder::new(Kind::GiftWrap, "x")
+            .sign_with_keys(&keys)
+            .expect("signs");
+        let note = EventBuilder::text_note("x")
+            .tag(Tag::expiration(Timestamp::from(
+                Timestamp::now().as_secs() + 228,
+            )))
+            .sign_with_keys(&keys)
+            .expect("signs");
+        assert_eq!(DropClass::of(&application), Some(DropClass::Application));
+        assert_eq!(
+            DropClass::of(&handshake),
+            Some(DropClass::Handshake),
+            "a 445 with no expiration is a commit or a proposal: group history outlives any TTL"
+        );
+        assert_eq!(DropClass::of(&welcome), Some(DropClass::GiftWrap));
+        assert_eq!(
+            DropClass::of(&note),
+            None,
+            "an expiration on a kind no class names does not make it an application message"
+        );
     }
 
     #[test]

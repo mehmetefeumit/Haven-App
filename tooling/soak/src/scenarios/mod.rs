@@ -32,18 +32,24 @@
 //! grows past the PR lane cannot be added without the sum saying so.
 
 pub mod s01_relay_outage;
+pub mod s02_receiver_partition;
+pub mod s03_lost_commit;
 pub mod s04_offline_member;
 pub mod s05_publish_confirm;
 pub mod s06_stuck_row;
 pub mod s09_cursor_poisoning;
+pub mod s10_ten_circles;
 pub mod s11_quiet_circle;
 pub mod s12_key_package_rotation;
 pub mod s13_quarantine;
 pub mod s14_restart_race;
+pub mod s16_storage_growth;
 pub mod s17_closed_prefixes;
 pub mod s18_swallowed_ok;
 pub mod s19_duplicate_reorder;
+pub mod s21_removal_effectiveness;
 pub mod s22_oversized_event;
+pub mod s23_chained_backlog;
 
 use std::fmt;
 use std::time::Duration;
@@ -276,6 +282,12 @@ impl Absence {
 pub enum Scenario {
     /// **S01** — a relay goes away and comes back.
     RelayOutage,
+    /// **S02** — one receiver is partitioned from the relay while a second
+    /// publisher keeps publishing, and recovers what it missed.
+    ReceiverPartition,
+    /// **S03** — a relay forgets a commit before a paused member returns, and
+    /// the member is stranded behind it.
+    LostCommit,
     /// **S04** — a member is away across a span, and comes back.
     OfflineMember,
     /// **S05** — a resolution fails inside the publish→confirm window.
@@ -305,24 +317,41 @@ pub enum Scenario {
     /// **S22** — an event a relay will not take, and the removal that can never
     /// be retried.
     OversizedEvent,
+    /// **S10** — the whole roster: ten circles on one account, one outage
+    /// across all of them.
+    TenCircleRoster,
+    /// **S23** — a device misses two chained commits and never converges
+    /// again. Expected red until C7 is fixed.
+    ChainedBacklog,
+    /// **S16** — durable-storage growth: three floods, three stores, one cap.
+    StorageGrowth,
+    /// **S21** — a removed member stops reading the circle, on both delivery
+    /// paths, and the removal-effectiveness lag is bounded (invariant S8).
+    RemovalEffectiveness,
 }
 
 impl Scenario {
     /// Every scenario this crate runs.
-    pub const REGISTRY: [Self; 13] = [
+    pub const REGISTRY: [Self; 19] = [
         Self::RelayOutage,
+        Self::ReceiverPartition,
+        Self::LostCommit,
         Self::OfflineMember,
         Self::PublishConfirmWindow,
         Self::StuckRow,
         Self::CursorPoisoning,
+        Self::TenCircleRoster,
         Self::QuietCircle,
         Self::KeyPackageRotation,
         Self::HydrationQuarantine,
         Self::RestartRace,
+        Self::StorageGrowth,
         Self::ClosedPrefixes,
         Self::SwallowedOk,
         Self::DuplicateReorder,
+        Self::RemovalEffectiveness,
         Self::OversizedEvent,
+        Self::ChainedBacklog,
     ];
 
     /// The id the profiles, the timeline and `--list-scenarios` spell.
@@ -330,6 +359,8 @@ impl Scenario {
     pub const fn id(self) -> &'static str {
         match self {
             Self::RelayOutage => "S01",
+            Self::ReceiverPartition => "S02",
+            Self::LostCommit => "S03",
             Self::OfflineMember => "S04",
             Self::PublishConfirmWindow => "S05",
             Self::StuckRow => "S06",
@@ -342,6 +373,10 @@ impl Scenario {
             Self::SwallowedOk => "S18",
             Self::DuplicateReorder => "S19",
             Self::OversizedEvent => "S22",
+            Self::TenCircleRoster => "S10",
+            Self::ChainedBacklog => "S23",
+            Self::StorageGrowth => "S16",
+            Self::RemovalEffectiveness => "S21",
         }
     }
 
@@ -350,6 +385,8 @@ impl Scenario {
     pub const fn title(self) -> &'static str {
         match self {
             Self::RelayOutage => "RELAY OUTAGE",
+            Self::ReceiverPartition => "RECEIVER PARTITION BEHIND A SECOND PUBLISHER",
+            Self::LostCommit => "LOST COMMIT BEHIND A RELAY WIPE",
             Self::OfflineMember => "MEMBER OFFLINE ACROSS A SPAN",
             Self::PublishConfirmWindow => "PUBLISH-CONFIRM WINDOW",
             Self::StuckRow => "STUCK CONVERGENCE ROW",
@@ -362,6 +399,10 @@ impl Scenario {
             Self::SwallowedOk => "SWALLOWED ACKNOWLEDGEMENT",
             Self::DuplicateReorder => "DUPLICATE AND REORDERED DELIVERY",
             Self::OversizedEvent => "OVERSIZED COMMIT AND WELCOME",
+            Self::TenCircleRoster => "TEN-CIRCLE ROSTER",
+            Self::ChainedBacklog => "CHAINED-COMMIT BACKLOG",
+            Self::StorageGrowth => "DURABLE-STORAGE GROWTH",
+            Self::RemovalEffectiveness => "BOUNDED REMOVAL EFFECTIVENESS",
         }
     }
 
@@ -370,6 +411,8 @@ impl Scenario {
     pub const fn arms(self) -> &'static [Arm] {
         match self {
             Self::RelayOutage => &s01_relay_outage::ARMS,
+            Self::ReceiverPartition => &s02_receiver_partition::ARMS,
+            Self::LostCommit => &s03_lost_commit::ARMS,
             Self::OfflineMember => &s04_offline_member::ARMS,
             Self::PublishConfirmWindow => &s05_publish_confirm::ARMS,
             Self::StuckRow => &s06_stuck_row::ARMS,
@@ -382,6 +425,10 @@ impl Scenario {
             Self::SwallowedOk => &s18_swallowed_ok::ARMS,
             Self::DuplicateReorder => &s19_duplicate_reorder::ARMS,
             Self::OversizedEvent => &s22_oversized_event::ARMS,
+            Self::TenCircleRoster => &s10_ten_circles::ARMS,
+            Self::ChainedBacklog => &s23_chained_backlog::ARMS,
+            Self::StorageGrowth => &s16_storage_growth::ARMS,
+            Self::RemovalEffectiveness => &s21_removal_effectiveness::ARMS,
         }
     }
 
@@ -429,6 +476,8 @@ impl Scenario {
         let started = tokio::time::Instant::now();
         let outcome = match self {
             Self::RelayOutage => s01_relay_outage::run(world, arm, tick).await?,
+            Self::ReceiverPartition => s02_receiver_partition::run(world, arm, tick).await?,
+            Self::LostCommit => s03_lost_commit::run(world, arm, tick).await?,
             Self::OfflineMember => s04_offline_member::run(world, arm, tick).await?,
             Self::PublishConfirmWindow => s05_publish_confirm::run(world, arm, tick).await?,
             Self::StuckRow => s06_stuck_row::run(world, arm, tick).await?,
@@ -441,8 +490,23 @@ impl Scenario {
             Self::SwallowedOk => s18_swallowed_ok::run(world, arm, tick).await?,
             Self::DuplicateReorder => s19_duplicate_reorder::run(world, arm, tick).await?,
             Self::OversizedEvent => s22_oversized_event::run(world, arm, tick).await?,
+            Self::TenCircleRoster => s10_ten_circles::run(world, arm, tick).await?,
+            Self::ChainedBacklog => s23_chained_backlog::run(world, arm, tick).await?,
+            Self::StorageGrowth => s16_storage_growth::run(world, arm, tick).await?,
+            Self::RemovalEffectiveness => s21_removal_effectiveness::run(world, arm, tick).await?,
         };
-        Ok(ScenarioReport {
+        Ok(self.report(world, arm, outcome, started))
+    }
+
+    /// Grades what an arm's body produced against its floor.
+    pub(crate) fn report<T: TimelineSink, L: LogDrain>(
+        self,
+        world: &ScenarioWorld<T, L>,
+        arm: &Arm,
+        outcome: ArmOutcome,
+        started: tokio::time::Instant,
+    ) -> ScenarioReport {
+        ScenarioReport {
             scenario: self,
             arm: arm.label,
             graded: outcome.graded,
@@ -450,7 +514,7 @@ impl Scenario {
             observed: outcome.observed,
             elapsed: started.elapsed(),
             deadline: arm.deadline(outcome.tick, &shape_of(world)),
-        })
+        }
     }
 }
 
@@ -642,6 +706,7 @@ pub(crate) const fn round<'a>(
         burst_opened,
         classified,
         retention: &[],
+        forward_secrecy: &[],
     }
 }
 

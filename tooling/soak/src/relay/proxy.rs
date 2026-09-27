@@ -17,7 +17,7 @@
 //! stays where it is.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
@@ -30,11 +30,11 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 
-use crate::nemesis::types::ClosedPrefix;
+use crate::nemesis::types::{ClosedPrefix, DropClass};
 use crate::relay::forge::{take_frame, take_http_head, text_frame, Frame};
 use crate::relay::ledger::Ledger;
 use crate::relay::policies::{closed_message, oversize_message};
-use crate::rig::{poll_until, RigError, Step};
+use crate::rig::{poll_until, DeviceTag, RigError, Step};
 
 /// How long `Up` waits for its own port back.
 ///
@@ -57,8 +57,10 @@ const INJECT_DEPTH: usize = 16;
 /// client never opened is an ordinary sight on a real relay.
 const FOREIGN_SUBSCRIPTION: &str = "a-subscription-this-client-never-opened";
 
-/// One `EVENT` frame held back from a page, with the event it carries.
-type HeldEvent = (Vec<u8>, EventId);
+/// One `EVENT` frame held back from a page, with the event it carries and its
+/// class — read when it is held, because the frame is not re-parsed when a
+/// later `EOSE` releases it.
+type HeldEvent = (Vec<u8>, EventId, Option<DropClass>);
 
 /// Pages held back under [`FaultState::reverse_pages`], PER SUBSCRIPTION.
 ///
@@ -75,8 +77,9 @@ fn hold(held: &mut HeldPages, subscription: SubscriptionId, event: HeldEvent) {
     held.entry(subscription).or_default().push(event);
 }
 
-/// Takes the page `subscription`'s `EOSE` releases, newest first, leaving every
-/// other subscription's alone.
+/// Takes the page `subscription`'s `EOSE` releases, in the reverse of the
+/// order the relay served it (oldest first), leaving every other
+/// subscription's alone.
 fn release(held: &mut HeldPages, subscription: &SubscriptionId) -> Vec<HeldEvent> {
     let mut page = held.remove(subscription).unwrap_or_default();
     page.reverse();
@@ -101,13 +104,27 @@ pub struct FaultState {
     pub closed: Option<ClosedPrefix>,
     /// The largest `EVENT` this plane forwards, when one is capped.
     pub max_event_bytes: Option<usize>,
+    /// The class of `EVENT` frame this endpoint withholds, when one is.
+    pub drop_class: Option<DropClass>,
 }
 
-/// The listening half of a plane.
+impl FaultState {
+    /// Whether an `EVENT` frame of `class` is withheld by this state.
+    fn drops(self, class: Option<DropClass>) -> bool {
+        self.drop_class.is_some() && self.drop_class == class
+    }
+}
+
+/// The listening half of a plane: one endpoint, canonical or a device's own.
 pub struct Proxy {
     url: String,
     addr: SocketAddr,
     target: String,
+    /// Whose endpoint this is. `None` is the plane's canonical one — circles,
+    /// key packages and catch-up dial it — and the ledger records every
+    /// delivery under this key, which is the device dimension a partition arm
+    /// reads back.
+    device: Option<DeviceTag>,
     state: Arc<RwLock<FaultState>>,
     ledger: Ledger,
     /// Bumped to cancel every live connection. Held behind an `Arc` so the
@@ -125,7 +142,11 @@ impl Proxy {
     ///
     /// [`RigError::Core`] with [`Step::ApplyFault`] if the endpoint cannot be
     /// bound — a plane with no address is not a plane.
-    pub async fn start(relay_url: &str, ledger: Ledger) -> Result<Self, RigError> {
+    pub async fn start(
+        relay_url: &str,
+        ledger: Ledger,
+        device: Option<DeviceTag>,
+    ) -> Result<Self, RigError> {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
             .map_err(|_| RigError::Core(Step::ApplyFault))?;
@@ -141,6 +162,7 @@ impl Proxy {
                 .trim_start_matches("ws://")
                 .trim_end_matches('/')
                 .to_string(),
+            device,
             state: Arc::new(RwLock::new(FaultState::default())),
             ledger,
             generation: Arc::new(generation),
@@ -233,35 +255,24 @@ impl Proxy {
             .map_err(|_| RigError::Core(Step::ApplyFault))
     }
 
-    /// Writes `forged` onto every subscription whose filter it matches.
-    ///
-    /// The relay's own delivery rule, not a guess: a relay puts an event on
-    /// every open subscription whose filter matches it, so an injection that
-    /// named one chosen by the harness would either be discarded by the client
-    /// (an unknown subscription) or delivered somewhere no relay would put it.
-    /// The event is never saved, which is the whole point — an injected event
-    /// is one an adversary put on the wire, and a later catch-up sweep must not
-    /// find it in the plane's pages.
+    /// Writes `forged` onto this endpoint's live connections — on each one,
+    /// once per subscription in `matching` that THAT connection opened — and
+    /// never saves it.
     ///
     /// # Errors
     ///
-    /// [`RigError::Core`] with [`Step::ApplyFault`] if no open subscription
-    /// matches it or nothing is connected: an injection nobody received did not
-    /// happen, and a bound derived from a fault that never fired is a fiction.
-    pub fn inject_event(&self, forged: &Event) -> Result<(), RigError> {
-        let matching = self.ledger.subscriptions_matching(forged);
-        if matching.is_empty() {
-            return Err(RigError::Core(Step::ApplyFault));
-        }
-        // Recorded once per injection, not once per frame: an arm asks the
-        // plane to forge ONE event, and it is the event — not the delivery —
-        // it later has to be able to name.
-        self.ledger.note_injected(forged.id);
+    /// [`RigError::Core`] with [`Step::ApplyFault`] if nothing is connected
+    /// here: an injection nobody received did not happen.
+    pub fn broadcast_event(
+        &self,
+        forged: &Event,
+        matching: &[SubscriptionId],
+    ) -> Result<(), RigError> {
         for subscription_id in matching {
             self.inject
                 .send(
                     RelayMessage::Event {
-                        subscription_id: Cow::Owned(subscription_id),
+                        subscription_id: Cow::Borrowed(subscription_id),
                         event: Cow::Borrowed(forged),
                     }
                     .as_json(),
@@ -273,6 +284,7 @@ impl Proxy {
 
     fn serve_on(&mut self, listener: TcpListener) {
         let target = self.target.clone();
+        let device = self.device;
         let state = Arc::clone(&self.state);
         let ledger = self.ledger.clone();
         let generation = Arc::clone(&self.generation);
@@ -282,6 +294,7 @@ impl Proxy {
                 tokio::spawn(serve(
                     client,
                     target.clone(),
+                    device,
                     Arc::clone(&state),
                     ledger.clone(),
                     generation.subscribe(),
@@ -308,6 +321,7 @@ impl Drop for Proxy {
 async fn serve(
     client: TcpStream,
     target: String,
+    device: Option<DeviceTag>,
     state: Arc<RwLock<FaultState>>,
     ledger: Ledger,
     mut cancel: watch::Receiver<u64>,
@@ -319,6 +333,13 @@ async fn serve(
     let (from_client, to_client) = client.into_split();
     let (from_relay, to_relay) = relay.into_split();
     let (forged_tx, forged_rx) = mpsc::channel(FORGED_DEPTH);
+    // The subscriptions THIS connection opened. An injection is delivered by
+    // the relay's rule — onto every open subscription its filter matches — but
+    // a subscription is open on one connection, and the pool on the other end
+    // notifies an event ONCE per id: a forged frame carrying somebody else's
+    // subscription id would burn that one notification on a REQ this client
+    // never opened, and the engine behind it would never see the injection.
+    let opened: Arc<Mutex<HashSet<SubscriptionId>>> = Arc::default();
 
     let mut upstream = tokio::spawn(pump_to_relay(
         from_client,
@@ -326,9 +347,16 @@ async fn serve(
         Arc::clone(&state),
         ledger.clone(),
         forged_tx,
+        Arc::clone(&opened),
     ));
+    let connection = Connection {
+        device,
+        state,
+        ledger,
+        opened,
+    };
     let mut downstream = tokio::spawn(pump_to_client(
-        from_relay, to_client, state, ledger, forged_rx, inject,
+        from_relay, to_client, connection, forged_rx, inject,
     ));
 
     tokio::select! {
@@ -348,6 +376,7 @@ async fn pump_to_relay(
     state: Arc<RwLock<FaultState>>,
     ledger: Ledger,
     forged: mpsc::Sender<String>,
+    opened: Arc<Mutex<HashSet<SubscriptionId>>>,
 ) {
     if !forward_head(&mut from_client, &mut to_relay).await {
         return;
@@ -355,7 +384,8 @@ async fn pump_to_relay(
     let mut buf = Vec::new();
     loop {
         while let Some(frame) = take_frame(&mut buf) {
-            if !forward_from_client(&frame, &mut to_relay, &state, &ledger, &forged).await {
+            if !forward_from_client(&frame, &mut to_relay, &state, &ledger, &forged, &opened).await
+            {
                 return;
             }
         }
@@ -370,8 +400,7 @@ async fn pump_to_relay(
 async fn pump_to_client(
     mut from_relay: OwnedReadHalf,
     mut to_client: OwnedWriteHalf,
-    state: Arc<RwLock<FaultState>>,
-    ledger: Ledger,
+    connection: Connection,
     mut forged: mpsc::Receiver<String>,
     mut inject: broadcast::Receiver<String>,
 ) {
@@ -382,9 +411,15 @@ async fn pump_to_client(
     }
     let mut buf = Vec::new();
     let mut held = HeldPages::new();
+    let endpoint = Endpoint {
+        device: connection.device,
+        state: &connection.state,
+        ledger: &connection.ledger,
+        opened: &connection.opened,
+    };
     loop {
         while let Some(frame) = take_frame(&mut buf) {
-            if !deliver(&frame, &mut to_client, &state, &ledger, &mut held).await {
+            if !deliver(&frame, &mut to_client, endpoint, &mut held).await {
                 return;
             }
         }
@@ -396,13 +431,13 @@ async fn pump_to_client(
             }
             message = forged.recv() => {
                 let Some(json) = message else { return };
-                if !write_forged(&json, &mut to_client, &ledger).await {
+                if !write_forged(&json, &mut to_client, endpoint).await {
                     return;
                 }
             }
             message = inject.recv() => match message {
                 Ok(json) => {
-                    if !write_forged(&json, &mut to_client, &ledger).await {
+                    if !write_forged(&json, &mut to_client, endpoint).await {
                         return;
                     }
                 }
@@ -444,6 +479,7 @@ async fn forward_from_client(
     state: &RwLock<FaultState>,
     ledger: &Ledger,
     forged: &mpsc::Sender<String>,
+    opened: &Mutex<HashSet<SubscriptionId>>,
 ) -> bool {
     if frame.is_text() {
         if let Ok(message) = ClientMessage::from_json(frame.payload().as_ref()) {
@@ -493,6 +529,10 @@ async fn forward_from_client(
                             .await
                             .is_ok();
                     }
+                    opened
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .insert(subscription_id);
                     if faults.cross_eose
                         && forged
                             .send(
@@ -507,6 +547,12 @@ async fn forward_from_client(
                         return false;
                     }
                 }
+                ClientMessage::Close(subscription_id) => {
+                    opened
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .remove(subscription_id.as_ref());
+                }
                 _ => {}
             }
         }
@@ -514,16 +560,49 @@ async fn forward_from_client(
     to_relay.write_all(frame.bytes()).await.is_ok()
 }
 
+/// What one connection's client-facing pump owns: the same four things
+/// [`Endpoint`] borrows, held for the life of the socket.
+struct Connection {
+    device: Option<DeviceTag>,
+    state: Arc<RwLock<FaultState>>,
+    ledger: Ledger,
+    opened: Arc<Mutex<HashSet<SubscriptionId>>>,
+}
+
+/// The client-facing side of one connection: whose endpoint it is, what is
+/// wrong with it, and where its frames are recorded.
+#[derive(Clone, Copy)]
+struct Endpoint<'a> {
+    device: Option<DeviceTag>,
+    state: &'a RwLock<FaultState>,
+    ledger: &'a Ledger,
+    /// The subscriptions this connection opened and has not closed.
+    opened: &'a Mutex<HashSet<SubscriptionId>>,
+}
+
+impl Endpoint<'_> {
+    fn faults(self) -> FaultState {
+        *self.state.read().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn opened(self, subscription_id: &SubscriptionId) -> bool {
+        self.opened
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(subscription_id)
+    }
+}
+
 async fn deliver(
     frame: &Frame,
     to_client: &mut OwnedWriteHalf,
-    state: &RwLock<FaultState>,
-    ledger: &Ledger,
+    endpoint: Endpoint<'_>,
     held: &mut HeldPages,
 ) -> bool {
+    let ledger = endpoint.ledger;
     if frame.is_text() {
         if let Ok(message) = RelayMessage::from_json(frame.payload().as_ref()) {
-            let faults = *state.read().unwrap_or_else(PoisonError::into_inner);
+            let faults = endpoint.faults();
             match message {
                 RelayMessage::Ok {
                     event_id,
@@ -545,19 +624,21 @@ async fn deliver(
                     subscription_id,
                     event,
                 } => {
+                    let class = DropClass::of(&event);
                     if faults.reverse_pages {
                         hold(
                             held,
                             subscription_id.into_owned(),
-                            (frame.bytes().to_vec(), event.id),
+                            (frame.bytes().to_vec(), event.id, class),
                         );
                         return true;
                     }
-                    return write_event(to_client, frame.bytes(), event.id, faults, ledger).await;
+                    return write_event(to_client, frame.bytes(), (event.id, class), endpoint)
+                        .await;
                 }
                 RelayMessage::EndOfStoredEvents(subscription_id) => {
-                    for (bytes, event_id) in release(held, subscription_id.as_ref()) {
-                        if !write_event(to_client, &bytes, event_id, faults, ledger).await {
+                    for (bytes, event_id, class) in release(held, subscription_id.as_ref()) {
+                        if !write_event(to_client, &bytes, (event_id, class), endpoint).await {
                             return false;
                         }
                     }
@@ -600,15 +681,37 @@ fn oversize(event: &Event, faults: FaultState) -> bool {
 }
 
 /// Writes a forged frame and records it exactly as a relay-sent one would be.
-async fn write_forged(json: &str, to_client: &mut OwnedWriteHalf, ledger: &Ledger) -> bool {
+///
+/// An injected `EVENT` is subject to the endpoint's dropped class like any
+/// other: the partition is between the relay's side of the proxy and this
+/// socket, and a frame the plane composed crosses the same socket.
+///
+/// And it is written only for a subscription THIS connection opened: the plane
+/// broadcasts one frame per matching subscription to every connection, and a
+/// frame naming a subscription some other connection holds is one the client
+/// on this socket never asked for — worse, a pool notifies an event once per
+/// id, so that frame would spend the notification the client's own
+/// subscription was owed.
+async fn write_forged(json: &str, to_client: &mut OwnedWriteHalf, endpoint: Endpoint<'_>) -> bool {
+    let ledger = endpoint.ledger;
+    let message = RelayMessage::from_json(json).ok();
+    if let Some(RelayMessage::Event {
+        subscription_id,
+        event,
+    }) = &message
+    {
+        if !endpoint.opened(subscription_id) || endpoint.faults().drops(DropClass::of(event)) {
+            return true;
+        }
+    }
     if !write(to_client, &text_frame(json.as_bytes())).await {
         return false;
     }
-    match RelayMessage::from_json(json) {
-        Ok(RelayMessage::Closed { message, .. }) => ledger.note_closed(message.into_owned()),
-        Ok(RelayMessage::Notice(text)) => ledger.note_notice(text.into_owned()),
-        Ok(RelayMessage::EndOfStoredEvents(_)) => ledger.note_eose(),
-        Ok(RelayMessage::Ok {
+    match message {
+        Some(RelayMessage::Closed { message, .. }) => ledger.note_closed(message.into_owned()),
+        Some(RelayMessage::Notice(text)) => ledger.note_notice(text.into_owned()),
+        Some(RelayMessage::EndOfStoredEvents(_)) => ledger.note_eose(),
+        Some(RelayMessage::Ok {
             event_id,
             status,
             message,
@@ -616,25 +719,34 @@ async fn write_forged(json: &str, to_client: &mut OwnedWriteHalf, ledger: &Ledge
         // An injected `EVENT` is recorded as a delivery like any other: it
         // really went out, and the ledger is the record of what the client was
         // sent, not of who composed it.
-        Ok(RelayMessage::Event { event, .. }) => ledger.note_delivered(event.id),
+        Some(RelayMessage::Event { event, .. }) => {
+            ledger.note_delivered(endpoint.device, event.id);
+        }
         _ => {}
     }
     true
 }
 
+/// Writes one `EVENT` frame towards the client — twice under a doubling fault,
+/// never under a fault dropping its class — and records what went out.
 async fn write_event(
     to_client: &mut OwnedWriteHalf,
     bytes: &[u8],
-    event_id: EventId,
-    faults: FaultState,
-    ledger: &Ledger,
+    (event_id, class): (EventId, Option<DropClass>),
+    endpoint: Endpoint<'_>,
 ) -> bool {
+    let faults = endpoint.faults();
+    if faults.drops(class) {
+        // Not recorded: the frame never went out, and a ledger that counted
+        // it would hand the partition arm the delivery it is asserting away.
+        return true;
+    }
     let copies = if faults.double_events { 2 } else { 1 };
     for _ in 0..copies {
         if !write(to_client, bytes).await {
             return false;
         }
-        ledger.note_delivered(event_id);
+        endpoint.ledger.note_delivered(endpoint.device, event_id);
     }
     true
 }
@@ -645,14 +757,35 @@ async fn write(to_client: &mut OwnedWriteHalf, bytes: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{hold, release, HeldPages};
+    use super::{hold, release, FaultState, HeldEvent, HeldPages};
     use nostr::{EventId, SubscriptionId};
 
-    fn an_event(byte: u8) -> (Vec<u8>, EventId) {
+    fn an_event(byte: u8) -> HeldEvent {
         (
             vec![byte],
             EventId::from_slice(&[byte; 32]).expect("32 bytes is an event id"),
+            None,
         )
+    }
+
+    #[test]
+    fn a_state_drops_exactly_the_class_it_was_armed_with() {
+        use crate::nemesis::types::DropClass;
+
+        let state = FaultState {
+            drop_class: Some(DropClass::Application),
+            ..FaultState::default()
+        };
+        assert!(state.drops(Some(DropClass::Application)));
+        assert!(!state.drops(Some(DropClass::Handshake)));
+        assert!(
+            !state.drops(None),
+            "a frame no class names is never dropped, whatever class is armed"
+        );
+        assert!(
+            !FaultState::default().drops(Some(DropClass::Application)),
+            "an unarmed state drops nothing, and `None == None` must not read as a match"
+        );
     }
 
     #[test]

@@ -149,6 +149,10 @@ fn every_finding() -> Vec<Finding> {
         Finding::RetentionEdgeRefused { device, circle },
         Finding::RetentionWindowOverrun { device, circle },
         Finding::RetentionEdgesIncomplete,
+        Finding::RemovalReadable { device, circle },
+        Finding::RemovalProbeShortCircuited { device, circle },
+        Finding::RemovalProbeInconclusive { device, circle },
+        Finding::RemovalProbesIncomplete,
         Finding::UnaccountedOutcome,
         Finding::UnnamedRow,
         Finding::NothingClassified,
@@ -159,7 +163,7 @@ fn every_finding() -> Vec<Finding> {
 }
 
 /// The number of `Finding` variants, pinned.
-const FINDING_VARIANTS: usize = 23;
+const FINDING_VARIANTS: usize = 27;
 
 /// A distinct ordinal per `Finding` variant.
 ///
@@ -193,6 +197,10 @@ const fn variant_index(finding: &Finding) -> usize {
         Finding::NotQuiescent(_) => 20,
         Finding::BacklogUnsettled { .. } => 21,
         Finding::FloorUnmet(_) => 22,
+        Finding::RemovalReadable { .. } => 23,
+        Finding::RemovalProbeShortCircuited { .. } => 24,
+        Finding::RemovalProbeInconclusive { .. } => 25,
+        Finding::RemovalProbesIncomplete => 26,
     }
 }
 

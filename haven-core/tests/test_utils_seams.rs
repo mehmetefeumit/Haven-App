@@ -7,12 +7,14 @@
 //! `SQLCipher` database — none of them plants a row to "reach" the state it
 //! asserts.
 //!
-//! Five are READ seams, and the sixth is not: `set_stored_message_write_fault_
-//! for_test` MUTATES a live database so a harness can make a write the engine
-//! performs mid-call fail. It is listed last and marked, because "a harness can
-//! see state the product does not expose" is not a true description of it.
+//! Six are READ seams; two are not. `set_stored_message_write_fault_for_test`
+//! MUTATES a live database so a harness can make a write the engine performs
+//! mid-call fail, and `forge_future_header_445_for_test` SEALS a crafted event
+//! under the group key (a member's outbound power, not a reader's). Both are
+//! listed last and marked, because "a harness can see state the product does not
+//! expose" is not a true description of either.
 //!
-//! The six seams and what each is for:
+//! The eight seams and what each is for:
 //!
 //! 1. `SessionManager::process_event_typed_for_test` — one ingest of one event
 //!    that keeps BOTH pre-authentication screens and hands back the engine's own
@@ -36,6 +38,16 @@
 //!    aborted between the event buffer and the durable row. Unlike the other
 //!    five it changes what the engine does rather than revealing it, which is
 //!    why it is armed and disarmed around one call and never left in place.
+//! 7. `SessionManager::convergence_buffer_len_for_test` — a count of the
+//!    engine's uncapped future-epoch convergence buffer (mdk#757), the store
+//!    `gating_input_count` deliberately cannot see. It is the only instrument a
+//!    flood scenario has to watch that buffer grow.
+//! 8. `SessionManager::forge_future_header_445_for_test` — the one OUTBOUND
+//!    seam: it seals a kind-445 whose outer layer a co-member peels while its
+//!    cleartext inner header claims a future epoch. A relay plane cannot mint
+//!    this (it holds no group key); only a member can, so the sealing lives at
+//!    the session. It is a member's forging power, not a reader's, which is why
+//!    it is marked here beside the write-fault seam.
 //!
 //! # Rule 15 over this file
 //!
@@ -878,5 +890,249 @@ async fn the_injection_seam_refuses_a_database_the_engine_never_wrote() {
     assert!(
         delete_openmls_group_state_for_test(&no_schema, &key, &group).is_err(),
         "and a delete against it must not report success"
+    );
+}
+
+// ── Seam 7: the convergence-buffer count ─────────────────────────────────────
+
+/// The count starts at zero, grows by one when a co-member's future-header
+/// forgery is buffered, and drains once the tip catches up to the forged epoch.
+///
+/// The forgery is minted through seam 8 (`forge_future_header_445_for_test`),
+/// which is the only honest way to reach this store: it is the one wire shape
+/// that grows the engine's uncapped convergence buffer (mdk#757), and a planted
+/// row would prove nothing about whether the engine really buffers it.
+#[tokio::test]
+async fn the_convergence_count_grows_on_a_buffered_future_header_and_drains_at_the_tip() {
+    let c = two_member_circle("conv buffer").await;
+    let tip = c.bob.manager.group_epoch(&c.mls_group_id).await.unwrap();
+    assert_eq!(
+        c.bob
+            .manager
+            .session()
+            .convergence_buffer_len_for_test(&c.mls_group_id)
+            .await
+            .expect("read the buffer count"),
+        0,
+        "a healthy circle buffers nothing"
+    );
+
+    let forged = c
+        .alice
+        .manager
+        .session()
+        .forge_future_header_445_for_test(&c.mls_group_id, tip + 3)
+        .await
+        .expect("alice seals a future-header 445");
+    let Ok(screened) = c
+        .bob
+        .manager
+        .session()
+        .process_event_typed_for_test(&forged)
+        .await
+    else {
+        panic!("a co-member-sealed forgery must not fail the ingest outright");
+    };
+    let ScreenedIngest::Ingested(effects) = screened else {
+        panic!("a peelable forgery passes both pre-authentication screens");
+    };
+    assert!(
+        matches!(effects.outcome, IngestOutcome::Buffered { .. }),
+        "a future-epoch application message is buffered, never delivered or dropped"
+    );
+    assert_eq!(
+        c.bob
+            .manager
+            .session()
+            .convergence_buffer_len_for_test(&c.mls_group_id)
+            .await
+            .expect("read the buffer count"),
+        1,
+        "the future-epoch row is in the convergence buffer this count exists to watch"
+    );
+
+    // The real chain arriving: three relay-list commits raise Bob's tip past the
+    // forged row's epoch, and a row that is no longer FUTURE leaves the count.
+    for relay in [
+        "wss://a.example.com",
+        "wss://b.example.com",
+        "wss://c.example.com",
+    ] {
+        let commit = commit_relay_update(&c.alice, &c.mls_group_id, relay).await;
+        c.bob
+            .manager
+            .decrypt_location(&commit)
+            .await
+            .expect("bob applies the commit");
+    }
+    assert!(
+        c.bob.manager.group_epoch(&c.mls_group_id).await.unwrap() >= tip + 3,
+        "bob's tip must reach the forged row's epoch"
+    );
+    assert_eq!(
+        c.bob
+            .manager
+            .session()
+            .convergence_buffer_len_for_test(&c.mls_group_id)
+            .await
+            .expect("read the buffer count"),
+        0,
+        "a row is no longer future once the tip catches up, so the count drains"
+    );
+}
+
+/// The negative half, required (`review_rig` §2.1): an event the device cannot peel
+/// is retained in the CAPPED `PeelDeferred` store, which projects to nothing —
+/// so the convergence count stays at zero while that other store fills.
+///
+/// Without this the count could silently be watching the wrong store, and a
+/// bounded `PeelDeferred` curve would be reported as a #757 result.
+#[tokio::test]
+async fn an_unpeelable_event_fills_peel_deferred_and_leaves_the_convergence_count_zero() {
+    let c = two_member_circle("peel deferred").await;
+    // A well-formed kind-445 routed at the circle whose content is valid base64
+    // of more than the minimum bytes but is no ChaCha20 seal Bob holds: it
+    // reaches the engine, peel-fails, and is retained as a raw PeelDeferred row.
+    let undecryptable = EventBuilder::new(Kind::Custom(445), "A".repeat(40))
+        .tags([Tag::custom(
+            TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::H)),
+            [hex::encode(c.nostr_group_id)],
+        )])
+        .sign_with_keys(&Keys::generate())
+        .expect("sign");
+
+    let Ok(screened) = c
+        .bob
+        .manager
+        .session()
+        .process_event_typed_for_test(&undecryptable)
+        .await
+    else {
+        panic!("a peel failure is an outcome, not an ingest error");
+    };
+    let ScreenedIngest::Ingested(effects) = screened else {
+        panic!("a well-formed envelope passes both pre-auth screens and reaches the engine");
+    };
+    assert!(
+        matches!(
+            effects.outcome,
+            IngestOutcome::Stale {
+                reason: StaleReason::PeelFailed
+            }
+        ),
+        "an event the device cannot peel is retained as PeelDeferred, reported PeelFailed"
+    );
+    assert_eq!(
+        c.bob
+            .manager
+            .session()
+            .convergence_buffer_len_for_test(&c.mls_group_id)
+            .await
+            .expect("read the buffer count"),
+        0,
+        "a PeelDeferred row is raw transport, not openmls-wire, so the convergence \
+         count never sees it — the count watches the #757 buffer alone"
+    );
+}
+
+#[test]
+fn convergence_buffer_len_is_gated_by_its_own_test_utils_attribute() {
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/nostr/mls/manager.rs"),
+    )
+    .expect("read the manager module");
+    let declaration = source
+        .find("pub async fn convergence_buffer_len_for_test")
+        .expect("the seam is declared here");
+    let gate = source[..declaration]
+        .rfind("#[cfg(any(test, feature = \"test-utils\"))]")
+        .expect("and it carries a gate");
+    assert!(
+        !source[gate..declaration].contains("pub "),
+        "the gate must be the seam's OWN attribute, not one belonging to an earlier item"
+    );
+}
+
+// ── Seam 8: the outbound future-header seal ──────────────────────────────────
+
+/// The seal is peelable by a co-member at the current epoch, and its buffering
+/// turns on the FUTURE inner header alone: a seal at the current epoch is a
+/// genuine message the engine applies.
+///
+/// The negative half is the proof the seam edits the epoch where the engine
+/// reads it: if it did not, a current-epoch seal and a future one would behave
+/// alike.
+#[tokio::test]
+async fn the_forge_seam_buffers_a_future_header_and_applies_a_current_one() {
+    let c = two_member_circle("forge seam").await;
+    let tip = c.alice.manager.group_epoch(&c.mls_group_id).await.unwrap();
+
+    let future = c
+        .alice
+        .manager
+        .session()
+        .forge_future_header_445_for_test(&c.mls_group_id, tip + 5)
+        .await
+        .expect("seal a future header");
+    // The seal is application-shaped on the wire: kind 445 WITH a NIP-40
+    // expiration, exactly as a real location — so a wire classifier that reads
+    // the absence of an expiration as a commit (DropClass::of) classes it
+    // Application, not Handshake.
+    assert_eq!(future.kind, Kind::Custom(445), "the seal is a kind-445");
+    assert!(
+        future.tags.find(nostr::TagKind::Expiration).is_some(),
+        "the seal must carry a NIP-40 expiration, or it reads as a commit on the wire"
+    );
+    let Ok(ScreenedIngest::Ingested(effects)) = c
+        .bob
+        .manager
+        .session()
+        .process_event_typed_for_test(&future)
+        .await
+    else {
+        panic!("a co-member-peelable forgery passes pre-authentication and reaches the engine");
+    };
+    assert!(
+        matches!(effects.outcome, IngestOutcome::Buffered { .. }),
+        "the outer layer peeled (a co-member sealed it) and the future inner header buffered it"
+    );
+
+    let current = c
+        .alice
+        .manager
+        .session()
+        .forge_future_header_445_for_test(&c.mls_group_id, tip)
+        .await
+        .expect("seal at the current epoch");
+    let Ok(ScreenedIngest::Ingested(effects)) = c
+        .bob
+        .manager
+        .session()
+        .process_event_typed_for_test(&current)
+        .await
+    else {
+        panic!("a co-member-peelable message passes pre-authentication and reaches the engine");
+    };
+    assert!(
+        matches!(effects.outcome, IngestOutcome::Processed),
+        "a current-epoch seal is a real message the engine applies, not a buffered one"
+    );
+}
+
+#[test]
+fn forge_future_header_is_gated_by_its_own_test_utils_attribute() {
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/nostr/mls/manager.rs"),
+    )
+    .expect("read the manager module");
+    let declaration = source
+        .find("pub async fn forge_future_header_445_for_test")
+        .expect("the seam is declared here");
+    let gate = source[..declaration]
+        .rfind("#[cfg(any(test, feature = \"test-utils\"))]")
+        .expect("and it carries a gate");
+    assert!(
+        !source[gate..declaration].contains("pub "),
+        "the gate must be the seam's OWN attribute, not one belonging to an earlier item"
     );
 }

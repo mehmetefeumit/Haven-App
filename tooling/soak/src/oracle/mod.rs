@@ -7,14 +7,28 @@
 //!
 //! # The registry is exhaustive, and deliberately short
 //!
-//! [`Invariant::REGISTRY`] is every oracle this crate grades: O1, O2, O4, O5 and
-//! O6. **O3 (forward secrecy) is NOT here, and there is no placeholder for it.**
-//! It needs a per-member commit drop — a device whose `OpenMLS` group is still
-//! active while the removal commit is withheld from it — and no scenario
-//! produces that state yet; an entry that could never run would report coverage
-//! this crate does not have, which is worse than the absence. The same goes for
-//! PLAN §2.1's safety invariants S4 (wire privacy) and S9 (kind-445 nonce
-//! uniqueness): both want relay-ledger evidence the ledger does not keep.
+//! [`Invariant::REGISTRY`] is every oracle this crate grades: O1, O2, O3, O4, O5
+//! and O6. PLAN §2.1's safety invariants S4 (wire privacy) and S9 (kind-445
+//! nonce uniqueness) are still absent by construction: both want relay-ledger
+//! evidence the ledger does not keep, and an entry that could never run would
+//! report coverage this crate does not have.
+//!
+//! **O3 (removal unreadability) is here**, and S21's `removal-unreadability` is
+//! what produces the state it grades: a removed member fed post-removal probes
+//! on BOTH delivery paths — the commit `Delivered` (its leaf inactive, every
+//! later 445 `Stale{SelfEvicted}`) and `Withheld` (its group still active, so a
+//! peel is genuinely attempted and fails `Stale{PeelFailed}`, and the row it
+//! leaves must never resolve). O3 grades the promise Haven can keep — "removed
+//! and they stop reading you" — and NOT the RFC 9420 §12.4 forward-secrecy
+//! property (a Remove's `UpdatePath` blanks the leaf). That property is
+//! openmls's, tested upstream, and is unreachable from Haven's code: the
+//! evictee's engine refuses after eviction (two `SelfEvicted` sites) and cannot
+//! peel without the new epoch's exporter secret, so `PeelFailed` on the withheld
+//! path is what ANY behind member sees and cannot distinguish a broken Remove.
+//! §12.4 is the basis O3 relies on, never what the soak measures. A withheld
+//! probe that answered `SelfEvicted` means the commit leaked, which is why this
+//! oracle rejects it, and why S21's arm holds `DropClass::Handshake` for its
+//! whole length.
 //!
 //! **O4 (retention window) is here**, and S04's `offline-past-retention` is what
 //! produces the state it grades: a device that crossed more epochs than the
@@ -92,6 +106,27 @@ pub enum Invariant {
     /// an unrecovered removal-bearing staged commit every read accessor answers
     /// cheerfully about a group that can no longer send.
     SendPathLiveness,
+    /// **O3** — after a removal, a removed member does not READ the circle, on
+    /// BOTH delivery paths: with the commit DELIVERED its engine refuses every
+    /// later 445 `Stale{SelfEvicted}`, and with the commit WITHHELD it cannot
+    /// peel one (`Stale{PeelFailed}`) and the row it leaves never resolves.
+    ///
+    /// Graded from the probes S21 fed — a pre-removal baseline that MUST decrypt
+    /// and post-removal probes that MUST NOT, paired by `(device, circle)` — for
+    /// the reason O4 and O5 are: the subject is a probe's DISPOSITION, and one
+    /// event is ingested exactly once.
+    ///
+    /// **What O3 does NOT prove.** This is post-removal UNREADABILITY, not the
+    /// RFC 9420 §12.4 forward-secrecy property (a Remove's `UpdatePath` blanks
+    /// the leaf so the new epoch secret is unreachable). That property is
+    /// openmls's, tested upstream, and is not reachable from Haven's code: an
+    /// evictee that never received the commit has no epoch-N+1 exporter secret
+    /// whether or not the `UpdatePath` was correct, so `PeelFailed` on the
+    /// withheld path is what ANY behind member sees and cannot distinguish a
+    /// broken Remove. O3 tests the promise Haven can keep — "removed and they
+    /// stop reading you" — and cites §12.4 as the basis it RELIES on, never as
+    /// something the soak measures.
+    RemovalUnreadability,
     /// **O4** — ciphertext older than the engine's retention window fails
     /// everywhere; ciphertext at the window's edge still succeeds. BOTH edges.
     ///
@@ -116,11 +151,12 @@ pub enum Invariant {
 }
 
 impl Invariant {
-    /// Every oracle this crate grades. See the module docs for why O3 is not
-    /// among them.
-    pub const REGISTRY: [Self; 5] = [
+    /// Every oracle this crate grades. See the module docs for the two invariants
+    /// (S4, S9) still absent by construction.
+    pub const REGISTRY: [Self; 6] = [
         Self::LocationRoundTrip,
         Self::SendPathLiveness,
+        Self::RemovalUnreadability,
         Self::RetentionWindow,
         Self::Undecryptable,
         Self::Quiescence,
@@ -132,6 +168,7 @@ impl Invariant {
         match self {
             Self::LocationRoundTrip => "O1",
             Self::SendPathLiveness => "O2",
+            Self::RemovalUnreadability => "O3",
             Self::RetentionWindow => "O4",
             Self::Undecryptable => "O5",
             Self::Quiescence => "O6",
@@ -144,6 +181,7 @@ impl Invariant {
         match self {
             Self::LocationRoundTrip => "LOCATION ROUND-TRIP",
             Self::SendPathLiveness => "SEND-PATH LIVENESS",
+            Self::RemovalUnreadability => "REMOVAL UNREADABILITY",
             Self::RetentionWindow => "RETENTION WINDOW",
             Self::Undecryptable => "UNDECRYPTABLE ACCOUNTED",
             Self::Quiescence => "QUIESCENCE",
@@ -168,6 +206,7 @@ impl Invariant {
         match self {
             Self::LocationRoundTrip => location_round_trip(world, round).await,
             Self::SendPathLiveness => send_path_liveness(world, round).await,
+            Self::RemovalUnreadability => Ok(removal_unreadability_holds(round)),
             Self::RetentionWindow => Ok(retention_window_holds(round)),
             Self::Undecryptable => Ok(undecryptable_accounted(round)),
             Self::Quiescence => quiescence_holds(world, round).await,
@@ -328,6 +367,37 @@ pub enum Finding {
     /// The round fed no edge on one side or the other, so O4 would grade half
     /// a promise: "both edges" is the whole of it.
     RetentionEdgesIncomplete,
+    /// A removed member READ the circle after removal: a post-removal probe
+    /// decrypted, carried the round's token, or its withheld row resolved.
+    RemovalReadable {
+        /// Who could still read after removal.
+        device: DeviceTag,
+        /// In which circle.
+        circle: CircleTag,
+    },
+    /// A WITHHELD-path removal probe answered `SelfEvicted`, so the removal
+    /// commit leaked to the evictee and the peel was short-circuited by MDK's
+    /// `!is_active()` gate: the arm did not hold the commit back, so its verdicts
+    /// say nothing about the withheld path it meant to test.
+    RemovalProbeShortCircuited {
+        /// Whose probe.
+        device: DeviceTag,
+        /// In which circle.
+        circle: CircleTag,
+    },
+    /// A removal probe produced neither its path's expected refusal nor a read:
+    /// some other outcome (a commit gap, a duplicate, a defect, a missing
+    /// terminal read …), so the arm did not produce O3's condition.
+    RemovalProbeInconclusive {
+        /// Whose probe.
+        device: DeviceTag,
+        /// In which circle.
+        circle: CircleTag,
+    },
+    /// The round did not feed, for some `(device, circle)` pair, a decrypting
+    /// pre-removal baseline AND at least one post-removal probe, so O3 would
+    /// grade half a promise.
+    RemovalProbesIncomplete,
     /// An event's disposition is one the classifier cannot account for.
     UnaccountedOutcome,
     /// A past-epoch disposition could not be resolved because the harness did
@@ -374,6 +444,10 @@ impl Finding {
             Self::RetentionEdgeRefused { .. } => "retention-edge-refused",
             Self::RetentionWindowOverrun { .. } => "retention-window-overrun",
             Self::RetentionEdgesIncomplete => "retention-edges-incomplete",
+            Self::RemovalReadable { .. } => "removal-readable",
+            Self::RemovalProbeShortCircuited { .. } => "removal-probe-short-circuited",
+            Self::RemovalProbeInconclusive { .. } => "removal-probe-inconclusive",
+            Self::RemovalProbesIncomplete => "removal-probes-incomplete",
             Self::UnaccountedOutcome => "unaccounted-outcome",
             Self::UnnamedRow => "unnamed-row",
             Self::NothingClassified => "nothing-classified",
@@ -398,6 +472,7 @@ impl Finding {
             | Self::UnnamedRow
             | Self::NothingClassified
             | Self::RetentionEdgesIncomplete
+            | Self::RemovalProbesIncomplete
             | Self::NotQuiescent(_)
             | Self::FloorUnmet(_) => Vec::new(),
             Self::DeliveryEvidenceLost { to } => vec![to.to_string()],
@@ -416,6 +491,9 @@ impl Finding {
             | Self::ProposalUncommitted { device, circle }
             | Self::RetentionEdgeRefused { device, circle }
             | Self::RetentionWindowOverrun { device, circle }
+            | Self::RemovalReadable { device, circle }
+            | Self::RemovalProbeShortCircuited { device, circle }
+            | Self::RemovalProbeInconclusive { device, circle }
             | Self::SendRefused { device, circle, .. } => {
                 vec![device.to_string(), circle.to_string()]
             }
@@ -446,6 +524,7 @@ impl Finding {
             | Self::SendRefused { .. }
             | Self::RetentionEdgeRefused { .. }
             | Self::RetentionWindowOverrun { .. }
+            | Self::RemovalReadable { .. }
             | Self::UnaccountedOutcome
             | Self::NotQuiescent(_)
             | Self::BacklogUnsettled { .. } => Rc::ViolationOrLeak,
@@ -454,6 +533,9 @@ impl Finding {
             | Self::NothingProbed
             | Self::NothingClassified
             | Self::RetentionEdgesIncomplete
+            | Self::RemovalProbeShortCircuited { .. }
+            | Self::RemovalProbeInconclusive { .. }
+            | Self::RemovalProbesIncomplete
             | Self::FloorUnmet(_) => Rc::Unusable,
         }
     }
@@ -515,6 +597,20 @@ impl fmt::Display for Finding {
             Self::RetentionEdgesIncomplete => {
                 f.write_str("the round fed only one side of the retention window")
             }
+            Self::RemovalReadable { device, circle } => {
+                write!(f, "a removed member still read the circle ({device}, {circle})")
+            }
+            Self::RemovalProbeShortCircuited { device, circle } => write!(
+                f,
+                "a withheld-path removal probe self-evicted, so the commit leaked ({device}, {circle})"
+            ),
+            Self::RemovalProbeInconclusive { device, circle } => write!(
+                f,
+                "a removal probe produced neither its refusal nor a read ({device}, {circle})"
+            ),
+            Self::RemovalProbesIncomplete => {
+                f.write_str("a removal pair fed no decrypting baseline and post-removal probe")
+            }
             Self::UnaccountedOutcome => f.write_str("an ingest outcome has no account"),
             Self::UnnamedRow => {
                 f.write_str("a past-epoch row was not named, so a branch loss is undetermined")
@@ -575,6 +671,13 @@ pub struct Round<'a> {
     /// [`Round::with_retention`], and an empty slice is the declaration that
     /// this round tested no edge rather than a term somebody forgot.
     pub retention: &'a [RetentionEdge],
+    /// The removal probes the arm fed this round — O3's whole subject.
+    ///
+    /// Empty for every round but S21's `removal-unreadability`, exactly as
+    /// `retention` is empty for every round but S04's: an arm attaches its own
+    /// with [`Round::with_forward_secrecy`], and an empty slice declares that
+    /// this round tested no removal rather than a term somebody forgot.
+    pub forward_secrecy: &'a [RemovalProbe],
 }
 
 impl<'a> Round<'a> {
@@ -584,6 +687,85 @@ impl<'a> Round<'a> {
         self.retention = retention;
         self
     }
+
+    /// The same round with the removal probes an arm fed attached.
+    #[must_use]
+    pub const fn with_forward_secrecy(mut self, forward_secrecy: &'a [RemovalProbe]) -> Self {
+        self.forward_secrecy = forward_secrecy;
+        self
+    }
+}
+
+/// When, relative to a removal, one O3 probe was fed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemovalStage {
+    /// Minted at the pre-removal epoch and fed BEFORE the removal — the baseline
+    /// that MUST decrypt, so the peel is proven to be genuinely attempted.
+    Before,
+    /// Minted at a post-removal epoch and fed to the evictee, which MUST NOT
+    /// read it (decrypt it or recover the round's token).
+    After,
+}
+
+/// Whether the removal commit reached the evictee, which decides the EXACT
+/// refusal a post-removal probe must produce.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemovalPath {
+    /// The commit was delivered: the evictee's own leaf is inactive, so every
+    /// later 445 short-circuits to `Stale{SelfEvicted}` before any peel.
+    Delivered,
+    /// The commit was withheld: the evictee's group is still active, so a peel
+    /// is genuinely attempted and fails `Stale{PeelFailed}` for want of the new
+    /// epoch's exporter secret — the path where the stored row's fate matters.
+    Withheld,
+}
+
+/// The evictee's stored row for a WITHHELD `After` probe.
+///
+/// Read through the stored-row probe seam after the arm's closing round: the
+/// "not yet" vs "never" distinction that `PeelFailed` alone cannot make (a
+/// `PeelFailed` row is retained `PeelDeferred`, not terminal).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemovalRow {
+    /// Not a withheld `After` probe, so no terminal read applies.
+    NotApplicable,
+    /// Still buffered `PeelDeferred`: the evictee never read it.
+    StillDeferred,
+    /// Retired terminal (the engine dropped it `Failed`): never readable.
+    Retired,
+    /// Resolved to a live/applied row: the evictee read past its removal — a
+    /// [`Finding::RemovalReadable`], the leak the terminal read exists to catch.
+    Resolved,
+}
+
+/// One probe an S21 removal arm fed to the evictee, and what its ingest made of
+/// it — O3's unit of evidence, mirroring [`RetentionEdge`] for O4.
+///
+/// Probes are graded in `(device, circle)` pairs: a `Before` from one pair and
+/// an `After` from another never combine. The evictee's `OpenMLS` group is kept
+/// ACTIVE across a `Withheld` removal (its commit withheld), so a withheld
+/// `After` probe's peel is genuinely attempted rather than short-circuited to
+/// `SelfEvicted`; a withheld probe that answered `SelfEvicted` means the commit
+/// leaked, which [`Finding::RemovalProbeShortCircuited`] rejects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RemovalProbe {
+    /// The evictee.
+    pub device: DeviceTag,
+    /// In which circle.
+    pub circle: CircleTag,
+    /// When, relative to the removal, this probe was fed.
+    pub stage: RemovalStage,
+    /// Whether the removal commit reached the evictee, which sets the exact
+    /// refusal an `After` probe must produce.
+    pub path: RemovalPath,
+    /// What the evictee's ingest made of it.
+    pub outcome: undecryptable::Verdict,
+    /// Whether the read content carried THIS round's `ProbeToken`. A `Before`
+    /// probe must; an `After` probe must not.
+    pub carried_token: bool,
+    /// The stored-row read after the arm's closing round, for a WITHHELD
+    /// `After` probe; [`RemovalRow::NotApplicable`] otherwise.
+    pub terminal: RemovalRow,
 }
 
 /// One ciphertext fed at a known epoch distance below its reader's tip, and
@@ -1050,6 +1232,108 @@ fn retention_window() -> u64 {
     u64::try_from(haven_core::nostr::mls::DEFAULT_MAX_PAST_EPOCHS).unwrap_or(u64::MAX)
 }
 
+/// O3: a removed member does not READ the circle after its removal, on both
+/// delivery paths, from the probes the arm fed.
+///
+/// Graded from the arm's own ingests rather than by ingesting here, for the
+/// reason O4 and O5 are: the subject is a probe's DISPOSITION, and one event may
+/// be ingested exactly once. Probes are grouped into `(device, circle)` pairs;
+/// each pair needs a decrypting `Before` baseline and at least one `After`, and
+/// every `After` must be its path's EXACT refusal — `Delivered` →
+/// `Stale{SelfEvicted}`, `Withheld` → `Stale{PeelFailed}` with a stored row that
+/// never resolves. A read (`Applied`, or the round's token recovered, or a
+/// withheld row that resolved) is [`Finding::RemovalReadable`] (rc 1); anything
+/// that is neither the expected refusal nor a read did not produce O3's
+/// condition ([`Finding::RemovalProbeInconclusive`], rc 3).
+fn removal_unreadability_holds(round: &Round<'_>) -> Verdict {
+    let probes = round.forward_secrecy;
+    if probes.is_empty() {
+        return Verdict::Failed(Finding::RemovalProbesIncomplete);
+    }
+    // Unique (device, circle) pairs, in first-seen order — no HashMap needed and
+    // the order is the arm's own.
+    let mut pairs: Vec<(DeviceTag, CircleTag)> = Vec::new();
+    for probe in probes {
+        if !pairs.contains(&(probe.device, probe.circle)) {
+            pairs.push((probe.device, probe.circle));
+        }
+    }
+    for (device, circle) in pairs {
+        let of_pair = probes
+            .iter()
+            .filter(|p| p.device == device && p.circle == circle);
+        // A decrypting, token-carrying baseline, or the refusals prove nothing:
+        // the evictee may simply never have been able to read this circle.
+        let baseline_ok = of_pair.clone().any(|p| {
+            p.stage == RemovalStage::Before
+                && p.outcome == undecryptable::Verdict::Applied
+                && p.carried_token
+        });
+        let afters: Vec<&RemovalProbe> =
+            of_pair.filter(|p| p.stage == RemovalStage::After).collect();
+        if !baseline_ok || afters.is_empty() {
+            return Verdict::Failed(Finding::RemovalProbesIncomplete);
+        }
+        for after in afters {
+            // A read is the violation, whatever framed it.
+            if after.outcome == undecryptable::Verdict::Applied || after.carried_token {
+                return Verdict::Failed(Finding::RemovalReadable { device, circle });
+            }
+            match after.path {
+                RemovalPath::Delivered => {
+                    // The commit reached the evictee: its leaf is inactive, so
+                    // the only correct refusal is SelfEvicted. A PeelFailed here
+                    // means the commit did not actually land — inconclusive.
+                    if after.outcome != undecryptable::Verdict::SelfEvicted {
+                        return Verdict::Failed(Finding::RemovalProbeInconclusive {
+                            device,
+                            circle,
+                        });
+                    }
+                }
+                RemovalPath::Withheld => match after.outcome {
+                    undecryptable::Verdict::PeelFailed => {
+                        // "Not yet" vs "never": PeelFailed retains a PeelDeferred
+                        // row, so the terminal read must show it never resolved.
+                        match after.terminal {
+                            RemovalRow::Resolved => {
+                                return Verdict::Failed(Finding::RemovalReadable {
+                                    device,
+                                    circle,
+                                });
+                            }
+                            RemovalRow::StillDeferred | RemovalRow::Retired => {}
+                            RemovalRow::NotApplicable => {
+                                return Verdict::Failed(Finding::RemovalProbeInconclusive {
+                                    device,
+                                    circle,
+                                });
+                            }
+                        }
+                    }
+                    // SelfEvicted on the withheld path means the commit leaked.
+                    undecryptable::Verdict::SelfEvicted => {
+                        return Verdict::Failed(Finding::RemovalProbeShortCircuited {
+                            device,
+                            circle,
+                        });
+                    }
+                    // CommitGap, Duplicate, Expired, Defect, PeelDeferredCapped,
+                    // Routing, Quarantined, Fork, … — the arm did not produce its
+                    // condition.
+                    _ => {
+                        return Verdict::Failed(Finding::RemovalProbeInconclusive {
+                            device,
+                            circle,
+                        });
+                    }
+                },
+            }
+        }
+    }
+    Verdict::Holds
+}
+
 /// O4: both edges of the retention window, from the edges the arm fed.
 ///
 /// Graded from the arm's own ingests rather than by ingesting here, for the
@@ -1121,17 +1405,14 @@ mod tests {
             burst_opened: &[],
             classified: &[],
             retention: &[],
+            forward_secrecy: &[],
         }
     }
 
     #[test]
-    fn the_registry_is_the_five_oracles_this_crate_grades_and_no_placeholders() {
+    fn the_registry_is_the_six_oracles_this_crate_grades_and_no_placeholders() {
         let ids: Vec<&str> = Invariant::REGISTRY.iter().map(|i| i.id()).collect();
-        assert_eq!(ids, ["O1", "O2", "O4", "O5", "O6"]);
-        // O3 is absent BY CONSTRUCTION, not merely unimplemented: the enum has
-        // no arm for it, so nothing can register one without an implementation
-        // the compiler checks.
-        assert!(!ids.contains(&"O3"));
+        assert_eq!(ids, ["O1", "O2", "O3", "O4", "O5", "O6"]);
     }
 
     fn an_edge(distance: u64, outcome: undecryptable::Verdict) -> RetentionEdge {
@@ -1217,6 +1498,254 @@ mod tests {
             );
             assert_eq!(retention_window_holds(&round).rc(), Rc::Unusable);
         }
+    }
+
+    fn a_probe(
+        stage: RemovalStage,
+        path: RemovalPath,
+        outcome: undecryptable::Verdict,
+        carried_token: bool,
+        terminal: RemovalRow,
+    ) -> RemovalProbe {
+        RemovalProbe {
+            device: DeviceTag::new(2),
+            circle: CircleTag::new(match path {
+                RemovalPath::Delivered => 0,
+                RemovalPath::Withheld => 1,
+            }),
+            stage,
+            path,
+            outcome,
+            carried_token,
+            terminal,
+        }
+    }
+
+    fn before(path: RemovalPath) -> RemovalProbe {
+        a_probe(
+            RemovalStage::Before,
+            path,
+            undecryptable::Verdict::Applied,
+            true,
+            RemovalRow::NotApplicable,
+        )
+    }
+
+    #[test]
+    fn o3_holds_on_a_mixed_delivered_and_withheld_world() {
+        // One pair per path: Delivered refuses SelfEvicted, Withheld refuses
+        // PeelFailed with a row that never resolved.
+        let probes = [
+            before(RemovalPath::Delivered),
+            a_probe(
+                RemovalStage::After,
+                RemovalPath::Delivered,
+                undecryptable::Verdict::SelfEvicted,
+                false,
+                RemovalRow::NotApplicable,
+            ),
+            before(RemovalPath::Withheld),
+            a_probe(
+                RemovalStage::After,
+                RemovalPath::Withheld,
+                undecryptable::Verdict::PeelFailed,
+                false,
+                RemovalRow::StillDeferred,
+            ),
+            a_probe(
+                RemovalStage::After,
+                RemovalPath::Withheld,
+                undecryptable::Verdict::PeelFailed,
+                false,
+                RemovalRow::Retired,
+            ),
+        ];
+        let mut round = empty_round();
+        round.forward_secrecy = &probes;
+        assert_eq!(removal_unreadability_holds(&round), Verdict::Holds);
+    }
+
+    #[test]
+    fn o3_fails_readable_when_a_removed_member_reads_or_the_withheld_row_resolves() {
+        let mut round = empty_round();
+
+        // An Applied After on the withheld path.
+        let applied = [
+            before(RemovalPath::Withheld),
+            a_probe(
+                RemovalStage::After,
+                RemovalPath::Withheld,
+                undecryptable::Verdict::Applied,
+                false,
+                RemovalRow::NotApplicable,
+            ),
+        ];
+        round.forward_secrecy = &applied;
+        assert_eq!(
+            removal_unreadability_holds(&round),
+            Verdict::Failed(Finding::RemovalReadable {
+                device: DeviceTag::new(2),
+                circle: CircleTag::new(1),
+            })
+        );
+        assert_eq!(
+            removal_unreadability_holds(&round).rc(),
+            Rc::ViolationOrLeak
+        );
+
+        // A PeelFailed After that nonetheless carried the round's token.
+        let token_leaked = [
+            before(RemovalPath::Withheld),
+            a_probe(
+                RemovalStage::After,
+                RemovalPath::Withheld,
+                undecryptable::Verdict::PeelFailed,
+                true,
+                RemovalRow::StillDeferred,
+            ),
+        ];
+        round.forward_secrecy = &token_leaked;
+        assert_eq!(
+            removal_unreadability_holds(&round),
+            Verdict::Failed(Finding::RemovalReadable {
+                device: DeviceTag::new(2),
+                circle: CircleTag::new(1),
+            })
+        );
+
+        // A withheld row that later RESOLVED — the "not yet" vs "never" gap.
+        let resolved = [
+            before(RemovalPath::Withheld),
+            a_probe(
+                RemovalStage::After,
+                RemovalPath::Withheld,
+                undecryptable::Verdict::PeelFailed,
+                false,
+                RemovalRow::Resolved,
+            ),
+        ];
+        round.forward_secrecy = &resolved;
+        assert_eq!(
+            removal_unreadability_holds(&round),
+            Verdict::Failed(Finding::RemovalReadable {
+                device: DeviceTag::new(2),
+                circle: CircleTag::new(1),
+            })
+        );
+    }
+
+    #[test]
+    fn o3_inconclusive_on_an_unexpected_after_outcome() {
+        // A CommitGap After is neither the path's refusal nor a read: the arm
+        // did not produce O3's condition.
+        let mut round = empty_round();
+        let commit_gap = [
+            before(RemovalPath::Withheld),
+            a_probe(
+                RemovalStage::After,
+                RemovalPath::Withheld,
+                undecryptable::Verdict::CommitGap,
+                false,
+                RemovalRow::NotApplicable,
+            ),
+        ];
+        round.forward_secrecy = &commit_gap;
+        assert_eq!(
+            removal_unreadability_holds(&round),
+            Verdict::Failed(Finding::RemovalProbeInconclusive {
+                device: DeviceTag::new(2),
+                circle: CircleTag::new(1),
+            })
+        );
+        assert_eq!(removal_unreadability_holds(&round).rc(), Rc::Unusable);
+
+        // A missing terminal read on a withheld PeelFailed is inconclusive too.
+        let missing_terminal = [
+            before(RemovalPath::Withheld),
+            a_probe(
+                RemovalStage::After,
+                RemovalPath::Withheld,
+                undecryptable::Verdict::PeelFailed,
+                false,
+                RemovalRow::NotApplicable,
+            ),
+        ];
+        round.forward_secrecy = &missing_terminal;
+        assert_eq!(
+            removal_unreadability_holds(&round),
+            Verdict::Failed(Finding::RemovalProbeInconclusive {
+                device: DeviceTag::new(2),
+                circle: CircleTag::new(1),
+            })
+        );
+    }
+
+    #[test]
+    fn o3_short_circuited_when_the_withheld_commit_leaks() {
+        let mut round = empty_round();
+        let leaked = [
+            before(RemovalPath::Withheld),
+            a_probe(
+                RemovalStage::After,
+                RemovalPath::Withheld,
+                undecryptable::Verdict::SelfEvicted,
+                false,
+                RemovalRow::NotApplicable,
+            ),
+        ];
+        round.forward_secrecy = &leaked;
+        assert_eq!(
+            removal_unreadability_holds(&round),
+            Verdict::Failed(Finding::RemovalProbeShortCircuited {
+                device: DeviceTag::new(2),
+                circle: CircleTag::new(1),
+            }),
+            "a withheld-path SelfEvicted means the commit leaked to the evictee"
+        );
+        assert_eq!(removal_unreadability_holds(&round).rc(), Rc::Unusable);
+    }
+
+    #[test]
+    fn o3_incomplete_on_an_unpaired_before_or_after() {
+        let mut round = empty_round();
+
+        // A baseline that never decrypted proves nothing about the after side.
+        let no_baseline = [
+            a_probe(
+                RemovalStage::Before,
+                RemovalPath::Withheld,
+                undecryptable::Verdict::PeelFailed,
+                false,
+                RemovalRow::NotApplicable,
+            ),
+            a_probe(
+                RemovalStage::After,
+                RemovalPath::Withheld,
+                undecryptable::Verdict::PeelFailed,
+                false,
+                RemovalRow::StillDeferred,
+            ),
+        ];
+        round.forward_secrecy = &no_baseline;
+        assert_eq!(
+            removal_unreadability_holds(&round),
+            Verdict::Failed(Finding::RemovalProbesIncomplete)
+        );
+        assert_eq!(removal_unreadability_holds(&round).rc(), Rc::Unusable);
+
+        // A baseline with no post-removal probe at all.
+        let baseline_only = [before(RemovalPath::Withheld)];
+        round.forward_secrecy = &baseline_only;
+        assert_eq!(
+            removal_unreadability_holds(&round),
+            Verdict::Failed(Finding::RemovalProbesIncomplete)
+        );
+
+        // And an empty round is not a clean one.
+        assert_eq!(
+            removal_unreadability_holds(&empty_round()),
+            Verdict::Failed(Finding::RemovalProbesIncomplete)
+        );
     }
 
     #[test]
@@ -1318,9 +1847,43 @@ mod tests {
         );
     }
 
-    /// One value of every `Finding` variant. The `match` below is what keeps
-    /// the list honest: a variant added to the enum and not to the list stops
-    /// compiling here instead of skipping the rendering sweep.
+    /// The exhaustiveness proof for [`every_finding`], split out so the list
+    /// itself stays under the line ceiling: a variant added to [`Finding`] and
+    /// not to the list stops compiling HERE instead of skipping the sweep.
+    const fn assert_listed(finding: &Finding) {
+        match finding {
+            Finding::ProbeNotPublished { .. }
+            | Finding::ProbeNotDelivered { .. }
+            | Finding::DeliveryEvidenceLost { .. }
+            | Finding::RowEnvelopeExceeded { .. }
+            | Finding::NothingProbed
+            | Finding::RosterNotConverged { .. }
+            | Finding::RosterDiverged { .. }
+            | Finding::EpochDiverged { .. }
+            | Finding::BranchDiverged { .. }
+            | Finding::ConvergenceGated { .. }
+            | Finding::ProposalUncommitted { .. }
+            | Finding::RemovalOwed { .. }
+            | Finding::RemovalOrphaned { .. }
+            | Finding::SendRefused { .. }
+            | Finding::UnaccountedOutcome
+            | Finding::UnnamedRow
+            | Finding::NothingClassified
+            | Finding::NotQuiescent(_)
+            | Finding::BacklogUnsettled { .. }
+            | Finding::RetentionEdgeRefused { .. }
+            | Finding::RetentionWindowOverrun { .. }
+            | Finding::RetentionEdgesIncomplete
+            | Finding::RemovalReadable { .. }
+            | Finding::RemovalProbeShortCircuited { .. }
+            | Finding::RemovalProbeInconclusive { .. }
+            | Finding::RemovalProbesIncomplete
+            | Finding::FloorUnmet(_) => {}
+        }
+    }
+
+    /// One value of every `Finding` variant, checked exhaustive by
+    /// [`assert_listed`].
     fn every_finding() -> Vec<Finding> {
         let findings = vec![
             Finding::ProbeNotPublished {
@@ -1388,34 +1951,23 @@ mod tests {
                 circle: CircleTag::new(1),
             },
             Finding::RetentionEdgesIncomplete,
+            Finding::RemovalReadable {
+                device: DeviceTag::new(2),
+                circle: CircleTag::new(1),
+            },
+            Finding::RemovalProbeShortCircuited {
+                device: DeviceTag::new(2),
+                circle: CircleTag::new(1),
+            },
+            Finding::RemovalProbeInconclusive {
+                device: DeviceTag::new(2),
+                circle: CircleTag::new(1),
+            },
+            Finding::RemovalProbesIncomplete,
             Finding::FloorUnmet(FloorTerm::FaultsApplied),
         ];
         for finding in &findings {
-            match finding {
-                Finding::ProbeNotPublished { .. }
-                | Finding::ProbeNotDelivered { .. }
-                | Finding::DeliveryEvidenceLost { .. }
-                | Finding::RowEnvelopeExceeded { .. }
-                | Finding::NothingProbed
-                | Finding::RosterNotConverged { .. }
-                | Finding::RosterDiverged { .. }
-                | Finding::EpochDiverged { .. }
-                | Finding::BranchDiverged { .. }
-                | Finding::ConvergenceGated { .. }
-                | Finding::ProposalUncommitted { .. }
-                | Finding::RemovalOwed { .. }
-                | Finding::RemovalOrphaned { .. }
-                | Finding::SendRefused { .. }
-                | Finding::UnaccountedOutcome
-                | Finding::UnnamedRow
-                | Finding::NothingClassified
-                | Finding::NotQuiescent(_)
-                | Finding::BacklogUnsettled { .. }
-                | Finding::RetentionEdgeRefused { .. }
-                | Finding::RetentionWindowOverrun { .. }
-                | Finding::RetentionEdgesIncomplete
-                | Finding::FloorUnmet(_) => {}
-            }
+            assert_listed(finding);
         }
         findings
     }

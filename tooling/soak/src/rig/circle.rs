@@ -23,8 +23,9 @@ use haven_core::nostr::mls::types::{GroupId, PendingStateRef};
 use haven_core::relay::auto_commit::RESOLVE_RUNAWAY_CAP;
 use haven_core::relay::live_sync::CircleSpec;
 use haven_core::relay::maintenance::build_kp_maintenance_events;
-use nostr::{Event, TagKind};
+use nostr::Event;
 
+use crate::nemesis::types::DropClass;
 use crate::rig::plane::RelayPlane;
 use crate::rig::world::PendingGuard;
 use crate::rig::{poll_until, sim_magnitude, CircleTag, DeviceTag, RigError, SimDevice, Step};
@@ -132,6 +133,21 @@ impl SimCircle {
             relays: relays.to_vec(),
         }
     }
+
+    /// The subscription spec `device`'s ENGINE takes for this circle: the same
+    /// routing id over the device's own endpoint on every plane.
+    ///
+    /// Per (device, circle), and the only place the engine's endpoint is
+    /// chosen — nothing here reaches storage, which keeps the canonical
+    /// endpoint (see [`build_circle`]).
+    #[must_use]
+    pub fn spec_for<R: RelayPlane>(&self, device: DeviceTag, relays: &[R]) -> CircleSpec {
+        let urls: Vec<String> = relays
+            .iter()
+            .map(|relay| relay.url_for(device).to_owned())
+            .collect();
+        self.spec(&urls)
+    }
 }
 
 // Presence-only: both group ids and the roster are identifiers.
@@ -145,22 +161,8 @@ impl fmt::Debug for SimCircle {
     }
 }
 
-/// Whether `event` is an application message, which production publishes
-/// through its own plane.
-///
-/// The discriminator is the wire's own and the product's: the engine stamps a
-/// NIP-40 `expiration` on kind-445 APPLICATION messages and never on a commit
-/// or a proposal (`haven-core/src/nostr/mls/manager.rs`, the
-/// `message-retention.v1` component), and a welcome is a kind-1059 gift wrap
-/// with no expiration at all. Reading the tag rather than asking the caller is
-/// what keeps the two planes from diverging: whatever the rig publishes, it
-/// goes out the way production would send it.
-fn is_application_message(event: &Event) -> bool {
-    event.tags.find(TagKind::Expiration).is_some()
-}
-
-/// Publishes `events` and waits, bounded, for a relay plane to witness an `OK`
-/// for at least one of them.
+/// Publishes `events` from `device`'s own endpoint on every plane and waits,
+/// bounded, for a relay plane to witness an `OK` for at least one of them.
 ///
 /// A publish that errors is NOT an error here: an unreachable relay is the
 /// commonest thing a schedule asks for, and the caller's question is only ever
@@ -174,14 +176,20 @@ pub async fn publish_witnessed<R: RelayPlane>(
     relays: &[R],
     events: &[Event],
 ) -> Result<Option<Duration>, RigError> {
-    let urls: Vec<String> = relays.iter().map(|r| r.url().to_string()).collect();
+    let urls: Vec<String> = relays
+        .iter()
+        .map(|relay| relay.url_for(device.tag).to_owned())
+        .collect();
     for event in events {
         // The publish plane is haven-core's own, and so is the CHOICE of
         // ladder: a location takes `publish_location_event`'s single bounded
         // attempt and a commit or a welcome takes `publish_event`'s retrying
         // one (Security Rule 13). Sending every probe down the commit ladder
         // would measure O1 against a publish path the product does not have.
-        let _ = if is_application_message(event) {
+        // The class is read off the wire by the same discriminator the proxy
+        // drops by, so whatever the rig publishes goes out the way production
+        // would send it.
+        let _ = if DropClass::of(event) == Some(DropClass::Application) {
             device.relays.publish_location_event(event, &urls).await
         } else {
             device.relays.publish_event(event, &urls).await
@@ -309,6 +317,19 @@ pub async fn resolve_ingest<R: RelayPlane>(
 /// commit like any other — the one a world builds an extra circle with runs
 /// while the quiescence predicate is reading — and a counter that ignored it
 /// would let the world call itself settled with an unpublished commit staged.
+///
+/// `urls` are the planes' CANONICAL endpoints, and everything here that
+/// reaches storage keeps them: `CircleConfig::with_relays`, a member's stored
+/// `inbox_relays` and `create_circle`'s relay argument. haven-core's
+/// `resync_circle_relays_from_mdk` rewrites the stored relay row from the
+/// engine's routing component after any group update, and
+/// `run_catchup_all_circles` reads its list out of storage — so a catch-up
+/// sweep dials the canonical endpoint for every circle, a catch-up-plane fault
+/// stays relay-global, and a scenario that partitions a device's ENGINE
+/// endpoint must not run a sweep during the partition or the withheld commit
+/// arrives by the other path. Only the engine — its group REQs
+/// ([`SimCircle::spec_for`]) and its inbox REQ (`SimDevice::open`) — and the
+/// publish plane ([`publish_witnessed`]) dial a device's own endpoint.
 ///
 /// # Errors
 ///
@@ -449,6 +470,19 @@ mod tests {
         assert_eq!(circle.members().len(), 2);
         assert_eq!(circle.nostr_group_id(), &[0xCD_u8; 32]);
         assert_eq!(circle.mls_group_id().as_slice(), &[0xAB_u8; 32]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_devices_spec_dials_its_own_endpoint_where_it_has_one() {
+        let relay = TestRelay::start(RelayTag::new(0)).await;
+        let spec = needle_circle().spec_for(DeviceTag::new(1), std::slice::from_ref(&relay));
+        assert_eq!(spec.group_id_hex, hex::encode([0xCD_u8; 32]));
+        assert_eq!(
+            spec.relays,
+            vec![relay.url_for(DeviceTag::new(1)).to_owned()],
+            "a one-endpoint plane answers every device with its canonical address"
+        );
+        assert_eq!(spec.relays, vec![relay.url().to_owned()]);
     }
 
     #[test]

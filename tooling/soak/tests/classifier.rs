@@ -15,7 +15,7 @@
 //!
 //! Saying "one case per reachable arm" without saying which arms are
 //! unreachable is a coverage claim nobody can check. At this pin the taxonomy
-//! has exactly three arms this file does not produce:
+//! has exactly four arms this file does not produce:
 //!
 //! * **`ForwardDistance`** — the short-circuit that reports a stored
 //!   `Retryable` row at an epoch at or below the tip. Reaching it needs a row
@@ -32,6 +32,13 @@
 //!   pins both halves — the quarantine really is set, and the ingest really
 //!   says routing — so the day the gate moves in front, it goes red and this
 //!   bullet comes out.
+//! * **`PeelDeferredCapped`** — the engine drops an event unpersisted when the
+//!   per-group `PeelDeferred` store is at its cap, and it answers that drop with
+//!   the SAME `Stale { PeelFailed }` as an ordinary peel failure. The two differ
+//!   only in whether a row was left behind, so a scenario that flooded the store
+//!   to its cap sets this from the ABSENCE of a row; [`classify_ingest`], which
+//!   sees one ingest, cannot. S16's `outsider-flood` (`scenarios/s16_storage_growth.rs`)
+//!   is its producer: it feeds the store past the cap and records the drops.
 //!
 //! Everything else in [`Verdict`] has a case below, and the enumeration test at
 //! the bottom is what keeps that sentence true.
@@ -749,9 +756,10 @@ const fn coverage(verdict: Verdict) -> Coverage {
         | Verdict::EpochNotStable
         | Verdict::EpochUnrecoverable
         | Verdict::Defect(_) => Coverage::Produced,
-        Verdict::ForwardDistance | Verdict::SelfEvicted | Verdict::Quarantined => {
-            Coverage::DeclaredUnreachable
-        }
+        Verdict::ForwardDistance
+        | Verdict::SelfEvicted
+        | Verdict::Quarantined
+        | Verdict::PeelDeferredCapped => Coverage::DeclaredUnreachable,
     }
 }
 
@@ -761,7 +769,7 @@ fn every_verdict_arm_is_produced_above_or_named_unreachable_in_the_header() {
     // and the set the header EXPLAINS are compared rather than assumed to
     // agree. The match above is what stops an arm being forgotten; this is
     // what stops one joining the unreachable side without its paragraph.
-    const EVERY_ARM: [Verdict; 17] = [
+    const EVERY_ARM: [Verdict; 18] = [
         Verdict::Expired,
         Verdict::PreAuth,
         Verdict::Applied,
@@ -772,6 +780,7 @@ fn every_verdict_arm_is_produced_above_or_named_unreachable_in_the_header() {
         Verdict::OwnEcho,
         Verdict::SelfEvicted,
         Verdict::Quarantined,
+        Verdict::PeelDeferredCapped,
         Verdict::Routing,
         Verdict::PeelFailed,
         Verdict::Fork,
@@ -780,10 +789,11 @@ fn every_verdict_arm_is_produced_above_or_named_unreachable_in_the_header() {
         Verdict::EpochUnrecoverable,
         Verdict::Defect(Cause::EngineFailure),
     ];
-    const NAMED_IN_THE_HEADER: [Verdict; 3] = [
+    const NAMED_IN_THE_HEADER: [Verdict; 4] = [
         Verdict::ForwardDistance,
         Verdict::SelfEvicted,
         Verdict::Quarantined,
+        Verdict::PeelDeferredCapped,
     ];
 
     let unreachable: Vec<Verdict> = EVERY_ARM

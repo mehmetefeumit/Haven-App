@@ -684,9 +684,10 @@ async fn restart_before_confirm<T: TimelineSink, L: LogDrain>(
 /// rather than grading it, so the day a verdict starts appearing the canary is
 /// unmet and the arm goes rc 3, which is the correct signal: the recorded
 /// expectation must be replaced by a graded one in the same commit. The 684-
-/// second form of that silence is OWED TO S03's weekly arm, which is not yet
-/// built; a second eleven-minute absence here would buy no further claim, which
-/// is why every arm in this scenario declares `Absence::None`.
+/// second form of that silence is asserted by S03's weekly arm
+/// `lost-commit-unnamed`; a second eleven-minute absence here would buy no
+/// further claim, which is why every arm in this scenario declares
+/// `Absence::None`.
 async fn anchor_exhausted<T: TimelineSink, L: LogDrain>(
     world: &mut ScenarioWorld<T, L>,
     circle: &SimCircle,

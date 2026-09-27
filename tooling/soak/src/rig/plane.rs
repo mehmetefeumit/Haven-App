@@ -18,7 +18,7 @@ use std::time::Duration;
 use serde::Serialize;
 
 use crate::nemesis::types::{Fault, Op};
-use crate::rig::{DeviceTag, KillKind, RelayTag, RigError, WorldId};
+use crate::rig::{CircleTag, DeviceTag, KillKind, RelayTag, RigError, WorldId};
 
 /// A relay the world can break.
 ///
@@ -28,8 +28,32 @@ pub trait RelayPlane: Send + Sync {
     /// This plane's handle.
     fn tag(&self) -> RelayTag;
 
-    /// The `ws://` loopback address devices dial. Never rendered.
+    /// The `ws://` loopback address of the plane's canonical endpoint — what
+    /// reaches storage, and so what a catch-up sweep dials. Never rendered.
     fn url(&self) -> &str;
+
+    /// Gives `device` an endpoint of its own on this plane, ahead of the
+    /// device dialling it.
+    ///
+    /// Defaulted to nothing: a plane with one endpoint answers every device
+    /// with it, which is what the in-crate double does.
+    ///
+    /// # Errors
+    ///
+    /// [`RigError::Core`] with [`crate::rig::Step::ApplyFault`] if the
+    /// endpoint cannot be bound.
+    fn provision(
+        &mut self,
+        _device: DeviceTag,
+    ) -> impl Future<Output = Result<(), RigError>> + Send {
+        std::future::ready(Ok(()))
+    }
+
+    /// The address `device`'s engine and publish plane dial: its own endpoint
+    /// where it has one, the canonical one otherwise. Never rendered.
+    fn url_for(&self, _device: DeviceTag) -> &str {
+        self.url()
+    }
 
     /// Applies `fault`, or heals with [`Fault::Heal`].
     ///
@@ -39,6 +63,22 @@ pub trait RelayPlane: Send + Sync {
     /// could not reach the state the fault names — a fault that silently did
     /// not fire would make every bound derived from it a fiction.
     fn apply(&mut self, fault: Fault) -> impl Future<Output = Result<(), RigError>> + Send;
+
+    /// Applies `fault` to `device`'s own endpoint, leaving the canonical one
+    /// and every other device's alone. Defaulted to the plane-wide fault, which
+    /// is the only fault a one-endpoint plane has.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::apply`], and [`RigError::UnknownTarget`] for a device this
+    /// plane never provisioned.
+    fn apply_for(
+        &mut self,
+        _device: DeviceTag,
+        fault: Fault,
+    ) -> impl Future<Output = Result<(), RigError>> + Send {
+        self.apply(fault)
+    }
 
     /// How many bind attempts the last `Up`/`Heal` needed and how long it
     /// waited, once a plane has come back up. `None` for a plane that never
@@ -157,7 +197,28 @@ pub enum TimelineRecord {
         /// duration — how long the rebind waited.
         wait_ms: u64,
     },
+    /// A flood arm's reading of one device's durable store for one circle: a
+    /// CLASSIFICATION of the curve and never the curve. The raw counts are
+    /// compared in process; the bucket vocabulary renders `5+` from a flood's
+    /// third sample and a byte delta as `5+` always, so a rendered curve
+    /// would be either a leak or a constant (decision 0.31).
+    BufferGrew {
+        /// delta.
+        tick: u64,
+        /// tag.
+        device: DeviceTag,
+        /// tag.
+        circle: CircleTag,
+        /// literal — [`BUFFER_GREW`] or [`BUFFER_DID_NOT_GROW`].
+        grew: &'static str,
+    },
 }
+
+/// The store grew across the flood.
+pub const BUFFER_GREW: &str = "grew";
+
+/// It did not, which is the arm's mis-configuration control failing its floor.
+pub const BUFFER_DID_NOT_GROW: &str = "did-not-grow";
 
 /// One captured log line.
 ///

@@ -98,41 +98,50 @@ knows what it covered:
 | # | PLAN §2.1 invariant | Graded? |
 |---|---|---|
 | S1 | Single branch (current-epoch cross-decrypt both ways, round-unique payloads) | **GRADED** — oracle O1, round-unique payloads. Both directions where it matters: every scenario's CLOSING round probes each chain pair BOTH ways, with the device that was restarted, reopened or resumed sending FIRST (a rebuilt epoch or exporter is invisible to the device itself and shows only as a peer failing to decrypt what it produced), and the nemesis phase's teardown round sweeps every ordered pair. Intermediate rounds stay one-directional over a spanning chain, which is the cost trade `Reach::These` exists for |
-| S2 | Forward secrecy after removal | **NOT GRADED** — needs O3 and scenarios S02/S21, both Phase 2 |
+| S2 | Post-removal unreadability | **GRADED** — oracle O3 (`RemovalUnreadability`), produced by S21's two O3 arms, graded APART because the delivery paths prove different things. `removal-delivered-commit` delivers the commit and asserts every later 445 is `Stale{SelfEvicted}` carrying no token: the BOOKKEEPING gate (MDK's `!is_active()`), and nothing about key material. `removal-withheld-commit` holds the commit back (`DropClass::Handshake` on the evictee's endpoint for the whole arm) so the evictee's group stays active and the peel is genuinely attempted, and asserts every post-removal probe is `Stale{PeelFailed}` carrying no token, with a stored row that NEVER resolves (read terminally after the closing round). O3 does NOT grade the RFC 9420 §12.4 forward-secrecy property (a Remove's `UpdatePath` blanks the leaf): that is openmls's, tested upstream, and is unreachable from Haven's code — an evictee that never received the commit has no epoch-N+1 exporter secret whether or not the `UpdatePath` was correct, so `PeelFailed` on the withheld path cannot distinguish a broken Remove. §12.4 is the basis O3 relies on, never what the soak measures |
 | S3 | Publish-before-apply (Rule 13) | **PARTIAL** — per COMMIT, not per transition. One rung in the rig resolves a pending state (`rig::circle::resolve_one`, reached only through `publish_and_resolve` and the ladder `resolve_ingest` that drains what a resolution's own replay hands back), and it confirms only on an acknowledgement a relay's client-facing ledger really carried; S18's three arms assert the gap from both sides (stored HERE, unacknowledged THERE), assert that a rolled-back commit left the whole circle on one epoch, and assert from the rebind counters that no socket went away while the ack was withheld. Three more arms reach the same rule from other sides: S05's `confirm-err-is-not-a-failure` (an `Err` from `confirm_published` is not a publish failure), and S22's `oversized-commit` and `oversized-removal-wedges-the-circle` (a refusal the publisher hears, rolled back and — for an owed removal — deliberately not). What is NOT graded is the universal form — "every observed epoch transition has a stored, acked commit" — because no oracle walks the ledger against the epoch history. That walk needs a per-transition record the Phase-1 ledger does not keep |
 | S4 | Nothing identifying on the wire | **NOT GRADED** — the wire oracles are the e2e lanes' (`check-wire-journal.sh` and friends); the rig still has no wire journal, and Phase 2 adds none |
 | S5 | Retention window (5 past epochs) | **GRADED** — O4, over BOTH edges, produced by S04's `offline-past-retention`: one ciphertext sealed exactly `DEFAULT_MAX_PAST_EPOCHS` advances below the reader's tip still decrypts, and one a single epoch older does not. The window is READ from the engine at runtime, never restated, and each edge's distance is MEASURED from the epochs the run really reached — a world that did not reach the intended shape answers "this proved nothing" (one side of the window fed twice) rather than reporting a violation the arm manufactured. What it adds over `haven-core`'s own `rule5_retention_constants_are_pinned` and `rule5_epoch_n_ciphertext_still_decrypts_at_the_window_edge` is those two edges over a real relay and a real live plane, across a pause and a catch-up — and nothing else |
 | S6 | Cursor integrity | **PARTIAL — the ADVANCE side only.** S09's two arms grade what an adversary can and cannot do to a persisted anchor. The first is a standing outsider forging at the circle's public `#h` every round for the whole arm — three recipes per round, expired, doubled `#h` and undecodable — which moves neither `read_sync_cursor` nor `read_backfill_floor`, while a legitimate fix delivered in the SAME round proves the plane was carrying anything at all, and a catch-up sweep that still advances locally is the control that keeps the whole arm from being satisfied by a build where advance had been deleted. The second injects ONE forgery, after the original it copies has been folded: an observed ciphertext re-signed a day ahead, which applies nothing a second time and moves neither anchor. And the catch-up sweep's own advance is required to land inside a bracket taken from the same wall clock the sweep opens its window with, which is the advance's PROVENANCE rather than its arithmetic and which a forged `created_at` a day ahead could not satisfy. **The HOLD-BACK side is still structural only, and the reason is measured, not assumed:** reading it needs an event that is DELIVERED and un-applied while a subscription generation is open, and at this pin the rig cannot produce one — a message sealed at an epoch the receiver has not reached peel-fails (the kind-445 outer layer is keyed by the sender's epoch exporter), and the buffering outcome the engine does produce (the publish-before-apply transition, which S19's `commit-gap` arm grades) leaves no gating row, its delivery landing only once the transition ENDS, on the confirm's own replay, which is not a window a cursor is read against. `haven-core`'s own anchor tests still cover the hold-back |
 | S7 | One session per DB (Rule 14) | **GRADED** — every restart asserts `is_session_live` true before and false after, against a bounded poll, on the `session.sqlite` PATH (a directory computes a key nothing is registered under and answers `Ok(false)` for ever) |
-| S8 | Bounded removal-effectiveness lag | **NOT GRADED** — scenario S21, Phase 2 |
+| S8 | Bounded removal-effectiveness lag | **GRADED** — S21's `removal-lag` arm: after the removal is confirmed by ≥ 1 remaining member, every remaining member reaches the post-removal epoch inside `B(S21)` and none is left publishing at the pre-removal epoch over the trailing `location_publish_window()` (`Absence::RemovalPublishTail`), while the evictee's last readable fix is one minted before the removal. In Tier 1 the epoch is the harness ledger's, not a relay-visible wire fact |
 | S9 | Nonce uniqueness (Rule 11) | **NOT GRADED** — nearly free once the relay ledger keeps 445 `content` prefixes, which is Phase 2 |
 
-Oracle **O3** (forward secrecy) is likewise not in the registry. It simply does
-not contain one: there is no stub, no skipped test and no "pending" row, because
-a scaffold that asserts nothing reports coverage it does not have. **O4 is in
-the registry**, and S04's `offline-past-retention` is the arm that produces the
+Oracle **O3** (`RemovalUnreadability`) **is in the registry**, and S21's two O3
+arms (`removal-withheld-commit`, `removal-delivered-commit`) produce the state it
+grades, so S2 is graded by running arms. O3 is deliberately NOT named "forward
+secrecy": it grades post-removal UNREADABILITY on both delivery paths and cites
+RFC 9420 §12.4 as the basis it relies on, never as something the soak measures
+(§12.4's `UpdatePath`/blanked-leaf property is openmls's, tested upstream, and is
+unreachable from Haven's code — the evictee's engine refuses after eviction and
+cannot peel without the new epoch's exporter secret). **O4 is also in the
+registry**, and S04's `offline-past-retention` is the arm that produces the
 state it grades.
 
 ## Which scenarios have no lane execution yet
 
-Thirteen scenarios exist: **S01, S04, S05, S06, S09, S11, S12, S13, S14, S17,
-S18, S19, S22**.
+Nineteen scenarios exist: **S01, S02, S03, S04, S05, S06, S09, S10, S11, S12,
+S13, S14, S16, S17, S18, S19, S21, S22, S23**.
 
 * `pr` (the only profile CI dispatches) runs **S01's single-relay outage arm,
   S06, S11 and S13**.
-* **S04, S05, S09, S12, S14, S17, S18, S19 and S22 have NO lane execution yet.**
-  The nightly and weekly scheduler workflows are still to come; `soak-core.yml`
-  carries their jobs so there is something to call, and nothing calls them. Those
-  nine run in `tests/oracles.rs` and under
+* **S02, S03, S04, S05, S09, S10, S12, S14, S16, S17, S18, S19, S21, S22 and
+  S23 have NO lane execution yet.** The nightly and weekly scheduler workflows are still to come;
+  `soak-core.yml` carries their jobs so there is something to call, and nothing
+  calls them. Those fifteen run in `tests/oracles.rs` and under
   `scripts/run_soak_local.sh core --profile nightly`.
 
-A green `soak-core-pr` therefore says nothing about the member-absence spans and
+A green `soak-core-pr` therefore says nothing about a receiver partitioned
+behind a second publisher (S02), a commit a relay forgot before a paused member
+returned (S03), the member-absence spans and
 the retention window (S04), the publish→confirm window (S05), the
-cursor-poisoning adversary and the two anchors (S09), the KeyPackage rotation
-slot (S12), a same-epoch commit race (S14), the CLOSED-prefix behaviour (S17),
-the three swallowed-OK Rule-13 arms (S18), duplicate/reorder delivery and the
-commit-gap fold (S19) or the oversized commit, Welcome and removal wedge (S22)
-beyond what a unit test proves.
+cursor-poisoning adversary and the two anchors (S09), the ten-circle roster
+under one outage (S10), the KeyPackage rotation slot (S12), a same-epoch commit
+race (S14), the three durable stores a flood can grow (S16), the CLOSED-prefix
+behaviour (S17), the three swallowed-OK Rule-13 arms (S18), duplicate/reorder
+delivery and the commit-gap fold (S19), post-removal unreadability and the
+removal lag (S21), the oversized commit, Welcome and removal wedge (S22) or the
+chained-commit backlog C7 records (S23) beyond what a unit test proves.
 
 ### The first recorded expectation, and what makes it stale
 
@@ -152,9 +161,10 @@ appearing, the silence canary is unmet and it is **rc 3** again, which is the
 correct signal — the recorded expectation must be replaced by a graded one in
 the same commit. Changing it in either direction without citing OD-1 (DECIDED, a
 per-circle verdict inside the circle's details sheet; NOT BUILT) is a regression.
-The 684-second form of that silence is owed to S03's weekly arm, which is not
-yet built; a second eleven-minute absence here would buy no further claim, which
-is why every arm in that scenario declares no absence window at all.
+The 684-second form of that silence is asserted by S03's weekly arm
+`lost-commit-unnamed` (below); a second eleven-minute absence here would buy no
+further claim, which is why every arm in that scenario declares no absence
+window at all.
 
 The scenario's other three arms assert the opposite and GRADE it: a race that
 does not converge is a finding about the subject, reported as
@@ -208,21 +218,82 @@ than one of them taking it. Tier 1 asserts the CLASSIFICATION and the local
 no-apply against a cap MEASURED off this run's own event; T2-19 hits a real
 strfry's real `maxEventSize`. Neither subsumes the other.
 
+### The third recorded expectation: a member stranded behind a lost commit
+
+S03's two arms record the shape behind "sharing stops after hours" that needs
+no fork and no wedge: a member is paused across one confirmed commit, the
+relay's store is wiped before it resumes, and its resume re-subscribes from the
+persisted cursor and finds nothing. It is left one epoch below its peers, and
+every later commit and fix is sealed above what it holds. The engine's own
+signature is a stranded EPOCH and a churning `PeelDeferred` store — each later
+445 refused at the outer wrap, retained, retried `MAX_DEFERRED_PEEL_ATTEMPTS`
+times and retired — never a growing `Buffered` chain, so the arm keys on the
+epoch and the cross-decrypt and never on a buffered count. The strand is
+one-directional at that distance: the committer still holds the stranded
+epoch's exporter secret for the whole retention window, so the stranded
+member's own fixes keep reaching its peers while theirs never reach it, and its
+send path stays open. That asymmetry is the user-visible shape: everybody
+else's locations stop arriving, with nothing saying so.
+
+*At this commit Haven raises no per-circle verdict for a device stranded behind
+a lost commit. This arm asserts that silence. OD-1 is DECIDED — a per-circle
+verdict inside the circle's details sheet — and is NOT BUILT. When it lands,
+this arm's absence assertion becomes a presence assertion within
+`silence_window()`; changing it in either direction without citing OD-1 is a
+regression.* The silence is read on every surface haven-core has:
+`unrecoverable_circles()` empty on every device, no `GroupUnrecoverable` on any
+bus, and the circle-health row readable and carrying no peer-event stamp — that
+stamp is the app layer's (`CircleManagerFfi::note_peer_event`), so at this tier
+haven-core itself records nothing about the strand at all.
+
+The arm carries its own control, run FIRST: the same pause, handshake
+partition, commit, heal and resume with the store KEPT converges all three, so
+the wipe — read back off the relay's own store before and after — is the cause
+and not the partition. The nightly `lost-commit-strands` grades O6 (the
+stranded world is quiet: nothing staged, nothing in flight, no gating row) and
+O5 (every refusal is one the classifier accounts for) and deliberately not O1
+or O2, which would report the divergence the arm induced at rc 1. The weekly
+`lost-commit-unnamed` then waits out the product's whole delivery-silence
+window with the engine's own health repair driven throughout, and requires that
+nothing named the circle across it and the device is still stranded when it
+ends; like S17's `full-intake` it is weekly-only and outside the crate's own
+sweep, because an absence window may never be scaled or shortened.
+
+### What S02 deliberately does not assert
+
+S02's two arms grade what Tier 1 CAN: a receiver whose ENGINE endpoint drops
+one class of frame at a time keeps the relay's store and acknowledgements
+intact, the unpartitioned witness keeps folding the publisher's fixes
+throughout, the commit never crosses the partitioned endpoint (final, because a
+fix published after it does cross and one connection's frames are written in
+order), and a pause-and-resume recovers the commit from a cursor that never
+went backwards. The catalogue's "the victim recovers no location published
+during the partition" is NOT asserted: it needs the TTL horizon, and the expiry
+screen is a WALL read on the wall side of the rig's clock partition, so no
+policy step can age an event into it — stepping the policy clock to reach it
+is exactly what `check_soak_clock_partition.sh` catches. The forged-expiry
+vector is S09's. A scenario that partitions an engine endpoint must also run no
+catch-up sweep while the partition stands: the sweep dials the plane's
+canonical endpoint for every circle and would heal it by the other path.
+
 ### What the crate's own tests run instead, and how much of it
 
 `tests/oracles.rs` runs **every registered arm** as its own test — all
-thirty-two but one — rather than one "smallest arm" per scenario. That
+forty-four but three (two excluded, one expected red — S23, below) — rather
+than one "smallest arm" per scenario. That
 distinction is the whole point: an ordering over arms tie-breaks positionally,
 and the version that ordered by derived deadline left most of the registry with
 no success path anywhere, including BOTH of the Rule-13 arms S18 exists for. The
-one exclusion is S17's `full-intake`, whose bound starts at the 684-second
-delivery-silence window, and
+two exclusions are S03's `lost-commit-unnamed` and S17's `full-intake`, whose
+bounds each start at the 684-second delivery-silence window, and
 `the_happy_path_sweep_runs_every_arm_but_the_one_it_excludes` asserts that the
-excluded set is exactly that one arm — so a new arm cannot join it silently.
+excluded set is exactly those two arms — so a new arm cannot join it silently.
 
 Beside the sweep there is **one deliberate mis-configuration control per
-scenario**, thirteen in all, each running the real arm against a world arranged
-so the condition it grades cannot arise — a second endpoint that never returns, a
+scenario**, nineteen in all, each running the real arm against a world arranged
+so the condition it grades cannot arise — a partition armed on the witness
+instead of the victim, an endpoint that is gone so no commit is ever stored to
+be lost, a second endpoint that never returns, a
 policy clock that starts past the horizon the arm is supposed to straddle, a
 swallowed acknowledgement that stops the victim circle existing or leaves no
 confirm that could fail, an endpoint that is gone so no epoch can be crossed
@@ -232,6 +303,151 @@ a rotation would be decided for, nothing reaching a relay to be refused by one,
 and a closed endpoint with nothing to duplicate — each requiring the verdict to be
 **rc 3**, the world proving nothing, rather than the rc 0 every oracle would
 otherwise hand it.
+
+### The ten-circle roster, and THE BOUND RULE
+
+S10's `ten-circle-roster` grows the world to the whole roster —
+`kMaxCirclesPerAccount = 10`, the bound the app refuses an eleventh circle at —
+through the same create-and-join path every other circle took, adopts each one
+into the world's table so every world-wide oracle grades all ten, and tells
+every running engine about it the way the app does for a circle it just created
+or joined (a REQ of its own on every plane). One probe round across all ten,
+one outage and heal on one plane, and a closing round across all ten, both
+directions. Its four canaries: every one of the ten delivered to every device
+(the starvation detector), no gating row anywhere, an outage that manufactured
+no commit activity on any device (DM-5a, compared in process), and every REQ
+the session expects still live in the pool after the reconnect — the adopted
+circles' own among them, which at ten circles is what catches a pool that
+silently stopped registering a bucket. It records, and does not decide, OD-11:
+the ten routing ids are pairwise distinct and every device's own circle table
+still answers for all ten at the end, so nothing rotated across the run.
+
+**The bound rule, which carries the claim (decision 0.24): the world-level
+deadline is the PER-CIRCLE bound — 171.75 s, the pool's reconnect ladder plus
+two round trips — and never ten times it.** The planes are concurrent, and a
+linear bound would hide a serialization bug behind slack. If the measured run
+cannot meet the per-circle bound at ten circles, that is the finding S10 exists
+for, and the bound is never widened to fit it. Measured 2026-09-25 at the PR
+shape (eight circles built by the arm): under 16 s including the world build.
+
+### Expected red: S23, and the promotion rule
+
+One arm in the nightly is REQUIRED to be red. S23's `chained-commit-backlog`
+grades C7 (`docs/BACKGROUND_SHARING_FAILURE_ANALYSIS.md`): a member paused
+across TWO confirmed commits is served them newest-first on its resume — the
+page order is pinned by waiting the wall second out between the commits, read
+back off the relay's own store, so the strand is the same every night and never
+a coin toss on event-id order — and the newer commit cannot peel until the older
+is applied, is retained as a `PeelDeferred` row, and is retried only by a sweep
+the receive plane never reaches. The device sits one epoch below its peers;
+three further fixes from the committer do not move it. Unlike S03 and S14, whose
+recorded silences are decided and not built (OD-1), this is a PRODUCT DEFECT
+that nobody decided, so it is GRADED rather than recorded: the closing round —
+witness leading, so the victim's first probe is a receive — reports
+`epoch-diverged` (O2) and `probe-not-delivered` towards the victim (O1) at
+**rc 1**, and the nightly carries that red until the fix lands.
+
+What the arm ALSO measured, 2026-09-25: the stranded device's OWN next seal
+(`encrypt_location`, nothing published) drains the retained commit — the send
+path's settle reaches the deferred-peel sweep the receive path never does — and
+it converges. So the blackout is bounded by the victim's own publish cadence
+while it is sharing, and unbounded only for a device that receives without
+sending; C7's "permanent" reads as "until this device next publishes". The arm
+records that lever as its last canary, after the grade, so the recovery is
+evidence beside the finding rather than a substitute for it.
+
+`tests/oracles.rs` names the arm in `EXPECTED_RED`, beside
+`EXCLUDED_FROM_THE_SWEEP`, with that one reason. Its own test requires rc 1
+with both findings, and its FIRST assertion is the promotion rule: **the day the
+arm grades rc 0, C7 is fixed, and the arm is promoted to `SWEPT` (and deleted
+from `EXPECTED_RED`) in the same change** — never left asserting a defect the
+product no longer has, and never quietly re-listed as a recorded expectation.
+The product fix — a sweep of deferred peels on resume or on a timer,
+independent of whether a peelable event arrived — is not designed in the soak.
+Its mis-configuration control withholds the handshake class from the victim's
+own endpoint, so no backlog is ever served to it: a device that received no
+chain cannot be stranded behind one (that is S03's strand, a partition's), the
+served-backlog canary cannot hold, and the arm reports rc 3.
+
+### Durable-storage growth: S16's three arms are three different stores
+
+"The engine bounds its storage" is true of exactly ONE of the three stores an
+inbound kind-445 can land in at the pinned engine, and S16 measures each on its
+own terms (Rule 12; `scenarios/s16_storage_growth.rs`, one arm per store, all
+three nightly). Where an event lands depends on who sealed it and on the group's
+epoch state when it arrives, because the peel runs after the `can_ingest` gate
+and before anything convergence-related:
+
+* **`outsider-flood` — the CAPPED `PeelDeferred` store.** Forgeries an outsider
+  can mint from the circle's public `#h` — content that decodes, sealed by no
+  member — reach the peel and fail there, and the engine retains them up to
+  `MAX_PEEL_DEFERRED_ROWS_PER_GROUP` (256, read from `cgka-engine` at runtime,
+  never restated; the crate's first and only direct MDK dependency). The arm feeds
+  the store PAST the cap and asserts that exactly `cap` rows were retained and
+  every later one was dropped unpersisted — the drop path held for the whole
+  overflow, not for a boundary — then one more forgery over the live plane, after
+  the cap, which leaves no row either. The classification of those drops,
+  `PeelDeferredCapped`, is set from the ABSENCE of a row: the engine answers a
+  capped drop and an ordinary peel failure with the same `Stale{PeelFailed}`, so
+  only a scenario that flooded the store can tell them apart, and the doc says so.
+  Dropping above the cap is NOT a Rule-12 breach — the input is un-peelable, so
+  it cannot be legitimate backlog for this device at this epoch, and transport
+  redelivery is the recovery path once the backlog drains — and the arm records
+  that tension rather than hiding it. Measured 2026-09-26: 264 feeds in under a
+  second, and neither of the other two stores moved.
+* **`member-future-header-flood` — the UNCAPPED convergence buffer (#757).**
+  A co-member seals kind-445s whose OUTER layer peels at the receiver's epoch
+  and whose cleartext inner header claims a far-future epoch, through
+  haven-core's `forge_future_header_445_for_test` (only a member holds the key
+  to mint one), publishes them, and the victim receives them over the wire like
+  any 445. `convergence_buffer_len_for_test` — the one instrument that sees this
+  store, because `gating_input_count` skips rows above the future horizon — is
+  read before the flood as the in-arm control and after every seal, and must
+  grow with every one: a strictly increasing curve compared in process, never
+  rendered. The stored row's state is read back to prove the flood entered
+  convergence and not `PeelDeferred` (without that read the arm would be
+  `outsider-flood` wearing this label). An outsider's re-signed replay of one
+  seal is carried to the victim and grows nothing (the store is keyed by content).
+  Then a real commit lands with the buffer full and the victim follows it, a fix
+  crosses the SIBLING circle in the same store, and the far-future rows are all
+  still there — nothing drains them, because nothing can.
+* **`pending-window-flood` — the UNCAPPED raw `Retryable` persist, OUTSIDER-
+  reachable (owner decision OQ-B).** While a group is `PendingPublish` the
+  `can_ingest` gate persists EVERY inbound event raw, before the peel, keyed on
+  the transport id the sender chose, with no cap at all. The arm opens the window
+  the way the product opens it — a swallowed acknowledgement holds a staged
+  relay-list commit in its publish-before-apply transition — feeds outsider
+  forgeries into it and reads one raw `Retryable` row per forgery (plus one
+  carried over the live plane), heals the plane, and the SAME commit is
+  acknowledged, confirmed and the circle sends again. Under Rule 13 an
+  acknowledgement that does arrive closes the window at once, and the arm
+  confirms it rather than hold a window open by hand — none of its canaries can
+  then hold, so it is rc 3; no test reaches that branch, because a swallowed
+  acknowledgement cannot be un-swallowed from outside the arm. The scenario's
+  mis-configuration control is `member-future-header-flood` on a downed plane
+  (`tests/oracles.rs`). The flood is eight rows, not the other store's cap, because the confirm
+  REPLAYS every raw row the window took — measured 2026-09-26 at roughly a
+  quarter of a second per row (85 s for 300), after which 256 have become
+  `PeelDeferred` and the rest stay `Retryable` for good; the record is in
+  `MARMOT_PROTOCOL_KNOWLEDGE.md` beside #757.
+
+**The recording story (decision 0.31).** The bucket policy renders `5+` from a
+flood's third sample and a byte delta as `5+` always, so the growth CURVE is
+unrepresentable in the timeline under Rule 15 as implemented. Every count and
+byte figure is compared in process; the timeline carries one `buffer-grew`
+record per arm with `grew` / `did-not-grow` and nothing else, and the arms
+sample every device's session store between feeds against the rig's declared
+ceiling (`SESSION_STORE_CEILING_BYTES`, the same one the driver samples at
+teardown) — crossing it mid-arm is rc 3, the sim hitting its own guard.
+
+**What the wire proved, and what it did not, until this scenario.** An injected
+forgery used to be written on every connection once per matching subscription
+plane-wide, and a relay pool notifies an event once per id — so a real engine
+saw the injection on its own REQ only if its subscription id happened to sort
+first, and S09's wire canaries were (honestly) wire-only. The proxy now writes
+an injected `EVENT` on a connection only for the subscriptions that connection
+opened, pinned by `tests/relay_faults.rs`, and every S16 arm's live-plane canary
+reads the injected event's row (or its absence) out of the ENGINE's store.
 
 ---
 
@@ -424,7 +640,7 @@ wrong is still the rig's rc taxonomy, never the deadline.
 sum of its step caps (10 scanner + 25 rig build + 25 drive = 60), so the
 drive's own 23-minute deadline is what reaps a hung run rather than the job's
 anonymous timeout — which is the outcome the ordering rules exist to prevent.
-The other two jobs are the same shape (125 against 119, 355 against 340). What
+The other two jobs are the same shape (135 against 129, 355 against 340). What
 is still missing is C6's other term: job cap ≥ Σ step caps **+ declared
 uncapped minutes**, and that declaration has to be MEASURED. C6 therefore
 deliberately does not cover the soak jobs yet (see "Two decisions inside those

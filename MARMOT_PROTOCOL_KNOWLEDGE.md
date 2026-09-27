@@ -934,6 +934,26 @@ un-poison workaround — all deleted):
   can grow durable storage with future-epoch messages. Haven mitigates with intake backpressure
   (Rule 12: rate-limit, NEVER silently drop legitimate offline backlog), but an intake cap
   throttles only — it cannot bound engine storage. #757 closure is the real fix.
+- **A third store, OUTSIDER-reachable and uncapped — recorded 2026-09-26 (owner decision
+  OQ-B; measured by `haven-soak` S16 `pending-window-flood`).** While a group is
+  `PendingPublish`/`Merging`, `can_ingest` is false and `ingest_group_message` persists
+  EVERY inbound kind-445 as `MessageState::Retryable` — unconditionally, BEFORE the peel,
+  with no cap (`cgka-engine/src/message_processor/ingest.rs:198-209`), keyed on the raw
+  transport id the sender chose (the content-id rebinding at `:416-440` happens only after
+  a successful peel, so fresh ids defeat the dedup at `:108-118`). The only cap in the
+  file is `reserve_peel_deferred_slot` inside the `DecryptFailed` arm (`:290`), a branch
+  this path never reaches. So anyone who has seen a circle's public `#h` grows the
+  victim's durable store one row per event for as long as its publish window stays open
+  — a window Haven holds open for the whole commit ladder on every unacknowledged
+  publish, and for ever under S22's undischargeable removal. Measured at this pin over
+  one window of 300 forged rows: the confirm that closes the window replays every raw
+  row (about 285 ms each — 85 s for the window), the first 256 become `PeelDeferred`
+  (the other cap), and the remaining 44 stay `Retryable` for good (the bullet below:
+  a raw row is never retired), with the store growing from 6.5 MB to 14.5 MB across the
+  replay. None of it gates a send (`gating_input_count` reads 0 throughout) and the
+  circle recovers, which is what makes it silent. Haven-side mitigation is the same
+  intake backpressure #757's is; the persist itself is MDK's, and it is left alone at
+  this pin.
 - **`replay_buffered_messages` retires only `PeelDeferred` rows** (`message_processor/mod.rs`
   `:890-900`): a raw `Retryable` row stays `Retryable` after its content has been applied, and it
   is that row a catch-up cursor is pinned behind. So a resolved publish delivering the buffered

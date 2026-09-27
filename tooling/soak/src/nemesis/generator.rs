@@ -301,6 +301,9 @@ mod tests {
                 // and a heal that quietly did not happen leaves every bound
                 // derived from it a fiction.
                 Op::Device { .. } | Op::Probe => assert_eq!(scheduled.heal_at, None),
+                // Arm-applied only: a schedule that partitioned one device
+                // would grade an arm against two causes at once.
+                Op::DeviceFault { .. } => panic!("the generator mints no per-device fault"),
             }
         }
     }
@@ -333,6 +336,7 @@ mod tests {
                     "an event named a device the world lacks"
                 ),
                 Op::Probe => {}
+                Op::DeviceFault { .. } => panic!("the generator mints no per-device fault"),
             }
         }
     }

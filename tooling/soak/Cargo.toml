@@ -56,13 +56,24 @@ serde_json = "1"
 sha2 = "0.10"
 # The checked-in profile declarations.
 toml = "0.8"
+# The engine's PUBLIC per-group caps, and nothing else from it: S16's
+# `outsider-flood` grades `MAX_PEEL_DEFERRED_ROWS_PER_GROUP` and a bound written
+# as a literal-plus-grep would restate the constant it is measuring (decision
+# 0.36/0.37). Pinned to the rev haven-core pins, byte for byte. The one-universe
+# hazard does not arise: this adds ZERO crates (the engine already resolves
+# through haven-core), and `rust-check.yml`'s `soak-tooling` step asserts one
+# version, one source and equality with haven-core's over `cgka-engine` and
+# its neighbours. Nothing here may format a value of its (Rule 15,
+# `check_soak_test_only.sh`'s `FOREIGN_RE`): the caps are matched and compared,
+# never rendered.
+cgka-engine = { git = "https://github.com/marmot-protocol/mdk", rev = "e391adc133a9b60e420da7a0446f014a180ac8d2" }
 #
-# NOT here, deliberately: `openmls`, `cgka-*` and `rusqlite` (one universe per
-# crate — a second `openmls` would be a second MLS type graph), and
-# `transport-nostr-peeler`, ever: `check_no_exporter_label_override.sh` roots at
-# `haven-core/src` + `haven/rust_builder/src` and would not see a Rule-11
-# exporter-label downgrade written here. Adding it means extending that guard in
-# the same change.
+# NOT here, deliberately: `openmls` (until S12(b)'s KeyPackage minting is its
+# first consumer — the same first-consumer rule that admitted `cgka-engine`
+# above), `rusqlite`, and `transport-nostr-peeler`, EVER:
+# `check_no_exporter_label_override.sh` roots at `haven-core/src` +
+# `haven/rust_builder/src` and would not see a Rule-11 exporter-label downgrade
+# written here. Adding it means extending that guard in the same change.
 
 [profile.soak]
 inherits = "release"

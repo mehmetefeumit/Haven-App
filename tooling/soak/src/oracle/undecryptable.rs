@@ -88,6 +88,15 @@ pub enum Verdict {
     OwnEcho,
     /// This device's own leaf was removed.
     SelfEvicted,
+    /// The engine dropped this event unpersisted because the per-group
+    /// `PeelDeferred` store was already at its cap.
+    ///
+    /// Not distinguishable from [`Self::PeelFailed`] by the engine's outcome
+    /// alone — both answer `Stale { PeelFailed }` — so it is set by a scenario
+    /// that observed the cap (the drop leaves NO row where a normal peel failure
+    /// leaves a `PeelDeferred` one), never by [`classify_ingest`]. S16(a) is its
+    /// producer.
+    PeelDeferredCapped,
     /// The group is frozen by hydration quarantine for the life of this session.
     Quarantined,
     /// Addressed to another client, or to a group this device does not hold.

@@ -354,6 +354,17 @@ which is why it is measured rather than argued.
   (`COMMITS_WHILE_AWAY`, `tooling/soak/src/scenarios/s04_offline_member.rs`), which is stated at the
   constant as a workaround. The scenario that asserts C7 RED is owner question **OQ-T** in
   `PLAN_PHASE2.md` §8, owed in sub-phase 2b.
+- **Amended 2026-09-25 — S23 (`tooling/soak/src/scenarios/s23_chained_backlog.rs`) grades it
+  RED and measured what DOES drain it.** The stranded device's OWN next seal — `encrypt_location`,
+  nothing published — runs the send path's settle, which reaches the deferred-peel sweep the
+  receive path never does: the retained commit peels, applies, and the device converges. Three
+  fixes from a peer do not move it; one seal of its own does. So "PERMANENT" above reads as
+  "until this device next publishes": bounded by its own publish cadence while it is sharing,
+  and unbounded only for a device that receives without sending — sharing off, or its publisher
+  wedged (C1–C6). It is still a defect — a receive plane that depends on the local send plane to
+  recover is not a receive plane — and the fix is unchanged: a drain that does not wait for a
+  local send. The page order is not a coin toss when the two commits fall in different wall
+  seconds (the store orders by `created_at` descending, ties by id), which is how S23 pins it.
 
 ### Downgraded hypotheses (kept so nobody re-investigates them)
 

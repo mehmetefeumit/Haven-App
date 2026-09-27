@@ -31,7 +31,7 @@ use std::time::Duration;
 use nostr::filter::MatchEventOptions;
 use nostr::{Event, EventId, Filter, SubscriptionId};
 
-use crate::rig::{sim_magnitude, EventTag};
+use crate::rig::{sim_magnitude, DeviceTag, EventTag};
 
 /// The frames one relay plane carried, per direction.
 ///
@@ -50,8 +50,12 @@ struct Inner {
     /// event. Verbatim, because a refusal's machine-readable prefix is what a
     /// client branches on and a forged refusal is only worth what its shape is.
     refusals: HashMap<EventId, String>,
-    /// `EVENT` frames written towards the client, per event.
-    delivered: HashMap<EventId, usize>,
+    /// `EVENT` frames written towards the client, per event and per ENDPOINT:
+    /// `None` is the plane's canonical endpoint, `Some` a device's own. The
+    /// endpoint is the device dimension a partition arm reads — "dev#0's
+    /// socket never carried it" is a different fact from "the plane never
+    /// wrote it".
+    delivered: HashMap<EventId, HashMap<Option<DeviceTag>, usize>>,
     /// `EVENT` frames the client sent towards the relay, per event.
     published: HashMap<EventId, usize>,
     /// Events this plane forged onto a subscription, in injection order.
@@ -148,11 +152,33 @@ impl Ledger {
     }
 
     /// How many `EVENT` frames naming `event_id` were written towards the
-    /// client. Two is a duplicate on the wire, whatever the client's own
-    /// de-duplication then does with it.
+    /// client, over every endpoint of this plane. Two is a duplicate on the
+    /// wire, whatever the client's own de-duplication then does with it.
     #[must_use]
     pub fn delivered(&self, event_id: &EventId) -> usize {
-        self.with(|inner| inner.delivered.get(event_id).copied().unwrap_or_default())
+        self.with(|inner| {
+            inner
+                .delivered
+                .get(event_id)
+                .map_or(0, |endpoints| endpoints.values().sum())
+        })
+    }
+
+    /// Whether an `EVENT` frame naming `event_id` was written towards
+    /// `device`'s OWN endpoint.
+    ///
+    /// The partition evidence: a device whose endpoint is dropping a class
+    /// must never have been sent a frame of that class, and a device whose
+    /// endpoint was healed must have been. A device with no endpoint of its
+    /// own on this plane was sent nothing through one.
+    #[must_use]
+    pub fn delivered_to(&self, device: DeviceTag, event_id: &EventId) -> bool {
+        self.with(|inner| {
+            inner
+                .delivered
+                .get(event_id)
+                .is_some_and(|endpoints| endpoints.contains_key(&Some(device)))
+        })
     }
 
     /// How many `EVENT` frames naming `event_id` the client sent.
@@ -263,10 +289,15 @@ impl Ledger {
         });
     }
 
-    pub(crate) fn note_delivered(&self, event_id: EventId) {
+    pub(crate) fn note_delivered(&self, device: Option<DeviceTag>, event_id: EventId) {
         self.with(|inner| {
             inner.tag(event_id);
-            *inner.delivered.entry(event_id).or_default() += 1;
+            *inner
+                .delivered
+                .entry(event_id)
+                .or_default()
+                .entry(device)
+                .or_default() += 1;
         });
     }
 
@@ -431,8 +462,8 @@ mod tests {
     fn delivery_and_publication_are_counted_per_direction() {
         let ledger = Ledger::new();
         ledger.note_published(an_event_id(1));
-        ledger.note_delivered(an_event_id(1));
-        ledger.note_delivered(an_event_id(1));
+        ledger.note_delivered(None, an_event_id(1));
+        ledger.note_delivered(None, an_event_id(1));
         assert_eq!(ledger.published(&an_event_id(1)), 1);
         assert_eq!(ledger.delivered(&an_event_id(1)), 2);
         assert_eq!(ledger.delivered(&an_event_id(9)), 0);
@@ -441,6 +472,33 @@ mod tests {
             vec![an_event_id(1)],
             "a delivery is not a publication, and the swallowed-ack proof reads the publications"
         );
+    }
+
+    #[test]
+    fn a_delivery_is_answered_per_endpoint_and_summed_over_the_plane() {
+        let ledger = Ledger::new();
+        let (alice, bob, carol) = (DeviceTag::new(0), DeviceTag::new(1), DeviceTag::new(2));
+        ledger.note_delivered(Some(alice), an_event_id(1));
+        ledger.note_delivered(Some(bob), an_event_id(1));
+        ledger.note_delivered(Some(bob), an_event_id(1));
+        ledger.note_delivered(None, an_event_id(2));
+        assert!(ledger.delivered_to(alice, &an_event_id(1)));
+        assert!(ledger.delivered_to(bob, &an_event_id(1)));
+        assert!(
+            !ledger.delivered_to(carol, &an_event_id(1)),
+            "a device whose endpoint never carried the frame was not sent it, whatever the \
+             plane wrote elsewhere"
+        );
+        assert!(
+            !ledger.delivered_to(alice, &an_event_id(2)),
+            "a frame the canonical endpoint wrote reached no device's own endpoint"
+        );
+        assert_eq!(
+            ledger.delivered(&an_event_id(1)),
+            3,
+            "the plane-wide count is the sum over every endpoint"
+        );
+        assert_eq!(ledger.delivered(&an_event_id(2)), 1);
     }
 
     #[test]
@@ -460,8 +518,8 @@ mod tests {
     fn a_handle_is_minted_once_per_event_in_observation_order() {
         let ledger = Ledger::new();
         ledger.note_published(an_event_id(7));
-        ledger.note_delivered(an_event_id(8));
-        ledger.note_delivered(an_event_id(7));
+        ledger.note_delivered(None, an_event_id(8));
+        ledger.note_delivered(Some(DeviceTag::new(1)), an_event_id(7));
         assert_eq!(ledger.tag_of(&an_event_id(7)), Some(EventTag::new(0)));
         assert_eq!(ledger.tag_of(&an_event_id(8)), Some(EventTag::new(1)));
         assert_eq!(ledger.tag_of(&an_event_id(9)), None);
@@ -519,7 +577,7 @@ mod tests {
     fn rendering_a_ledger_buckets_its_counts_and_names_nothing_it_carried() {
         let ledger = Ledger::new();
         ledger.note_ok(an_event_id(1), true, "");
-        ledger.note_delivered(an_event_id(1));
+        ledger.note_delivered(Some(DeviceTag::new(0)), an_event_id(1));
         ledger.note_published(an_event_id(1));
         ledger.note_req(SubscriptionId::new("needle-subscription"), Vec::new());
         ledger.note_closed("rate-limited: needle-text".to_string());

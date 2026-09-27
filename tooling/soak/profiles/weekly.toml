@@ -1,8 +1,9 @@
 # The weekly soak profile: every scenario, every arm, the biggest world.
 #
-# Superset of `nightly`. The one arm that appears only here is S17's full
-# intake, whose bound starts at the 684-second delivery-silence window and so
-# cannot share a run with anything shorter.
+# Superset of `nightly`. The two arms that appear only here — S17's full
+# intake and S03's unnamed strand — each wait out the 684-second
+# delivery-silence window as an absence, and an absence cannot share a run
+# with anything shorter.
 name = "weekly"
 run_budget_secs = 16200
 deadline_secs = 18000
@@ -18,6 +19,14 @@ relays = 3
 [[scenarios]]
 id = "S01"
 arms = ["single-relay-outage", "all-relay-outage", "rolling-outage"]
+
+[[scenarios]]
+id = "S02"
+arms = ["partitioned-receiver", "commit-class-only"]
+
+[[scenarios]]
+id = "S03"
+arms = ["lost-commit-strands", "lost-commit-unnamed"]
 
 [[scenarios]]
 id = "S04"
@@ -69,3 +78,19 @@ arms = ["duplicate-replay", "reordered-pages", "cross-sub-eose", "commit-gap"]
 id = "S22"
 arms = ["oversized-commit", "refusal-is-relay-count-invariant", "oversized-welcome",
         "oversized-removal-wedges-the-circle"]
+
+[[scenarios]]
+id = "S10"
+arms = ["ten-circle-roster"]
+
+[[scenarios]]
+id = "S23"
+arms = ["chained-commit-backlog"]  # EXPECTED RED (C7) until the deferred-peel sweep lands
+
+[[scenarios]]
+id = "S16"
+arms = ["outsider-flood", "member-future-header-flood", "pending-window-flood"]
+
+[[scenarios]]
+id = "S21"
+arms = ["removal-withheld-commit", "removal-delivered-commit", "removal-lag"]

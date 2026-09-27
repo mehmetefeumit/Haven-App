@@ -15,13 +15,15 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
-use haven_soak::nemesis::types::{ByteCap, ClosedPrefix, Fault};
-use haven_soak::relay::{Forgery, Ledger, NativeClosed, SimRelay, OVERSIZE_PREFIX};
+use haven_soak::nemesis::types::{ByteCap, ClosedPrefix, DropClass, Fault, Schedule};
+use haven_soak::profiles::WorldShape;
+use haven_soak::relay::{mint, Forgery, Ledger, NativeClosed, SimRelay, OVERSIZE_PREFIX};
 use haven_soak::rig::circle::{build_circle, publish_witnessed};
 use haven_soak::rig::{
-    install_process_globals, poll_until, CircleTag, DeviceTag, EventTag, RelayPlane, RelayTag,
-    RigError, SimDevice,
+    install_process_globals, poll_until, CapturedLine, CircleTag, DeviceTag, EventTag, LogDrain,
+    RelayPlane, RelayTag, RigError, SimDevice, SimWorld,
 };
+use haven_soak::timeline::Timeline;
 use nostr::{
     ClientMessage, Event, EventBuilder, EventId, Filter, JsonUtil, Keys, Kind, RelayMessage,
     SubscriptionId, Tag, Timestamp,
@@ -40,6 +42,15 @@ const POLL_EVERY: Duration = Duration::from_millis(5);
 /// The text a `Notice` fault carries. Harness-authored, like every string this
 /// crate puts on a wire.
 const NOTICE_TEXT: &str = "the harness is holding this relay";
+
+/// A world here captures no logs: the case is about frames.
+struct NoDrain;
+
+impl LogDrain for NoDrain {
+    fn drain_since(&self, _from: u64) -> Vec<CapturedLine> {
+        Vec::new()
+    }
+}
 
 // ---------------------------------------------------------------------------
 // The world each case builds
@@ -130,8 +141,14 @@ fn a_commit_445() -> Event {
 }
 
 async fn publish(client: &Client, plane: &SimRelay, event: &Event) {
+    publish_on(client, plane.url(), event).await;
+}
+
+/// Publishes through the one endpoint `client` dialled, canonical or a
+/// device's own.
+async fn publish_on(client: &Client, url: &str, event: &Event) {
     client
-        .send_msg_to([plane.url()], ClientMessage::event(event.clone()))
+        .send_msg_to([url], ClientMessage::event(event.clone()))
         .await
         .expect("the event goes out");
 }
@@ -1462,6 +1479,383 @@ async fn a_refusal_and_a_swallowed_acknowledgement_are_distinct_in_the_ledger() 
 }
 
 // ---------------------------------------------------------------------------
+// Per-device endpoints and DropClass: a partition between the relay and ONE
+// device
+// ---------------------------------------------------------------------------
+
+/// A plane with an endpoint of its own for each of `devices`.
+async fn provisioned_plane(devices: &[DeviceTag]) -> SimRelay {
+    let mut plane = plane().await;
+    for device in devices {
+        plane
+            .provision(*device)
+            .await
+            .expect("a device's endpoint binds");
+    }
+    plane
+}
+
+/// A client dialling `device`'s own endpoint and subscribed to everything on
+/// it, with the REQ known to have crossed the proxy.
+async fn client_on(plane: &SimRelay, device: DeviceTag, reqs_so_far: usize) -> Client {
+    let client = Client::builder().build();
+    client.automatic_authentication(false);
+    client
+        .add_relay(plane.url_for(device))
+        .await
+        .expect("the client takes the device's own address");
+    client.connect().await;
+    client.wait_for_connection(WIRE_BOUND).await;
+    client
+        .subscribe_with_id(SubscriptionId::new("everything"), Filter::new(), None)
+        .await
+        .expect("the REQ goes out");
+    let ledger = plane.ledger().clone();
+    reaching(WIRE_BOUND, reqs_so_far + 1, move || ledger.reqs()).await;
+    client
+}
+
+/// Waits until `device`'s own endpoint has carried `marker`.
+///
+/// The frames of one connection are written in order, so a marker published
+/// AFTER the event under test, once seen on a device's endpoint, proves that
+/// endpoint's answer for the earlier event is final rather than in flight.
+async fn marker_reached(plane: &SimRelay, device: DeviceTag, marker: &EventId) -> bool {
+    let ledger = plane.ledger().clone();
+    let marker = *marker;
+    reaching(WIRE_BOUND, 1, move || {
+        usize::from(ledger.delivered_to(device, &marker))
+    })
+    .await
+        == 1
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dropped_class_is_withheld_from_one_devices_endpoint_and_carried_to_the_others() {
+    let (alice, bob) = (DeviceTag::new(0), DeviceTag::new(1));
+    let mut plane = provisioned_plane(&[alice, bob]).await;
+    assert!(
+        plane.url_for(alice) != plane.url_for(bob) && plane.url_for(alice) != plane.url(),
+        "two devices dial two endpoints, and neither is the canonical one"
+    );
+    let alices = client_on(&plane, alice, 0).await;
+    let bobs = client_on(&plane, bob, 1).await;
+    let mut alice_sees = alices.notifications();
+    let mut bob_sees = bobs.notifications();
+
+    plane
+        .apply_for(alice, Fault::DropClass(DropClass::Application))
+        .await
+        .expect("the fault applies");
+
+    // The application message first, then the handshake as the marker: on
+    // alice's socket the handshake is the positive control AND the proof that
+    // the application frame is not merely late — and it is the discriminator's
+    // own control, because the two differ only in the expiration tag.
+    let location = an_application_445();
+    let commit = a_commit_445();
+    publish_on(&bobs, plane.url_for(bob), &location).await;
+    publish_on(&bobs, plane.url_for(bob), &commit).await;
+
+    assert!(
+        message_within(&mut alice_sees, WIRE_BOUND, |message| {
+            matches!(message, RelayMessage::Event { event, .. } if event.id == commit.id)
+        })
+        .await
+        .is_some(),
+        "the handshake-shaped 445 must reach the partitioned device: only the CLASS is dropped"
+    );
+    assert!(
+        !plane.ledger().delivered_to(alice, &location.id),
+        "the application 445 was written towards the partitioned device's own socket"
+    );
+    assert!(
+        message_within(&mut bob_sees, WIRE_BOUND, |message| {
+            matches!(message, RelayMessage::Event { event, .. } if event.id == location.id)
+        })
+        .await
+        .is_some(),
+        "the other device's endpoint must carry the application message untouched"
+    );
+    assert!(
+        marker_reached(&plane, bob, &commit.id).await,
+        "and the handshake"
+    );
+    assert!(
+        plane.stored(&location.id).await.expect("the store reads")
+            && acked_within(&plane, &location.id, WIRE_BOUND).await,
+        "the relay stored and acknowledged it: a drop is a partition, never an outage"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn healing_one_devices_endpoint_restores_it_and_leaves_the_others_partition_standing() {
+    let (alice, bob) = (DeviceTag::new(0), DeviceTag::new(1));
+    let mut plane = provisioned_plane(&[alice, bob]).await;
+    let alices = client_on(&plane, alice, 0).await;
+    let _bobs = client_on(&plane, bob, 1).await;
+    let mut alice_sees = alices.notifications();
+    for device in [alice, bob] {
+        plane
+            .apply_for(device, Fault::DropClass(DropClass::Application))
+            .await
+            .expect("the fault applies");
+    }
+    plane
+        .apply_for(alice, Fault::Heal)
+        .await
+        .expect("the heal applies");
+
+    let location = an_application_445();
+    let commit = a_commit_445();
+    publish_on(&alices, plane.url_for(alice), &location).await;
+    publish_on(&alices, plane.url_for(alice), &commit).await;
+
+    assert!(
+        message_within(&mut alice_sees, WIRE_BOUND, |message| {
+            matches!(message, RelayMessage::Event { event, .. } if event.id == location.id)
+        })
+        .await
+        .is_some(),
+        "a healed endpoint carries the class it was dropping"
+    );
+    assert!(
+        marker_reached(&plane, bob, &commit.id).await,
+        "the other device's endpoint is still up and carrying handshakes"
+    );
+    assert!(
+        !plane.ledger().delivered_to(bob, &location.id),
+        "and still dropping applications: healing one endpoint disturbed another's fault"
+    );
+    assert!(
+        plane.faults_applied() == 2,
+        "two faults were taken and a heal is not a fault, per device as per plane"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_device_with_no_endpoint_dials_the_canonical_one_and_takes_no_fault_of_its_own() {
+    let (alice, stranger) = (DeviceTag::new(0), DeviceTag::new(7));
+    let mut plane = provisioned_plane(&[alice]).await;
+    assert!(
+        plane.url_for(stranger) == plane.url(),
+        "a device this plane never provisioned dials the canonical endpoint"
+    );
+    assert!(
+        matches!(
+            plane
+                .apply_for(stranger, Fault::DropClass(DropClass::Handshake))
+                .await,
+            Err(RigError::UnknownTarget)
+        ),
+        "a fault aimed at an endpoint nobody dials would count towards a floor while \
+         changing nothing any engine sees; it is refused rather than armed on nothing"
+    );
+    assert!(
+        plane.faults_applied() == 0,
+        "a refused fault is a fault that did not fire, and is not counted"
+    );
+
+    plane
+        .apply_for(alice, Fault::DropClass(DropClass::Handshake))
+        .await
+        .expect("the provisioned device takes its fault");
+    assert!(
+        plane.faults_applied() == 1,
+        "a per-device fault is counted once, against the plane's one ledger"
+    );
+
+    // The canonical endpoint is untouched by a device's fault: a client on it
+    // still receives the class alice's endpoint is dropping.
+    let canonical = connected_client(&plane).await;
+    let mut canonical_sees = canonical.notifications();
+    canonical
+        .subscribe_with_id(SubscriptionId::new("everything"), Filter::new(), None)
+        .await
+        .expect("the REQ goes out");
+    let ledger = plane.ledger().clone();
+    reaching(WIRE_BOUND, 1, move || ledger.reqs()).await;
+    let commit = a_commit_445();
+    publish(&canonical, &plane, &commit).await;
+    assert!(
+        message_within(&mut canonical_sees, WIRE_BOUND, |message| {
+            matches!(message, RelayMessage::Event { event, .. } if event.id == commit.id)
+        })
+        .await
+        .is_some(),
+        "the canonical endpoint carries what one device's endpoint is dropping"
+    );
+    assert!(
+        !plane.ledger().delivered_to(alice, &commit.id),
+        "no device's own endpoint carried a frame the canonical one delivered"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_delivery_is_answered_per_device_for_one_event_on_one_plane() {
+    let (alice, bob, carol) = (DeviceTag::new(0), DeviceTag::new(1), DeviceTag::new(2));
+    let mut plane = provisioned_plane(&[alice, bob]).await;
+    let alices = client_on(&plane, alice, 0).await;
+    let _bobs = client_on(&plane, bob, 1).await;
+
+    let seen_by_both = an_event("carried to both endpoints");
+    publish_on(&alices, plane.url_for(alice), &seen_by_both).await;
+    assert!(marker_reached(&plane, alice, &seen_by_both.id).await);
+    assert!(marker_reached(&plane, bob, &seen_by_both.id).await);
+    assert!(
+        !plane.ledger().delivered_to(carol, &seen_by_both.id),
+        "a device with no endpoint on this plane was sent nothing through one"
+    );
+    assert!(
+        plane.ledger().delivered(&seen_by_both.id) == 2,
+        "the plane-wide count is the sum over the endpoints that carried it"
+    );
+
+    plane
+        .apply_for(bob, Fault::DropClass(DropClass::Application))
+        .await
+        .expect("the fault applies");
+    let location = an_application_445();
+    let marker = a_commit_445();
+    publish_on(&alices, plane.url_for(alice), &location).await;
+    publish_on(&alices, plane.url_for(alice), &marker).await;
+    assert!(marker_reached(&plane, alice, &marker.id).await);
+    assert!(marker_reached(&plane, bob, &marker.id).await);
+    assert!(
+        plane.ledger().delivered_to(alice, &location.id)
+            && !plane.ledger().delivered_to(bob, &location.id),
+        "the same event on the same plane: one endpoint carried it and the other withheld it"
+    );
+    assert!(
+        plane.ledger().delivered(&location.id) == 1,
+        "and the plane-wide count says how many endpoints did"
+    );
+}
+
+/// A plane-wide injection and a plane-wide notice are written on EVERY endpoint
+/// with a listener — the canonical one an observer watches AND the device's own
+/// one an engine dials — never on the first that answered. A fan-out that
+/// stopped there would leave every engine but one unsent, and an arm's
+/// "the engine received the forgery" canary would be reading luck.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_plane_wide_injection_and_notice_reach_a_devices_own_endpoint_beside_the_canonical() {
+    let alice = DeviceTag::new(0);
+    let mut plane = provisioned_plane(&[alice]).await;
+    let observer = connected_client(&plane).await;
+    let observing = subscribed_to_everything(&observer, &plane, "observer").await;
+    let alices = client_on(&plane, alice, 1).await;
+    let mut observer_sees = observer.notifications();
+    let mut alice_sees = alices.notifications();
+
+    plane
+        .apply(Fault::Inject(Forgery::OutsiderSeal {
+            group_id: A_CIRCLES_ROUTING_ID,
+        }))
+        .await
+        .expect("the injection applies");
+    let forged = injected_within(&plane, WIRE_BOUND).await;
+    assert!(
+        message_within(&mut observer_sees, WIRE_BOUND, |message| {
+            matches!(message, RelayMessage::Event { subscription_id, event }
+                if subscription_id.as_ref() == &observing && event.id == forged)
+        })
+        .await
+        .is_some(),
+        "the canonical endpoint carried the injection"
+    );
+    assert!(
+        message_within(&mut alice_sees, WIRE_BOUND, |message| {
+            matches!(message, RelayMessage::Event { event, .. } if event.id == forged)
+        })
+        .await
+        .is_some(),
+        "the DEVICE endpoint — the one an engine dials — carried the injection too"
+    );
+    let ledger = plane.ledger().clone();
+    assert!(
+        reaching(WIRE_BOUND, 2, move || ledger.delivered(&forged)).await == 2
+            && plane.ledger().delivered_to(alice, &forged),
+        "one frame per endpoint, and the ledger answers for the device's own"
+    );
+
+    plane
+        .apply(Fault::Notice(NOTICE_TEXT))
+        .await
+        .expect("the notice applies");
+    assert!(
+        message_within(&mut observer_sees, WIRE_BOUND, |message| {
+            matches!(message, RelayMessage::Notice(held) if held.as_ref() == NOTICE_TEXT)
+        })
+        .await
+        .is_some(),
+        "the canonical endpoint carried the plane-wide notice"
+    );
+    assert!(
+        message_within(&mut alice_sees, WIRE_BOUND, |message| {
+            matches!(message, RelayMessage::Notice(held) if held.as_ref() == NOTICE_TEXT)
+        })
+        .await
+        .is_some(),
+        "the device's own endpoint carried the plane-wide notice too"
+    );
+}
+
+/// The same fan-out in a real world: three engines on their own endpoints of
+/// one plane, one plane-wide injection, and every device's endpoint carries
+/// it — the ledger's per-device answer is true for each, and the plane-wide
+/// count is the number of devices.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn in_a_world_a_plane_wide_injection_reaches_every_devices_own_endpoint() {
+    install_process_globals().expect("the ws:// loopback opt-in");
+    let shape = WorldShape {
+        members: 3,
+        circles: 1,
+        relays: 1,
+    };
+    let mut world: SimWorld<SimRelay, Timeline, NoDrain> = SimWorld::build(
+        &shape,
+        Schedule::new(Vec::new()),
+        vec![plane().await],
+        Timeline::in_memory(),
+        NoDrain,
+    )
+    .await
+    .expect("a three-member world builds");
+    let routing = *world.circles()[0].nostr_group_id();
+    let tags: Vec<DeviceTag> = world.devices().iter().map(|device| device.tag).collect();
+    // Every engine's group REQ has crossed the proxy before the injection is
+    // asked, or an endpoint with no subscription yet would be correctly absent.
+    let probe =
+        mint(Forgery::OutsiderSeal { group_id: routing }, None).expect("a probe forgery mints");
+    let ledger = world.relays()[0].ledger().clone();
+    reaching(WIRE_BOUND, tags.len(), move || {
+        ledger.subscriptions_matching(&probe).len()
+    })
+    .await;
+
+    world.relays_mut()[0]
+        .apply(Fault::Inject(Forgery::OutsiderSeal { group_id: routing }))
+        .await
+        .expect("the injection applies");
+    let forged = injected_within(&world.relays()[0], WIRE_BOUND).await;
+    let ledger = world.relays()[0].ledger().clone();
+    let delivered = reaching(WIRE_BOUND, tags.len(), move || ledger.delivered(&forged)).await;
+    let carried: Vec<bool> = tags
+        .iter()
+        .map(|tag| world.relays()[0].ledger().delivered_to(*tag, &forged))
+        .collect();
+    world.teardown().await.expect("teardown");
+    assert!(
+        carried.iter().all(|carried| *carried),
+        "a plane-wide injection must reach every device's own endpoint, not the first with a listener"
+    );
+    assert!(
+        delivered == tags.len(),
+        "and the plane-wide count is one frame per device"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Heal, over everything at once
 // ---------------------------------------------------------------------------
 
@@ -1484,6 +1878,11 @@ async fn a_heal_restores_the_pass_through_whatever_was_wrong() {
         Fault::RefuseOversize {
             max_bytes: ByteCap::new(1),
         },
+        // A class is a partition of the canonical endpoint too; the last one
+        // armed is what a heal must undo, and the page below carries one
+        // event of each class to prove it.
+        Fault::DropClass(DropClass::Application),
+        Fault::DropClass(DropClass::Handshake),
         Fault::Down,
     ] {
         plane.apply(fault).await.expect("the fault applies");
@@ -1498,6 +1897,12 @@ async fn a_heal_restores_the_pass_through_whatever_was_wrong() {
         acked_within(&plane, &event.id, WIRE_BOUND).await,
         "a healed plane acknowledges"
     );
+    let location = an_application_445();
+    let commit = a_commit_445();
+    for classed in [&location, &commit] {
+        publish(&healed_client, &plane, classed).await;
+        assert!(stored_within(&plane, &classed.id, WIRE_BOUND).await);
+    }
 
     let subscription = SubscriptionId::new("healed");
     healed_client
@@ -1513,6 +1918,15 @@ async fn a_heal_restores_the_pass_through_whatever_was_wrong() {
         page.iter().filter(|tag| **tag == seeded_tag).count() == 1,
         "a healed plane delivers each stored event once"
     );
+    for classed in [&location, &commit] {
+        let tag = ledger
+            .tag_of(&classed.id)
+            .expect("the ledger names what it delivered");
+        assert!(
+            page.iter().filter(|held| **held == tag).count() == 1,
+            "a healed plane carries every class it was dropping, once"
+        );
+    }
     assert!(
         ledger.closed_messages().is_empty(),
         "a healed plane closes nothing"
@@ -1552,5 +1966,241 @@ async fn a_planes_rendering_names_its_handle_and_nothing_it_carries() {
     assert!(
         !rendered.contains(&event.id.to_hex()),
         "a plane's rendering must carry no event id"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// FutureInnerHeader: a co-member's seal a relay plane cannot mint, and the one
+// wire shape that grows the receiving engine's convergence buffer (mdk#757).
+// ---------------------------------------------------------------------------
+
+/// A fresh two-member circle on its own plane, for the future-header case. The
+/// build boilerplate lives here so the case itself stays a sequence of proofs.
+async fn future_header_world() -> ([SimDevice; 2], haven_soak::rig::SimCircle, SimRelay) {
+    install_process_globals().expect("the ws:// loopback opt-in");
+    let plane = plane().await;
+    let urls = vec![plane.url().to_string()];
+    let devices = [
+        SimDevice::open(DeviceTag::new(0), &urls).expect("open alice"),
+        SimDevice::open(DeviceTag::new(1), &urls).expect("open bob"),
+    ];
+    let outstanding = Arc::new(AtomicUsize::new(0));
+    let circle = build_circle(
+        CircleTag::new(0),
+        &devices,
+        std::slice::from_ref(&plane),
+        &urls,
+        &outstanding,
+    )
+    .await
+    .expect("build a two-member circle");
+    (devices, circle, plane)
+}
+
+/// A co-member seals a future-header 445 (a relay plane holds no group key, so it
+/// cannot); an outsider replays it live through `Fault::Inject`; a real client
+/// receives that replay; and the receiving ENGINE buffers it into convergence,
+/// proven by the count seam growing and the stored row's state, not inferred.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_co_member_future_header_is_replayed_live_and_the_engine_buffers_it_into_convergence() {
+    use haven_core::nostr::mls::types::{
+        IngestOutcome, MessageState, OpenMlsContentKind, ScreenedIngest,
+    };
+    let (devices, circle, mut plane) = future_header_world().await;
+    let group = circle.mls_group_id();
+    let (alice, bob) = (&devices[0], &devices[1]);
+    let bob_session = bob.session().expect("session");
+    let tip = alice
+        .manager()
+        .expect("manager")
+        .group_epoch(group)
+        .await
+        .expect("epoch");
+    let forged = alice
+        .session()
+        .expect("session")
+        .forge_future_header_445_for_test(group, tip + 4)
+        .await
+        .expect("alice seals a future-header 445");
+    assert!(
+        publish_witnessed(
+            alice,
+            std::slice::from_ref(&plane),
+            std::slice::from_ref(&forged)
+        )
+        .await
+        .expect("publish the seal")
+        .is_some(),
+        "the seal must be acked so the plane can serve it to the injection"
+    );
+    let client = connected_client(&plane).await;
+    let subscription = subscribed_to_everything(&client, &plane, "watching").await;
+    let mut notifications = client.notifications();
+    let before = bob_session
+        .convergence_buffer_len_for_test(group)
+        .await
+        .expect("count");
+    assert_eq!(before, 0, "nothing is buffered before the injection");
+    plane
+        .apply(Fault::Inject(Forgery::FutureInnerHeader {
+            source: forged.id,
+            inner_epoch: tip + 4,
+        }))
+        .await
+        .expect("the injection applies");
+    // The stored original (served on subscribe) shares the content but keeps its
+    // id; the injected replay is re-signed, so `id != forged.id` selects it.
+    let replayed = message_within(&mut notifications, WIRE_BOUND, |message| {
+        matches!(message, RelayMessage::Event { subscription_id, event }
+            if subscription_id.as_ref() == &subscription
+                && event.content == forged.content
+                && event.id != forged.id)
+    })
+    .await
+    .expect("a real client receives the injected replay live");
+    let RelayMessage::Event {
+        event: replayed, ..
+    } = replayed
+    else {
+        unreachable!("the predicate above accepted only an EVENT")
+    };
+    assert!(
+        replayed.id != forged.id,
+        "the replay is re-signed by an outsider, so it is a distinct event on the wire"
+    );
+    let Ok(ScreenedIngest::Ingested(effects)) =
+        bob_session.process_event_typed_for_test(&replayed).await
+    else {
+        panic!("a co-member-peelable replay passes pre-authentication and reaches the engine");
+    };
+    assert!(
+        matches!(effects.outcome, IngestOutcome::Buffered { .. }),
+        "a future-epoch application message is buffered, not delivered or dropped"
+    );
+    let after = bob_session
+        .convergence_buffer_len_for_test(group)
+        .await
+        .expect("count");
+    assert_eq!(
+        after, 1,
+        "the injected replay grew the receiving engine's convergence buffer — proven, not inferred"
+    );
+    let record = bob_session
+        .stored_convergence_input_for_test(group, OpenMlsContentKind::Application, tip + 1)
+        .await
+        .expect("the buffered future-epoch row is present");
+    let probe = bob_session
+        .stored_message_record_for_test(&record.id)
+        .await
+        .expect("read the row")
+        .expect("the row the locator just returned exists");
+    assert!(
+        probe.state != MessageState::PeelDeferred,
+        "the row is in the convergence buffer, not the capped PeelDeferred store: a \
+         PeelDeferred row is raw transport and would not have projected into the count above"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_injected_outsider_seal_reaches_the_client_and_no_store_holds_it() {
+    let mut plane = plane().await;
+    let client = connected_client(&plane).await;
+    let subscription = subscribed_to_everything(&client, &plane, "watching").await;
+    let mut notifications = client.notifications();
+
+    plane
+        .apply(Fault::Inject(Forgery::OutsiderSeal {
+            group_id: A_CIRCLES_ROUTING_ID,
+        }))
+        .await
+        .expect("the injection applies");
+
+    let message = message_within(&mut notifications, WIRE_BOUND, |message| {
+        matches!(message, RelayMessage::Event { subscription_id, .. }
+            if subscription_id.as_ref() == &subscription)
+    })
+    .await
+    .expect("the forged event reaches a subscribed client");
+    let RelayMessage::Event { event, .. } = message else {
+        unreachable!("the predicate above accepted only an EVENT")
+    };
+
+    assert!(
+        event
+            .tags
+            .iter()
+            .filter(|tag| tag.kind().as_str() == "h")
+            .count()
+            == 1,
+        "one routing tag: this one parses AND decodes, so the PEEL is what refuses it"
+    );
+    assert!(
+        !plane.stored(&event.id).await.expect("the store reads"),
+        "an injection is never retained"
+    );
+}
+
+/// An injection is written on each connection only for the subscriptions THAT
+/// connection opened. Two clients, one subscription each: the frame reaches
+/// both, once each — never once per subscription on every socket, which would
+/// hand each client a frame for a REQ it never opened and, on a pool that
+/// notifies an event once per id, spend the one notification its own REQ was
+/// owed. That is the difference between "the wire carried it" and "the engine
+/// behind the socket ever saw it".
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_injection_reaches_each_connection_once_and_only_on_its_own_subscription() {
+    let mut plane = plane().await;
+    let first = connected_client(&plane).await;
+    let first_sub = subscribed_to_everything(&first, &plane, "first").await;
+    let second = connected_client(&plane).await;
+    // Not `subscribed_to_everything`: that helper waits for the FIRST REQ to
+    // cross, which the first client already satisfied. The second REQ must
+    // have crossed too, or the injection is asked before this subscription is
+    // open and its absence on the second socket would be correct.
+    let second_sub = SubscriptionId::new("second");
+    second
+        .subscribe_with_id(second_sub.clone(), Filter::new(), None)
+        .await
+        .expect("the REQ goes out");
+    let ledger = plane.ledger().clone();
+    reaching(WIRE_BOUND, 2, move || ledger.reqs()).await;
+    let mut first_notifications = first.notifications();
+    let mut second_notifications = second.notifications();
+
+    plane
+        .apply(Fault::Inject(Forgery::OutsiderSeal {
+            group_id: A_CIRCLES_ROUTING_ID,
+        }))
+        .await
+        .expect("the injection applies");
+    let forged = injected_within(&plane, WIRE_BOUND).await;
+
+    for (notifications, own) in [
+        (&mut first_notifications, &first_sub),
+        (&mut second_notifications, &second_sub),
+    ] {
+        let message = message_within(
+            notifications,
+            WIRE_BOUND,
+            |message| matches!(message, RelayMessage::Event { event, .. } if event.id == forged),
+        )
+        .await
+        .expect("each client receives the injection");
+        let RelayMessage::Event {
+            subscription_id, ..
+        } = message
+        else {
+            unreachable!("the predicate above accepted only an EVENT")
+        };
+        assert!(
+            subscription_id.as_ref() == own,
+            "the frame a client receives names the subscription IT opened"
+        );
+    }
+    let ledger = plane.ledger().clone();
+    assert!(
+        reaching(WIRE_BOUND, 2, move || ledger.delivered(&forged)).await == 2,
+        "one frame per connection: a second frame on either socket would name a \
+         subscription that socket never opened"
     );
 }

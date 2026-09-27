@@ -11,8 +11,9 @@
 #
 # `pr` is the only profile ci.yml calls (stage 4, `needs: [rust]`). `nightly`
 # and `weekly` exist so the scheduler workflows Phase 2 adds have something to
-# call; nothing dispatches them until sub-phase 2d, so NINE scenarios — S04,
-# S05, S09, S12, S14, S17, S18, S19, S22 — have no LANE execution at all. They
+# call; nothing dispatches them until sub-phase 2d, so FIFTEEN scenarios — S02,
+# S03, S04, S05, S09, S10, S12, S14, S16, S17, S18, S19, S21, S22, S23 — have no
+# LANE execution at all. They
 # run in `tests/oracles.rs` and under `scripts/run_soak_local.sh`.
 # docs/SOAK_LANE.md says so in those words, so a reader cannot mistake a green
 # PR lane for coverage of the nightly set.
@@ -25,7 +26,7 @@
 #                priced run fits. It is a ceiling of worst-case product
 #                constants, not an expectation: a healthy pr run measures about
 #                twenty seconds.
-#   deadline     run-with-deadline.sh 23m / 80m / 300m — above the run budget
+#   deadline     run-with-deadline.sh 23m / 90m / 300m — above the run budget
 #                so a hung run is killed with time left to finalise, and
 #                ATTRIBUTABLE where a bare 124 would not be.
 #   step cap     above the deadline + the 1 min SIGTERM→SIGKILL grace.
@@ -181,17 +182,21 @@ jobs:
         run: rm -f /tmp/haven-soak/needles/*.needles.decl /tmp/haven-soak/needles/*.needles.json /tmp/haven-soak/needles/*.canaries.json
 
   # ---------------------------------------------------------------------------
-  # nightly — pr plus the all-relay and rolling S01 arms, S04, S05, S09, S12,
-  # S14, S17's two ClosedKind arms, S18, S19 and S22. No scheduler dispatches
+  # nightly — pr plus the all-relay and rolling S01 arms, S02, S03's nightly
+  # arm, S04, S05, S09, S10, S12, S14, S16, S17's two ClosedKind arms, S18, S19,
+  # S21, S22 and S23 (expected red until C7 is fixed). No scheduler dispatches
   # this until sub-phase 2d.
   # ---------------------------------------------------------------------------
   e2e_soak_core_nightly:
     name: e2e_soak_core_nightly
     if: ${{ inputs.profile == 'nightly' }}
     runs-on: ubuntu-latest
-    # PLAN §9.2: deadline 80m, drive step cap 84 (budget 81); job cap 125 is
-    # above the step-cap sum (10 + 25 + 84) so the drive reaps before the job.
-    timeout-minutes: 125
+    # Deadline 90m (the profile's `deadline_secs`, L6-tied), drive step cap 94
+    # (budget 90 + 1 kill grace + 0 boot = 91, and C2 fails on budget >= cap);
+    # job cap 135 is above the step-cap sum (10 + 25 + 94 = 129) so the drive
+    # reaps before the job. The four move together: a raise of the profile's
+    # budget is a raise of all of them.
+    timeout-minutes: 135
     env:
       HAVEN_LOGSCAN: "true"
       HAVEN_LOGSCAN_PROFILE: host
@@ -225,8 +230,8 @@ jobs:
 
       - name: Run the soak (nightly profile)
         id: soak
-        timeout-minutes: 84
-        run: bash tooling/e2e/ci/run-with-deadline.sh 80m "soak-core nightly" -- bash tooling/e2e/ci/run-soak-core.sh nightly
+        timeout-minutes: 94
+        run: bash tooling/e2e/ci/run-with-deadline.sh 90m "soak-core nightly" -- bash tooling/e2e/ci/run-soak-core.sh nightly
 
       # The pr job's comment says why this step exists and why it is gated on
       # the checkout rather than on the drive.

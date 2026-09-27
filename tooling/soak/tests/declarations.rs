@@ -144,8 +144,8 @@ async fn a_circle_an_arm_builds_mid_run_is_declared_like_every_other() {
         "every device's identity, both halves"
     );
     assert!(
-        declared(&built, "relay_url") == 1,
-        "and every endpoint the world dials"
+        declared(&built, "relay_url") == 3,
+        "and every endpoint the world dials: the plane's canonical one and one per device"
     );
 
     // S13 builds one more circle inside its own body and breaks it. Before the
@@ -172,6 +172,92 @@ async fn a_circle_an_arm_builds_mid_run_is_declared_like_every_other() {
     assert!(
         declared(&after, "pubkey") == 2 && declared(&after, "nsec") == 2,
         "the arm minted no new device, so nothing was declared twice"
+    );
+    assert!(
+        world.circles().len() == 2,
+        "a circle built to be broken stays out of the world's own table"
+    );
+
+    // S10's shape: a circle built to be GRADED is adopted into the table. It
+    // was declared when it was built, and adopting it must not declare it
+    // again — a value declared twice is one the scan searches for twice and
+    // the declaration floor counts twice.
+    let adopted = world
+        .build_extra_circle()
+        .await
+        .expect("a further circle builds");
+    world.adopt_circle(adopted);
+    let adopted = sink.seal();
+    assert!(
+        world.circles().len() == 3,
+        "an adopted circle is one the world's own table answers for"
+    );
+    assert!(
+        declared(&adopted, "nostr_group_id") == 4
+            && declared(&adopted, "mls_group_id") == 4
+            && declared(&adopted, "circle_name") == 4,
+        "an adopted circle is declared exactly once: when it was built, not again when adopted"
+    );
+    assert!(
+        declared(&adopted, "pubkey") == 2
+            && declared(&adopted, "nsec") == 2
+            && declared(&adopted, "relay_url") == 3,
+        "no device or relay class is declared twice by an adoption"
+    );
+
+    world.teardown().await.expect("teardown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_whole_roster_an_arm_grows_to_is_declared_once_per_circle() {
+    // S10's shape in full: the arm grows the world to the roster bound, adopting
+    // every circle it builds. Each one is declared exactly once — when it is
+    // built, never again when adopted — and the arm mints no device and no
+    // relay, so those classes stay where the world left them.
+    let sink = Arc::new(Sink::new());
+    let relay = SimRelay::start(RelayTag::new(0))
+        .await
+        .expect("the relay plane starts");
+    let mut world: ScenarioWorld<Timeline, EmptyDrain> = SimWorld::build(
+        &shape(),
+        Schedule::new(Vec::new()),
+        vec![relay],
+        Timeline::in_memory(),
+        EmptyDrain,
+    )
+    .await
+    .expect("the world builds");
+    world
+        .declare_to(Arc::clone(&sink) as Arc<dyn DeclareSink>)
+        .expect("the world declares what it minted");
+
+    let scenario = Scenario::TenCircleRoster;
+    let spec = ProfileSpec::embedded(ProfileName::Pr).expect("the pr profile parses");
+    let tick = Duration::from_millis(spec.tick_ms);
+    let arm = scenario
+        .arm("ten-circle-roster")
+        .expect("the scenario offers its arm");
+    scenario
+        .run(&mut world, arm, tick)
+        .await
+        .expect("the arm runs");
+
+    let after = sink.seal();
+    assert!(
+        world.circles().len() == 10,
+        "the arm grows the world to the whole roster and adopts every circle it built"
+    );
+    assert!(
+        declared(&after, "nostr_group_id") == 10
+            && declared(&after, "mls_group_id") == 10
+            && declared(&after, "circle_name") == 10,
+        "every circle's two ids and its name are declared exactly once"
+    );
+    assert!(
+        declared(&after, "pubkey") == 2
+            && declared(&after, "nsec") == 2
+            && declared(&after, "relay_url") == 3,
+        "the arm minted no device and no relay, so nothing of those classes is declared twice"
     );
 
     world.teardown().await.expect("teardown");

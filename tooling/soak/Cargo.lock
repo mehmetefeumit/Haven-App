@@ -1032,6 +1032,7 @@ dependencies = [
 name = "haven-soak"
 version = "0.1.0"
 dependencies = [
+ "cgka-engine",
  "chrono",
  "haven-core",
  "haven-logscan",

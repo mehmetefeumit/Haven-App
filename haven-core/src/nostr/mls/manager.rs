@@ -67,6 +67,8 @@ use transport_nostr_peeler::{NostrMlsPeeler, NostrTransportEvent};
 use super::retention::RetentionBoundPeeler;
 use super::signer::HavenIdentityProofSigner;
 use super::storage::{LiveSessionGuard, StorageConfig};
+// Only the two outbound-forging test seams below reach these; gated so a plain
+// build does not carry the imports as dead weight.
 #[cfg(any(test, feature = "test-utils"))]
 use super::types::StoredMessageProbe;
 use super::types::{
@@ -77,6 +79,18 @@ use super::welcome::WelcomePreview;
 use crate::log_alias::bucket;
 use crate::nostr::error::{NostrError, Result};
 use crate::nostr::event::{KIND_LOCATION_UPDATE, LEGACY_KIND_LOCATION_UPDATE};
+#[cfg(any(test, feature = "test-utils"))]
+use cgka_session::PublishWork;
+#[cfg(any(test, feature = "test-utils"))]
+use cgka_traits::group_context::GroupContextSnapshot;
+#[cfg(any(test, feature = "test-utils"))]
+use cgka_traits::ingest::PeeledContent;
+#[cfg(any(test, feature = "test-utils"))]
+use cgka_traits::peeler::GroupMessageMetadata;
+#[cfg(any(test, feature = "test-utils"))]
+use cgka_traits::transport::EncryptedPayload;
+#[cfg(any(test, feature = "test-utils"))]
+use std::collections::HashMap;
 
 // `redact_hex_sequences` lives in the neutral `crate::util` module. Re-exported
 // here so every `crate::nostr::mls::redact_hex_sequences` caller (circle/error,
@@ -1364,6 +1378,47 @@ impl SessionManager {
             })
     }
 
+    /// How many stored convergence inputs this device holds for `group_id` whose
+    /// source epoch is ABOVE its own tip: the engine's convergence buffer,
+    /// counted.
+    ///
+    /// There is no per-group cap and no eviction API upstream (mdk#757), so the
+    /// only honest instrument is a count a harness can watch grow.
+    /// [`Self::gating_input_count`] is not it: [`scan_group_inputs`] skips rows
+    /// above the future horizon, so a buffered future-epoch row is provably
+    /// invisible there.
+    ///
+    /// A `PeelDeferred` row is a raw transport row that never peeled: it is
+    /// stored as raw transport, not openmls-wire, so [`gating_projection`]
+    /// cannot read it and it is never counted here. The count therefore sees the
+    /// `buffer_openmls_convergence_message` store alone, which is the #757
+    /// buffer — the negative half of this seam's own test is what pins that.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the message store cannot be read.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn convergence_buffer_len_for_test(&self, group_id: &GroupId) -> Result<usize> {
+        let _session = self.session.lock().await;
+        let tip = match self.message_store.get_group(group_id) {
+            Ok(group) => group.epoch.0,
+            // A missing group holds nothing; the gating scan reads it the same.
+            Err(StorageError::NotFound) => return Ok(0),
+            Err(e) => return Err(map_storage_err(e)),
+        };
+        Ok(self
+            .message_store
+            .list_messages(group_id, EpochId(0))
+            .map_err(map_storage_err)?
+            .into_iter()
+            .filter(|record| {
+                gating_projection(&record.payload).is_some_and(|(_, projection)| {
+                    projection.source_epoch.is_some_and(|epoch| epoch > tip)
+                })
+            })
+            .count())
+    }
+
     /// Writes `source` into THIS device's store in `state`, its outer
     /// `created_at` moved `backdated_by_secs` into the past.
     ///
@@ -1821,6 +1876,109 @@ impl SessionManager {
             .is_ok())
     }
 
+    /// Seals a kind-445 whose OUTER layer a co-member at this device's epoch can
+    /// peel, but whose CLEARTEXT inner `PrivateMessage` header claims
+    /// `inner_epoch`.
+    ///
+    /// This is the one wire shape that grows the engine's uncapped convergence
+    /// buffer (mdk#757): decision 0.4(b)'s `member-future-header-flood` vector.
+    /// It cannot be minted at a relay plane, which holds no group key — only a
+    /// member does — so the sealing lives here, at the co-member's own session.
+    ///
+    /// It works in three genuine steps and one edit:
+    /// 1. a real application message is sent, giving real inner MLS bytes sealed
+    ///    at the current epoch (the side effect is one recorded send on THIS
+    ///    device — the minting co-member, never the subject the arm grades);
+    /// 2. that outer layer is peeled back to the inner bytes;
+    /// 3. the cleartext epoch in the inner `PrivateMessage` header is overwritten
+    ///    with `inner_epoch` — the field `ingest.rs` reads without decrypting;
+    /// 4. the edited inner bytes are re-sealed under the SAME current-epoch key,
+    ///    so a co-member at this epoch peels the result and reads the future
+    ///    header.
+    ///
+    /// The inner ciphertext no longer authenticates at `inner_epoch`, which is
+    /// exactly the point: a future-epoch application message is buffered on its
+    /// header alone and never decrypted while it stays ahead of the tip.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the group is unknown, the send is refused, or the
+    /// engine cannot peel or re-seal.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn forge_future_header_445_for_test(
+        &self,
+        group_id: &GroupId,
+        inner_epoch: u64,
+    ) -> Result<Event> {
+        let effects = self
+            .send_location(group_id, "forge-future-header".to_string())
+            .await?;
+        let outer = effects
+            .publish
+            .into_iter()
+            .find_map(|work| match work {
+                PublishWork::ApplicationMessage { msg } => Some(msg),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                NostrError::MdkError("send produced no application message to reseal".to_string())
+            })?;
+
+        let (nostr_group_id, _relays) = self.group_routing(group_id).await?;
+        // The group's declared retention, read before the lock so no accessor is
+        // called while it is held.
+        let retention = self.group_message_retention_secs(group_id).await?;
+        // The group key belongs in `ctx` only. Take it under the lock, drop the
+        // lock, copy it into `ctx`, then drop the `Zeroizing` secret — all before
+        // the two awaits below, rather than holding either to the end of the call
+        // (Security Rule 9).
+        let ctx = {
+            let (epoch, secret) = {
+                let session = self.session.lock().await;
+                session
+                    .exporter_secret_with_epoch(group_id, DEFAULT_EXPORTER_LABEL, 32)
+                    .map_err(map_mls_err)?
+            };
+            let mut secrets = HashMap::new();
+            secrets.insert(DEFAULT_EXPORTER_LABEL.to_string(), secret.to_vec());
+            drop(secret);
+            GroupContextSnapshot::new(epoch, secrets, Some(nostr_group_id.to_vec()))
+        };
+
+        let peeled = self
+            .preview_peeler
+            .peel_group_message(&outer, &ctx)
+            .await
+            .map_err(map_mls_err)?;
+        let PeeledContent::MlsMessage { bytes } = peeled.content else {
+            return Err(NostrError::MdkError(
+                "outer layer did not peel to an inner MLS message".to_string(),
+            ));
+        };
+        let mut inner = bytes;
+        overwrite_private_message_epoch(&mut inner, inner_epoch)?;
+
+        // Re-seal through the application-message metadata wrap Haven uses for a
+        // real location, so the forged event carries the NIP-40 `expiration`
+        // (= created_at + the group's 0x8005 window, bounded by the peeler) and
+        // reads as an APPLICATION message on the wire — not, like a metadata-less
+        // wrap, as a commit.
+        let metadata = GroupMessageMetadata::application(Timestamp::now().as_secs(), retention);
+        let wrapped = self
+            .preview_peeler
+            .wrap_group_message_with_metadata(
+                &EncryptedPayload {
+                    ciphertext: inner,
+                    aad: Vec::new(),
+                },
+                &ctx,
+                &metadata,
+            )
+            .await
+            .map_err(map_mls_err)?;
+        Self::transport_message_to_event(&wrapped)
+    }
+
     // ── Event → LocationMessageResult folding (plan §5.2 #32) ────────────────
 
     /// Folds an ordered engine [`GroupEvent`] into a location-facing
@@ -1915,6 +2073,64 @@ fn gating_projection(
     let message = stored.as_openmls_wire()?;
     let projection = project_mls_message(&message.payload).ok()?;
     Some((message.timestamp.0, projection))
+}
+
+/// Overwrites the cleartext `epoch` of a serialized MLS `PrivateMessage` in
+/// place.
+///
+/// `ingest.rs` reads a group message's epoch and content type off this cleartext
+/// framing before it decrypts anything, so a co-member that seals the outer
+/// layer at an epoch the receiver holds while writing a far-future epoch here
+/// produces the one shape that grows the uncapped convergence buffer (mdk#757).
+/// Reached only by [`SessionManager::forge_future_header_445_for_test`].
+#[cfg(any(test, feature = "test-utils"))]
+fn overwrite_private_message_epoch(bytes: &mut [u8], epoch: u64) -> Result<()> {
+    // MLSMessage = version(u16) || wire_format(u16) || PrivateMessage, and a
+    // PrivateMessage begins group_id<V> || epoch(u64) || content_type(u8).
+    const GROUP_ID_AT: usize = 4;
+    // `WireFormat::PrivateMessage = 2` (openmls framing/mod.rs). The seam only
+    // ever hands us a peeled application message, but a wire whose format field
+    // is anything else means the layout below does not hold — refuse rather than
+    // edit bytes at the wrong offset.
+    let wire_format = bytes
+        .get(2..4)
+        .map(|w| u16::from_be_bytes([w[0], w[1]]))
+        .ok_or_else(|| NostrError::MdkError("MLS wire too short for its header".to_string()))?;
+    if wire_format != 2 {
+        return Err(NostrError::MdkError(
+            "MLS wire is not a PrivateMessage".to_string(),
+        ));
+    }
+    let (group_id_len, header) = tls_vector_len(bytes, GROUP_ID_AT)
+        .ok_or_else(|| NostrError::MdkError("MLS wire too short for its group id".to_string()))?;
+    // At most 30 bits of length (the 8-byte form is refused), so the offset
+    // arithmetic cannot overflow.
+    let epoch_at = GROUP_ID_AT + header + group_id_len;
+    bytes
+        .get_mut(epoch_at..epoch_at + 8)
+        .ok_or_else(|| NostrError::MdkError("MLS wire too short for its epoch".to_string()))?
+        .copy_from_slice(&epoch.to_be_bytes());
+    Ok(())
+}
+
+/// The value and header length of a TLS variable-length vector at `at`: the two
+/// high bits of the first byte give the count of length bytes (1, 2, or 4).
+///
+/// The 8-byte form (prefix `0b11`) is refused: a group id never needs it, and
+/// accepting it would read a 64-bit length out of a message this seam is
+/// supposed to have peeled from a real group.
+#[cfg(any(test, feature = "test-utils"))]
+fn tls_vector_len(bytes: &[u8], at: usize) -> Option<(usize, usize)> {
+    let first = *bytes.get(at)?;
+    let header = 1usize << (first >> 6);
+    if header > 4 {
+        return None;
+    }
+    let mut len = usize::from(first & 0x3f);
+    for offset in 1..header {
+        len = (len << 8) | usize::from(*bytes.get(at.checked_add(offset)?)?);
+    }
+    Some((len, header))
 }
 
 /// Whether a scan may WRITE.
@@ -2400,6 +2616,96 @@ fn inviter_from_sender(sender: Option<&MemberId>) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── The future-header wire edit is robust against malformed input ─────────
+
+    /// A minimal `PrivateMessage`-shaped MLS wire: version, `WireFormat = 2`, a
+    /// 1-byte-prefixed 32-byte group id, an 8-byte epoch, and a content type.
+    fn private_message_wire() -> Vec<u8> {
+        let mut wire = vec![0x00, 0x01, 0x00, 0x02]; // version 1, wire_format PrivateMessage
+        wire.push(0x20); // group_id length 32 (1-byte varint)
+        wire.extend_from_slice(&[0u8; 32]); // group_id
+        wire.extend_from_slice(&[0u8; 8]); // epoch
+        wire.push(0x01); // content_type application
+        wire
+    }
+
+    #[test]
+    fn overwrite_private_message_epoch_edits_the_cleartext_epoch_in_place() {
+        let mut wire = private_message_wire();
+        overwrite_private_message_epoch(&mut wire, 0x0102_0304_0506_0708)
+            .expect("a well-formed PrivateMessage wire edits");
+        assert_eq!(
+            &wire[37..45],
+            &0x0102_0304_0506_0708u64.to_be_bytes(),
+            "the epoch must be written at group_id's end, big-endian"
+        );
+        assert_eq!(wire[45], 0x01, "the content type after it is untouched");
+    }
+
+    #[test]
+    fn overwrite_private_message_epoch_rejects_a_non_private_wire_format() {
+        let mut wire = private_message_wire();
+        wire[2..4].copy_from_slice(&1u16.to_be_bytes()); // PublicMessage
+        assert!(
+            overwrite_private_message_epoch(&mut wire, 9).is_err(),
+            "a wire format other than PrivateMessage must be refused, not edited"
+        );
+    }
+
+    #[test]
+    fn overwrite_private_message_epoch_rejects_an_eight_byte_length_prefix() {
+        let mut wire = private_message_wire();
+        wire[4] = 0xC0; // prefix 0b11 => the 8-byte varint form
+        assert!(
+            overwrite_private_message_epoch(&mut wire, 9).is_err(),
+            "a group id never needs the 8-byte length form; it must be refused"
+        );
+    }
+
+    #[test]
+    fn overwrite_private_message_epoch_rejects_a_wire_truncated_before_its_epoch() {
+        let mut wire = private_message_wire();
+        wire.truncate(37 + 3); // group id ends at 37; only 3 of 8 epoch bytes remain
+        assert!(
+            overwrite_private_message_epoch(&mut wire, 9).is_err(),
+            "a wire too short to hold the epoch must be refused, never sliced out of bounds"
+        );
+    }
+
+    #[test]
+    fn overwrite_private_message_epoch_rejects_a_wire_shorter_than_its_header() {
+        let mut wire = private_message_wire();
+        wire.truncate(3); // version and half a wire_format
+        assert!(
+            overwrite_private_message_epoch(&mut wire, 9).is_err(),
+            "a wire with no complete wire_format field must be refused, not read past its end"
+        );
+    }
+
+    #[test]
+    fn overwrite_private_message_epoch_rejects_a_wire_with_no_group_id_length_prefix() {
+        let mut wire = private_message_wire();
+        wire.truncate(4); // the header alone; the group id's length byte is missing
+        assert!(
+            overwrite_private_message_epoch(&mut wire, 9).is_err(),
+            "a wire that ends where the group id's length should begin must be refused"
+        );
+    }
+
+    #[test]
+    fn overwrite_private_message_epoch_rejects_a_group_id_length_past_the_wire() {
+        let mut wire = private_message_wire();
+        // A 4-byte prefix (0b10) claiming the largest length the form can carry,
+        // then far too few bytes: the epoch offset is computed, not overflowed,
+        // and the read past the end is what is refused.
+        wire[4] = 0xBF;
+        wire[5..8].copy_from_slice(&[0xFF, 0xFF, 0xFF]);
+        assert!(
+            overwrite_private_message_epoch(&mut wire, 9).is_err(),
+            "a group id longer than the wire must be refused, never indexed"
+        );
+    }
 
     // ── Gate 2: the epoch-state token match ──────────────────────────────────
 

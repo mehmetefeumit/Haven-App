@@ -7,21 +7,28 @@
 # ## What the rig is, and why it needs a boundary
 #
 # `tooling/soak` builds `haven-soak`, which links haven-core with the
-# `test-utils` feature ON. That feature is the door to the five probe seams
-# (a typed ingest that returns the engine's own error, a stored-message probe,
-# the live-sync processor, the circle rotation stamps, and direct read/delete
-# of the OpenMLS group state inside the SQLCipher store) plus the
-# unencrypted-store constructors. Every one of those exists so a harness can
-# see state the product deliberately does not expose.
+# `test-utils` feature ON. That feature is the door to eight test-only seams.
+# Six only READ state the product deliberately does not expose (a typed ingest
+# that returns the engine's own error, a stored-message probe, the live-sync
+# processor, the circle rotation stamps, direct read/delete of the OpenMLS group
+# state inside the SQLCipher store, and a count of the uncapped convergence
+# buffer) plus the unencrypted-store constructors.
 #
-# It is also the door to a MUTATION seam, which is worse:
-# `set_stored_message_write_fault_for_test` installs an abort trigger on the
-# engine's stored-message table in a LIVE database, so the feature can make the
-# product's own writes fail rather than merely observe them. A shipped build
-# that carried any of this would ship a door into its own MLS store — and, with
-# that one, a lever on it.
+# Two do MORE than read, and are worse. `set_stored_message_write_fault_for_test`
+# is a MUTATION seam: it installs an abort trigger on the engine's stored-message
+# table in a LIVE database, so the feature can make the product's own writes
+# fail rather than merely observe them. `forge_future_header_445_for_test` is an
+# OUTBOUND SEALING seam: it seals a kind-445 under the group key with a crafted
+# future inner header — member-level forging power, not a reader's. A shipped
+# build that carried any of this would ship a door into its own MLS store, and
+# with those two a lever on it and a forge inside it.
 #
-# haven-core defends that with a compile-time trap:
+# What stops a shipped build from CALLING any of them is the compiler, not this
+# guard: every seam is `#[cfg(any(test, feature = "test-utils"))]`, so the symbol
+# does not exist in a build without the feature. Check 1 therefore bans the rig's
+# NAMES, PATHS and ENV VARS from production — not `_for_test` symbols, which a
+# production file cannot resolve anyway. haven-core defends the rest with a
+# compile-time trap:
 #
 #     #[cfg(all(feature = "test-utils", not(debug_assertions)))] compile_error!(…)
 #
@@ -55,7 +62,7 @@
 #
 #      A dependency table is not the only door. A `[features]` ALIAS is the
 #      other one, and it is wider: `default = ["test-utils"]` in
-#      haven-core/Cargo.toml turns the five probe seams on for every consumer
+#      haven-core/Cargo.toml turns those eight test-only seams on for every consumer
 #      that does not opt out — every DEBUG build of the app included, since the
 #      `compile_error!` fires only with `debug_assertions` off. Checks 2, 3 and
 #      4 as first written all stay green through that one-word diff. So: no
@@ -212,7 +219,7 @@ check_no_production_reach() {
       hits="$(grep -rlF -- "${token}" "${root}/${tree}" 2>/dev/null)"
       if [[ -n "${hits}" ]]; then
         printf '%s\n' "${hits}" >&2
-        fail "'${token}' appears under ${tree}. The soak rig links haven-core with test-utils on — the five probe seams and the unencrypted-store constructors — and must be unreachable from the shipped app."
+        fail "'${token}' appears under ${tree}. The soak rig links haven-core with test-utils on — eight test-only seams (a mutation seam and an outbound sealing seam among them) and the unencrypted-store constructors — and must be unreachable from the shipped app."
         rc=1
       fi
     done
@@ -323,7 +330,7 @@ check_test_utils_is_dev_only() {
   hits="$(non_dev_feature_hits "${f}" 'test-utils')"
   if [[ -n "${hits}" ]]; then
     printf '%s\n' "${hits}" >&2
-    fail "${FFI_MANIFEST} names the test-utils feature in a NON-DEV dependency table. That feature opens haven-core's probe seams; rust_builder may have it as a dev-dependency (its own redaction tests need the macros) and nowhere else."
+    fail "${FFI_MANIFEST} names the test-utils feature in a NON-DEV dependency table. That feature opens haven-core's test-only seams; rust_builder may have it as a dev-dependency (its own redaction tests need the macros) and nowhere else."
     rc=1
   fi
   local rel
@@ -343,7 +350,7 @@ check_test_utils_is_dev_only() {
     hits="$(feature_alias_hits "${m}")"
     if [[ -n "${hits}" ]]; then
       printf '%s\n' "${hits}" >&2
-      fail "${m#"${root}/"} pulls haven-core's test-utils into a [features] alias (line:alias above). An alias is not a dev edge: \`default = [\"test-utils\"]\` opens the five probe seams for every consumer that does not opt out, and haven-core's compile_error! only fires with debug_assertions OFF — so every DEBUG build of the app would carry them while checks 2-4 stayed green."
+      fail "${m#"${root}/"} pulls haven-core's test-utils into a [features] alias (line:alias above). An alias is not a dev edge: \`default = [\"test-utils\"]\` opens all eight test-only seams for every consumer that does not opt out, and haven-core's compile_error! only fires with debug_assertions OFF — so every DEBUG build of the app would carry them while checks 2-4 stayed green."
       rc=1
     fi
   done < <(other_manifests "${root}")
@@ -352,7 +359,7 @@ check_test_utils_is_dev_only() {
   # is the one shape the scan above passes over vacuously.
   f="${root}/${CORE_MANIFEST}"
   if [[ -f "${f}" ]] && [[ -z "$(feature_default_decl "${f}")" ]]; then
-    fail "${CORE_MANIFEST} declares no \`default = [...]\` under [features]. The empty default is what keeps the probe seams off for every consumer; unstated, there is nothing for the alias scan above to read."
+    fail "${CORE_MANIFEST} declares no \`default = [...]\` under [features]. The empty default is what keeps those seams off for every consumer; unstated, there is nothing for the alias scan above to read."
     rc=1
   fi
   return "${rc}"
@@ -806,8 +813,9 @@ main() {
 
   if (( FAILED )); then
     echo >&2
-    echo "The Tier-1 soak rig links haven-core with test-utils on: the five probe" >&2
-    echo "seams and the unencrypted-store constructors. It must stay out of the" >&2
+    echo "The Tier-1 soak rig links haven-core with test-utils on: eight test-only" >&2
+    echo "seams (a mutation seam and an outbound sealing seam among them) and the" >&2
+    echo "unencrypted-store constructors. It must stay out of the" >&2
     echo "shipped app and out of every build path, and the compile-time trap that" >&2
     echo "enforces that must stay armed. See the header of this script and" >&2
     echo "docs/SOAK_LANE.md." >&2

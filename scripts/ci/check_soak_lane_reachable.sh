@@ -557,7 +557,7 @@ source "${DIR}/logscan-gate.sh"
 logscan_gate host "${SOAK_NEEDLE_DIR}" -- --sink "soak=${spec}"
 SH
     printf 'scenarios = ["s01", "s06"]\ndeadline = "6m"\n'  > "${r}/${PROFILE_DIR}/pr.toml"
-    printf 'scenarios = ["s01", "s06", "s17"]\ndeadline = "80m"\n' > "${r}/${PROFILE_DIR}/nightly.toml"
+    printf 'scenarios = ["s01", "s06", "s17"]\ndeadline = "90m"\n' > "${r}/${PROFILE_DIR}/nightly.toml"
     printf 'scenarios = ["s01", "s06", "s17", "s19"]\ndeadline = "300m"\n' > "${r}/${PROFILE_DIR}/weekly.toml"
     printf '# declared drive hatches\nsome/dart/path.dart|reason\n' > "${r}/${DRIVE_SKIPS}"
   }
@@ -696,7 +696,7 @@ YAML
   _case "a drive-skip row naming a soak path fails" 1 check_profiles_nest "${soakskip}"
 
   local emptytoml="${tmp}/emptytoml"; _mk "${emptytoml}"
-  printf 'deadline = "80m"\n' > "${emptytoml}/${PROFILE_DIR}/nightly.toml"
+  printf 'deadline = "90m"\n' > "${emptytoml}/${PROFILE_DIR}/nightly.toml"
   _case "a profile declaring no scenario is BROKEN, not clean" 2 check_profiles_nest "${emptytoml}"
 
   # --- L6.

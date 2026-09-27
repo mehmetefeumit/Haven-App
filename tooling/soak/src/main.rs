@@ -25,7 +25,8 @@ use haven_soak::nemesis::generator::Generator;
 use haven_soak::nemesis::types::Schedule;
 use haven_soak::oracle::bounds::WaitScale;
 use haven_soak::oracle::{
-    bounds, vacuity, Invariant, Reach, Recovery, RetentionEdge, Round, Verdict,
+    bounds, vacuity, Invariant, Reach, Recovery, RemovalPath, RemovalProbe, RemovalRow,
+    RemovalStage, RetentionEdge, Round, Verdict,
 };
 use haven_soak::profiles::{ProfileName, ProfileSpec, WorldShape};
 use haven_soak::rc::Rc;
@@ -570,9 +571,10 @@ const fn self_test_round<'a>(
         row_envelope: 0,
         burst_opened: &[],
         classified,
-        // The self-test crosses no epoch window, so it feeds O4 nothing and
-        // says so.
+        // The self-test crosses no epoch window and stages no removal, so it
+        // feeds O4 and O3 nothing and says so.
         retention: &[],
+        forward_secrecy: &[],
     }
 }
 
@@ -734,11 +736,11 @@ async fn case_clean(logs: &SoakLogs) -> Result<bool, Refusal> {
     let mut world = self_test_world(logs).await?;
     let pairs = chain_pairs(&world);
     let classified = [haven_soak::oracle::undecryptable::Verdict::Applied];
-    // The two oracles whose subject is an arm's own evidence rather than a
-    // state of the world are DECLARED here, exactly as a scenario declares
-    // them: O5 the classification of an ingest, O4 the pair of retention
-    // edges. A round that fed neither is `Unusable` by design, which is what
-    // stops an arm passing them by feeding nothing — so a self-test that
+    // The oracles whose subject is an arm's own evidence rather than a state of
+    // the world are DECLARED here, exactly as a scenario declares them: O5 the
+    // classification of an ingest, O4 the pair of retention edges, O3 the pair of
+    // removal probes. A round that fed none is `Unusable` by design, which is
+    // what stops an arm passing them by feeding nothing — so a self-test that
     // wanted a green world has to say what it fed.
     let window = u64::try_from(haven_core::nostr::mls::DEFAULT_MAX_PAST_EPOCHS).unwrap_or(u64::MAX);
     let edges = [
@@ -757,12 +759,59 @@ async fn case_clean(logs: &SoakLogs) -> Result<bool, Refusal> {
             },
         },
     ];
+    // O3 is graded on both delivery paths, so the clean-world declaration feeds
+    // one Delivered pair (refuses SelfEvicted) and one Withheld pair (refuses
+    // PeelFailed with a row that never resolved), each a distinct (device,
+    // circle) pair so the grader's pairing has something to pair.
+    let delivered_dev = world.devices()[0].tag;
+    let withheld_dev = world.devices()[1].tag;
+    let circle = world.circles()[0].tag;
+    let probes = [
+        RemovalProbe {
+            device: delivered_dev,
+            circle,
+            stage: RemovalStage::Before,
+            path: RemovalPath::Delivered,
+            outcome: haven_soak::oracle::undecryptable::Verdict::Applied,
+            carried_token: true,
+            terminal: RemovalRow::NotApplicable,
+        },
+        RemovalProbe {
+            device: delivered_dev,
+            circle,
+            stage: RemovalStage::After,
+            path: RemovalPath::Delivered,
+            outcome: haven_soak::oracle::undecryptable::Verdict::SelfEvicted,
+            carried_token: false,
+            terminal: RemovalRow::NotApplicable,
+        },
+        RemovalProbe {
+            device: withheld_dev,
+            circle,
+            stage: RemovalStage::Before,
+            path: RemovalPath::Withheld,
+            outcome: haven_soak::oracle::undecryptable::Verdict::Applied,
+            carried_token: true,
+            terminal: RemovalRow::NotApplicable,
+        },
+        RemovalProbe {
+            device: withheld_dev,
+            circle,
+            stage: RemovalStage::After,
+            path: RemovalPath::Withheld,
+            outcome: haven_soak::oracle::undecryptable::Verdict::PeelFailed,
+            carried_token: false,
+            terminal: RemovalRow::StillDeferred,
+        },
+    ];
     let mut held = true;
     for invariant in Invariant::REGISTRY {
         let verdict = invariant
             .check(
                 &mut world,
-                &self_test_round(1, &pairs, &classified).with_retention(&edges),
+                &self_test_round(1, &pairs, &classified)
+                    .with_retention(&edges)
+                    .with_forward_secrecy(&probes),
             )
             .await?;
         held = held && verdict == Verdict::Holds;

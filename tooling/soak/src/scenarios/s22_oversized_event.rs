@@ -93,8 +93,8 @@ use crate::oracle::{bounds, Invariant, ProbeToken, Reach, Recovery};
 use crate::relay::OVERSIZE_PREFIX;
 use crate::rig::{DeviceTag, LogDrain, RelayPlane, RigError, SimCircle, Step, TimelineSink};
 use crate::scenarios::{
-    closing_pairs, grade_round, round, Absence, Arm, ArmOutcome, ScenarioWorld, WithheldAcks,
-    NO_GATING_ROWS,
+    await_connected, closing_pairs, grade_round, round, Absence, Arm, ArmOutcome, ScenarioWorld,
+    WithheldAcks, NO_GATING_ROWS,
 };
 
 /// How many foreground publish passes the wedge arm makes.
@@ -212,6 +212,17 @@ pub(crate) async fn run<T: TimelineSink, L: LogDrain>(
         _ => return Err(RigError::UnknownTarget),
     };
     heal(world).await?;
+    // A heal is a bring-up too, and the closing round is priced `Undisturbed`:
+    // it may begin only once every engine sees every plane again — at once in
+    // this scenario's own worlds, where no socket ever closed, and after the
+    // pool's ladder in a control that took a plane down.
+    await_connected(
+        world,
+        world.relays().len(),
+        usize::MAX,
+        bounds::round_trip(Recovery::Reconnect),
+    )
+    .await?;
 
     // Graded over the WORLD's circles. Three arms touch one of them and put it
     // back; the fourth touches none, because a circle that never sends again

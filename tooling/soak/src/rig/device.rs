@@ -148,6 +148,11 @@ pub struct SimDevice {
     pub policy_offset_secs: i64,
     bus_rx: Option<Receiver<LiveSyncEvent>>,
     specs: Vec<CircleSpec>,
+    /// The gift-wrap plane: the device's OWN endpoint on every relay, like its
+    /// engine's group REQs, so the engine's pool holds one relay per plane and
+    /// a welcome crosses the same partition its engine does. What a member's
+    /// key package STORES as its inbox relays stays canonical
+    /// (`rig/circle.rs`).
     inbox_relays: Vec<String>,
     ledger: DeviceLedger,
 }
@@ -248,6 +253,30 @@ impl SimDevice {
             .map_err(|_| RigError::Core(Step::ReadSessionLiveness))
     }
 
+    /// How many bytes this device's session store holds on disk: the database
+    /// file plus its write-ahead log, which under WAL journalling is where a
+    /// flood's rows sit until a checkpoint folds them in.
+    ///
+    /// A raw count, compared in process and never rendered (decision 0.31).
+    ///
+    /// # Errors
+    ///
+    /// [`RigError::Core`] with [`Step::ReadSessionStoreSize`] if the store's
+    /// file cannot be measured — a store nothing can measure is one no ceiling
+    /// can guard.
+    pub fn session_db_bytes(&self) -> Result<u64, RigError> {
+        let db = self.session_db_path();
+        let main = std::fs::metadata(&db)
+            .map(|meta| meta.len())
+            .map_err(|_| RigError::Core(Step::ReadSessionStoreSize))?;
+        let mut wal = db.into_os_string();
+        wal.push("-wal");
+        // Absent between checkpoints and after a clean close, which is zero
+        // bytes of log rather than a store nothing can measure.
+        let wal = std::fs::metadata(wal).map_or(0, |meta| meta.len());
+        Ok(main.saturating_add(wal))
+    }
+
     /// The circles this device subscribes to, as it was started with.
     #[must_use]
     pub fn specs(&self) -> &[CircleSpec] {
@@ -298,6 +327,26 @@ impl SimDevice {
         self.bus_rx = Some(bus_rx);
         self.core = Some(core);
         self.offline = false;
+        Ok(())
+    }
+
+    /// Subscribes the running engine to one more circle, the way the app does
+    /// when a circle is created or joined mid-session.
+    ///
+    /// Kept beside the engine's own spec list so a later restart re-specs the
+    /// adopted circle too: `start_engine` reads `specs`, and an engine rebuilt
+    /// from a list that predates the adoption would silently drop the circle.
+    ///
+    /// # Errors
+    ///
+    /// [`RigError::SessionNotLive`] if no engine is running, or
+    /// [`RigError::Core`] with [`Step::StartEngine`] if the subscription fails.
+    pub async fn subscribe_circle(&mut self, spec: CircleSpec) -> Result<(), RigError> {
+        self.engine()?
+            .subscribe_circle(&spec)
+            .await
+            .map_err(|_| RigError::Core(Step::StartEngine))?;
+        self.specs.push(spec);
         Ok(())
     }
 
@@ -463,6 +512,36 @@ mod tests {
             "the registry key is the file; a directory answers `not live` for ever"
         );
         assert!(device.session_is_live().expect("liveness"));
+    }
+
+    #[test]
+    fn a_session_store_is_measured_from_its_file_and_its_log_together() {
+        let device = device(0);
+        let measured = device
+            .session_db_bytes()
+            .expect("an opened store has a file to measure");
+        let db = device.session_db_path();
+        let main = std::fs::metadata(&db).expect("the file exists").len();
+        let mut wal = db.into_os_string();
+        wal.push("-wal");
+        // The log is where WAL journalling puts what a checkpoint has not
+        // folded in yet, so a measurement that read the main file alone would
+        // call a flood weightless until the next checkpoint. Read, never
+        // written: the log belongs to the open store.
+        let log = std::fs::metadata(wal).map_or(0, |meta| meta.len());
+        assert!(measured > 0, "an opened session store is not empty on disk");
+        assert_eq!(
+            measured,
+            main + log,
+            "the store is its file and its write-ahead log together"
+        );
+
+        let gone = SimDevice::open(DeviceTag::new(9), &[]).expect("device opens");
+        std::fs::remove_file(gone.session_db_path()).expect("the file is removable");
+        assert!(
+            gone.session_db_bytes().is_err(),
+            "a store whose file is gone is one no ceiling can guard, and it says so"
+        );
     }
 
     #[test]

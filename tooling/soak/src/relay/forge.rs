@@ -170,6 +170,15 @@ const OPAQUE_CONTENT: &str = "b3BhcXVl";
 /// the thing that refuses it.
 const UNDECODABLE_CONTENT: &str = "!!!!not-base64!!!!";
 
+/// Content that DECODES — valid base64 of thirty zero bytes — and is no seal any
+/// member ever made, so the engine reaches the peel and fails there. That is
+/// the one outsider shape the engine RETAINS (`PeelDeferred`) rather than
+/// refuses, which is what a flood at the retained store's cap needs. Constant
+/// on purpose: the transport id is the fresh signing key's event id, so every
+/// mint is a distinct row, and the content-derived id is only ever computed
+/// after a peel that never succeeds.
+const UNPEELABLE_CONTENT: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
 /// A second `#h` value, so a doubled routing tag is one this crate chose.
 const FOREIGN_ROUTING_ID: [u8; 32] = [0x11; 32];
 
@@ -220,6 +229,39 @@ pub enum Forgery {
         /// The circle's public routing id.
         group_id: [u8; 32],
     },
+    /// A kind-445 whose envelope is well formed and whose content decodes to
+    /// bytes no member sealed, so it reaches the PEEL and fails there — and the
+    /// engine retains it as a `PeelDeferred` row, up to its per-group cap.
+    ///
+    /// The outsider's flood shape: an adversary who has seen only the circle's
+    /// public `#h` can mint one per fresh key, and each one is a distinct raw
+    /// transport id.
+    OutsiderSeal {
+        /// The circle's public routing id.
+        group_id: [u8; 32],
+    },
+    /// A co-member's crafted kind-445 whose OUTER layer peels at the receiver's
+    /// epoch but whose CLEARTEXT inner header claims `inner_epoch` — the one
+    /// shape that grows the engine's uncapped convergence buffer (mdk#757).
+    ///
+    /// Unlike every other recipe here, this is NOT an outsider's: sealing it
+    /// needs the group key, so it is minted at a co-member's session through
+    /// `SessionManager::forge_future_header_445_for_test` (which stamps the same
+    /// NIP-40 `expiration` a real location carries, so the wire shape is an
+    /// application message), published so the plane holds it, and then INJECTED
+    /// by id. Minting here only re-signs that observed seal under a throwaway key
+    /// and replays it live — content and tags (the `expiration` included) are
+    /// copied verbatim, so the receiver still peels it and the future header
+    /// still routes it into convergence.
+    FutureInnerHeader {
+        /// The crafted seal the plane's own store holds.
+        source: EventId,
+        /// A MINT INPUT ONLY: the far-future epoch the seam baked into the
+        /// cleartext inner header. It is an ABSOLUTE epoch and MUST never reach
+        /// the timeline, banner or any log — it is kept out of `Debug` and
+        /// `Serialize` (which render the label alone), and mint does not read it.
+        inner_epoch: u64,
+    },
 }
 
 impl Forgery {
@@ -232,6 +274,8 @@ impl Forgery {
             Self::Rewrap { .. } => "rewrap",
             Self::MalformedDoubleH { .. } => "malformed-double-h",
             Self::Unprocessable { .. } => "unprocessable",
+            Self::OutsiderSeal { .. } => "outsider-seal",
+            Self::FutureInnerHeader { .. } => "future-inner-header",
         }
     }
 
@@ -242,16 +286,39 @@ impl Forgery {
             Self::Rewrap { .. } => 1,
             Self::MalformedDoubleH { .. } => 2,
             Self::Unprocessable { .. } => 3,
+            Self::FutureInnerHeader { .. } => 4,
+            Self::OutsiderSeal { .. } => 5,
         }
     }
 
     /// Whether this recipe needs the plane to resolve an observed event first.
     pub(crate) const fn source(self) -> Option<EventId> {
         match self {
-            Self::Rewrap { source, .. } => Some(source),
-            Self::Expired { .. } | Self::MalformedDoubleH { .. } | Self::Unprocessable { .. } => {
-                None
-            }
+            Self::Rewrap { source, .. } | Self::FutureInnerHeader { source, .. } => Some(source),
+            Self::Expired { .. }
+            | Self::MalformedDoubleH { .. }
+            | Self::Unprocessable { .. }
+            | Self::OutsiderSeal { .. } => None,
+        }
+    }
+
+    /// The far-future epoch a [`Self::FutureInnerHeader`] was sealed to claim.
+    /// `None` for every other recipe.
+    ///
+    /// A MINT INPUT the scenario chooses; it is an absolute epoch and must never
+    /// reach the timeline, banner or a log. Public because S16(b) — the flood
+    /// scenario that is this recipe's first consumer — reads it to pick each
+    /// injection's epoch; the digest does not use it (two future-header
+    /// injections are one operation shape).
+    #[must_use]
+    pub const fn inner_epoch(self) -> Option<u64> {
+        match self {
+            Self::FutureInnerHeader { inner_epoch, .. } => Some(inner_epoch),
+            Self::Expired { .. }
+            | Self::Rewrap { .. }
+            | Self::MalformedDoubleH { .. }
+            | Self::Unprocessable { .. }
+            | Self::OutsiderSeal { .. } => None,
         }
     }
 }
@@ -319,6 +386,25 @@ pub fn mint(forgery: Forgery, source: Option<&Event>) -> Result<Event, RigError>
         }
         Forgery::Unprocessable { group_id } => {
             EventBuilder::new(kind(), UNDECODABLE_CONTENT).tags(vec![routing_tag(&group_id)?])
+        }
+        Forgery::OutsiderSeal { group_id } => {
+            EventBuilder::new(kind(), UNPEELABLE_CONTENT).tags(vec![routing_tag(&group_id)?])
+        }
+        Forgery::FutureInnerHeader { .. } => {
+            // The crafted future-header seal is already in the plane's store; an
+            // outsider re-signs and replays it. Its content — the outer
+            // ChaCha20 layer over a future-epoch inner header, sealed by a
+            // co-member through the haven-core seam — is copied VERBATIM, so a
+            // co-member at the receiver's epoch still peels it and the future
+            // header still routes it into convergence. ALL tags ride along in
+            // the copied set: the routing `#h` AND the NIP-40 `expiration` the
+            // seam stamps, so the replay is application-shaped on the wire. Only
+            // the outer signature changes. `inner_epoch` is baked into the seal
+            // and needs no re-derivation here.
+            let observed = source.ok_or(RigError::Core(Step::ApplyFault))?;
+            EventBuilder::new(observed.kind, observed.content.clone())
+                .tags(observed.tags.iter().cloned().collect::<Vec<Tag>>())
+                .custom_created_at(observed.created_at)
         }
     };
     builder
@@ -566,6 +652,56 @@ mod tests {
     }
 
     #[test]
+    fn a_future_inner_header_replays_the_crafted_seal_verbatim_under_another_key() {
+        // The seam's crafted seal, standing in: a co-member peels its OUTER
+        // layer, so mint must copy the content byte for byte — a re-encode would
+        // change the ciphertext and the receiver could no longer peel it.
+        let sealed = observed();
+        let forged = mint(
+            Forgery::FutureInnerHeader {
+                source: sealed.id,
+                inner_epoch: 424_242,
+            },
+            Some(&sealed),
+        )
+        .expect("mints");
+        assert_eq!(
+            forged.content, sealed.content,
+            "the crafted outer seal must be copied verbatim, or the receiver cannot peel it"
+        );
+        assert_eq!(routing_values(&forged), routing_values(&sealed));
+        assert_ne!(
+            forged.pubkey, sealed.pubkey,
+            "the replay is signed by an outsider, not the co-member who sealed it"
+        );
+        assert!(forged.verify().is_ok(), "it must be a real, signed event");
+        assert_eq!(
+            Forgery::FutureInnerHeader {
+                source: sealed.id,
+                inner_epoch: 424_242,
+            }
+            .inner_epoch(),
+            Some(424_242),
+            "the baked-in epoch is recorded for the timeline and the schedule"
+        );
+    }
+
+    #[test]
+    fn a_future_inner_header_without_the_event_it_copies_is_refused() {
+        let refused = mint(
+            Forgery::FutureInnerHeader {
+                source: EventId::from_slice(&[9; 32]).expect("32 bytes is an event id"),
+                inner_epoch: 7,
+            },
+            None,
+        );
+        assert!(
+            matches!(refused, Err(RigError::Core(Step::ApplyFault))),
+            "a replay of a seal the plane never carried is a fault that did not fire"
+        );
+    }
+
+    #[test]
     fn a_rewrap_without_the_event_it_copies_is_refused_rather_than_invented() {
         let refused = mint(
             Forgery::Rewrap {
@@ -618,6 +754,41 @@ mod tests {
     }
 
     #[test]
+    fn an_outsider_seal_decodes_where_the_unprocessable_one_does_not() {
+        let seal = mint(
+            Forgery::OutsiderSeal {
+                group_id: A_ROUTING_ID,
+            },
+            None,
+        )
+        .expect("mints");
+        assert_eq!(routing_values(&seal), vec![hex::encode(A_ROUTING_ID)]);
+        assert!(
+            seal.content
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'+' || byte == b'/')
+                && seal.content.len().is_multiple_of(4),
+            "the content must be base64 the engine decodes, so the refusal happens at the PEEL"
+        );
+        assert_ne!(
+            seal.content, UNDECODABLE_CONTENT,
+            "an unprocessable forgery is refused before the peel; this one must reach it"
+        );
+        assert!(seal.verify().is_ok(), "it must be a real, signed event");
+        let again = mint(
+            Forgery::OutsiderSeal {
+                group_id: A_ROUTING_ID,
+            },
+            None,
+        )
+        .expect("mints");
+        assert_ne!(
+            seal.id, again.id,
+            "every mint is a distinct transport id, or a flood would be one row"
+        );
+    }
+
+    #[test]
     fn a_forgery_renders_its_recipe_and_neither_the_circle_nor_the_event_it_names() {
         let recipes = [
             Forgery::Expired {
@@ -633,6 +804,13 @@ mod tests {
             Forgery::Unprocessable {
                 group_id: A_ROUTING_ID,
             },
+            Forgery::FutureInnerHeader {
+                source: EventId::from_slice(&[0xCD; 32]).expect("32 bytes is an event id"),
+                inner_epoch: 424_242,
+            },
+            Forgery::OutsiderSeal {
+                group_id: A_ROUTING_ID,
+            },
         ];
         let mut codes = Vec::new();
         for recipe in recipes {
@@ -642,7 +820,9 @@ mod tests {
                 assert!(surface.contains(recipe.label()), "{surface}");
                 assert!(!surface.contains("7c7c"), "{surface}");
                 assert!(!surface.contains("abab"), "{surface}");
+                assert!(!surface.contains("cdcd"), "{surface}");
                 assert!(!surface.contains("86400"), "{surface}");
+                assert!(!surface.contains("424242"), "{surface}");
             }
             codes.push(recipe.code());
         }

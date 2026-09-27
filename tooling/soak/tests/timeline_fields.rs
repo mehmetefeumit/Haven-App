@@ -27,17 +27,20 @@ use std::time::Duration;
 
 use haven_soak::banner::{Banner, Measured, Provenance};
 use haven_soak::nemesis::types::{
-    ByteCap, ClosedPrefix, DeviceOp, Fault, Op, Schedule, ScheduledOp,
+    ByteCap, ClosedPrefix, DeviceOp, DropClass, Fault, Op, Schedule, ScheduledOp,
 };
 use haven_soak::profiles::ProfileName;
 use haven_soak::relay::Forgery;
-use haven_soak::rig::{DeviceTag, KillKind, RelayTag, TimelineRecord};
+use haven_soak::rig::{
+    CircleTag, DeviceTag, KillKind, RelayTag, SessionStoreUse, TimelineRecord, BUFFER_DID_NOT_GROW,
+    BUFFER_GREW,
+};
 
 /// Every field this rig renders, across all three surfaces.
 ///
 /// Pinned by equality and asserted below: a table whose length can drift is a
 /// table that can lose a field's class without anything saying so.
-const CLASSIFIED_FIELDS: usize = 44;
+const CLASSIFIED_FIELDS: usize = 52;
 
 /// What a moved pin means, kept as a constant so the assertion below stays on
 /// one line: the guard that requires this pin to be ASSERTED reads the
@@ -96,6 +99,13 @@ fn table() -> Vec<(Surface, &'static str, Class)> {
         // event the world minted.
         (T, "op.fault.fault.inject", Literal),
         (T, "op.fault.fault.refuse-oversize.max_bytes", Bucket),
+        // A dropped class is a word from this crate's own vocabulary, on the
+        // canonical endpoint or on one device's, and the device is a handle.
+        (T, "op.fault.fault.drop-class", Literal),
+        (T, "op.device-fault.relay", Tag),
+        (T, "op.device-fault.device", Tag),
+        (T, "op.device-fault.fault", Literal),
+        (T, "op.device-fault.fault.drop-class", Literal),
         (T, "op.device.device", Tag),
         (T, "op.device.op", Literal),
         (T, "op.device.op.restart", Literal),
@@ -110,6 +120,11 @@ fn table() -> Vec<(Surface, &'static str, Class)> {
         (T, "relay", Tag),
         (T, "attempts", Bucket),
         (T, "wait_ms", DurationMs),
+        // A flood arm's reading of one device's store for one circle: the
+        // circle is a handle, and the reading is a classification of the curve
+        // — never the curve, whose every sample would render `5+`.
+        (T, "circle", Tag),
+        (T, "grew", Literal),
         // The schedule file.
         (S, "schedule_tag", Tag),
         (S, "ops.tick", Delta),
@@ -132,6 +147,9 @@ fn table() -> Vec<(Surface, &'static str, Class)> {
         (B, "rc_names", Literal),
         (B, "wall", Measurement),
         (B, "peak_rss", Measurement),
+        // A quarter of the rig's declared ceiling, never a byte count: a
+        // session store's size is a magnitude of the world's behaviour.
+        (B, "peak_session_store", Literal),
     ]
 }
 
@@ -150,6 +168,7 @@ fn vocabulary() -> BTreeSet<String> {
         "restarted",
         "published",
         "rebound",
+        "buffer-grew",
     ] {
         words.insert(kind.to_owned());
     }
@@ -165,6 +184,7 @@ fn vocabulary() -> BTreeSet<String> {
         "eose-for-another-subscription",
         "inject",
         "refuse-oversize",
+        "drop-class",
         "heal",
         "probe",
         "restart-soft",
@@ -191,8 +211,33 @@ fn vocabulary() -> BTreeSet<String> {
     }
     words.insert(NOTICE.to_owned());
     // A forgery's recipe, which is the only thing an injection renders.
-    for recipe in ["expired", "rewrap", "malformed-double-h", "unprocessable"] {
+    for recipe in [
+        "expired",
+        "rewrap",
+        "malformed-double-h",
+        "unprocessable",
+        "future-inner-header",
+        "outsider-seal",
+    ] {
         words.insert(recipe.to_owned());
+    }
+    // The classes a partition drops.
+    for class in ["application", "handshake", "gift-wrap"] {
+        words.insert(class.to_owned());
+    }
+    // What a flood arm says about a store: the classification and its
+    // negation, never a count.
+    for reading in [BUFFER_GREW, BUFFER_DID_NOT_GROW] {
+        words.insert(reading.to_owned());
+    }
+    // The quarters of the session-store ceiling the banner prints.
+    for usage in [
+        SessionStoreUse::UnderQuarter,
+        SessionStoreUse::UnderHalf,
+        SessionStoreUse::UnderCeiling,
+        SessionStoreUse::OverCeiling,
+    ] {
+        words.insert(usage.label().to_owned());
     }
     words
 }
@@ -293,6 +338,32 @@ fn records() -> Vec<TimelineRecord> {
                 },
             },
         },
+        // A class dropped on the canonical endpoint, one dropped on a
+        // device's own, and the heal that undoes the latter: the per-device
+        // shape carries a device handle beside the relay's.
+        TimelineRecord::Applied {
+            tick: 11,
+            op: Op::Fault {
+                relay: RelayTag::new(1),
+                fault: Fault::DropClass(DropClass::GiftWrap),
+            },
+        },
+        TimelineRecord::Applied {
+            tick: 11,
+            op: Op::DeviceFault {
+                relay: RelayTag::new(1),
+                device: DeviceTag::new(0),
+                fault: Fault::DropClass(DropClass::Application),
+            },
+        },
+        TimelineRecord::Healed {
+            tick: 12,
+            op: Op::DeviceFault {
+                relay: RelayTag::new(1),
+                device: DeviceTag::new(0),
+                fault: Fault::Heal,
+            },
+        },
         TimelineRecord::Restarted {
             tick: 11,
             device: DeviceTag::new(1),
@@ -323,6 +394,20 @@ fn records() -> Vec<TimelineRecord> {
             relay: RelayTag::new(0),
             attempts: "1",
             wait_ms: 60,
+        },
+        // Both readings a flood arm can make, so the literal class sees the
+        // negation too.
+        TimelineRecord::BufferGrew {
+            tick: 14,
+            device: DeviceTag::new(1),
+            circle: CircleTag::new(0),
+            grew: BUFFER_GREW,
+        },
+        TimelineRecord::BufferGrew {
+            tick: 14,
+            device: DeviceTag::new(1),
+            circle: CircleTag::new(0),
+            grew: BUFFER_DID_NOT_GROW,
         },
     ]
 }
@@ -438,6 +523,7 @@ fn rendered() -> Vec<Rendered> {
         .render(Some(Measured {
             wall: Duration::from_secs(271),
             peak_rss_mib: Some(412),
+            session_store: SessionStoreUse::UnderHalf,
         }))
         .lines()
     {
@@ -644,6 +730,7 @@ fn the_banner_renders_no_hex_run_a_structural_rule_could_match() {
     let text = banner().render(Some(Measured {
         wall: Duration::from_secs(1),
         peak_rss_mib: None,
+        session_store: SessionStoreUse::OverCeiling,
     }));
     let longest = text
         .split(|c: char| !c.is_ascii_hexdigit())

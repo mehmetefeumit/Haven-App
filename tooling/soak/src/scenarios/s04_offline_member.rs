@@ -76,8 +76,9 @@ const EPOCHS_PAST_RETENTION: u64 = DEFAULT_MAX_PAST_EPOCHS as u64 + 1;
 /// chained commits never converges again on its own, and for Haven that means
 /// its peers' fixes stop arriving: **sharing stops**, silently, with the circle
 /// still reporting a healthy send path. It is recorded as **C7** in
-/// `docs/BACKGROUND_SHARING_FAILURE_ANALYSIS.md` and it is owed a scenario of
-/// its own that asserts it RED.
+/// `docs/BACKGROUND_SHARING_FAILURE_ANALYSIS.md`, and S23
+/// (`s23_chained_backlog.rs`) is the scenario that GRADES it — red at rc 1,
+/// deliberately, until the product fix lands.
 ///
 /// So `1` here is a WORKAROUND pending that fix, not a design: one commit is
 /// redelivered and applied on its own, which keeps this scenario about member

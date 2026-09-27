@@ -2,12 +2,27 @@
 #
 # Superset of `pr` — every PR arm runs here too, so a nightly red is never
 # something the PR lane silently stopped covering. The scenarios that appear
-# only here (S04, S05, S09, S12, S14, S17, S18, S19, S22) have NO scheduled lane
-# execution yet: the scheduler workflow lands with the rest of Phase 2, and until
-# then they run under `run_soak_local.sh` and in the crate's own oracle tests.
+# only here (S02, S03, S04, S05, S09, S10, S12, S14, S16, S17, S18, S19, S21,
+# S22, S23) have NO scheduled lane execution yet: the scheduler workflow lands
+# with the rest of Phase 2, and until then they run under `run_soak_local.sh`
+# and in the crate's own oracle tests.
+#
+# `run_budget_secs` is the work: the ARMS and the background nemesis phase the
+# driver walks before them, both priced at the product's own worst-case
+# constants by `tests/budget.rs`. It is a CEILING, not an expectation — a
+# healthy run measures minutes, because a bound is only paid when something
+# fails to happen. Every term in the sum is exact, so the sum moves only when
+# the arm set moves or a product constant does; the slack it leaves is what an
+# added arm spends, and a plain arm (undisturbed recovery, two probe rounds, a
+# resubscribe) costs 48.75 s of it. Raise the budget rather than loosen a bound.
+#
+# `deadline_secs` is the timeout the lane arms above it: the budget plus twice
+# the margin, as every profile here does. `check_soak_lane_reachable.sh` L6 ties
+# it to `soak-core.yml`'s own literal in both directions, and that literal's
+# step cap and job cap move with it (`check_e2e_step_timeout_ordering.sh`).
 name = "nightly"
-run_budget_secs = 4200
-deadline_secs = 4800
+run_budget_secs = 4800
+deadline_secs = 5400
 margin_secs = 300
 duration_secs = 900
 tick_ms = 250
@@ -20,6 +35,14 @@ relays = 2
 [[scenarios]]
 id = "S01"
 arms = ["single-relay-outage", "all-relay-outage", "rolling-outage"]
+
+[[scenarios]]
+id = "S02"
+arms = ["partitioned-receiver", "commit-class-only"]
+
+[[scenarios]]
+id = "S03"
+arms = ["lost-commit-strands"]       # the 684-second silence form is weekly-only
 
 [[scenarios]]
 id = "S04"
@@ -71,3 +94,19 @@ arms = ["duplicate-replay", "reordered-pages", "cross-sub-eose", "commit-gap"]
 id = "S22"
 arms = ["oversized-commit", "refusal-is-relay-count-invariant", "oversized-welcome",
         "oversized-removal-wedges-the-circle"]
+
+[[scenarios]]
+id = "S10"
+arms = ["ten-circle-roster"]
+
+[[scenarios]]
+id = "S23"
+arms = ["chained-commit-backlog"]  # EXPECTED RED (C7) until the deferred-peel sweep lands
+
+[[scenarios]]
+id = "S16"
+arms = ["outsider-flood", "member-future-header-flood", "pending-window-flood"]
+
+[[scenarios]]
+id = "S21"
+arms = ["removal-withheld-commit", "removal-delivered-commit", "removal-lag"]

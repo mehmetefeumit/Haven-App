@@ -39,11 +39,14 @@ use tokio::time::{Instant, MissedTickBehavior};
 pub use circle::{PublishVerdict, SimCircle};
 pub use declare::DeclareSink;
 pub use device::{DeviceLedger, SimDevice};
-pub use plane::{CapturedLine, LogDrain, RelayPlane, TimelineRecord, TimelineSink};
+pub use plane::{
+    CapturedLine, LogDrain, RelayPlane, TimelineRecord, TimelineSink, BUFFER_DID_NOT_GROW,
+    BUFFER_GREW,
+};
 pub use restart::{kill_and_reopen, KillKind, ReopenReport};
 pub use world::{
     install_process_globals, CircleFingerprint, DeviceFingerprint, PendingGuard, RosterDigest,
-    SimWorld, TickReport, WorldFingerprint,
+    SessionStoreUse, SimWorld, TickReport, WorldFingerprint, SESSION_STORE_CEILING_BYTES,
 };
 
 /// The kinds of thing the rig names.
@@ -223,6 +226,12 @@ pub enum Step {
     ReadConvergenceState,
     /// Reading a session's liveness.
     ReadSessionLiveness,
+    /// Measuring a session store's size on disk.
+    ReadSessionStoreSize,
+    /// A session store crossed the rig's declared ceiling mid-arm: the sim hit
+    /// its own guard (`SESSION_STORE_CEILING_BYTES`) and stopped rather than
+    /// fill the runner's disk.
+    SessionStoreCeiling,
     /// Applying a fault to a relay plane.
     ApplyFault,
 }

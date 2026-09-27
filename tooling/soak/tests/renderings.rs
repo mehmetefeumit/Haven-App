@@ -234,14 +234,15 @@ fn static_samples() -> BTreeMap<String, Vec<String>> {
     use haven_soak::driver::Refusal;
     use haven_soak::logsink::{ScanReport, SinkError};
     use haven_soak::nemesis::types::{
-        ByteCap, ClosedPrefix, DeviceOp, Fault, Op, Schedule, ScheduledOp,
+        ByteCap, ClosedPrefix, DeviceOp, DropClass, Fault, Op, Schedule, ScheduledOp,
     };
     use haven_soak::oracle::bounds::{BoundDefect, Recovery, WaitScale};
     use haven_soak::oracle::quiescence::{PendingReason, Quiescence, Settled, StabilityWindow};
     use haven_soak::oracle::undecryptable::{self, Cause, Probe, StoredRow};
     use haven_soak::oracle::vacuity::{ExpectationFloor, FloorTerm, Observed};
     use haven_soak::oracle::{
-        Finding, Invariant, ProbeToken, Reach, RetentionEdge, Round, Verdict,
+        Finding, Invariant, ProbeToken, Reach, RemovalPath, RemovalProbe, RemovalRow, RemovalStage,
+        RetentionEdge, Round, Verdict,
     };
     use haven_soak::profiles::{
         ProfileError, ProfileName, ProfileSpec, ScenarioSelection, WorldShape,
@@ -250,7 +251,7 @@ fn static_samples() -> BTreeMap<String, Vec<String>> {
     use haven_soak::relay::{Forgery, NativeClosed};
     use haven_soak::rig::{
         CapturedLine, CircleTag, DeviceTag, EventTag, KillKind, PublishVerdict, RelayTag,
-        ReopenReport, RigError, SimKind, Step, TimelineRecord, Wait, WorldId,
+        ReopenReport, RigError, SessionStoreUse, SimKind, Step, TimelineRecord, Wait, WorldId,
     };
     use haven_soak::scenarios::{Absence, ScenarioReport, WithheldAcks};
     use haven_soak::timeline::{read_lines, Snapshot, Timeline};
@@ -271,6 +272,8 @@ fn static_samples() -> BTreeMap<String, Vec<String>> {
     let measured = Measured {
         wall: Duration::from_secs(271),
         peak_rss_mib: Some(412),
+        // The peak a byte count would betray, carried as the quarter it falls in.
+        session_store: SessionStoreUse::of(NEEDLE_COUNT_U64),
     };
     add(&mut out, "banner.rs::Measured", format!("{measured:?}"));
 
@@ -360,9 +363,21 @@ fn static_samples() -> BTreeMap<String, Vec<String>> {
         Fault::RefuseOversize {
             max_bytes: ByteCap::new(NEEDLE_COUNT),
         },
+        Fault::DropClass(DropClass::Application),
         Fault::Heal,
     ] {
         add(&mut out, "nemesis/types.rs::Fault", format!("{fault:?}"));
+    }
+    for class in [
+        DropClass::Application,
+        DropClass::Handshake,
+        DropClass::GiftWrap,
+    ] {
+        add(
+            &mut out,
+            "nemesis/types.rs::DropClass",
+            format!("{class:?}"),
+        );
     }
     add(
         &mut out,
@@ -381,6 +396,15 @@ fn static_samples() -> BTreeMap<String, Vec<String>> {
             group_id: needle_bytes(),
         },
         Forgery::Unprocessable {
+            group_id: needle_bytes(),
+        },
+        // The event id and the baked-in epoch are both needle-planted, so the
+        // sweep proves the rendering carries neither.
+        Forgery::FutureInnerHeader {
+            source: nostr::EventId::from_slice(&needle_bytes()).expect("32 bytes is an event id"),
+            inner_epoch: NEEDLE_COUNT_U64,
+        },
+        Forgery::OutsiderSeal {
             group_id: needle_bytes(),
         },
     ] {
@@ -404,11 +428,16 @@ fn static_samples() -> BTreeMap<String, Vec<String>> {
         &mut out,
         "nemesis/types.rs::Op",
         format!(
-            "{:?} {:?}",
+            "{:?} {:?} {:?}",
             Op::Probe,
             Op::Fault {
                 relay,
                 fault: Fault::Down
+            },
+            Op::DeviceFault {
+                relay,
+                device,
+                fault: Fault::DropClass(DropClass::GiftWrap),
             }
         ),
     );
@@ -517,6 +546,42 @@ fn static_samples() -> BTreeMap<String, Vec<String>> {
             }
         ),
     );
+    // O3's evidence unit: two handles, a stage, a path, a value-free verdict, a
+    // bool and a terminal row state — all value-free.
+    for stage in [RemovalStage::Before, RemovalStage::After] {
+        add(
+            &mut out,
+            "oracle/mod.rs::RemovalStage",
+            format!("{stage:?}"),
+        );
+        add(
+            &mut out,
+            "oracle/mod.rs::RemovalProbe",
+            format!(
+                "{:?}",
+                RemovalProbe {
+                    device,
+                    circle,
+                    stage,
+                    path: RemovalPath::Withheld,
+                    outcome: undecryptable::Verdict::PeelFailed,
+                    carried_token: false,
+                    terminal: RemovalRow::StillDeferred,
+                }
+            ),
+        );
+    }
+    for path in [RemovalPath::Delivered, RemovalPath::Withheld] {
+        add(&mut out, "oracle/mod.rs::RemovalPath", format!("{path:?}"));
+    }
+    for row in [
+        RemovalRow::NotApplicable,
+        RemovalRow::StillDeferred,
+        RemovalRow::Retired,
+        RemovalRow::Resolved,
+    ] {
+        add(&mut out, "oracle/mod.rs::RemovalRow", format!("{row:?}"));
+    }
     let pairs = [(device, DeviceTag::new(1))];
     add(
         &mut out,
@@ -537,6 +602,7 @@ fn static_samples() -> BTreeMap<String, Vec<String>> {
                 burst_opened: &[device],
                 classified: &[undecryptable::Verdict::Applied],
                 retention: &[],
+                forward_secrecy: &[],
             }
         ),
     );
@@ -614,6 +680,7 @@ fn static_samples() -> BTreeMap<String, Vec<String>> {
         undecryptable::Verdict::PastEpochOrBranchLoss { branch_loss: true },
         undecryptable::Verdict::OwnEcho,
         undecryptable::Verdict::SelfEvicted,
+        undecryptable::Verdict::PeelDeferredCapped,
         undecryptable::Verdict::Quarantined,
         undecryptable::Verdict::Routing,
         undecryptable::Verdict::PeelFailed,
@@ -862,6 +929,8 @@ fn static_samples() -> BTreeMap<String, Vec<String>> {
         Step::ReadCursor,
         Step::ReadConvergenceState,
         Step::ReadSessionLiveness,
+        Step::ReadSessionStoreSize,
+        Step::SessionStoreCeiling,
         Step::ApplyFault,
     ] {
         add(&mut out, "rig/mod.rs::Step", format!("{step:?}"));
@@ -952,6 +1021,14 @@ fn static_samples() -> BTreeMap<String, Vec<String>> {
             relay,
             attempts: "1",
             wait_ms: 60,
+        },
+        // The flood reading carries a circle handle and a classification; the
+        // count it classifies is compared in process and never rendered.
+        TimelineRecord::BufferGrew {
+            tick: 10,
+            device,
+            circle,
+            grew: haven_soak::rig::BUFFER_GREW,
         },
     ] {
         add(
@@ -1093,7 +1170,9 @@ async fn world_samples() -> (BTreeMap<String, Vec<String>>, Vec<String>) {
     use haven_soak::nemesis::types::Schedule;
     use haven_soak::profiles::WorldShape;
     use haven_soak::relay::SimRelay;
-    use haven_soak::rig::{install_process_globals, RelayPlane, RelayTag, SimWorld};
+    use haven_soak::rig::{
+        install_process_globals, RelayPlane, RelayTag, SessionStoreUse, SimWorld,
+    };
     use haven_soak::timeline::Timeline;
 
     install_process_globals().expect("the ws:// loopback opt-in installs");
@@ -1140,6 +1219,21 @@ async fn world_samples() -> (BTreeMap<String, Vec<String>>, Vec<String>) {
         &mut out,
         "rig/world.rs::PendingGuard",
         format!("{:?}", world.note_pending_staged()),
+    );
+    // The quarter a live world's store really falls in, beside the guard's
+    // own edge: what a rendering of it may carry is a word and never a count.
+    add(
+        &mut out,
+        "rig/world.rs::SessionStoreUse",
+        format!(
+            "{:?} {:?}",
+            SessionStoreUse::of(
+                world
+                    .session_store_bytes()
+                    .expect("every store is measurable")
+            ),
+            SessionStoreUse::of(haven_soak::rig::SESSION_STORE_CEILING_BYTES + NEEDLE_COUNT_U64)
+        ),
     );
     add(
         &mut out,

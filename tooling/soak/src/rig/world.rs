@@ -21,6 +21,7 @@ use sha2::{Digest, Sha256};
 use crate::clock::WallNow;
 use crate::nemesis::types::{DeviceOp, Fault, Op, Schedule, ScheduledOp};
 use crate::profiles::WorldShape;
+use crate::rc::Rc;
 use crate::rig::circle::{
     build_circle, publish_and_resolve, publish_witnessed, resolve_ingest, PublishVerdict,
 };
@@ -36,6 +37,78 @@ const TEARDOWN_RELEASE_BOUND: Duration = Duration::from_secs(30);
 
 /// How often teardown re-reads that condition.
 const TEARDOWN_POLL: Duration = Duration::from_millis(20);
+
+/// The most bytes one device's session store may reach in a world before the
+/// run stops trusting itself.
+///
+/// A DECLARED rig budget, not a derived bound, and the only one in this crate:
+/// nothing in Haven or MDK caps the convergence buffer or the raw `Retryable`
+/// store (upstream #757 is open), so there is no product constant to name it
+/// from. Re-pinned from measurement — the banner's `peak_session_store` over
+/// the first nights — and only ever raised from one, never hand-edited.
+/// Exceeding it is rc 3, the sim hitting its own guard, rather than a flood
+/// arm filling the runner's disk and dying as an anonymous timeout.
+///
+/// Initial pin (2026-09-24): 256 MiB, forty times the largest store a local
+/// `pr` run measured at any world's end (6.5 MB, at three members / two
+/// circles / one relay; a two-member world opens at under 1 MB).
+pub const SESSION_STORE_CEILING_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Where a run's peak session store sat against [`SESSION_STORE_CEILING_BYTES`].
+///
+/// The banner's rendering of OD-10's number. A byte count is a magnitude of
+/// the world's behaviour and the crate's bucket policy has no resolution at
+/// this scale — a store renders `5+` before its first row — so the peak is
+/// rendered RELATIVE to the declared ceiling, in quarters, and never as bytes
+/// (decision 0.31).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionStoreUse {
+    /// Under a quarter of the ceiling.
+    UnderQuarter,
+    /// Under half.
+    UnderHalf,
+    /// Under the ceiling.
+    UnderCeiling,
+    /// Over it: the guard fired.
+    OverCeiling,
+}
+
+impl SessionStoreUse {
+    /// The quarter `peak_bytes` falls in.
+    #[must_use]
+    pub const fn of(peak_bytes: u64) -> Self {
+        if peak_bytes > SESSION_STORE_CEILING_BYTES {
+            Self::OverCeiling
+        } else if peak_bytes > SESSION_STORE_CEILING_BYTES / 2 {
+            Self::UnderCeiling
+        } else if peak_bytes > SESSION_STORE_CEILING_BYTES / 4 {
+            Self::UnderHalf
+        } else {
+            Self::UnderQuarter
+        }
+    }
+
+    /// The literal the banner prints.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::UnderQuarter => "under-quarter",
+            Self::UnderHalf => "under-half",
+            Self::UnderCeiling => "under-ceiling",
+            Self::OverCeiling => "over-ceiling",
+        }
+    }
+
+    /// The verdict this folds into: a store over the ceiling is a world that
+    /// proves nothing, because the run stopped grading it to save the runner.
+    #[must_use]
+    pub const fn rc(self) -> Rc {
+        match self {
+            Self::OverCeiling => Rc::Unusable,
+            _ => Rc::Clean,
+        }
+    }
+}
 
 /// Installs the process-wide opt-ins the rig needs, exactly once.
 ///
@@ -333,7 +406,7 @@ impl<R: RelayPlane, T: TimelineSink, L: LogDrain> SimWorld<R, T, L> {
     pub async fn build(
         shape: &WorldShape,
         schedule: Schedule,
-        relays: Vec<R>,
+        mut relays: Vec<R>,
         timeline: T,
         logs: L,
     ) -> Result<Self, RigError> {
@@ -346,7 +419,20 @@ impl<R: RelayPlane, T: TimelineSink, L: LogDrain> SimWorld<R, T, L> {
         let mut devices = Vec::with_capacity(shape.members);
         for ordinal in 0..shape.members {
             let tag = DeviceTag::new(u32::try_from(ordinal).map_err(|_| RigError::ShapeMismatch)?);
-            devices.push(SimDevice::open(tag, &urls)?);
+            // Before the device dials anything: an endpoint provisioned after
+            // the engine started would be one nothing dials.
+            for relay in &mut relays {
+                relay.provision(tag).await?;
+            }
+            // The inbox plane dials the device's own endpoints too, so the
+            // engine's pool holds ONE relay per plane: the pool is the group
+            // relays' union with the inbox's, and a second address per plane
+            // would double every `relay_health().connected` a canary reads.
+            let own: Vec<String> = relays
+                .iter()
+                .map(|relay| relay.url_for(tag).to_owned())
+                .collect();
+            devices.push(SimDevice::open(tag, &own)?);
         }
 
         // Minted before the first create rather than with the struct: a create
@@ -359,9 +445,12 @@ impl<R: RelayPlane, T: TimelineSink, L: LogDrain> SimWorld<R, T, L> {
             circles.push(build_circle(tag, &devices, &relays, &urls, &outstanding).await?);
         }
 
-        let specs: Vec<_> = circles.iter().map(|circle| circle.spec(&urls)).collect();
         for device in &mut devices {
-            device.start_engine(specs.clone()).await?;
+            let specs: Vec<_> = circles
+                .iter()
+                .map(|circle| circle.spec_for(device.tag, &relays))
+                .collect();
+            device.start_engine(specs).await?;
         }
 
         // The schedule is the timeline's first records, so a run that dies in
@@ -412,6 +501,14 @@ impl<R: RelayPlane, T: TimelineSink, L: LogDrain> SimWorld<R, T, L> {
         }
         for relay in &self.relays {
             sink.declare_relay(relay.url())?;
+            // Every endpoint the world dials, not only the canonical one: a
+            // device's own is an address the rig minted like any other.
+            for device in &self.devices {
+                let own = relay.url_for(device.tag);
+                if own != relay.url() {
+                    sink.declare_relay(own)?;
+                }
+            }
         }
         self.declarations = Some(sink);
         Ok(())
@@ -448,6 +545,33 @@ impl<R: RelayPlane, T: TimelineSink, L: LogDrain> SimWorld<R, T, L> {
         Ok(circle)
     }
 
+    /// Pushes `circle` into the world's own table so every world-wide oracle
+    /// grades it.
+    ///
+    /// The inverse of [`Self::build_extra_circle`]'s default, and the ONLY
+    /// caller is S10: a scenario that builds a circle in order to break it
+    /// (S13) must never adopt it, or a world-wide oracle would report a
+    /// violation the arm induced. The circle was declared when it was built,
+    /// so nothing is declared twice.
+    pub fn adopt_circle(&mut self, circle: SimCircle) {
+        self.circles.push(circle);
+    }
+
+    /// The largest session store any device of this world holds on disk right
+    /// now. A raw count for the driver's ceiling, compared in process and
+    /// never rendered.
+    ///
+    /// # Errors
+    ///
+    /// [`RigError::Core`] with [`Step::ReadSessionStoreSize`] if a store
+    /// cannot be measured.
+    pub fn session_store_bytes(&self) -> Result<u64, RigError> {
+        self.devices
+            .iter()
+            .map(SimDevice::session_db_bytes)
+            .try_fold(0, |largest, bytes| bytes.map(|bytes| largest.max(bytes)))
+    }
+
     /// Applies everything the schedule has for `tick`, then folds what the
     /// devices received.
     ///
@@ -472,7 +596,17 @@ impl<R: RelayPlane, T: TimelineSink, L: LogDrain> SimWorld<R, T, L> {
         for scheduled in firing {
             match scheduled.op {
                 Op::Fault { relay, fault } => {
-                    self.apply_fault(relay, fault).await?;
+                    self.apply_fault(relay, None, fault).await?;
+                    if matches!(fault, Fault::Up | Fault::Heal) {
+                        self.record_rebind(tick, relay);
+                    }
+                }
+                Op::DeviceFault {
+                    relay,
+                    device,
+                    fault,
+                } => {
+                    self.apply_fault(relay, Some(device), fault).await?;
                     if matches!(fault, Fault::Up | Fault::Heal) {
                         self.record_rebind(tick, relay);
                     }
@@ -488,13 +622,15 @@ impl<R: RelayPlane, T: TimelineSink, L: LogDrain> SimWorld<R, T, L> {
         }
 
         for scheduled in healing {
-            let Op::Fault { relay, .. } = scheduled.op else {
+            let (relay, device) = match scheduled.op {
+                Op::Fault { relay, .. } => (relay, None),
+                Op::DeviceFault { relay, device, .. } => (relay, Some(device)),
                 // Only a fault can be healed; a schedule that asked to heal a
                 // restart is a generator bug, and silently ignoring it would
                 // leave a bound derived from a heal that never happened.
-                return Err(RigError::Unhealable);
+                Op::Device { .. } | Op::Probe => return Err(RigError::Unhealable),
             };
-            self.apply_fault(relay, Fault::Heal).await?;
+            self.apply_fault(relay, device, Fault::Heal).await?;
             self.record_rebind(tick, relay);
             self.timeline.record(TimelineRecord::Healed {
                 tick,
@@ -522,13 +658,23 @@ impl<R: RelayPlane, T: TimelineSink, L: LogDrain> SimWorld<R, T, L> {
             .sum()
     }
 
-    async fn apply_fault(&mut self, relay: RelayTag, fault: Fault) -> Result<(), RigError> {
-        self.relays
+    /// Applies `fault` to `relay`'s canonical endpoint, or to `device`'s own
+    /// endpoint on it.
+    async fn apply_fault(
+        &mut self,
+        relay: RelayTag,
+        device: Option<DeviceTag>,
+        fault: Fault,
+    ) -> Result<(), RigError> {
+        let plane = self
+            .relays
             .iter_mut()
             .find(|plane| plane.tag() == relay)
-            .ok_or(RigError::UnknownTarget)?
-            .apply(fault)
-            .await
+            .ok_or(RigError::UnknownTarget)?;
+        match device {
+            None => plane.apply(fault).await,
+            Some(device) => plane.apply_for(device, fault).await,
+        }
     }
 
     /// Records the rebind cost of a plane that just came back, when the plane
@@ -1447,6 +1593,150 @@ mod tests {
         }
         assert_eq!(world.outstanding_pending_refs(), 0);
         world.teardown().await.expect("teardown");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_extra_circle_stays_out_of_the_world_until_it_is_adopted() {
+        // S13's shape: a circle built to be broken stays out of the table, so
+        // no world-wide oracle grades the damage the arm did on purpose. S10's
+        // shape is the inverse, and the same seam serves both.
+        let mut world = build_world(Schedule::new(Vec::new())).await;
+        let declared = world.circles().len();
+        let extra = world
+            .build_extra_circle()
+            .await
+            .expect("an extra circle builds");
+        let tag = extra.tag;
+        assert_eq!(
+            world.circles().len(),
+            declared,
+            "a circle an arm builds is not the world's until the arm says so"
+        );
+        assert!(world.circle(tag).is_err());
+
+        world.adopt_circle(extra);
+        assert_eq!(world.circles().len(), declared + 1);
+        assert!(
+            world.circle(tag).is_ok(),
+            "an adopted circle is one the world's own table answers for"
+        );
+        let fingerprint = world.fingerprint().await.expect("fingerprint");
+        assert!(
+            fingerprint
+                .devices
+                .iter()
+                .all(|device| device.circles.iter().any(|circle| circle.circle == tag)),
+            "and every world-wide read now covers it"
+        );
+        world.teardown().await.expect("teardown");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_scheduled_device_fault_is_applied_to_that_device_and_healed_on_it() {
+        let alice = DeviceTag::new(0);
+        let schedule = Schedule::new(vec![ScheduledOp {
+            tick: 1,
+            op: Op::DeviceFault {
+                relay: RelayTag::new(0),
+                device: alice,
+                fault: Fault::SwallowOk,
+            },
+            heal_at: Some(2),
+        }]);
+        let mut world = build_world(schedule).await;
+        let first = world.tick(1).await.expect("tick 1");
+        assert_eq!(first.applied, 1);
+        // The double has one endpoint, so a device-aimed fault reaches the
+        // plane's own `apply`; what this pins is the world's dispatch and
+        // the heal finding its way back to the same target.
+        assert_eq!(world.relays()[0].applied(), vec![Fault::SwallowOk]);
+        let second = world.tick(2).await.expect("tick 2");
+        assert_eq!(second.healed, 1);
+        assert_eq!(
+            world.relays()[0].applied(),
+            vec![Fault::SwallowOk, Fault::Heal]
+        );
+        assert!(world.timeline().records().iter().any(|record| matches!(
+            record,
+            TimelineRecord::Healed {
+                op: Op::DeviceFault { device, .. },
+                ..
+            } if *device == alice
+        )));
+        world.teardown().await.expect("teardown");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_worlds_session_store_is_measured_as_its_largest_device() {
+        let world = build_world(Schedule::new(Vec::new())).await;
+        let largest = world
+            .session_store_bytes()
+            .expect("every store is measurable");
+        let per_device: Vec<u64> = world
+            .devices()
+            .iter()
+            .map(|device| device.session_db_bytes().expect("measurable"))
+            .collect();
+        assert!(largest > 0);
+        assert_eq!(
+            Some(largest),
+            per_device.iter().copied().max(),
+            "the guard reads the worst device, not the sum: the ceiling is per store"
+        );
+        assert_eq!(
+            SessionStoreUse::of(largest),
+            SessionStoreUse::UnderQuarter,
+            "a fresh two-member world sits far under the ceiling, or the pin is stale"
+        );
+        world.teardown().await.expect("teardown");
+    }
+
+    #[test]
+    fn the_session_store_ceiling_is_read_in_quarters_and_only_the_breach_is_a_verdict() {
+        let ceiling = SESSION_STORE_CEILING_BYTES;
+        assert_eq!(SessionStoreUse::of(0), SessionStoreUse::UnderQuarter);
+        assert_eq!(
+            SessionStoreUse::of(ceiling / 4),
+            SessionStoreUse::UnderQuarter
+        );
+        assert_eq!(
+            SessionStoreUse::of(ceiling / 4 + 1),
+            SessionStoreUse::UnderHalf
+        );
+        assert_eq!(SessionStoreUse::of(ceiling / 2), SessionStoreUse::UnderHalf);
+        assert_eq!(
+            SessionStoreUse::of(ceiling / 2 + 1),
+            SessionStoreUse::UnderCeiling
+        );
+        assert_eq!(SessionStoreUse::of(ceiling), SessionStoreUse::UnderCeiling);
+        assert_eq!(
+            SessionStoreUse::of(ceiling + 1),
+            SessionStoreUse::OverCeiling,
+            "one byte over the declared ceiling is the guard firing"
+        );
+        for within in [
+            SessionStoreUse::UnderQuarter,
+            SessionStoreUse::UnderHalf,
+            SessionStoreUse::UnderCeiling,
+        ] {
+            assert_eq!(within.rc(), Rc::Clean);
+        }
+        assert_eq!(
+            SessionStoreUse::OverCeiling.rc(),
+            Rc::Unusable,
+            "the sim hit its own guard: rc 3, never a finding about the subject"
+        );
+        // Rendered as a quarter and never as a count: the label is one of four
+        // literals, and none of them is a digit.
+        for usage in [
+            SessionStoreUse::UnderQuarter,
+            SessionStoreUse::UnderHalf,
+            SessionStoreUse::UnderCeiling,
+            SessionStoreUse::OverCeiling,
+        ] {
+            assert!(!usage.label().chars().any(|c| c.is_ascii_digit()));
+            assert!(!format!("{usage:?}").chars().any(|c| c.is_ascii_digit()));
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

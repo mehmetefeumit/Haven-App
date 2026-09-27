@@ -38,13 +38,16 @@ use haven_soak::oracle::quiescence::{self, PendingReason, Quiescence, Settled};
 use haven_soak::oracle::undecryptable::{self, StoredRow};
 use haven_soak::oracle::vacuity::{grade, ExpectationFloor, FloorTerm, Observed};
 use haven_soak::oracle::{
-    bounds, Finding, Invariant, ProbeToken, Reach, Recovery, RetentionEdge, Round, Verdict,
+    bounds, Finding, Invariant, ProbeToken, Reach, Recovery, RemovalPath, RemovalProbe, RemovalRow,
+    RemovalStage, RetentionEdge, Round, Verdict,
 };
 use haven_soak::profiles::{ProfileName, ProfileSpec, WorldShape};
 use haven_soak::rc::Rc;
 use haven_soak::relay::SimRelay;
 use haven_soak::rig::{CapturedLine, DeviceTag, LogDrain, RelayPlane, RelayTag, SimWorld};
+use haven_soak::scenarios::s02_receiver_partition::unwitnessed_control;
 use haven_soak::scenarios::s14_restart_race::{co_admin, merge_race, stage_race, SecondCommit};
+use haven_soak::scenarios::s23_chained_backlog::one_commit_control;
 use haven_soak::scenarios::Scenario;
 use haven_soak::timeline::Timeline;
 
@@ -124,8 +127,9 @@ const fn round(ordinal: u32) -> Round<'static> {
         burst_opened: &[],
         classified: &[],
         // O4's subject, fed by the one arm that crosses the window; a
-        // round that feeds none declares none.
+        // round that feeds none declares none. O3's removal probes are the same.
         retention: &[],
+        forward_secrecy: &[],
     }
 }
 
@@ -880,7 +884,51 @@ async fn every_registered_oracle_holds_on_a_world_with_nothing_wrong_with_it() {
             outcome: undecryptable::Verdict::PastEpochOrBranchLoss { branch_loss: false },
         },
     ];
-    let mut healthy = round(1).with_retention(&edges);
+    // O3's subject is likewise the probes an arm fed it, not a state of the
+    // world: the healthy round declares one Delivered pair (refuses SelfEvicted)
+    // and one Withheld pair (refuses PeelFailed with a row that never resolved),
+    // so a round that fed neither is `Unusable` by design, exactly as O4/O5 are.
+    let probes = [
+        RemovalProbe {
+            device: DeviceTag::new(0),
+            circle: world.circles()[0].tag,
+            stage: RemovalStage::Before,
+            path: RemovalPath::Delivered,
+            outcome: undecryptable::Verdict::Applied,
+            carried_token: true,
+            terminal: RemovalRow::NotApplicable,
+        },
+        RemovalProbe {
+            device: DeviceTag::new(0),
+            circle: world.circles()[0].tag,
+            stage: RemovalStage::After,
+            path: RemovalPath::Delivered,
+            outcome: undecryptable::Verdict::SelfEvicted,
+            carried_token: false,
+            terminal: RemovalRow::NotApplicable,
+        },
+        RemovalProbe {
+            device: DeviceTag::new(1),
+            circle: world.circles()[0].tag,
+            stage: RemovalStage::Before,
+            path: RemovalPath::Withheld,
+            outcome: undecryptable::Verdict::Applied,
+            carried_token: true,
+            terminal: RemovalRow::NotApplicable,
+        },
+        RemovalProbe {
+            device: DeviceTag::new(1),
+            circle: world.circles()[0].tag,
+            stage: RemovalStage::After,
+            path: RemovalPath::Withheld,
+            outcome: undecryptable::Verdict::PeelFailed,
+            carried_token: false,
+            terminal: RemovalRow::StillDeferred,
+        },
+    ];
+    let mut healthy = round(1)
+        .with_retention(&edges)
+        .with_forward_secrecy(&probes);
     healthy.classified = &classified;
 
     for invariant in Invariant::REGISTRY {
@@ -921,20 +969,37 @@ async fn every_registered_oracle_holds_on_a_world_with_nothing_wrong_with_it() {
 // line with the same words and the test NAME would be the only thing saying
 // which arm broke.
 
-/// The one arm the sweep does not run, and why.
+/// The two arms the sweep does not run, and the one reason.
 ///
-/// S17's full intake asserts an ABSENCE over the whole delivery-silence window
-/// — three kind-445 retention windows, 684 seconds — and an absence is the one
-/// span that may never be scaled or shortened. It runs in the `weekly` profile,
-/// which is where a bound that starts at eleven minutes belongs.
-const EXCLUDED_FROM_THE_SWEEP: [&str; 1] = ["full-intake"];
+/// Each asserts an ABSENCE over the whole delivery-silence window — three
+/// kind-445 retention windows, 684 seconds — and an absence is the one span
+/// that may never be scaled or shortened. S03's unnamed strand and S17's full
+/// intake run in the `weekly` profile, which is where a bound that starts at
+/// eleven minutes belongs. In registry order, because the sweep test compares
+/// its leftovers to this list as it walks the registry.
+const EXCLUDED_FROM_THE_SWEEP: [&str; 2] = ["lost-commit-unnamed", "full-intake"];
+
+/// The one arm the sweep runs and REQUIRES to be red, and the one reason.
+///
+/// C7 (`docs/BACKGROUND_SHARING_FAILURE_ANALYSIS.md`): a device that misses
+/// two chained commits never converges again at the pinned engine, because the
+/// deferred-peel sweep is only ever driven by a peelable inbound event and a
+/// device one epoch behind never receives one. That is a PRODUCT DEFECT, not a
+/// decision, so it is graded at rc 1 rather than recorded as a canary: the
+/// nightly reports it until the fix lands, and the day this arm grades rc 0 its
+/// own test fails with the instruction to promote it to `SWEPT` in the same
+/// change.
+const EXPECTED_RED: [(Scenario, &str); 1] = [(Scenario::ChainedBacklog, "chained-commit-backlog")];
 
 /// Every (scenario, arm) the sweep below runs, written out so that an arm added
 /// to a scenario without a test here fails rather than widening a loop.
-const SWEPT: [(Scenario, &str); 31] = [
+const SWEPT: [(Scenario, &str); 41] = [
     (Scenario::RelayOutage, "single-relay-outage"),
     (Scenario::RelayOutage, "all-relay-outage"),
     (Scenario::RelayOutage, "rolling-outage"),
+    (Scenario::ReceiverPartition, "partitioned-receiver"),
+    (Scenario::ReceiverPartition, "commit-class-only"),
+    (Scenario::LostCommit, "lost-commit-strands"),
     (Scenario::OfflineMember, "offline-quiet"),
     (Scenario::OfflineMember, "offline-across-commits"),
     (Scenario::OfflineMember, "offline-past-retention"),
@@ -969,6 +1034,13 @@ const SWEPT: [(Scenario, &str); 31] = [
         Scenario::OversizedEvent,
         "oversized-removal-wedges-the-circle",
     ),
+    (Scenario::TenCircleRoster, "ten-circle-roster"),
+    (Scenario::StorageGrowth, "outsider-flood"),
+    (Scenario::StorageGrowth, "member-future-header-flood"),
+    (Scenario::StorageGrowth, "pending-window-flood"),
+    (Scenario::RemovalEffectiveness, "removal-withheld-commit"),
+    (Scenario::RemovalEffectiveness, "removal-delivered-commit"),
+    (Scenario::RemovalEffectiveness, "removal-lag"),
 ];
 
 /// The world one arm is run in: the PR profile's own shape, widened only where
@@ -991,7 +1063,13 @@ fn shape_for(label: &str) -> WorldShape {
     ) {
         shape.relays = shape.relays.max(2);
     }
-    if label == "offline-across-removal" {
+    if matches!(
+        label,
+        "offline-across-removal"
+            | "removal-withheld-commit"
+            | "removal-delivered-commit"
+            | "removal-lag"
+    ) {
         shape.members = shape.members.max(4);
     }
     shape
@@ -1048,7 +1126,9 @@ fn the_happy_path_sweep_runs_every_arm_but_the_one_it_excludes() {
     let mut unswept: Vec<&str> = Vec::new();
     for scenario in Scenario::REGISTRY {
         for arm in scenario.arms() {
-            if !SWEPT.contains(&(scenario, arm.label)) {
+            if !SWEPT.contains(&(scenario, arm.label))
+                && !EXPECTED_RED.contains(&(scenario, arm.label))
+            {
                 unswept.push(arm.label);
             }
         }
@@ -1062,6 +1142,16 @@ fn the_happy_path_sweep_runs_every_arm_but_the_one_it_excludes() {
         assert!(
             scenario.arm(label).is_some(),
             "the sweep names an arm its scenario no longer offers"
+        );
+        assert!(
+            !EXPECTED_RED.contains(&(scenario, label)),
+            "an arm is swept for a success path or required red, never both"
+        );
+    }
+    for (scenario, label) in EXPECTED_RED {
+        assert!(
+            scenario.arm(label).is_some(),
+            "the expected-red list names an arm its scenario no longer offers"
         );
     }
 }
@@ -1079,6 +1169,21 @@ async fn s01_all_relay_outage_holds() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn s01_rolling_outage_holds() {
     happy_path(Scenario::RelayOutage, "rolling-outage").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s02_partitioned_receiver_holds() {
+    happy_path(Scenario::ReceiverPartition, "partitioned-receiver").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s02_commit_class_only_holds() {
+    happy_path(Scenario::ReceiverPartition, "commit-class-only").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s03_lost_commit_strands_holds() {
+    happy_path(Scenario::LostCommit, "lost-commit-strands").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1230,6 +1335,100 @@ async fn s22_oversized_removal_wedges_the_circle_holds() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s10_ten_circle_roster_holds() {
+    happy_path(Scenario::TenCircleRoster, "ten-circle-roster").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s16_outsider_flood_holds() {
+    happy_path(Scenario::StorageGrowth, "outsider-flood").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s16_member_future_header_flood_holds() {
+    happy_path(Scenario::StorageGrowth, "member-future-header-flood").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s16_pending_window_flood_holds() {
+    happy_path(Scenario::StorageGrowth, "pending-window-flood").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s21_removal_withheld_commit_holds() {
+    happy_path(Scenario::RemovalEffectiveness, "removal-withheld-commit").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s21_removal_delivered_commit_holds() {
+    happy_path(Scenario::RemovalEffectiveness, "removal-delivered-commit").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s21_removal_lag_holds() {
+    happy_path(Scenario::RemovalEffectiveness, "removal-lag").await;
+}
+
+/// Runs the one `EXPECTED_RED` arm and requires exactly the red it is expected
+/// to be: its floor met (the arm produced its condition), rc 1, and the two
+/// findings C7 predicts — the stranded device's epoch diverged, and this
+/// round's probe never reached it.
+///
+/// The `stale_expectation` pin is the first assertion: a clean report means C7
+/// is FIXED, and the arm must be promoted to `SWEPT` (and deleted from
+/// `EXPECTED_RED`) in the same change, never left asserting a defect the
+/// product no longer has.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s23_chained_commit_backlog_is_red_at_rc_1_with_the_strand_c7_predicts() {
+    let (scenario, label) = EXPECTED_RED[0];
+    let arm = arm_of(scenario, label);
+    let mut world = build_shaped_world(&shape_for(label)).await;
+    let victim = world.devices()[2].tag;
+    let circle = world.circles()[0].tag;
+
+    let report = scenario
+        .run(&mut world, arm, pr_tick())
+        .await
+        .expect("the scenario runs");
+
+    assert!(
+        report.rc() != Rc::Clean,
+        "STALE EXPECTATION: C7 is fixed — a device that missed two chained commits \
+         converged. Promote chained-commit-backlog to SWEPT and delete it from \
+         EXPECTED_RED in the same change"
+    );
+    assert!(
+        report.floor == Verdict::Holds,
+        "the arm must have produced the chained backlog it grades, or the red \
+         below is about something else"
+    );
+    assert!(
+        report.rc() == Rc::ViolationOrLeak,
+        "a device stranded behind a chained backlog is a finding about the subject"
+    );
+    assert!(
+        report.graded.iter().any(
+            |(invariant, verdict)| *invariant == Invariant::SendPathLiveness
+                && *verdict == Verdict::Failed(Finding::EpochDiverged { circle })
+        ),
+        "O2 must report the stranded device's epoch as diverged"
+    );
+    assert!(
+        report.graded.iter().any(|(invariant, verdict)| {
+            *invariant == Invariant::LocationRoundTrip
+                && matches!(
+                    verdict,
+                    Verdict::Failed(Finding::ProbeNotDelivered { to, circle: c, .. })
+                        if *to == victim && *c == circle
+                )
+        }),
+        "O1 must report this round's probe as never reaching the stranded device"
+    );
+
+    world.teardown().await.expect("teardown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_scenario_arm_graded_against_a_floor_it_cannot_reach_is_unusable() {
     let scenario = Scenario::StuckRow;
     let arm = arm_of(scenario, "stuck-row-sweep");
@@ -1282,9 +1481,9 @@ async fn a_scenario_arm_graded_against_a_floor_it_cannot_reach_is_unusable() {
 /// Requires `report`'s expectation floor to be unmet, whatever its oracles
 /// answered.
 ///
-/// The floor and the oracles are folded separately on purpose: a control that
-/// also breaks a promise is still a control, and demanding a bare rc 3 would
-/// mean demanding that a world nobody can grade still satisfies every oracle.
+/// A control is rc 3 and nothing else. A mis-configured world that also
+/// reddens an oracle folds to rc 1, and a red control is a control that
+/// staged a defect instead of a world where the arm's condition cannot arise.
 fn floor_is_unusable(report: &haven_soak::scenarios::ScenarioReport) {
     assert!(
         report.floor != Verdict::Holds,
@@ -1292,13 +1491,9 @@ fn floor_is_unusable(report: &haven_soak::scenarios::ScenarioReport) {
          expectation floor, or the floor is not holding the arm to anything"
     );
     assert!(
-        report.floor.rc() == Rc::Unusable,
-        "and an unmet floor is rc 3: the run proves nothing, which is neither \
-         clean nor a finding about the subject"
-    );
-    assert!(
-        report.rc() != Rc::Clean,
-        "so the arm as a whole can never fold to clean"
+        report.rc() == Rc::Unusable,
+        "and an unmet floor over green oracles is rc 3: the run proves nothing, \
+         which is neither clean nor a finding about the subject"
     );
 }
 
@@ -1347,6 +1542,53 @@ async fn run_arm(
     scenario
         .run(world, arm_of(scenario, label), pr_tick())
         .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s02_a_publisher_standing_as_its_own_witness_proves_no_partition() {
+    // The mis-configuration: the witness role is filled by the publisher. An
+    // engine folds no fix of its own, so nobody on the other side can be seen
+    // to keep receiving — and a partition is only a partition if somebody did.
+    // The victim's partition and recovery still run and hold, and both graded
+    // rounds are whole, so the floor goes unmet over green oracles: rc 3,
+    // never a partition the arm could not witness. (A drop armed on the
+    // witness's endpoint instead would redden the control round's O1 before
+    // any partition — rc 1, a defect staged rather than a world that proves
+    // nothing.)
+    let mut world = build_shaped_world(&shape_for("partitioned-receiver")).await;
+
+    let report = unwitnessed_control(&mut world, pr_tick())
+        .await
+        .expect("the scenario runs");
+    floor_is_unusable(&report);
+    assert!(
+        report.floor == Verdict::Failed(Finding::FloorUnmet(FloorTerm::CanariesCaught)),
+        "the two unpartitioned-peer canaries are what go unmet, and nothing before them"
+    );
+
+    world.teardown().await.expect("teardown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s03_a_commit_no_relay_ever_stored_cannot_be_lost() {
+    // The mis-configuration: the endpoint is gone, so the commit the arm means
+    // to lose is never acknowledged and Rule 13 rolls it back before any store
+    // could hold it. A commit that was never stored cannot be forgotten, and a
+    // device cannot be stranded behind one — the arm refuses at the first
+    // unacknowledged commit rather than reporting a strand it never staged.
+    let mut world = build_shaped_world(&shape_for("lost-commit-strands")).await;
+    down_and_noticed(&mut world, 0).await;
+
+    let report = run_arm(Scenario::LostCommit, "lost-commit-strands", &mut world).await;
+    match report {
+        Ok(report) => floor_is_unusable(&report),
+        Err(refused) => assert!(
+            refused.rc() == Rc::Unusable,
+            "an arm with no stored commit to lose is rc 3, never clean"
+        ),
+    }
+
+    world.teardown().await.expect("teardown");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1653,13 +1895,138 @@ async fn s19_a_probe_that_never_crossed_cannot_be_duplicated() {
     world.teardown().await.expect("teardown");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s10_a_world_already_at_the_whole_roster_measures_nothing_about_scale() {
+    // The mis-configuration: the world is built at the roster bound, so the
+    // arm builds and adopts nothing and no engine is subscribed to a circle
+    // mid-session. Every circle still delivers and every oracle holds, but the
+    // arm's whole content — the roster GROWN to ten under running engines and
+    // then carried across an outage — never happened, and the arm says so.
+    let mut world = build_shaped_world(&WorldShape {
+        members: pr_spec().world.members,
+        circles: 10,
+        relays: 1,
+    })
+    .await;
+
+    let report = run_arm(Scenario::TenCircleRoster, "ten-circle-roster", &mut world)
+        .await
+        .expect("the scenario runs");
+    floor_is_unusable(&report);
+
+    world.teardown().await.expect("teardown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s23_one_commit_while_away_is_not_a_chained_backlog() {
+    // The mis-configuration: ONE commit lands while the victim is away. A
+    // single commit is redelivered and applied on its own (S04), so the victim
+    // converges, every oracle holds, and what the floor demands — a chain of
+    // two — never formed: rc 3, never the C7 red the arm is expected to grade.
+    let mut world = build_shaped_world(&shape_for("chained-commit-backlog")).await;
+
+    let report = one_commit_control(&mut world, pr_tick())
+        .await
+        .expect("the scenario runs");
+    floor_is_unusable(&report);
+    assert!(
+        report.floor == Verdict::Failed(Finding::FloorUnmet(FloorTerm::EpochsCrossed)),
+        "the term that goes unmet is the chain's length, and nothing before it"
+    );
+
+    world.teardown().await.expect("teardown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s16_a_seal_no_plane_ever_carried_floods_no_buffer() {
+    // The mis-configuration: the endpoint is gone, so the co-member's first
+    // future-header seal is never acknowledged and the plane never holds it.
+    // Nothing reaches the victim, the counter it reads before the flood is the
+    // counter it would read after, and the arm refuses at that first seal
+    // rather than reporting a store that grew.
+    let mut world = build_shaped_world(&shape_for("member-future-header-flood")).await;
+    down_and_noticed(&mut world, 0).await;
+
+    let report = run_arm(
+        Scenario::StorageGrowth,
+        "member-future-header-flood",
+        &mut world,
+    )
+    .await;
+    match report {
+        Ok(report) => floor_is_unusable(&report),
+        Err(refused) => assert!(
+            refused.rc() == Rc::Unusable,
+            "a flood with no plane to carry it is rc 3, never clean"
+        ),
+    }
+
+    world.teardown().await.expect("teardown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s21_a_member_already_removed_has_no_removal_left_to_grade() {
+    // The mis-configuration: the evictee is removed and its commit delivered
+    // BEFORE the arm runs, so it is already self-evicted and no longer in the
+    // admin's roster. The withheld arm's own `remove_member` then has nobody to
+    // remove — a fresh removal to hold back cannot arise — so it refuses at the
+    // stage step rather than reporting a withheld path it never staged.
+    let mut world = build_shaped_world(&shape_for("removal-withheld-commit")).await;
+    let admin = world.devices()[0].tag;
+    let evictee = world.devices()[3].tag;
+    let circle_tag = world.circles()[0].tag;
+
+    let commit = {
+        let circle = world.circle(circle_tag).expect("a circle");
+        let (commit, verdict) =
+            haven_soak::scenarios::remove_member(&world, admin, circle, evictee)
+                .await
+                .expect("the removal stages and resolves");
+        assert!(
+            verdict == haven_soak::rig::PublishVerdict::Confirmed,
+            "the control's own removal must confirm, or the evictee is not gone"
+        );
+        commit
+    };
+    // Deliver it to the evictee so its group is inactive, exactly as a delivered
+    // removal would leave it.
+    world
+        .device(evictee)
+        .expect("a device")
+        .session()
+        .expect("a session")
+        .process_event_typed_for_test(&commit)
+        .await
+        .expect("the evictee ingests its own removal");
+
+    let report = run_arm(
+        Scenario::RemovalEffectiveness,
+        "removal-withheld-commit",
+        &mut world,
+    )
+    .await;
+    match report {
+        Ok(report) => floor_is_unusable(&report),
+        // The arm refuses at the stage step: the evictee is no longer a member,
+        // so there is no removal to withhold. Same finding, same verdict.
+        Err(refused) => assert!(
+            refused.rc() == Rc::Unusable,
+            "an arm with no fresh removal to grade is rc 3, never clean"
+        ),
+    }
+
+    world.teardown().await.expect("teardown");
+}
+
 #[test]
 fn every_registered_scenario_has_a_mis_configuration_control() {
-    // The thirteen tests above, by the scenario each one controls. Written out
+    // The fifteen tests above, by the scenario each one controls. Written out
     // so that a scenario added to the registry without a control fails here
     // rather than inheriting somebody else's.
-    const CONTROLLED: [Scenario; 13] = [
+    const CONTROLLED: [Scenario; 19] = [
         Scenario::RelayOutage,
+        Scenario::ReceiverPartition,
+        Scenario::LostCommit,
         Scenario::OfflineMember,
         Scenario::PublishConfirmWindow,
         Scenario::StuckRow,
@@ -1672,6 +2039,10 @@ fn every_registered_scenario_has_a_mis_configuration_control() {
         Scenario::SwallowedOk,
         Scenario::DuplicateReorder,
         Scenario::OversizedEvent,
+        Scenario::TenCircleRoster,
+        Scenario::ChainedBacklog,
+        Scenario::StorageGrowth,
+        Scenario::RemovalEffectiveness,
     ];
     assert!(
         CONTROLLED.len() == Scenario::REGISTRY.len(),

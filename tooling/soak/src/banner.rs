@@ -44,6 +44,7 @@ use std::time::Duration;
 
 use crate::profiles::ProfileName;
 use crate::rc::Rc;
+use crate::rig::SessionStoreUse;
 
 /// The banner's file name, beside the timeline.
 pub const BANNER_FILE: &str = "banner.log";
@@ -113,23 +114,31 @@ impl Provenance {
 
 /// What a finished run measured about itself.
 ///
-/// Exact, and that is deliberate: a wall time and a peak resident size are
-/// measurements, which CLAUDE.md allows, and neither differentiates a user.
+/// The first two are exact, and that is deliberate: a wall time and a peak
+/// resident size are measurements, which CLAUDE.md allows, and neither
+/// differentiates a user. The third is NOT: a session store's size is a
+/// magnitude of the world's behaviour, so it is carried as a quarter of the
+/// declared ceiling and the byte count never leaves the driver.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Measured {
     /// How long the run took.
     pub wall: Duration,
     /// Peak resident set size, in MiB, where the platform can say.
     pub peak_rss_mib: Option<u64>,
+    /// The largest session store any world of the run reached, against the
+    /// rig's declared ceiling.
+    pub session_store: SessionStoreUse,
 }
 
 impl Measured {
-    /// The measurement for a run that started `wall` ago.
+    /// The measurement for a run that started `wall` ago whose worst session
+    /// store sat at `session_store`.
     #[must_use]
-    pub fn new(wall: Duration) -> Self {
+    pub fn new(wall: Duration, session_store: SessionStoreUse) -> Self {
         Self {
             wall,
             peak_rss_mib: peak_rss_mib(),
+            session_store,
         }
     }
 }
@@ -222,11 +231,12 @@ impl Banner {
             Some(measured) => {
                 let _ = writeln!(
                     out,
-                    "  measured: wall={}s peak_rss={}",
+                    "  measured: wall={}s peak_rss={} peak_session_store={}",
                     measured.wall.as_secs(),
                     measured
                         .peak_rss_mib
                         .map_or_else(|| "unavailable".to_owned(), |mib| format!("{mib}MiB")),
+                    measured.session_store.label(),
                 );
             }
             None => out.push_str("  measured: pending\n"),
@@ -260,6 +270,7 @@ impl fmt::Display for Banner {
 mod tests {
     use super::{peak_rss_mib, Banner, Measured, Provenance, BANNER_FILE, COMMIT_MAX_HEX};
     use crate::profiles::ProfileName;
+    use crate::rig::SessionStoreUse;
     use std::time::Duration;
 
     fn banner() -> Banner {
@@ -345,19 +356,50 @@ mod tests {
         let after = banner().render(Some(Measured {
             wall: Duration::from_secs(271),
             peak_rss_mib: Some(412),
+            session_store: SessionStoreUse::UnderQuarter,
         }));
         assert!(
-            after.contains("measured: wall=271s peak_rss=412MiB"),
+            after.contains("measured: wall=271s peak_rss=412MiB peak_session_store=under-quarter"),
             "{after}"
         );
 
         let unmeasurable = banner().render(Some(Measured {
             wall: Duration::from_secs(1),
             peak_rss_mib: None,
+            session_store: SessionStoreUse::OverCeiling,
         }));
         assert!(
             unmeasurable.contains("peak_rss=unavailable"),
             "a platform that cannot say must say so: {unmeasurable}"
+        );
+        assert!(
+            unmeasurable.contains("peak_session_store=over-ceiling"),
+            "the guard firing is on the banner: {unmeasurable}"
+        );
+    }
+
+    #[test]
+    fn the_session_store_peak_is_a_quarter_of_the_ceiling_and_never_a_byte_count() {
+        // OD-10's number, rendered the only way Rule 15 lets a magnitude of
+        // the world's behaviour be rendered: relative to a declared budget.
+        // Planted at a count no bucket could hide, and the count must not
+        // appear.
+        let peak = crate::rig::SESSION_STORE_CEILING_BYTES / 2 + 7919;
+        let rendered = banner().render(Some(Measured {
+            wall: Duration::from_secs(3),
+            peak_rss_mib: None,
+            session_store: SessionStoreUse::of(peak),
+        }));
+        assert!(
+            rendered.contains("peak_session_store=under-ceiling"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("7919"), "{rendered}");
+        assert!(!rendered.contains(&peak.to_string()), "{rendered}");
+        assert!(
+            !rendered.contains("peak_session_store=0")
+                && !rendered.contains("MiB peak_session_store=1"),
+            "a quarter is a word, never a figure: {rendered}"
         );
     }
 
@@ -376,7 +418,7 @@ mod tests {
     fn a_measurement_is_taken_from_the_platform_where_it_can_be() {
         // On Linux this is the kernel's own high-water mark; anywhere else the
         // honest answer is None, and the banner prints that rather than a zero.
-        let measured = Measured::new(Duration::from_secs(3));
+        let measured = Measured::new(Duration::from_secs(3), SessionStoreUse::UnderQuarter);
         let later = peak_rss_mib();
         assert_eq!(measured.wall.as_secs(), 3);
         assert!(
