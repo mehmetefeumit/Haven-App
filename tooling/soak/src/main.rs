@@ -24,7 +24,9 @@ use haven_soak::logsink::{self, SoakLogs};
 use haven_soak::nemesis::generator::Generator;
 use haven_soak::nemesis::types::Schedule;
 use haven_soak::oracle::bounds::WaitScale;
-use haven_soak::oracle::{bounds, vacuity, Invariant, Reach, Recovery, Round, Verdict};
+use haven_soak::oracle::{
+    bounds, vacuity, Invariant, Reach, Recovery, RetentionEdge, Round, Verdict,
+};
 use haven_soak::profiles::{ProfileName, ProfileSpec, WorldShape};
 use haven_soak::rc::Rc;
 use haven_soak::relay::SimRelay;
@@ -94,11 +96,23 @@ struct Env {
 impl Env {
     fn from_process() -> Self {
         Self {
-            profile: std::env::var("HAVEN_SOAK_PROFILE").ok(),
-            seed: std::env::var("HAVEN_SOAK_SEED").ok(),
-            wait_scale: std::env::var("HAVEN_TEST_WAIT_SCALE").ok(),
+            profile: present(std::env::var("HAVEN_SOAK_PROFILE").ok()),
+            seed: present(std::env::var("HAVEN_SOAK_SEED").ok()),
+            wait_scale: present(std::env::var("HAVEN_TEST_WAIT_SCALE").ok()),
         }
     }
+}
+
+/// A present-but-empty environment value read as UNSET.
+///
+/// A workflow that defaults an optional input to `''` sets the variable to the
+/// empty string, which `std::env::var` hands back as `Some("")`. Parsed, that
+/// is a refusal, so the whole run would exit "the rig is broken" (rc 2) because
+/// a dispatch left one box blank — a lane reporting a defect it does not have.
+/// Whitespace goes with it: a YAML expression that expands to nothing but a
+/// newline is the same blank box.
+fn present(value: Option<String>) -> Option<String> {
+    value.filter(|value| !value.trim().is_empty())
 }
 
 /// Why an invocation was refused. Names the flag, never a value: an argument
@@ -556,6 +570,9 @@ const fn self_test_round<'a>(
         row_envelope: 0,
         burst_opened: &[],
         classified,
+        // The self-test crosses no epoch window, so it feeds O4 nothing and
+        // says so.
+        retention: &[],
     }
 }
 
@@ -717,10 +734,36 @@ async fn case_clean(logs: &SoakLogs) -> Result<bool, Refusal> {
     let mut world = self_test_world(logs).await?;
     let pairs = chain_pairs(&world);
     let classified = [haven_soak::oracle::undecryptable::Verdict::Applied];
+    // The two oracles whose subject is an arm's own evidence rather than a
+    // state of the world are DECLARED here, exactly as a scenario declares
+    // them: O5 the classification of an ingest, O4 the pair of retention
+    // edges. A round that fed neither is `Unusable` by design, which is what
+    // stops an arm passing them by feeding nothing — so a self-test that
+    // wanted a green world has to say what it fed.
+    let window = u64::try_from(haven_core::nostr::mls::DEFAULT_MAX_PAST_EPOCHS).unwrap_or(u64::MAX);
+    let edges = [
+        RetentionEdge {
+            device: world.devices()[0].tag,
+            circle: world.circles()[0].tag,
+            distance: window,
+            outcome: haven_soak::oracle::undecryptable::Verdict::Applied,
+        },
+        RetentionEdge {
+            device: world.devices()[0].tag,
+            circle: world.circles()[0].tag,
+            distance: window + 1,
+            outcome: haven_soak::oracle::undecryptable::Verdict::PastEpochOrBranchLoss {
+                branch_loss: false,
+            },
+        },
+    ];
     let mut held = true;
     for invariant in Invariant::REGISTRY {
         let verdict = invariant
-            .check(&mut world, &self_test_round(1, &pairs, &classified))
+            .check(
+                &mut world,
+                &self_test_round(1, &pairs, &classified).with_retention(&edges),
+            )
             .await?;
         held = held && verdict == Verdict::Holds;
     }
@@ -878,6 +921,37 @@ mod tests {
         let cli = Cli::parse(&args(&["--profile", "weekly", "--seed", "8"]), &env).expect("parses");
         assert_eq!(cli.profile, ProfileName::Weekly);
         assert_eq!(cli.seed, 8);
+    }
+
+    #[test]
+    fn an_empty_environment_knob_reads_as_unset_rather_than_as_a_broken_rig() {
+        // The values `Env::from_process` really produces for a variable a
+        // workflow set to `''`, composed through the same function.
+        for blank in [None, Some(String::new()), Some("   \n".to_string())] {
+            assert_eq!(present(blank.clone()), None, "{blank:?}");
+        }
+        assert_eq!(present(Some("7".to_string())), Some("7".to_string()));
+
+        let blank = Env {
+            profile: present(Some(String::new())),
+            seed: present(Some(String::new())),
+            wait_scale: present(Some(String::new())),
+        };
+        let cli = Cli::parse(&[], &blank).expect("a blank knob is silence, not a refusal");
+        assert_eq!(cli.seed, DEFAULT_SEED);
+        assert_eq!(cli.profile, ProfileName::Pr);
+        assert_eq!(cli.wait_scale, WaitScale::ONE);
+
+        // The control: the same field with a value in it still parses, so the
+        // filter cannot be satisfied by ignoring the environment altogether.
+        let set = Env {
+            profile: present(Some("nightly".to_string())),
+            seed: present(Some("9".to_string())),
+            wait_scale: present(Some("2".to_string())),
+        };
+        let cli = Cli::parse(&[], &set).expect("parses");
+        assert_eq!(cli.seed, 9);
+        assert_eq!(cli.profile, ProfileName::Nightly);
     }
 
     #[test]

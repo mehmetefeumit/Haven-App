@@ -8,9 +8,11 @@
 //! # What may be printed, and why
 //!
 //! The profile name and the seed identify the run completely, and both are
-//! repository facts: every preimage of a scheduler seed is public metadata and
-//! the PR seed is checked into `profiles/pr.toml`. They identify a SHAPE, not a
-//! user, a circle or a device.
+//! repository facts: every preimage of a scheduler seed is public metadata, and
+//! the PR seed is `DEFAULT_SEED` in `src/main.rs` — the PR lane passes no
+//! `--seed` and no profile TOML carries one, so a PR run is reproducible from
+//! the repository alone. They identify a SHAPE, not a user, a circle or a
+//! device.
 //!
 //! The world's magnitudes are NOT printed — not `relays=3`, not a member count.
 //! CLAUDE.md forbids exact counts outright, and the profile name plus the

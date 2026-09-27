@@ -31,3 +31,4 @@ pub mod relay;
 pub mod rig;
 pub mod scenarios;
 pub mod timeline;
+pub mod verdict;

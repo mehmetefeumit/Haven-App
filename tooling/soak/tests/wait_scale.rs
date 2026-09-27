@@ -39,6 +39,8 @@ fn a_scale_stretches_a_delivery_budget_and_leaves_every_absence_window_alone() {
     let withheld = bounds::withheld_publish_ladder();
     let throttled_absence = Absence::ThrottledBackoffFloor.window();
     let silence_absence = Absence::DeliverySilenceWindow.window();
+    let removal_absence = Absence::RemovalPublishTail.window();
+    let publish_window = bounds::location_publish_window();
 
     assert!(
         bounds::wait_scale() == WaitScale::ONE,
@@ -81,6 +83,15 @@ fn a_scale_stretches_a_delivery_budget_and_leaves_every_absence_window_alone() {
     assert!(
         Absence::DeliverySilenceWindow.window() == silence_absence,
         "both of them"
+    );
+    assert!(
+        Absence::RemovalPublishTail.window() == removal_absence,
+        "and the removal tail: an arm asserting that no remaining member published at the old \
+         epoch asserts exactly its own window, whatever the machine"
+    );
+    assert!(
+        bounds::location_publish_window() == publish_window,
+        "the location publish window is a leaf, and the removal tail is exactly it"
     );
 
     // Every leaf stays where it was: the scale is applied at one composite, so

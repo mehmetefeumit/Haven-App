@@ -7,14 +7,19 @@
 //!
 //! # The registry is exhaustive, and deliberately short
 //!
-//! [`Invariant::REGISTRY`] is every oracle Phase 1 grades: O1, O2, O5 and O6.
-//! **O3 (forward secrecy) and O4 (retention window) are NOT here, and there is
-//! no placeholder for them.** O3 needs a per-member commit drop and O4 needs a
-//! five-epoch advance, and the scenarios that produce those states are not in
-//! this phase — an entry that could never run would report coverage this crate
-//! does not have, which is worse than the absence. The same goes for PLAN §2.1's
-//! safety invariants S4 (wire privacy) and S9 (kind-445 nonce uniqueness): both
-//! want relay-ledger evidence the Phase-1 ledger does not keep.
+//! [`Invariant::REGISTRY`] is every oracle this crate grades: O1, O2, O4, O5 and
+//! O6. **O3 (forward secrecy) is NOT here, and there is no placeholder for it.**
+//! It needs a per-member commit drop — a device whose `OpenMLS` group is still
+//! active while the removal commit is withheld from it — and no scenario
+//! produces that state yet; an entry that could never run would report coverage
+//! this crate does not have, which is worse than the absence. The same goes for
+//! PLAN §2.1's safety invariants S4 (wire privacy) and S9 (kind-445 nonce
+//! uniqueness): both want relay-ledger evidence the ledger does not keep.
+//!
+//! **O4 (retention window) is here**, and S04's `offline-past-retention` is what
+//! produces the state it grades: a device that crossed more epochs than the
+//! engine keeps exporter secrets for, fed one ciphertext from inside that window
+//! and one from outside it.
 //!
 //! # Every verdict is value-free
 //!
@@ -87,6 +92,19 @@ pub enum Invariant {
     /// an unrecovered removal-bearing staged commit every read accessor answers
     /// cheerfully about a group that can no longer send.
     SendPathLiveness,
+    /// **O4** — ciphertext older than the engine's retention window fails
+    /// everywhere; ciphertext at the window's edge still succeeds. BOTH edges.
+    ///
+    /// The window is `DEFAULT_MAX_PAST_EPOCHS`, READ at runtime and never
+    /// restated: it is how many past epochs' exporter secrets the engine keeps
+    /// (Security Rule 5), and `haven-core/tests/security_rule_gates.rs`'s
+    /// `rule5_retention_constants_are_pinned` is what pins it against the
+    /// delivery policy that has to agree with it.
+    ///
+    /// **What this adds over that gate**, and nothing else: the same two edges
+    /// under real relay transport, across a partition heal and a restart. A
+    /// green O4 is not new coverage of the constant.
+    RetentionWindow,
     /// **O5** — every event that did not decrypt has an account.
     ///
     /// Graded over the classifications the scenario collected through
@@ -98,11 +116,12 @@ pub enum Invariant {
 }
 
 impl Invariant {
-    /// Every oracle this phase grades. See the module docs for why O3 and O4 are
-    /// not among them.
-    pub const REGISTRY: [Self; 4] = [
+    /// Every oracle this crate grades. See the module docs for why O3 is not
+    /// among them.
+    pub const REGISTRY: [Self; 5] = [
         Self::LocationRoundTrip,
         Self::SendPathLiveness,
+        Self::RetentionWindow,
         Self::Undecryptable,
         Self::Quiescence,
     ];
@@ -113,6 +132,7 @@ impl Invariant {
         match self {
             Self::LocationRoundTrip => "O1",
             Self::SendPathLiveness => "O2",
+            Self::RetentionWindow => "O4",
             Self::Undecryptable => "O5",
             Self::Quiescence => "O6",
         }
@@ -124,6 +144,7 @@ impl Invariant {
         match self {
             Self::LocationRoundTrip => "LOCATION ROUND-TRIP",
             Self::SendPathLiveness => "SEND-PATH LIVENESS",
+            Self::RetentionWindow => "RETENTION WINDOW",
             Self::Undecryptable => "UNDECRYPTABLE ACCOUNTED",
             Self::Quiescence => "QUIESCENCE",
         }
@@ -147,6 +168,7 @@ impl Invariant {
         match self {
             Self::LocationRoundTrip => location_round_trip(world, round).await,
             Self::SendPathLiveness => send_path_liveness(world, round).await,
+            Self::RetentionWindow => Ok(retention_window_holds(round)),
             Self::Undecryptable => Ok(undecryptable_accounted(round)),
             Self::Quiescence => quiescence_holds(world, round).await,
         }
@@ -243,6 +265,16 @@ pub enum Finding {
         /// Which circle.
         circle: CircleTag,
     },
+    /// Two devices hold the SAME epoch and the same roster for one circle and
+    /// still cannot read each other: two branches wearing one epoch number.
+    ///
+    /// Distinct from [`Self::EpochDiverged`] because the two send a reader
+    /// hunting different things — "epochs disagree" reads as a catch-up bug,
+    /// and this one is a fork that no epoch comparison can see.
+    BranchDiverged {
+        /// Which circle.
+        circle: CircleTag,
+    },
     /// Stored inputs still gate a circle's outbound path.
     ConvergenceGated {
         /// Whose store.
@@ -277,6 +309,25 @@ pub enum Finding {
         /// What the send-side classifier made of it.
         cause: undecryptable::Verdict,
     },
+    /// Ciphertext INSIDE the retention window did not decrypt: the engine no
+    /// longer holds a secret it promises to keep.
+    RetentionEdgeRefused {
+        /// Who could not decrypt it.
+        device: DeviceTag,
+        /// In which circle.
+        circle: CircleTag,
+    },
+    /// Ciphertext OLDER than the retention window still decrypted: an exporter
+    /// secret outlived the window Rule 5 bounds it by.
+    RetentionWindowOverrun {
+        /// Who decrypted it.
+        device: DeviceTag,
+        /// In which circle.
+        circle: CircleTag,
+    },
+    /// The round fed no edge on one side or the other, so O4 would grade half
+    /// a promise: "both edges" is the whole of it.
+    RetentionEdgesIncomplete,
     /// An event's disposition is one the classifier cannot account for.
     UnaccountedOutcome,
     /// A past-epoch disposition could not be resolved because the harness did
@@ -296,6 +347,84 @@ pub enum Finding {
 }
 
 impl Finding {
+    /// The classification code a machine-readable verdict carries.
+    ///
+    /// A literal from this file, one per variant, and deliberately NOT the
+    /// rendered [`fmt::Display`] form: that is a sentence composed for a human,
+    /// its shape is not pinned, and a reader outside this process — an issue
+    /// body, a nightly watcher — needs a class it can group by. Kebab-case,
+    /// like every other closed vocabulary this crate publishes.
+    #[must_use]
+    pub const fn class(self) -> &'static str {
+        match self {
+            Self::ProbeNotPublished { .. } => "probe-not-published",
+            Self::ProbeNotDelivered { .. } => "probe-not-delivered",
+            Self::DeliveryEvidenceLost { .. } => "delivery-evidence-lost",
+            Self::RowEnvelopeExceeded { .. } => "row-envelope-exceeded",
+            Self::NothingProbed => "nothing-probed",
+            Self::RosterNotConverged { .. } => "roster-not-converged",
+            Self::RosterDiverged { .. } => "roster-diverged",
+            Self::EpochDiverged { .. } => "epoch-diverged",
+            Self::BranchDiverged { .. } => "branch-diverged",
+            Self::ConvergenceGated { .. } => "convergence-gated",
+            Self::ProposalUncommitted { .. } => "proposal-uncommitted",
+            Self::RemovalOwed { .. } => "removal-owed",
+            Self::RemovalOrphaned { .. } => "removal-orphaned",
+            Self::SendRefused { .. } => "send-refused",
+            Self::RetentionEdgeRefused { .. } => "retention-edge-refused",
+            Self::RetentionWindowOverrun { .. } => "retention-window-overrun",
+            Self::RetentionEdgesIncomplete => "retention-edges-incomplete",
+            Self::UnaccountedOutcome => "unaccounted-outcome",
+            Self::UnnamedRow => "unnamed-row",
+            Self::NothingClassified => "nothing-classified",
+            Self::NotQuiescent(_) => "not-quiescent",
+            Self::BacklogUnsettled { .. } => "backlog-unsettled",
+            Self::FloorUnmet(_) => "floor-unmet",
+        }
+    }
+
+    /// The rig handles this finding names, in the order it names them.
+    ///
+    /// The ONLY free-form field a machine-readable verdict carries, which is
+    /// why it is minted here rather than parsed back out of a rendering: every
+    /// element is a handle this crate's own vocabulary produced, and a reader
+    /// that scraped one out of a sentence would be reading whatever the
+    /// sentence happened to hold.
+    #[must_use]
+    pub fn handles(self) -> Vec<String> {
+        match self {
+            Self::NothingProbed
+            | Self::UnaccountedOutcome
+            | Self::UnnamedRow
+            | Self::NothingClassified
+            | Self::RetentionEdgesIncomplete
+            | Self::NotQuiescent(_)
+            | Self::FloorUnmet(_) => Vec::new(),
+            Self::DeliveryEvidenceLost { to } => vec![to.to_string()],
+            Self::RemovalOwed { device }
+            | Self::RemovalOrphaned { device }
+            | Self::BacklogUnsettled { device } => vec![device.to_string()],
+            Self::RosterDiverged { circle }
+            | Self::EpochDiverged { circle }
+            | Self::BranchDiverged { circle } => {
+                vec![circle.to_string()]
+            }
+            Self::ProbeNotPublished { device, circle }
+            | Self::RowEnvelopeExceeded { device, circle }
+            | Self::RosterNotConverged { device, circle }
+            | Self::ConvergenceGated { device, circle }
+            | Self::ProposalUncommitted { device, circle }
+            | Self::RetentionEdgeRefused { device, circle }
+            | Self::RetentionWindowOverrun { device, circle }
+            | Self::SendRefused { device, circle, .. } => {
+                vec![device.to_string(), circle.to_string()]
+            }
+            Self::ProbeNotDelivered { from, to, circle } => {
+                vec![from.to_string(), to.to_string(), circle.to_string()]
+            }
+        }
+    }
+
     /// The exit verdict this finding folds into.
     ///
     /// Three distinct meanings, and the distinction is the whole point of the
@@ -309,11 +438,14 @@ impl Finding {
             | Self::RosterNotConverged { .. }
             | Self::RosterDiverged { .. }
             | Self::EpochDiverged { .. }
+            | Self::BranchDiverged { .. }
             | Self::ConvergenceGated { .. }
             | Self::ProposalUncommitted { .. }
             | Self::RemovalOwed { .. }
             | Self::RemovalOrphaned { .. }
             | Self::SendRefused { .. }
+            | Self::RetentionEdgeRefused { .. }
+            | Self::RetentionWindowOverrun { .. }
             | Self::UnaccountedOutcome
             | Self::NotQuiescent(_)
             | Self::BacklogUnsettled { .. } => Rc::ViolationOrLeak,
@@ -321,6 +453,7 @@ impl Finding {
             Self::RowEnvelopeExceeded { .. }
             | Self::NothingProbed
             | Self::NothingClassified
+            | Self::RetentionEdgesIncomplete
             | Self::FloorUnmet(_) => Rc::Unusable,
         }
     }
@@ -353,6 +486,9 @@ impl fmt::Display for Finding {
             }
             Self::RosterDiverged { circle } => write!(f, "rosters disagree ({circle})"),
             Self::EpochDiverged { circle } => write!(f, "epochs disagree ({circle})"),
+            Self::BranchDiverged { circle } => {
+                write!(f, "one epoch, two branches ({circle})")
+            }
             Self::ConvergenceGated { device, circle } => {
                 write!(f, "stored inputs gate the send path ({device}, {circle})")
             }
@@ -368,6 +504,17 @@ impl fmt::Display for Finding {
                 circle,
                 cause,
             } => write!(f, "the send was refused ({device}, {circle}, {cause:?})"),
+            Self::RetentionEdgeRefused { device, circle } => write!(
+                f,
+                "ciphertext inside the retention window did not decrypt ({device}, {circle})"
+            ),
+            Self::RetentionWindowOverrun { device, circle } => write!(
+                f,
+                "ciphertext older than the retention window still decrypted ({device}, {circle})"
+            ),
+            Self::RetentionEdgesIncomplete => {
+                f.write_str("the round fed only one side of the retention window")
+            }
             Self::UnaccountedOutcome => f.write_str("an ingest outcome has no account"),
             Self::UnnamedRow => {
                 f.write_str("a past-epoch row was not named, so a branch loss is undetermined")
@@ -421,6 +568,41 @@ pub struct Round<'a> {
     pub burst_opened: &'a [DeviceTag],
     /// What the scenario's own ingests classified — O5's whole subject.
     pub classified: &'a [undecryptable::Verdict],
+    /// The retention edges the arm fed this round — O4's whole subject.
+    ///
+    /// Empty for every round that fed none, which is every round but S04's
+    /// `offline-past-retention`: an arm attaches its own with
+    /// [`Round::with_retention`], and an empty slice is the declaration that
+    /// this round tested no edge rather than a term somebody forgot.
+    pub retention: &'a [RetentionEdge],
+}
+
+impl<'a> Round<'a> {
+    /// The same round with the retention edges an arm fed attached.
+    #[must_use]
+    pub const fn with_retention(mut self, retention: &'a [RetentionEdge]) -> Self {
+        self.retention = retention;
+        self
+    }
+}
+
+/// One ciphertext fed at a known epoch distance below its reader's tip, and
+/// what that reader's ingest made of it.
+///
+/// The distance is a DELTA the arm read at runtime — how many epoch advances
+/// the group crossed between minting it and feeding it — never an absolute
+/// epoch, which is an identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetentionEdge {
+    /// Who ingested it.
+    pub device: DeviceTag,
+    /// In which circle.
+    pub circle: CircleTag,
+    /// How many epoch advances separate the ciphertext's epoch from the
+    /// reader's tip.
+    pub distance: u64,
+    /// What the ingest made of it.
+    pub outcome: undecryptable::Verdict,
 }
 
 /// The 16-bit span each half of a probe is minted from.
@@ -859,6 +1041,53 @@ fn undecryptable_accounted(round: &Round<'_>) -> Verdict {
     })
 }
 
+/// How many past epochs' exporter secrets the engine keeps.
+///
+/// Read from the product at runtime, never restated: `DEFAULT_MAX_PAST_EPOCHS`
+/// is Security Rule 5's own bound, and an oracle that spelled its value would
+/// go on grading a window the engine no longer has.
+fn retention_window() -> u64 {
+    u64::try_from(haven_core::nostr::mls::DEFAULT_MAX_PAST_EPOCHS).unwrap_or(u64::MAX)
+}
+
+/// O4: both edges of the retention window, from the edges the arm fed.
+///
+/// Graded from the arm's own ingests rather than by ingesting here, for the
+/// reason O5 is: the subject is an event's DISPOSITION, and one event may be
+/// ingested exactly once — a second look reports `Stale { AlreadySeen }`.
+fn retention_window_holds(round: &Round<'_>) -> Verdict {
+    let window = retention_window();
+    let (mut inside, mut outside) = (false, false);
+    for edge in round.retention {
+        let applied = edge.outcome == undecryptable::Verdict::Applied;
+        if edge.distance <= window {
+            inside = true;
+            if !applied {
+                return Verdict::Failed(Finding::RetentionEdgeRefused {
+                    device: edge.device,
+                    circle: edge.circle,
+                });
+            }
+        } else {
+            outside = true;
+            if applied {
+                return Verdict::Failed(Finding::RetentionWindowOverrun {
+                    device: edge.device,
+                    circle: edge.circle,
+                });
+            }
+        }
+    }
+    // Both halves, or the round proved the half it happens to have fed: an arm
+    // that only ever fed old ciphertext would pass an engine that retains
+    // nothing at all.
+    if inside && outside {
+        Verdict::Holds
+    } else {
+        Verdict::Failed(Finding::RetentionEdgesIncomplete)
+    }
+}
+
 /// O6: settle to the derived deadline, then confirm the bursts the harness
 /// opened.
 async fn quiescence_holds<R: RelayPlane, T: TimelineSink, L: LogDrain>(
@@ -891,18 +1120,103 @@ mod tests {
             row_envelope: 0,
             burst_opened: &[],
             classified: &[],
+            retention: &[],
         }
     }
 
     #[test]
-    fn the_registry_is_the_four_oracles_this_phase_grades_and_no_placeholders() {
+    fn the_registry_is_the_five_oracles_this_crate_grades_and_no_placeholders() {
         let ids: Vec<&str> = Invariant::REGISTRY.iter().map(|i| i.id()).collect();
-        assert_eq!(ids, ["O1", "O2", "O5", "O6"]);
-        // O3 and O4 are absent BY CONSTRUCTION, not merely unimplemented: the
-        // enum has no arm for them, so nothing can register one without an
-        // implementation the compiler checks.
+        assert_eq!(ids, ["O1", "O2", "O4", "O5", "O6"]);
+        // O3 is absent BY CONSTRUCTION, not merely unimplemented: the enum has
+        // no arm for it, so nothing can register one without an implementation
+        // the compiler checks.
         assert!(!ids.contains(&"O3"));
-        assert!(!ids.contains(&"O4"));
+    }
+
+    fn an_edge(distance: u64, outcome: undecryptable::Verdict) -> RetentionEdge {
+        RetentionEdge {
+            device: DeviceTag::new(1),
+            circle: CircleTag::new(0),
+            distance,
+            outcome,
+        }
+    }
+
+    #[test]
+    fn o4s_window_is_never_zero_or_its_inside_edge_would_be_unreachable() {
+        assert!(
+            retention_window() > 0,
+            "a window of zero would make the inside edge unreachable and O4 vacuous"
+        );
+    }
+
+    #[test]
+    fn o4_holds_only_when_both_edges_answered_the_way_rule_5_promises() {
+        let window = retention_window();
+        let inside = an_edge(window, undecryptable::Verdict::Applied);
+        let outside = an_edge(
+            window + 1,
+            undecryptable::Verdict::PastEpochOrBranchLoss { branch_loss: false },
+        );
+
+        let mut round = empty_round();
+        let both = [inside, outside];
+        round.retention = &both;
+        assert_eq!(retention_window_holds(&round), Verdict::Holds);
+
+        // The window's own edge is INSIDE it: a ciphertext exactly `window`
+        // advances back is the last one the engine promises to keep a secret
+        // for, and treating it as outside would let a narrowing pass.
+        let refused = [
+            an_edge(
+                window,
+                undecryptable::Verdict::PastEpochOrBranchLoss { branch_loss: false },
+            ),
+            outside,
+        ];
+        round.retention = &refused;
+        assert_eq!(
+            retention_window_holds(&round),
+            Verdict::Failed(Finding::RetentionEdgeRefused {
+                device: DeviceTag::new(1),
+                circle: CircleTag::new(0),
+            })
+        );
+        assert_eq!(retention_window_holds(&round).rc(), Rc::ViolationOrLeak);
+
+        // The other direction is the Rule-5 one: a secret that outlived the
+        // window the engine bounds it by.
+        let overrun = [inside, an_edge(window + 1, undecryptable::Verdict::Applied)];
+        round.retention = &overrun;
+        assert_eq!(
+            retention_window_holds(&round),
+            Verdict::Failed(Finding::RetentionWindowOverrun {
+                device: DeviceTag::new(1),
+                circle: CircleTag::new(0),
+            })
+        );
+        assert_eq!(retention_window_holds(&round).rc(), Rc::ViolationOrLeak);
+    }
+
+    #[test]
+    fn o4_refuses_a_round_that_fed_only_one_side_of_the_window() {
+        let window = retention_window();
+        let mut round = empty_round();
+        let inside_only = [an_edge(window, undecryptable::Verdict::Applied)];
+        let outside_only = [an_edge(
+            window + 1,
+            undecryptable::Verdict::PastEpochOrBranchLoss { branch_loss: false },
+        )];
+        for half in [&inside_only[..], &outside_only[..], &[][..]] {
+            round.retention = half;
+            assert_eq!(
+                retention_window_holds(&round),
+                Verdict::Failed(Finding::RetentionEdgesIncomplete),
+                "an arm that fed one side proved the half it happens to have fed"
+            );
+            assert_eq!(retention_window_holds(&round).rc(), Rc::Unusable);
+        }
     }
 
     #[test]
@@ -1004,9 +1318,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn every_finding_renders_handles_and_classifications_and_no_values() {
-        let findings = [
+    /// One value of every `Finding` variant. The `match` below is what keeps
+    /// the list honest: a variant added to the enum and not to the list stops
+    /// compiling here instead of skipping the rendering sweep.
+    fn every_finding() -> Vec<Finding> {
+        let findings = vec![
             Finding::ProbeNotPublished {
                 device: DeviceTag::new(0),
                 circle: CircleTag::new(1),
@@ -1032,6 +1348,9 @@ mod tests {
                 circle: CircleTag::new(0),
             },
             Finding::EpochDiverged {
+                circle: CircleTag::new(0),
+            },
+            Finding::BranchDiverged {
                 circle: CircleTag::new(0),
             },
             Finding::ConvergenceGated {
@@ -1060,9 +1379,50 @@ mod tests {
             Finding::BacklogUnsettled {
                 device: DeviceTag::new(0),
             },
+            Finding::RetentionEdgeRefused {
+                device: DeviceTag::new(2),
+                circle: CircleTag::new(1),
+            },
+            Finding::RetentionWindowOverrun {
+                device: DeviceTag::new(2),
+                circle: CircleTag::new(1),
+            },
+            Finding::RetentionEdgesIncomplete,
             Finding::FloorUnmet(FloorTerm::FaultsApplied),
         ];
-        for finding in findings {
+        for finding in &findings {
+            match finding {
+                Finding::ProbeNotPublished { .. }
+                | Finding::ProbeNotDelivered { .. }
+                | Finding::DeliveryEvidenceLost { .. }
+                | Finding::RowEnvelopeExceeded { .. }
+                | Finding::NothingProbed
+                | Finding::RosterNotConverged { .. }
+                | Finding::RosterDiverged { .. }
+                | Finding::EpochDiverged { .. }
+                | Finding::BranchDiverged { .. }
+                | Finding::ConvergenceGated { .. }
+                | Finding::ProposalUncommitted { .. }
+                | Finding::RemovalOwed { .. }
+                | Finding::RemovalOrphaned { .. }
+                | Finding::SendRefused { .. }
+                | Finding::UnaccountedOutcome
+                | Finding::UnnamedRow
+                | Finding::NothingClassified
+                | Finding::NotQuiescent(_)
+                | Finding::BacklogUnsettled { .. }
+                | Finding::RetentionEdgeRefused { .. }
+                | Finding::RetentionWindowOverrun { .. }
+                | Finding::RetentionEdgesIncomplete
+                | Finding::FloorUnmet(_) => {}
+            }
+        }
+        findings
+    }
+
+    #[test]
+    fn every_finding_renders_handles_and_classifications_and_no_values() {
+        for finding in every_finding() {
             let rendered = Verdict::Failed(finding).to_string();
             assert!(!rendered.is_empty());
             assert!(!rendered.contains("ws://"), "{rendered}");

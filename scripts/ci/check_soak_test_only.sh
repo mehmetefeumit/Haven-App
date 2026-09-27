@@ -135,7 +135,7 @@ readonly TIMELINE_TEST='tooling/soak/tests/timeline_fields.rs'
 readonly SEAM_TEST='haven-core/tests/test_utils_seams.rs'
 # Equality pin: a fixture added or removed without moving this line is a
 # self-test that no longer says what it runs.
-readonly SELF_TEST_FIXTURES=38
+readonly SELF_TEST_FIXTURES=41
 
 # Trees that ship. `haven/integration_test` and `tooling/` are deliberately
 # absent: that is the harness, and it is where the rig belongs.
@@ -174,13 +174,23 @@ readonly FEATURE_FREE_FILES=(
 )
 
 # Foreign crates and the re-exported types whose Debug prints a real MLS group
-# id, absolute epochs or key material.
+# id, absolute epochs, key material, member pubkeys, relay URLs, a KeyPackage
+# slot or a Nostr event id. A scenario that imports one of these by BARE name
+# escapes the crate-path alternatives above, which is why each is listed by
+# type name: the list is what makes `use haven_core::…::{ConvergedRoster}`
+# followed by `{roster:?}` a guard failure rather than a leak.
+#
+# Membership is decided on the RENDERING, not on the crate: a type whose Debug
+# is hand-written to alias, redact or bucket every field is deliberately absent
+# (`DecryptedIngest`, `KpMaintenanceEvents`, `MemberKeyPackage` — all three
+# bucket or redact), because banning it would push scenarios toward formatting
+# something the product does not redact.
 #
 # Both are written with BRACKET expressions rather than backslash escapes: they
 # are handed to awk through `-v`, which consumes a backslash before the regex
 # engine ever sees it (check_no_identifier_logging.sh's header records the same
 # trap), and a bare `{` in an ERE starts an interval.
-readonly FOREIGN_RE='haven_core::|haven-core|cgka_session::|cgka_traits::|cgka_engine::|nostr::|nostr_sdk::|nostr_relay_builder::|nostr_database::|openmls|SessionError|EngineError|IngestOutcome|StaleReason|ScreenedIngest|MessageState|StoredMessageProbe|EpochId|GroupId|CircleRotationState|StopOutcome|LiveSyncEvent|OpenMlsGroupKey'
+readonly FOREIGN_RE='haven_core::|haven-core|cgka_session::|cgka_traits::|cgka_engine::|nostr::|nostr_sdk::|nostr_relay_builder::|nostr_database::|openmls|SessionError|EngineError|IngestOutcome|StaleReason|ScreenedIngest|MessageState|StoredMessageProbe|EpochId|GroupId|CircleRotationState|StopOutcome|LiveSyncEvent|OpenMlsGroupKey|ConvergedRoster|RelayKpSnapshot|RelayKpPerRelay|RelayKpEntry|KpMaintenanceDecision'
 readonly DEBUG_FMT_RE='[{][A-Za-z0-9_]*:[#]?x?[?][}]|dbg![(]'
 
 FAILED=0
@@ -712,6 +722,24 @@ TOML
   local seamfmt="${tmp}/seamfmt"; _mk "${seamfmt}"
   printf 'fn f(o: IngestOutcome) { panic!("{:#?}", o); }\n' >> "${seamfmt}/${SEAM_TEST}"
   _case "the haven-core seam test is scanned too" 1 check_no_foreign_debug_format "${seamfmt}"
+
+  # The three bare-name classes a scenario imports without a crate path, one
+  # fixture each: a roster's member pubkeys, a KeyPackage relay's URL, and a
+  # KeyPackage slot `d` beside a Nostr event id.
+  local roster="${tmp}/roster"; _mk "${roster}"
+  printf 'fn f(r: ConvergedRoster) { log::info!("{r:?}"); }\n' \
+    >> "${roster}/${SOAK_DIR}/src/lib.rs"
+  _case "a {r:?} of a roster carrying member pubkeys fails" 1 check_no_foreign_debug_format "${roster}"
+
+  local kprelay="${tmp}/kprelay"; _mk "${kprelay}"
+  printf 'fn f(s: RelayKpSnapshot) { println!("{s:?}"); }\n' \
+    >> "${kprelay}/${SOAK_DIR}/src/lib.rs"
+  _case "a KeyPackage snapshot carrying own-relay URLs fails" 1 check_no_foreign_debug_format "${kprelay}"
+
+  local kpslot="${tmp}/kpslot"; _mk "${kpslot}"
+  printf 'fn f(e: RelayKpEntry) { dbg!(e); }\n' \
+    >> "${kpslot}/${SOAK_DIR}/tests/timeline_fields.rs"
+  _case "a KeyPackage slot d beside an event id fails" 1 check_no_foreign_debug_format "${kpslot}"
 
   local local_dbg="${tmp}/localdbg"; _mk "${local_dbg}"
   printf 'fn f(t: SimTag) { println!("{t:?}"); }\n' >> "${local_dbg}/${SOAK_DIR}/src/lib.rs"

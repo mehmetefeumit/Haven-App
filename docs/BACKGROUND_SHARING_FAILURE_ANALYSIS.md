@@ -6,6 +6,9 @@
 restart does not clear (the OD4-c wedge). It was found by the power epic's own review rather than by this
 analysis, which is the point worth keeping: "analysis COMPLETE" was true of the field incident and was
 never a closed-world claim about the wedge set. Every five-wedge phrase below reads as five-plus-C5b.**
+**AMENDED 2026-09-24: a SEVENTH was added — C7, the chained-commit backlog that never drains, measured
+by the Tier-1 soak rig while building S04. Same reading of "COMPLETE": the amendment above is a standing
+one, not a one-off. Every five- or six-wedge phrase below reads as that number plus C7.**
 This is the canonical reference for every session working on the
 "sharing stops after a few hours and reopening does not help" incident. Update the work-unit
 status lines in place; do not fork this document.
@@ -313,6 +316,44 @@ this document and in `POWER_EFFICIENCY_PLAN.md`. Read the five-wedge framing bel
   `readLastPublishTime()` and `_startTimers()` to appear ahead of the `_resumeStopwatch.isRunning`
   guard, and `'the debounced early return carries no repair of its own'` fails if anything
   load-bearing is left trapped below it.
+
+### C7 — a backlog of TWO OR MORE chained commits never drains (added 2026-09-24)
+
+**Silent receive blackout, PERMANENT. A SEVENTH silent wedge, and a PRODUCT DEFECT rather than a
+design constraint.** Found by the Tier-1 soak rig while building S04's `offline-across-a-commit` arm,
+which is why it is measured rather than argued.
+
+- **Consequence, in the user's words.** A device that was away long enough for two commits to land
+  stops receiving its peers' fixes and never resumes: the map's other markers simply stop moving.
+  Nothing says so — the circle reports a healthy send path, its own publishes keep succeeding, and
+  `unrecoverable_circles()` is empty throughout. **Sharing stops.**
+- **Mechanism, all five steps measured at the pinned MDK rev (`e391adc`).**
+  1. A relay serves a stored page NEWEST FIRST, so the returning device ingests the newer commit of
+     the pair before the older one.
+  2. A kind-445 commit's outer ChaCha20-Poly1305 layer is keyed at its committer's **pre-commit**
+     epoch, so the newer sibling cannot be peeled by a device that has not yet applied the older.
+  3. The unpeelable sibling is retained as a `PeelDeferred` row rather than dropped — correct, and
+     the reason the loss is not visible as one.
+  4. `retry_deferred_peels` (`cgka-engine/src/message_processor/mod.rs:475`) is reached only from
+     `advance_convergence_inputs_until_settled` (`:359`), which Haven drives only through
+     `advance_convergence` over an ingest's `pending_convergence`
+     (`haven-core/src/relay/live_sync/processor.rs:819`, `haven-core/src/relay/catchup.rs:1002`). A
+     `PeelDeferred` row is not a convergence input, so that list is empty and the sweep never runs.
+  5. So the sweep needs a **peelable** inbound event, and a device one epoch behind its peers never
+     receives one: every fresh fix is sealed above it. Which of the two commits peels first is a
+     coin toss on event-id order within the page, so the failure is not even reliably reproducible
+     from the outside — only its end state is.
+- **The two measurements.** A **two**-commit backlog leaves the returning device exactly one epoch
+  short, permanently: three further fixes from the committer do not move it. A **five**-commit
+  backlog is still short after 180 s and three fixes. Neither recovers on its own.
+- **What is NOT the fix.** Widening any retention or rewind window: the rows are retained already,
+  and the window is not what is missing. What is missing is a DRAIN — a sweep of deferred peels on
+  resume, or on a timer, independent of whether a peelable event arrived. That is to be planned
+  separately; it is a product change, not a harness one.
+- **Status.** Recorded, not fixed. S04 works around it by spanning exactly ONE commit
+  (`COMMITS_WHILE_AWAY`, `tooling/soak/src/scenarios/s04_offline_member.rs`), which is stated at the
+  constant as a workaround. The scenario that asserts C7 RED is owner question **OQ-T** in
+  `PLAN_PHASE2.md` §8, owed in sub-phase 2b.
 
 ### Downgraded hypotheses (kept so nobody re-investigates them)
 

@@ -1,4 +1,5 @@
-//! The WebSocket frames the proxy reads, forwards and forges.
+//! The WebSocket frames the proxy reads, forwards and forges — and the forged
+//! EVENTS it injects into them.
 //!
 //! Frame-accurate rather than byte-accurate: every edit the fault layer makes
 //! lands on a frame boundary chosen by CONTENT, so nothing here depends on how
@@ -10,8 +11,21 @@
 //! Client→server frames are masked and server→client frames are not
 //! (RFC 6455 §5.1), so a frame carries its mask and unmasks into a scratch copy
 //! to be READ — what gets forwarded is always the original bytes.
+//!
+//! # The forgeries, and why they are minted here
+//!
+//! [`Forgery`] is an OUTSIDER's vocabulary: every recipe below is mintable from
+//! a circle's public `#h` routing id and a key belonging to nobody, which is
+//! precisely the adversary Haven's cursor-poisoning gates are written against.
+//! They are shaped after `haven-core/tests/cursor_poisoning_e2e.rs`'s own
+//! minters, so a scenario grades the product against the wire shape its unit
+//! gates already name rather than against a synthetic one.
 
 use std::borrow::Cow;
+
+use nostr::{Event, EventBuilder, EventId, Keys, Kind, Tag, TagStandard, Timestamp};
+
+use crate::rig::{RigError, Step};
 
 /// A text frame (RFC 6455 §5.2). Everything else — ping, pong, close, binary,
 /// continuation — is forwarded without being read, because nothing the fault
@@ -128,6 +142,209 @@ pub fn text_frame(payload: &[u8]) -> Vec<u8> {
     }
     frame.extend_from_slice(payload);
     frame
+}
+
+// ---------------------------------------------------------------------------
+// Minting
+// ---------------------------------------------------------------------------
+
+/// The kind every forgery here wears: Marmot's group message.
+const GROUP_MESSAGE_KIND: u16 = 445;
+
+/// How far in the past an expired forgery's `expiration` sits.
+///
+/// An hour, a literal of this crate's own: far beyond any plausible clock-skew
+/// grace, so no forgery restates the product's grace constant — which is the
+/// thing the arm reading it is trying to measure.
+const EXPIRED_BY_SECS: u64 = 3600;
+
+/// Content for the recipes whose content is never meant to be peeled.
+///
+/// Base64, so the pre-engine transport parse gets as far as the ENGINE: the
+/// difference between [`Forgery::MalformedDoubleH`] and
+/// [`Forgery::Unprocessable`] is which side of the authentication boundary
+/// refuses them, and identical content is what keeps the tag the only variable.
+const OPAQUE_CONTENT: &str = "b3BhcXVl";
+
+/// Content no base64 decoder accepts, so the envelope parses and the engine is
+/// the thing that refuses it.
+const UNDECODABLE_CONTENT: &str = "!!!!not-base64!!!!";
+
+/// A second `#h` value, so a doubled routing tag is one this crate chose.
+const FOREIGN_ROUTING_ID: [u8; 32] = [0x11; 32];
+
+/// One forged event, by recipe.
+///
+/// `Copy`, deliberately: a forgery travels inside [`crate::nemesis::types::Fault`],
+/// which every schedule op is built from. A rewrap names the ciphertext it
+/// copies by ID and the plane resolves it from its own store, because "an
+/// OBSERVED ciphertext" means one the relay really carried.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Forgery {
+    /// A kind-445 at a circle's public `#h` whose NIP-40 `expiration` is
+    /// already past.
+    ///
+    /// The relay double is NIP-40-conformant, so it refuses to store this and
+    /// filters it out of every query — which is exactly why an expired-event
+    /// arm has to be injected live rather than seeded.
+    Expired {
+        /// The circle's public routing id, as the `#h` tag carries it.
+        group_id: [u8; 32],
+    },
+    /// An observed ciphertext re-signed under a throwaway key, dated
+    /// `offset_secs` from the original.
+    ///
+    /// The real cursor-poisoning shape: the outer ciphertext is copied
+    /// verbatim, the routing tag is the circle's public one, and the signer
+    /// holds no MLS secret. The date is an OFFSET rather than an instant so an
+    /// arm never has to hold a wall clock.
+    Rewrap {
+        /// The event the plane's own store holds.
+        source: EventId,
+        /// Seconds from the source's `created_at`, forwards or backwards.
+        offset_secs: i64,
+    },
+    /// A kind-445 carrying TWO `h` tags.
+    ///
+    /// A conformant relay matches a `#h` filter on ANY of an event's values, so
+    /// this reaches a victim subscribed on the first one — and Haven's pure
+    /// pre-engine transport parse refuses it before the engine, the signature
+    /// or any key material is involved.
+    MalformedDoubleH {
+        /// The circle's public routing id.
+        group_id: [u8; 32],
+    },
+    /// A kind-445 whose envelope is well formed and whose content no decoder
+    /// accepts, so the pre-engine parse succeeds and the ENGINE refuses it.
+    Unprocessable {
+        /// The circle's public routing id.
+        group_id: [u8; 32],
+    },
+}
+
+impl Forgery {
+    /// The label the timeline and the schedule digest carry. A literal from
+    /// this file.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Expired { .. } => "expired",
+            Self::Rewrap { .. } => "rewrap",
+            Self::MalformedDoubleH { .. } => "malformed-double-h",
+            Self::Unprocessable { .. } => "unprocessable",
+        }
+    }
+
+    /// The digest discriminant.
+    pub(crate) const fn code(self) -> u8 {
+        match self {
+            Self::Expired { .. } => 0,
+            Self::Rewrap { .. } => 1,
+            Self::MalformedDoubleH { .. } => 2,
+            Self::Unprocessable { .. } => 3,
+        }
+    }
+
+    /// Whether this recipe needs the plane to resolve an observed event first.
+    pub(crate) const fn source(self) -> Option<EventId> {
+        match self {
+            Self::Rewrap { source, .. } => Some(source),
+            Self::Expired { .. } | Self::MalformedDoubleH { .. } | Self::Unprocessable { .. } => {
+                None
+            }
+        }
+    }
+}
+
+// The recipe's NAME and nothing else. A routing id is an identifier and an
+// event id is 64 hex — the shape a structural rule matches — so neither may
+// reach a rendering, and a derived `Debug` would print both (Rule 15).
+impl std::fmt::Debug for Forgery {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("Forgery").field(&self.label()).finish()
+    }
+}
+
+// Serialised as the label alone, for the same reason: a fault reaches the
+// timeline, and a record says WHAT was forged, never against which circle.
+impl serde::Serialize for Forgery {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.label())
+    }
+}
+
+/// Mints the event `forgery` describes.
+///
+/// `source` is the observed ciphertext a [`Forgery::Rewrap`] copies; every
+/// other recipe ignores it. The signing key is freshly generated and belongs to
+/// nobody — it is deliberately NOT declared to the needle manifest, because an
+/// outsider's key is not one the world minted for itself and declaring it would
+/// claim the rig owns an identity it is impersonating an attacker with.
+///
+/// # Errors
+///
+/// [`RigError::Core`] with [`Step::ApplyFault`] if a rewrap was asked for
+/// without the event it copies, or if the event could not be signed: a fault
+/// that could not be minted did not fire.
+pub fn mint(forgery: Forgery, source: Option<&Event>) -> Result<Event, RigError> {
+    let keys = Keys::generate();
+    let builder = match forgery {
+        Forgery::Expired { group_id } => EventBuilder::new(kind(), OPAQUE_CONTENT).tags(vec![
+            routing_tag(&group_id)?,
+            Tag::expiration(Timestamp::from(
+                Timestamp::now().as_secs().saturating_sub(EXPIRED_BY_SECS),
+            )),
+        ]),
+        Forgery::Rewrap { offset_secs, .. } => {
+            let observed = source.ok_or(RigError::Core(Step::ApplyFault))?;
+            // The expiration is dropped rather than copied: a rewrap's whole
+            // subject is the SIGNATURE and the date, and carrying the
+            // original's expiry would let Haven's own expiry screen answer
+            // before the authentication boundary the arm is aiming at.
+            let tags: Vec<Tag> = observed
+                .tags
+                .iter()
+                .filter(|tag| !matches!(tag.as_standardized(), Some(TagStandard::Expiration(_))))
+                .cloned()
+                .collect();
+            EventBuilder::new(observed.kind, observed.content.clone())
+                .tags(tags)
+                .custom_created_at(shifted(observed.created_at, offset_secs))
+        }
+        Forgery::MalformedDoubleH { group_id } => {
+            EventBuilder::new(kind(), OPAQUE_CONTENT).tags(vec![
+                routing_tag(&group_id)?,
+                routing_tag(&FOREIGN_ROUTING_ID)?,
+            ])
+        }
+        Forgery::Unprocessable { group_id } => {
+            EventBuilder::new(kind(), UNDECODABLE_CONTENT).tags(vec![routing_tag(&group_id)?])
+        }
+    };
+    builder
+        .sign_with_keys(&keys)
+        .map_err(|_| RigError::Core(Step::ApplyFault))
+}
+
+/// The group-message kind, built once so the literal lives in one place.
+const fn kind() -> Kind {
+    Kind::Custom(GROUP_MESSAGE_KIND)
+}
+
+/// The `#h` tag for a routing id.
+fn routing_tag(group_id: &[u8; 32]) -> Result<Tag, RigError> {
+    Tag::parse(["h", &hex::encode(group_id)]).map_err(|_| RigError::Core(Step::ApplyFault))
+}
+
+/// `created_at` moved by `offset_secs`, saturating at the epoch.
+fn shifted(created_at: Timestamp, offset_secs: i64) -> Timestamp {
+    let base = created_at.as_secs();
+    let moved = if offset_secs.is_negative() {
+        base.saturating_sub(offset_secs.unsigned_abs())
+    } else {
+        base.saturating_add(offset_secs.unsigned_abs())
+    };
+    Timestamp::from(moved)
 }
 
 #[cfg(test)]
@@ -256,5 +473,185 @@ mod tests {
         let mut buf = b"GET / HTTP/1.1\r\nHost: x\r\n".to_vec();
         assert!(take_http_head(&mut buf).is_none());
         assert_eq!(buf.len(), 25);
+    }
+
+    // -- minting ------------------------------------------------------------
+
+    /// A routing id no circle in any world holds.
+    const A_ROUTING_ID: [u8; 32] = [0x7c; 32];
+
+    /// A ciphertext a plane observed, standing in for one a member published.
+    fn observed() -> Event {
+        EventBuilder::new(kind(), "Y2lwaGVydGV4dA")
+            .tags(vec![
+                routing_tag(&A_ROUTING_ID).expect("a routing tag"),
+                Tag::expiration(Timestamp::from(Timestamp::now().as_secs() + 228)),
+            ])
+            .custom_created_at(Timestamp::from(1_700_000_000))
+            .sign_with_keys(&Keys::generate())
+            .expect("a member's own event signs")
+    }
+
+    fn routing_values(event: &Event) -> Vec<String> {
+        event
+            .tags
+            .iter()
+            .filter(|tag| tag.kind().as_str() == "h")
+            .filter_map(|tag| tag.content().map(str::to_owned))
+            .collect()
+    }
+
+    #[test]
+    fn an_expired_forgery_is_routed_at_the_circle_and_dated_in_the_past() {
+        let event = mint(
+            Forgery::Expired {
+                group_id: A_ROUTING_ID,
+            },
+            None,
+        )
+        .expect("mints");
+        assert_eq!(routing_values(&event), vec![hex::encode(A_ROUTING_ID)]);
+        let expiry = event
+            .tags
+            .find(nostr::TagKind::Expiration)
+            .and_then(|tag| tag.content().map(str::to_owned))
+            .expect("an expiration");
+        let expiry: u64 = expiry.parse().expect("an expiration is seconds");
+        assert!(
+            expiry < Timestamp::now().as_secs(),
+            "an expired forgery whose expiry is in the future is not expired"
+        );
+        assert!(event.verify().is_ok(), "it must be a real, signed event");
+    }
+
+    #[test]
+    fn a_rewrap_copies_the_ciphertext_verbatim_under_another_key_and_drops_the_expiry() {
+        let source = observed();
+        let forged = mint(
+            Forgery::Rewrap {
+                source: source.id,
+                offset_secs: 600,
+            },
+            Some(&source),
+        )
+        .expect("mints");
+        assert_eq!(forged.content, source.content, "the ciphertext is copied");
+        assert_eq!(routing_values(&forged), routing_values(&source));
+        assert_ne!(
+            forged.pubkey, source.pubkey,
+            "a rewrap is signed by somebody who holds no MLS secret"
+        );
+        assert_eq!(
+            forged.created_at.as_secs(),
+            source.created_at.as_secs() + 600
+        );
+        assert!(
+            forged.tags.find(nostr::TagKind::Expiration).is_none(),
+            "the expiry is dropped so Haven's own expiry screen does not answer first"
+        );
+        assert!(forged.verify().is_ok());
+
+        let backwards = mint(
+            Forgery::Rewrap {
+                source: source.id,
+                offset_secs: -600,
+            },
+            Some(&source),
+        )
+        .expect("mints");
+        assert_eq!(
+            backwards.created_at.as_secs(),
+            source.created_at.as_secs() - 600
+        );
+    }
+
+    #[test]
+    fn a_rewrap_without_the_event_it_copies_is_refused_rather_than_invented() {
+        let refused = mint(
+            Forgery::Rewrap {
+                source: EventId::from_slice(&[9; 32]).expect("32 bytes is an event id"),
+                offset_secs: 1,
+            },
+            None,
+        );
+        assert!(
+            matches!(refused, Err(RigError::Core(Step::ApplyFault))),
+            "a rewrap of nothing is a fault that did not fire"
+        );
+    }
+
+    #[test]
+    fn the_two_unpeelable_forgeries_differ_only_where_they_are_refused() {
+        let malformed = mint(
+            Forgery::MalformedDoubleH {
+                group_id: A_ROUTING_ID,
+            },
+            None,
+        )
+        .expect("mints");
+        assert_eq!(
+            routing_values(&malformed),
+            vec![hex::encode(A_ROUTING_ID), hex::encode(FOREIGN_ROUTING_ID)],
+            "a doubled routing tag is what the pre-engine parse refuses"
+        );
+        assert_eq!(malformed.content, OPAQUE_CONTENT);
+
+        let unprocessable = mint(
+            Forgery::Unprocessable {
+                group_id: A_ROUTING_ID,
+            },
+            None,
+        )
+        .expect("mints");
+        assert_eq!(
+            routing_values(&unprocessable),
+            vec![hex::encode(A_ROUTING_ID)]
+        );
+        assert_ne!(
+            unprocessable.content, malformed.content,
+            "the engine-side refusal turns on the content, and the parse-side one on the tag"
+        );
+        for event in [&malformed, &unprocessable] {
+            assert!(event.verify().is_ok());
+            assert_eq!(event.kind, kind());
+        }
+    }
+
+    #[test]
+    fn a_forgery_renders_its_recipe_and_neither_the_circle_nor_the_event_it_names() {
+        let recipes = [
+            Forgery::Expired {
+                group_id: A_ROUTING_ID,
+            },
+            Forgery::Rewrap {
+                source: EventId::from_slice(&[0xAB; 32]).expect("32 bytes is an event id"),
+                offset_secs: 86_400,
+            },
+            Forgery::MalformedDoubleH {
+                group_id: A_ROUTING_ID,
+            },
+            Forgery::Unprocessable {
+                group_id: A_ROUTING_ID,
+            },
+        ];
+        let mut codes = Vec::new();
+        for recipe in recipes {
+            let rendered = format!("{recipe:?}");
+            let json = serde_json::to_string(&recipe).expect("a recipe serialises");
+            for surface in [rendered.as_str(), json.as_str()] {
+                assert!(surface.contains(recipe.label()), "{surface}");
+                assert!(!surface.contains("7c7c"), "{surface}");
+                assert!(!surface.contains("abab"), "{surface}");
+                assert!(!surface.contains("86400"), "{surface}");
+            }
+            codes.push(recipe.code());
+        }
+        codes.sort_unstable();
+        codes.dedup();
+        assert_eq!(
+            codes.len(),
+            recipes.len(),
+            "two recipes that share a digest code would digest as one schedule"
+        );
     }
 }

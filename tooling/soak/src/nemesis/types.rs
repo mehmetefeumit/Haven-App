@@ -19,7 +19,8 @@ use std::fmt;
 use serde::{Serialize, Serializer};
 use sha2::{Digest, Sha256};
 
-use crate::rig::{DeviceTag, KillKind, RelayTag};
+use crate::relay::Forgery;
+use crate::rig::{sim_magnitude, DeviceTag, KillKind, RelayTag};
 
 /// A NIP-01 machine-readable `CLOSED` / `OK` prefix.
 ///
@@ -98,10 +99,51 @@ impl ClosedPrefix {
     }
 }
 
+/// A frame-size cap, in bytes.
+///
+/// Its own type for one reason: every rendering of it is BUCKETED. The cap an
+/// arm chooses is MEASURED off an event the world minted — the oversize arm
+/// takes one byte less than a staged commit's own frame — so an exactly
+/// rendered cap is a fingerprint of that world's roster, which Rule 15 keeps
+/// out of a record exactly as it keeps out a count.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct ByteCap(usize);
+
+impl ByteCap {
+    /// A cap of `bytes`.
+    #[must_use]
+    pub const fn new(bytes: usize) -> Self {
+        Self(bytes)
+    }
+
+    /// The cap itself, for the proxy that enforces it.
+    #[must_use]
+    pub const fn bytes(self) -> usize {
+        self.0
+    }
+}
+
+// Presence only, like `ProbeToken`'s: the magnitude is the world's and the
+// bucket vocabulary has no resolution at this scale anyway, so rendering
+// anything but "a cap was set" would render the measurement itself.
+impl fmt::Debug for ByteCap {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("ByteCap").field(&"..").finish()
+    }
+}
+
+// The crate's one magnitude vocabulary, for the same reason: a record says a
+// cap was in force, never which.
+impl Serialize for ByteCap {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(sim_magnitude(self.0))
+    }
+}
+
 /// One thing that can be wrong with a relay.
 ///
-/// Exactly what the Phase-1 scenarios need and nothing speculative: a fault
-/// nobody schedules is a mechanism nobody tests.
+/// Exactly what the scenarios need and nothing speculative: a fault nobody
+/// schedules and no arm applies is a mechanism nobody tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Fault {
@@ -126,6 +168,18 @@ pub enum Fault {
     ReversePages,
     /// `EOSE` is sent naming a different subscription.
     EoseForAnotherSubscription,
+    /// A forged event is written onto the subscriptions it matches, live.
+    ///
+    /// Live and never stored, which is the honest model of "in flight but not
+    /// retained": an injected event is one an adversary put on the wire, so a
+    /// later catch-up sweep must not find it sitting in the relay's own pages.
+    Inject(Forgery),
+    /// An `EVENT` frame above this size is refused with `OK false invalid:`
+    /// and never reaches the relay.
+    RefuseOversize {
+        /// The largest frame payload the plane will forward.
+        max_bytes: ByteCap,
+    },
     /// Everything above is undone.
     Heal,
 }
@@ -145,6 +199,8 @@ impl Fault {
             Self::DoubleEveryEvent => "double-every-event",
             Self::ReversePages => "reverse-pages",
             Self::EoseForAnotherSubscription => "eose-for-another-subscription",
+            Self::Inject(_) => "inject",
+            Self::RefuseOversize { .. } => "refuse-oversize",
             Self::Heal => "heal",
         }
     }
@@ -160,7 +216,9 @@ impl Fault {
             Self::DoubleEveryEvent => 6,
             Self::ReversePages => 7,
             Self::EoseForAnotherSubscription => 8,
-            Self::Heal => 9,
+            Self::Inject(_) => 9,
+            Self::RefuseOversize { .. } => 10,
+            Self::Heal => 11,
         };
         buf.push(code);
         match self {
@@ -168,6 +226,15 @@ impl Fault {
             Self::Notice(text) => {
                 buf.extend_from_slice(&(text.len() as u64).to_be_bytes());
                 buf.extend_from_slice(text.as_bytes());
+            }
+            // The RECIPE, never what it is aimed at: a digest is an input this
+            // crate holds twice, and a routing id or an event id has no second
+            // reason to exist in one. Neither fault is ever scheduled — both
+            // are arm-applied — so nothing derives a bound from telling two of
+            // them apart.
+            Self::Inject(forgery) => buf.push(forgery.code()),
+            Self::RefuseOversize { max_bytes } => {
+                buf.extend_from_slice(&(max_bytes.bytes() as u64).to_be_bytes());
             }
             _ => {}
         }
@@ -517,6 +584,27 @@ mod tests {
     }
 
     #[test]
+    fn the_forged_ok_false_is_a_prefix_the_nostr_parser_reads_back_too() {
+        use nostr::message::MachineReadablePrefix;
+
+        // The `CLOSED` side is pinned above; this is the OK side, which the rig
+        // forges for the first time with `RefuseOversize`. A client branches on
+        // the prefix, so a refusal the upstream parser no longer recognises is
+        // a fault that no longer means what the arm applying it thinks.
+        let message = crate::relay::oversize_message();
+        let parsed: Option<MachineReadablePrefix> = MachineReadablePrefix::parse(&message);
+        assert_eq!(
+            parsed.map(|prefix| prefix.as_str().to_string()),
+            Some(
+                crate::relay::OVERSIZE_PREFIX
+                    .as_str()
+                    .trim_end_matches(':')
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
     fn the_serialised_schedule_carries_the_tag_and_not_the_digest() {
         let schedule = Schedule::new(ops());
         let json = serde_json::to_string(&schedule).expect("schedule serialises");
@@ -530,6 +618,70 @@ mod tests {
         let rendered = Schedule::new(ops()).to_string();
         assert!(rendered.contains("2-4"), "{rendered}");
         assert!(!rendered.contains(" 3"), "{rendered}");
+    }
+
+    #[test]
+    fn a_forgery_and_a_cap_reach_the_digest_and_neither_reaches_a_rendering() {
+        use crate::relay::Forgery;
+
+        let expired = Forgery::Expired {
+            group_id: [0x5a; 32],
+        };
+        let unprocessable = Forgery::Unprocessable {
+            group_id: [0x5a; 32],
+        };
+        let injected = |forgery| {
+            Schedule::new(vec![ScheduledOp {
+                tick: 1,
+                op: Op::Fault {
+                    relay: RelayTag::new(0),
+                    fault: Fault::Inject(forgery),
+                },
+                heal_at: None,
+            }])
+        };
+        assert_ne!(
+            injected(expired).digest(),
+            injected(unprocessable).digest(),
+            "two recipes must not digest as one op"
+        );
+
+        let capped = |bytes| {
+            Schedule::new(vec![ScheduledOp {
+                tick: 1,
+                op: Op::Fault {
+                    relay: RelayTag::new(0),
+                    fault: Fault::RefuseOversize {
+                        max_bytes: ByteCap::new(bytes),
+                    },
+                },
+                heal_at: None,
+            }])
+        };
+        assert_ne!(
+            capped(1024).digest(),
+            capped(1025).digest(),
+            "two caps must not digest as one op"
+        );
+
+        // The rendering side: the recipe's target and the cap's magnitude are
+        // both measurements of a world, and neither may reach a record.
+        let rendered = format!("{:?}", Fault::Inject(expired));
+        assert!(rendered.contains("expired"), "{rendered}");
+        assert!(!rendered.contains("5a5a"), "{rendered}");
+        let rendered = format!(
+            "{:?}",
+            Fault::RefuseOversize {
+                max_bytes: ByteCap::new(7919),
+            }
+        );
+        assert!(!rendered.contains("7919"), "{rendered}");
+        let json = serde_json::to_string(&Fault::RefuseOversize {
+            max_bytes: ByteCap::new(7919),
+        })
+        .expect("a fault serialises");
+        assert!(!json.contains("7919"), "{json}");
+        assert!(json.contains("5+"), "{json}");
     }
 
     #[test]

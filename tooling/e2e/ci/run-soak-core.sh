@@ -99,6 +99,22 @@ soak_upload_dir() { printf '%s\n' "${SOAK_UPLOAD_DIR:-${RUNNER_TEMP:-/tmp}/soak-
 # (check_wire_proxy_test_only.sh invariant 3), so they live outside the tree.
 soak_report_dir() { printf '%s\n' "${SOAK_REPORT_DIR:-${RUNNER_TEMP:-/tmp}/soak-reports}"; }
 
+# Where THIS process looks for the needle directory: the constant above in
+# every real run, and never anything a caller chose. The assignment below runs
+# on every invocation of this file, so a value inherited from the environment
+# is cleared before the first read, and `soak_self_test` — in its own process,
+# with no child to inherit it — is the only thing that ever sets it.
+# Production must never take an override: every ban on this directory is keyed
+# on the path (check_wire_proxy_test_only.sh checks 3 and 6), and haven-logscan
+# refuses an `--out` outside it for the same reason ("a manifest must live in
+# `/tmp/haven-soak/needles` — there is deliberately no override, because a
+# relocatable path defeats the upload ban", tooling/logscan/src/manifest.rs).
+# The fixtures need one for the mirror-image reason: the real directory holds
+# whatever the last run on this machine left there, and a single stale manifest
+# in it is enough to read a hermetic fixture as clean.
+SOAK_SELF_TEST_NEEDLE_DIR=''
+soak_needle_dir() { printf '%s\n' "${SOAK_SELF_TEST_NEEDLE_DIR:-${SOAK_NEEDLE_DIR}}"; }
+
 soak_run_id() { printf '%s\n' "${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-local}"; }
 
 # Every *.log the rig left, comma-joined for one `--sink`. Printed, never read.
@@ -173,10 +189,11 @@ soak_finalize() { # soak_finalize <profile>
   # which runs on every outcome, is the backstop for that.
   trap '' TERM INT HUP
 
-  local upload reports manifest spec
+  local upload reports needles manifest spec
   upload="$(soak_upload_dir)"
   reports="$(soak_report_dir)"
-  manifest="${SOAK_NEEDLE_DIR}/$(soak_run_id)${SOAK_MANIFEST_SUFFIX}"
+  needles="$(soak_needle_dir)"
+  manifest="${needles}/$(soak_run_id)${SOAK_MANIFEST_SUFFIX}"
   mkdir -p "${reports}"
 
   # No tree at all. The drive creates it before the rig's first byte, so this
@@ -219,7 +236,7 @@ soak_finalize() { # soak_finalize <profile>
   # ...then the harness's own host needles and endpoint exemptions, which the
   # rig has no way to declare.
   local gate_rc=0
-  logscan_gate host "${SOAK_NEEDLE_DIR}" -- \
+  logscan_gate host "${needles}" -- \
     --sink "soak=${spec}" --report "${reports}/soak-${profile}-host.ndjson" || gate_rc=$?
 
   # The rig re-seals its manifest as each world is built and again as each arm
@@ -290,9 +307,10 @@ soak_main() { # soak_main <profile>
   local profile="${1:-}"
   soak_profile_ok "${profile}" || return $?
 
-  local upload manifest stdout_log
+  local upload needles manifest stdout_log
   upload="$(soak_upload_dir)"
-  manifest="${SOAK_NEEDLE_DIR}/$(soak_run_id)${SOAK_MANIFEST_SUFFIX}"
+  needles="$(soak_needle_dir)"
+  manifest="${needles}/$(soak_run_id)${SOAK_MANIFEST_SUFFIX}"
   stdout_log="${upload}/soak-${profile}-run.log"
 
   # Armed before the tree itself exists, because from the mkdir on every way
@@ -310,7 +328,7 @@ soak_main() { # soak_main <profile>
   # the job's always() discard is what removes it. A local run seals in memory
   # and writes nothing.
   if [[ "${HAVEN_LOGSCAN:-}" == "true" ]]; then
-    mkdir -m 0700 -p "${SOAK_NEEDLE_DIR}"
+    mkdir -m 0700 -p "${needles}"
     rig_args+=(--needle-manifest "${manifest}")
   fi
 
@@ -330,11 +348,16 @@ soak_main() { # soak_main <profile>
 }
 
 # ---------------------------------------------------------------------------
-# --self-test: hermetic. No cargo, no relay, no network. It exercises the
+# --self-test: hermetic. No cargo, no relay, no network, and no read or write
+# of the real needle directory — whose contents belong to whatever run last
+# used this machine, and are asserted unchanged at the end. It exercises the
 # helpers and PINS the wiring properties a real run cannot re-check.
 # ---------------------------------------------------------------------------
 soak_self_test() {
   local tmp fails=0 cases=0
+  # Equality pin: a fixture added or removed without moving this line is a
+  # self-test that no longer says what it runs.
+  local -r want_cases=29
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
   trap "rm -rf '${tmp}'" RETURN
@@ -357,9 +380,17 @@ soak_self_test() {
       fails=1
     fi
   }
+  # The REAL directory, never a fixture's: taken before the first fixture and
+  # compared after the last one.
+  _needle_state() {
+    [[ -d "${SOAK_NEEDLE_DIR}" ]] || { printf 'absent\n'; return 0; }
+    find "${SOAK_NEEDLE_DIR}" -mindepth 1 -printf '%P\n' | sort | tr '\n' ' '
+    printf '\n'
+  }
 
   echo "run-soak-core.sh --self-test"
-  local rc
+  local rc needles_before
+  needles_before="$(_needle_state)" || needles_before='unreadable'
 
   # (1) The sink spec is every *.log in the tree, sorted, comma-joined.
   local d="${tmp}/tree"; mkdir -p "${d}"
@@ -393,6 +424,17 @@ soak_self_test() {
   if ! grep -qE '^readonly SOAK_NEEDLE_DIR=/tmp/haven-soak/needles$' "${BASH_SOURCE[0]}"; then rc=1; fi
   _case "the needle directory is a spelled constant" 0 "${rc}"
 
+  # (5b) ...and the one indirection over it belongs to this self-test alone.
+  #      The override is cleared at every startup, so a value inherited from
+  #      the environment is gone before the first read and no lane, workflow or
+  #      caller can relocate the directory those bans name; with nothing
+  #      overriding it, the scan reads the constant.
+  rc=0
+  if ! grep -qE "^SOAK_SELF_TEST_NEEDLE_DIR=''$" "${BASH_SOURCE[0]}"; then rc=1; fi
+  _case "the needle override is cleared at every startup" 0 "${rc}"
+  _eq "...so a run nothing overrides reads the constant" \
+    "${SOAK_NEEDLE_DIR}" "$(soak_needle_dir)"
+
   # (6) THE WIRING PIN (check_logscan_wired_everywhere.sh RUNNER_PINS). The
   #     gate is what stands between a captured log and the job log, so its
   #     position is read from this file's own lines rather than trusted. This
@@ -402,7 +444,7 @@ soak_self_test() {
   #     command names a capture anywhere in the file.
   local joined gate_at read_at
   joined="$(sed -e ':a' -e '/\\$/N; s/\\\n//; ta' "${BASH_SOURCE[0]}" | grep -vE '^[[:space:]]*#')"
-  gate_at="$(grep -nE '^[[:space:]]*logscan_gate host "\$\{SOAK_NEEDLE_DIR\}"' <<<"${joined}" \
+  gate_at="$(grep -nE '^[[:space:]]*logscan_gate host "\$\{needles\}"' <<<"${joined}" \
               | cut -d: -f1 | head -n 1 || true)"
   read_at="$(grep -nE '(^|[;&|[:space:]])(cat|tee|head|tail|less|more)[[:space:]]+[^|]*[.]log' <<<"${joined}" \
               | cut -d: -f1 | head -n 1 || true)"
@@ -527,20 +569,42 @@ soak_self_test() {
   #      run — so nothing searched them for a value THIS run minted, and the
   #      verdict must say so (rc 4, ungraded) rather than read as clean. The
   #      gate runs against injected fakes here, as scan-logs.sh's own self-test
-  #      does. The other direction — a manifest PRESENT is not downgraded — is
-  #      fixture (12) inverted: the needle directory is a fixed constant no
-  #      hermetic fixture may write into, so the arm tested here is the flag's.
+  #      does, over a needle directory of this fixture's own: read against the
+  #      real one, this asked whether some earlier run's leftovers happened to
+  #      be lying around, and a single stale manifest there read the arm as
+  #      clean. In-process for that reason — the override is a plain variable
+  #      this file clears at startup, which a child could not inherit.
   local ungraded="${tmp}/ungraded" fakebin="${tmp}/fake-logscan" fakewrap="${tmp}/fake-scan-logs"
-  mkdir -p "${ungraded}"
+  local fixturedir="${tmp}/fixture-needles"
+  mkdir -p "${ungraded}" "${fixturedir}"
   printf 'the rig said nothing identifying\n' > "${ungraded}/soak-pr-run.log"
   printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "${fakebin}"
   printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "${fakewrap}"
   chmod +x "${fakebin}" "${fakewrap}"
   rc=0
-  HAVEN_LOGSCAN=true HAVEN_LOGSCAN_BIN="${fakebin}" SCAN_LOGS="${fakewrap}" \
-    SOAK_UPLOAD_DIR="${ungraded}" SOAK_REPORT_DIR="${tmp}/ungraded-reports" \
-    bash "${BASH_SOURCE[0]}" --scan-only pr >/dev/null 2>&1 || rc=$?
+  ( SOAK_SELF_TEST_NEEDLE_DIR="${fixturedir}"
+    HAVEN_LOGSCAN=true
+    HAVEN_LOGSCAN_BIN="${fakebin}"
+    SCAN_LOGS="${fakewrap}"
+    SOAK_UPLOAD_DIR="${ungraded}"
+    SOAK_REPORT_DIR="${tmp}/ungraded-reports"
+    soak_scan_only pr ) >/dev/null 2>&1 || rc=$?
   _case "captures no rig manifest ever searched are UNGRADED, not clean" 4 "${rc}"
+
+  # (15b) The positive control: the same run, with the rig's manifest sitting
+  #       in that directory, is GRADED. Without it a floor that fired whatever
+  #       the rig sealed would look exactly as green as the one above.
+  printf '{"a fixture, never a manifest the rig sealed": true}\n' \
+    > "${fixturedir}/$(soak_run_id)${SOAK_MANIFEST_SUFFIX}"
+  rc=0
+  ( SOAK_SELF_TEST_NEEDLE_DIR="${fixturedir}"
+    HAVEN_LOGSCAN=true
+    HAVEN_LOGSCAN_BIN="${fakebin}"
+    SCAN_LOGS="${fakewrap}"
+    SOAK_UPLOAD_DIR="${ungraded}"
+    SOAK_REPORT_DIR="${tmp}/graded-reports"
+    soak_scan_only pr ) >/dev/null 2>&1 || rc=$?
+  _case "...and the same captures WITH one are graded, not ungraded" 0 "${rc}"
 
   # (16) ...and the new entry point validates its profile like the old one.
   rc=0
@@ -629,8 +693,19 @@ soak_self_test() {
     bash "${BASH_SOURCE[0]}" pr >/dev/null 2>&1 || rc=$?
   _case "a violation the rig proved is not demoted to the scan's milder code" 1 "${rc}"
 
+  # (20) And none of the above went near the real needle directory. Its
+  #      contents are another run's, so a fixture that reads them passes or
+  #      fails by what was left on the machine, and one that writes them plants
+  #      a needle in the directory the next run's scan will seal from.
+  _eq "the real needle directory is untouched by every fixture above" \
+    "${needles_before}" "$(_needle_state)"
+
   if (( fails )); then
     soak_err "self-test FAILED"
+    return 1
+  fi
+  if (( cases != want_cases )); then
+    soak_err "self-test ran ${cases} case(s), expected exactly ${want_cases}: a fixture was added or removed without moving the pin."
     return 1
   fi
   soak_log "self-test OK (${cases} cases)"

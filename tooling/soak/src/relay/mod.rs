@@ -21,14 +21,15 @@ mod ledger;
 mod policies;
 mod proxy;
 
+pub use forge::{mint, Forgery};
 pub use ledger::Ledger;
-pub use policies::NativeClosed;
+pub use policies::{oversize_message, NativeClosed, OVERSIZE_PREFIX};
 
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
-use nostr::EventId;
+use nostr::{Event, EventId, Filter};
 use nostr_database::{DatabaseEventStatus, MemoryDatabase, MemoryDatabaseOptions, NostrDatabase};
 use nostr_relay_builder::{LocalRelay, RelayBuilder};
 
@@ -142,12 +143,28 @@ impl SimRelay {
     /// # Errors
     ///
     /// [`RigError::Core`] with [`Step::Publish`] if the store cannot answer.
-    pub async fn stored_page(&self, filter: nostr::Filter) -> Result<Vec<nostr::Event>, RigError> {
+    pub async fn stored_page(&self, filter: Filter) -> Result<Vec<Event>, RigError> {
         self.db
             .query(filter)
             .await
             .map(|events| events.into_iter().collect())
             .map_err(|_| RigError::Core(Step::Publish))
+    }
+
+    /// The event this plane's store holds under `event_id`.
+    ///
+    /// # Errors
+    ///
+    /// [`RigError::Core`] with [`Step::ApplyFault`] if the store cannot answer
+    /// or holds no such event — the only caller is a forgery that copies an
+    /// OBSERVED ciphertext, and a copy of nothing is a fault that did not fire.
+    async fn stored_event(&self, event_id: &EventId) -> Result<Event, RigError> {
+        self.stored_page(Filter::new().id(*event_id))
+            .await
+            .map_err(|_| RigError::Core(Step::ApplyFault))?
+            .into_iter()
+            .next()
+            .ok_or(RigError::Core(Step::ApplyFault))
     }
 }
 
@@ -220,6 +237,23 @@ impl SimRelay {
             }
             Fault::EoseForAnotherSubscription => {
                 self.proxy.edit(|state| state.cross_eose = true);
+                Ok(())
+            }
+            // The source is resolved from this plane's OWN store, because "an
+            // observed ciphertext" means one this relay really carried: a
+            // rewrap of an event nobody published is a synthetic shape, and the
+            // arm asking for one has mis-aimed its fault.
+            Fault::Inject(forgery) => {
+                let source = match forgery.source() {
+                    Some(event_id) => Some(self.stored_event(&event_id).await?),
+                    None => None,
+                };
+                let forged = forge::mint(forgery, source.as_ref())?;
+                self.proxy.inject_event(&forged)
+            }
+            Fault::RefuseOversize { max_bytes } => {
+                self.proxy
+                    .edit(|state| state.max_event_bytes = Some(max_bytes.bytes()));
                 Ok(())
             }
             // A heal restores BEHAVIOUR, endpoint included. It cannot restore a

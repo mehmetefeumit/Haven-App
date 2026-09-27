@@ -15,16 +15,16 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
-use haven_soak::nemesis::types::{ClosedPrefix, Fault};
-use haven_soak::relay::{Ledger, NativeClosed, SimRelay};
+use haven_soak::nemesis::types::{ByteCap, ClosedPrefix, Fault};
+use haven_soak::relay::{Forgery, Ledger, NativeClosed, SimRelay, OVERSIZE_PREFIX};
 use haven_soak::rig::circle::{build_circle, publish_witnessed};
 use haven_soak::rig::{
     install_process_globals, poll_until, CircleTag, DeviceTag, EventTag, RelayPlane, RelayTag,
     RigError, SimDevice,
 };
 use nostr::{
-    ClientMessage, Event, EventBuilder, EventId, Filter, Keys, Kind, RelayMessage, SubscriptionId,
-    Tag, Timestamp,
+    ClientMessage, Event, EventBuilder, EventId, Filter, JsonUtil, Keys, Kind, RelayMessage,
+    SubscriptionId, Tag, Timestamp,
 };
 use nostr_sdk::{Client, RelayPoolNotification};
 use tokio::io::AsyncReadExt;
@@ -96,6 +96,29 @@ fn an_application_445() -> Event {
         )))
         .sign_with_keys(&Keys::generate())
         .expect("a 445 signs")
+}
+
+/// A routing id standing in for a circle's public `#h`. No world here holds
+/// one, and a forgery needs nothing else to be mintable — which is the point
+/// every injection case is making.
+const A_CIRCLES_ROUTING_ID: [u8; 32] = [0x3b; 32];
+
+/// The same event with one byte of its signature turned over.
+///
+/// The relay's OWN refusal path: `nostr-relay-builder` verifies before it
+/// saves, so this is refused with a machine-readable `invalid:` of its own
+/// composition — which is what a forged refusal is compared against.
+fn corrupt_the_signature_of(event: &Event) -> Event {
+    let mut json: serde_json::Value =
+        serde_json::from_str(&event.as_json()).expect("an event is JSON");
+    let signature = json["sig"].as_str().expect("an event carries a sig");
+    let mut bytes = signature.to_owned();
+    // The last hex digit, moved: still 64 bytes of hex, still a well-formed
+    // envelope, and no longer a signature over this event.
+    let last = bytes.pop().expect("a signature is not empty");
+    bytes.push(if last == '0' { '1' } else { '0' });
+    json["sig"] = serde_json::Value::String(bytes);
+    Event::from_json(json.to_string()).expect("the envelope still parses")
 }
 
 /// A kind-445 COMMIT: the same kind, no expiration — group history has to
@@ -1013,6 +1036,432 @@ async fn a_wiped_plane_forgets_what_it_held_and_keeps_serving() {
 }
 
 // ---------------------------------------------------------------------------
+// Inject: a forged event on the wire and in nobody's store
+// ---------------------------------------------------------------------------
+
+/// A subscription that takes everything, so a forgery's delivery turns on the
+/// FAULT and not on a filter this test wrote.
+async fn subscribed_to_everything(client: &Client, plane: &SimRelay, id: &str) -> SubscriptionId {
+    let subscription = SubscriptionId::new(id);
+    client
+        .subscribe_with_id(subscription.clone(), Filter::new(), None)
+        .await
+        .expect("the REQ goes out");
+    // The REQ must have CROSSED the proxy before an injection asks which
+    // subscriptions are open: a race here would refuse a fault that is about
+    // to be perfectly deliverable.
+    let ledger = plane.ledger().clone();
+    reaching(WIRE_BOUND, 1, move || ledger.reqs()).await;
+    subscription
+}
+
+/// The event the plane injected, once it has injected one.
+async fn injected_within(plane: &SimRelay, bound: Duration) -> EventId {
+    let ledger = plane.ledger().clone();
+    reaching(bound, 1, move || ledger.injected_ids().len()).await;
+    *plane
+        .ledger()
+        .injected_ids()
+        .first()
+        .expect("the plane records what it forged")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_injected_rewrap_carries_the_observed_ciphertext_and_no_store_holds_it() {
+    let mut plane = plane().await;
+    let client = connected_client(&plane).await;
+    let subscription = subscribed_to_everything(&client, &plane, "watching").await;
+    let mut notifications = client.notifications();
+
+    let observed = an_application_445();
+    publish(&client, &plane, &observed).await;
+    assert!(stored_within(&plane, &observed.id, WIRE_BOUND).await);
+
+    plane
+        .apply(Fault::Inject(Forgery::Rewrap {
+            source: observed.id,
+            offset_secs: 3600,
+        }))
+        .await
+        .expect("the injection applies");
+
+    let forged = message_within(&mut notifications, WIRE_BOUND, |message| {
+        matches!(message, RelayMessage::Event { subscription_id, event }
+            if subscription_id.as_ref() == &subscription && event.id != observed.id)
+    })
+    .await
+    .expect("the forged event reaches a subscribed client");
+    let RelayMessage::Event { event: forged, .. } = forged else {
+        unreachable!("the predicate above accepted only an EVENT")
+    };
+
+    assert!(
+        forged.content == observed.content,
+        "a rewrap copies the ciphertext it observed"
+    );
+    assert!(
+        forged.pubkey != observed.pubkey,
+        "a rewrap is signed by somebody who holds no MLS secret"
+    );
+    assert!(
+        !plane.stored(&forged.id).await.expect("the store reads"),
+        "an injection is in flight and never retained: a later page must not serve it"
+    );
+    assert!(
+        plane.ledger().published(&forged.id) == 0,
+        "nobody published it; the plane forged it"
+    );
+    assert!(
+        plane.ledger().injected_ids() == vec![forged.id],
+        "the plane records what it forged, so a scenario can name it without minting it"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_injected_malformed_double_h_reaches_the_client_and_no_store_holds_it() {
+    let mut plane = plane().await;
+    let client = connected_client(&plane).await;
+    let subscription = subscribed_to_everything(&client, &plane, "watching").await;
+    let mut notifications = client.notifications();
+
+    plane
+        .apply(Fault::Inject(Forgery::MalformedDoubleH {
+            group_id: A_CIRCLES_ROUTING_ID,
+        }))
+        .await
+        .expect("the injection applies");
+
+    let message = message_within(&mut notifications, WIRE_BOUND, |message| {
+        matches!(message, RelayMessage::Event { subscription_id, .. }
+            if subscription_id.as_ref() == &subscription)
+    })
+    .await
+    .expect("the forged event reaches a subscribed client");
+    let RelayMessage::Event { event, .. } = message else {
+        unreachable!("the predicate above accepted only an EVENT")
+    };
+
+    assert!(
+        event
+            .tags
+            .iter()
+            .filter(|tag| tag.kind().as_str() == "h")
+            .count()
+            == 2,
+        "the doubled routing tag is what Haven's pre-engine parse refuses"
+    );
+    assert!(
+        !plane.stored(&event.id).await.expect("the store reads"),
+        "an injection is never retained"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_injected_unprocessable_forgery_reaches_the_client_and_no_store_holds_it() {
+    let mut plane = plane().await;
+    let client = connected_client(&plane).await;
+    let subscription = subscribed_to_everything(&client, &plane, "watching").await;
+    let mut notifications = client.notifications();
+
+    plane
+        .apply(Fault::Inject(Forgery::Unprocessable {
+            group_id: A_CIRCLES_ROUTING_ID,
+        }))
+        .await
+        .expect("the injection applies");
+
+    let message = message_within(&mut notifications, WIRE_BOUND, |message| {
+        matches!(message, RelayMessage::Event { subscription_id, .. }
+            if subscription_id.as_ref() == &subscription)
+    })
+    .await
+    .expect("the forged event reaches a subscribed client");
+    let RelayMessage::Event { event, .. } = message else {
+        unreachable!("the predicate above accepted only an EVENT")
+    };
+
+    assert!(
+        event
+            .tags
+            .iter()
+            .filter(|tag| tag.kind().as_str() == "h")
+            .count()
+            == 1,
+        "one routing tag: this one parses, and the ENGINE is what refuses it"
+    );
+    assert!(
+        !plane.stored(&event.id).await.expect("the store reads"),
+        "an injection is never retained"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_injected_expired_forgery_goes_out_on_the_wire_and_no_store_holds_it() {
+    let mut plane = plane().await;
+    let client = connected_client(&plane).await;
+    let _subscription = subscribed_to_everything(&client, &plane, "watching").await;
+
+    plane
+        .apply(Fault::Inject(Forgery::Expired {
+            group_id: A_CIRCLES_ROUTING_ID,
+        }))
+        .await
+        .expect("the injection applies");
+
+    // The WIRE is the evidence here, not the client: a conformant SDK drops an
+    // already-expired event before it ever emits a notification, which is the
+    // whole reason this forgery can only be injected — the relay's own store
+    // refuses to hold it and its queries filter it out.
+    let forged = injected_within(&plane, WIRE_BOUND).await;
+    let ledger = plane.ledger().clone();
+    assert!(
+        reaching(WIRE_BOUND, 1, move || ledger.delivered(&forged)).await >= 1,
+        "the forged frame must really have been written towards the client"
+    );
+    assert!(
+        !plane.stored(&forged).await.expect("the store reads"),
+        "an expired event is one no relay would retain, which is why it is injected"
+    );
+    assert!(
+        !plane.witnessed_ok(&forged),
+        "nobody published it, so nothing acknowledged it"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_injection_nobody_subscribed_for_is_reported_as_a_fault_that_did_not_fire() {
+    let mut plane = plane().await;
+    let client = connected_client(&plane).await;
+
+    // Connected, but listening for something else entirely.
+    let subscription = SubscriptionId::new("wants-profiles");
+    client
+        .subscribe_with_id(subscription, Filter::new().kind(Kind::Metadata), None)
+        .await
+        .expect("the REQ goes out");
+    let ledger = plane.ledger().clone();
+    reaching(WIRE_BOUND, 1, move || ledger.reqs()).await;
+
+    let refused = plane
+        .apply(Fault::Inject(Forgery::Unprocessable {
+            group_id: A_CIRCLES_ROUTING_ID,
+        }))
+        .await;
+    assert!(
+        matches!(refused, Err(RigError::Core(_))),
+        "an injection nobody received did not happen, and a bound derived from it is a fiction"
+    );
+    assert!(
+        plane.ledger().injected_ids().is_empty(),
+        "a fault that did not fire records nothing"
+    );
+    assert!(
+        plane.faults_applied() == 0,
+        "and it must not be counted towards an arm's expectation floor"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_rewrap_of_an_event_this_plane_never_carried_is_refused() {
+    let mut plane = plane().await;
+    let client = connected_client(&plane).await;
+    let _subscription = subscribed_to_everything(&client, &plane, "watching").await;
+
+    let never_published = an_application_445();
+    let refused = plane
+        .apply(Fault::Inject(Forgery::Rewrap {
+            source: never_published.id,
+            offset_secs: 60,
+        }))
+        .await;
+    assert!(
+        matches!(refused, Err(RigError::Core(_))),
+        "an OBSERVED ciphertext means one this relay really carried; a copy of nothing is \
+         a synthetic shape the arm did not ask for"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// RefuseOversize: the rig's first forged `OK false`
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_oversize_event_is_refused_machine_readably_and_a_smaller_one_is_not() {
+    let mut plane = plane().await;
+    let client = connected_client(&plane).await;
+
+    let refused = an_event("this one is over the cap");
+    plane
+        .apply(Fault::RefuseOversize {
+            max_bytes: ByteCap::new(refused.as_json().len() - 1),
+        })
+        .await
+        .expect("the cap applies");
+    publish(&client, &plane, &refused).await;
+
+    let ledger = plane.ledger().clone();
+    let id = refused.id;
+    reaching(WIRE_BOUND, 1, move || {
+        usize::from(ledger.refusal(&id).is_some())
+    })
+    .await;
+    let message = plane
+        .ledger()
+        .refusal(&refused.id)
+        .expect("the client was told why");
+    assert!(
+        message.starts_with(OVERSIZE_PREFIX.as_str()),
+        "a client branches on the machine-readable prefix"
+    );
+    assert!(
+        !plane.stored(&refused.id).await.expect("the store reads"),
+        "a refused event must not be in the store: a plane that stored it and said no would \
+         let an arm pass on the store"
+    );
+    assert!(
+        !plane.witnessed_ok(&refused.id),
+        "a refusal is not an acknowledgement (Rule 13)"
+    );
+
+    // The matched pair: the same plane, the same client, one byte of cap the
+    // other way. Without it the arm would pass on a plane that refuses
+    // everything.
+    let accepted = an_event("this one is under the cap");
+    plane
+        .apply(Fault::RefuseOversize {
+            max_bytes: ByteCap::new(accepted.as_json().len() + 1),
+        })
+        .await
+        .expect("the cap applies");
+    publish(&client, &plane, &accepted).await;
+    assert!(
+        acked_within(&plane, &accepted.id, WIRE_BOUND).await,
+        "an event inside the cap is carried and acknowledged as it always was"
+    );
+    assert!(
+        plane.stored(&accepted.id).await.expect("the store reads"),
+        "and stored"
+    );
+    assert!(
+        plane.ledger().refusal(&accepted.id).is_none(),
+        "and never refused"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_forged_refusal_has_the_shape_the_relays_own_refusal_has() {
+    let mut plane = plane().await;
+    let client = connected_client(&plane).await;
+
+    // The control is the relay's OWN refusal: an event whose signature does not
+    // verify, which `nostr-relay-builder` refuses with `invalid: …` of its own
+    // composition. A forged frame is only worth what its shape is.
+    let corrupted = corrupt_the_signature_of(&an_event("this signature is not mine"));
+    publish(&client, &plane, &corrupted).await;
+    let ledger = plane.ledger().clone();
+    let id = corrupted.id;
+    reaching(WIRE_BOUND, 1, move || {
+        usize::from(ledger.refusal(&id).is_some())
+    })
+    .await;
+    let native = plane
+        .ledger()
+        .refusal(&corrupted.id)
+        .expect("the relay refuses an unverifiable event");
+
+    let forged_at = an_event("this one is over the cap");
+    plane
+        .apply(Fault::RefuseOversize {
+            max_bytes: ByteCap::new(forged_at.as_json().len() - 1),
+        })
+        .await
+        .expect("the cap applies");
+    publish(&client, &plane, &forged_at).await;
+    let ledger = plane.ledger().clone();
+    let id = forged_at.id;
+    reaching(WIRE_BOUND, 1, move || {
+        usize::from(ledger.refusal(&id).is_some())
+    })
+    .await;
+    let forged = plane
+        .ledger()
+        .refusal(&forged_at.id)
+        .expect("the forged refusal reaches the client");
+
+    let prefix_of = |message: &str| {
+        nostr::message::MachineReadablePrefix::parse(message)
+            .map(|prefix| prefix.as_str().to_owned())
+    };
+    assert!(
+        prefix_of(&native) == prefix_of(&forged),
+        "the forged refusal must parse to the prefix a real one does, or an engine reacting \
+         to the prefix is reacting to something no relay sends"
+    );
+    assert!(
+        native != forged,
+        "the two say different things: the control proves the SHAPE, not the words"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refusal_and_a_swallowed_acknowledgement_are_distinct_in_the_ledger() {
+    // S18's whole oracle is the gap between the store and the client-facing
+    // ack. This is the proof that the rig's first `OK false` cannot be mistaken
+    // for it: both answer `witnessed_ok` with `false` — Rule 13's disposition
+    // is identical, which is correct — and the ledger tells them apart.
+    let mut swallowing = plane().await;
+    let swallow_client = connected_client(&swallowing).await;
+    swallowing
+        .apply(Fault::SwallowOk)
+        .await
+        .expect("the fault applies");
+    let swallowed = an_event("stored, and the ack never arrives");
+    publish(&swallow_client, &swallowing, &swallowed).await;
+    assert!(
+        stored_within(&swallowing, &swallowed.id, WIRE_BOUND).await,
+        "a swallowed OK means the relay HAS it"
+    );
+
+    let mut refusing = plane().await;
+    let refuse_client = connected_client(&refusing).await;
+    let refused = an_event("refused, and never stored");
+    refusing
+        .apply(Fault::RefuseOversize {
+            max_bytes: ByteCap::new(refused.as_json().len() - 1),
+        })
+        .await
+        .expect("the fault applies");
+    publish(&refuse_client, &refusing, &refused).await;
+    let ledger = refusing.ledger().clone();
+    let id = refused.id;
+    reaching(WIRE_BOUND, 1, move || {
+        usize::from(ledger.refusal(&id).is_some())
+    })
+    .await;
+
+    assert!(
+        !swallowing.witnessed_ok(&swallowed.id) && !refusing.witnessed_ok(&refused.id),
+        "neither is acked, which is why the disposition is the same"
+    );
+    assert!(
+        swallowing.ledger().refusal(&swallowed.id).is_none(),
+        "a swallowed OK leaves NO frame: recording one would turn S18's silence into a refusal"
+    );
+    assert!(
+        refusing.ledger().refusal(&refused.id).is_some(),
+        "a refusal is a frame the client really received"
+    );
+    assert!(
+        swallowing
+            .stored(&swallowed.id)
+            .await
+            .expect("the store reads")
+            && !refusing.stored(&refused.id).await.expect("the store reads"),
+        "stored-and-silent against refused-and-absent: the two halves that tell them apart"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Heal, over everything at once
 // ---------------------------------------------------------------------------
 
@@ -1030,6 +1479,11 @@ async fn a_heal_restores_the_pass_through_whatever_was_wrong() {
         Fault::ReversePages,
         Fault::EoseForAnotherSubscription,
         Fault::Closed(ClosedPrefix::RateLimited),
+        // One byte of cap: after the heal, a publish that would have been
+        // refused has to be carried again.
+        Fault::RefuseOversize {
+            max_bytes: ByteCap::new(1),
+        },
         Fault::Down,
     ] {
         plane.apply(fault).await.expect("the fault applies");

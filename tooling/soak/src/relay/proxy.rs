@@ -23,7 +23,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::Duration;
 
-use nostr::{ClientMessage, EventId, JsonUtil, RelayMessage, SubscriptionId};
+use nostr::{ClientMessage, Event, EventId, JsonUtil, RelayMessage, SubscriptionId};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
@@ -33,7 +33,7 @@ use tokio::task::JoinHandle;
 use crate::nemesis::types::ClosedPrefix;
 use crate::relay::forge::{take_frame, take_http_head, text_frame, Frame};
 use crate::relay::ledger::Ledger;
-use crate::relay::policies::closed_message;
+use crate::relay::policies::{closed_message, oversize_message};
 use crate::rig::{poll_until, RigError, Step};
 
 /// How long `Up` waits for its own port back.
@@ -99,6 +99,8 @@ pub struct FaultState {
     pub reverse_pages: bool,
     pub cross_eose: bool,
     pub closed: Option<ClosedPrefix>,
+    /// The largest `EVENT` this plane forwards, when one is capped.
+    pub max_event_bytes: Option<usize>,
 }
 
 /// The listening half of a plane.
@@ -229,6 +231,44 @@ impl Proxy {
             .send(RelayMessage::Notice(Cow::Borrowed(text)).as_json())
             .map(|_| ())
             .map_err(|_| RigError::Core(Step::ApplyFault))
+    }
+
+    /// Writes `forged` onto every subscription whose filter it matches.
+    ///
+    /// The relay's own delivery rule, not a guess: a relay puts an event on
+    /// every open subscription whose filter matches it, so an injection that
+    /// named one chosen by the harness would either be discarded by the client
+    /// (an unknown subscription) or delivered somewhere no relay would put it.
+    /// The event is never saved, which is the whole point — an injected event
+    /// is one an adversary put on the wire, and a later catch-up sweep must not
+    /// find it in the plane's pages.
+    ///
+    /// # Errors
+    ///
+    /// [`RigError::Core`] with [`Step::ApplyFault`] if no open subscription
+    /// matches it or nothing is connected: an injection nobody received did not
+    /// happen, and a bound derived from a fault that never fired is a fiction.
+    pub fn inject_event(&self, forged: &Event) -> Result<(), RigError> {
+        let matching = self.ledger.subscriptions_matching(forged);
+        if matching.is_empty() {
+            return Err(RigError::Core(Step::ApplyFault));
+        }
+        // Recorded once per injection, not once per frame: an arm asks the
+        // plane to forge ONE event, and it is the event — not the delivery —
+        // it later has to be able to name.
+        self.ledger.note_injected(forged.id);
+        for subscription_id in matching {
+            self.inject
+                .send(
+                    RelayMessage::Event {
+                        subscription_id: Cow::Owned(subscription_id),
+                        event: Cow::Borrowed(forged),
+                    }
+                    .as_json(),
+                )
+                .map_err(|_| RigError::Core(Step::ApplyFault))?;
+        }
+        Ok(())
     }
 
     fn serve_on(&mut self, listener: TcpListener) {
@@ -409,12 +449,35 @@ async fn forward_from_client(
         if let Ok(message) = ClientMessage::from_json(frame.payload().as_ref()) {
             let faults = *state.read().unwrap_or_else(PoisonError::into_inner);
             match message {
-                ClientMessage::Event(event) => ledger.note_published(event.id),
+                ClientMessage::Event(event) => {
+                    ledger.note_published(event.id);
+                    if oversize(&event, faults) {
+                        // Refused on the way OUT, so the relay never sees it:
+                        // a plane that both stored the event and told the
+                        // client it was too large would let an arm pass on the
+                        // store.
+                        return forged
+                            .send(
+                                RelayMessage::Ok {
+                                    event_id: event.id,
+                                    status: false,
+                                    message: Cow::Owned(oversize_message()),
+                                }
+                                .as_json(),
+                            )
+                            .await
+                            .is_ok();
+                    }
+                }
                 ClientMessage::Req {
-                    subscription_id, ..
+                    subscription_id,
+                    filters,
                 } => {
                     let subscription_id = subscription_id.into_owned();
-                    ledger.note_req(subscription_id.clone());
+                    ledger.note_req(
+                        subscription_id.clone(),
+                        filters.into_iter().map(Cow::into_owned).collect(),
+                    );
                     if let Some(prefix) = faults.closed {
                         // A refused REQ never reaches the relay: a relay that
                         // both served the page and closed the subscription
@@ -463,7 +526,9 @@ async fn deliver(
             let faults = *state.read().unwrap_or_else(PoisonError::into_inner);
             match message {
                 RelayMessage::Ok {
-                    event_id, status, ..
+                    event_id,
+                    status,
+                    message,
                 } => {
                     if faults.swallow_ok {
                         // The relay has it and said so; the client never hears
@@ -473,7 +538,7 @@ async fn deliver(
                     if !write(to_client, frame.bytes()).await {
                         return false;
                     }
-                    ledger.note_ok(event_id, status);
+                    ledger.note_ok(event_id, status, &message);
                     return true;
                 }
                 RelayMessage::Event {
@@ -523,6 +588,17 @@ async fn deliver(
     write(to_client, frame.bytes()).await
 }
 
+/// Whether this `EVENT` is over the plane's cap.
+///
+/// The EVENT's own JSON, not the frame's: that is what a relay's size limit
+/// measures, and it is the quantity an arm can take off an event it has staged
+/// but not yet published. The `["EVENT", …]` envelope belongs to the transport.
+fn oversize(event: &Event, faults: FaultState) -> bool {
+    faults
+        .max_event_bytes
+        .is_some_and(|cap| event.as_json().len() > cap)
+}
+
 /// Writes a forged frame and records it exactly as a relay-sent one would be.
 async fn write_forged(json: &str, to_client: &mut OwnedWriteHalf, ledger: &Ledger) -> bool {
     if !write(to_client, &text_frame(json.as_bytes())).await {
@@ -532,6 +608,15 @@ async fn write_forged(json: &str, to_client: &mut OwnedWriteHalf, ledger: &Ledge
         Ok(RelayMessage::Closed { message, .. }) => ledger.note_closed(message.into_owned()),
         Ok(RelayMessage::Notice(text)) => ledger.note_notice(text.into_owned()),
         Ok(RelayMessage::EndOfStoredEvents(_)) => ledger.note_eose(),
+        Ok(RelayMessage::Ok {
+            event_id,
+            status,
+            message,
+        }) => ledger.note_ok(event_id, status, &message),
+        // An injected `EVENT` is recorded as a delivery like any other: it
+        // really went out, and the ledger is the record of what the client was
+        // sent, not of who composed it.
+        Ok(RelayMessage::Event { event, .. }) => ledger.note_delivered(event.id),
         _ => {}
     }
     true

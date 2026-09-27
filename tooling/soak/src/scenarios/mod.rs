@@ -1,4 +1,4 @@
-//! The seven scenarios Phase 1 runs.
+//! The scenarios this crate runs.
 //!
 //! A scenario is a script with a grade attached: it puts the world into a
 //! specific, deliberately broken state, watches the product come out of it, and
@@ -32,16 +32,24 @@
 //! grows past the PR lane cannot be added without the sum saying so.
 
 pub mod s01_relay_outage;
+pub mod s04_offline_member;
+pub mod s05_publish_confirm;
 pub mod s06_stuck_row;
+pub mod s09_cursor_poisoning;
 pub mod s11_quiet_circle;
+pub mod s12_key_package_rotation;
 pub mod s13_quarantine;
+pub mod s14_restart_race;
 pub mod s17_closed_prefixes;
 pub mod s18_swallowed_ok;
 pub mod s19_duplicate_reorder;
+pub mod s22_oversized_event;
 
 use std::fmt;
 use std::time::Duration;
 
+use haven_core::circle::MemberKeyPackage;
+use haven_core::relay::maintenance::build_kp_maintenance_events;
 use nostr::Event;
 
 use crate::oracle::bounds;
@@ -231,16 +239,34 @@ pub enum Absence {
     /// The delivery-silence window: how long a group REQ may deliver neither an
     /// event nor an `EOSE` before it counts as silent.
     DeliverySilenceWindow,
+    /// The tail after a removal is confirmed, during which a remaining member's
+    /// NEXT fix must already carry the post-removal epoch.
+    ///
+    /// `location_publish_window()` — one bounded location attempt, no retry
+    /// behind it (`haven-core/src/relay/manager.rs`'s
+    /// `LOCATION_PUBLISH_ATTEMPTS` × `LOCATION_ACK_WINDOW`). NOT the 168-second
+    /// `kLocationPublishMaxInterval`: that is a Dart constant with no
+    /// haven-core equivalent, and in Tier 1 the rig is its own publish
+    /// scheduler, so the tail it owes is one publish attempt per remaining
+    /// member rather than a scheduler's own period.
+    RemovalPublishTail,
 }
 
 impl Absence {
     /// The window this absence spans.
+    ///
+    /// A pure function of the variant, which is all it can structurally be: an
+    /// arm's absence is priced from `Arm::deadline` with nothing but `self` in
+    /// hand, so an absence whose length depended on the arm's world could not
+    /// be expressed here at all — and an unpriced wait is a budget hole and a
+    /// flake generator at once.
     #[must_use]
     pub fn window(self) -> Duration {
         match self {
             Self::None => Duration::ZERO,
             Self::ThrottledBackoffFloor => bounds::throttled_backoff_floor(),
             Self::DeliverySilenceWindow => bounds::silence_window(),
+            Self::RemovalPublishTail => bounds::location_publish_window(),
         }
     }
 }
@@ -250,13 +276,25 @@ impl Absence {
 pub enum Scenario {
     /// **S01** — a relay goes away and comes back.
     RelayOutage,
+    /// **S04** — a member is away across a span, and comes back.
+    OfflineMember,
+    /// **S05** — a resolution fails inside the publish→confirm window.
+    PublishConfirmWindow,
     /// **S06** — a stored convergence input gates a circle until the sweep
     /// retires it.
     StuckRow,
+    /// **S09** — an adversary forges at a circle's public routing id for the
+    /// whole run, and neither receive plane's anchor takes a number from it.
+    CursorPoisoning,
     /// **S11** — a circle stays quiet across a long policy span and resumes.
     QuietCircle,
+    /// **S12** — a `KeyPackage` reaches the rotation point of its own lifetime.
+    KeyPackageRotation,
     /// **S13** — a device loses one group's `OpenMLS` state and reopens.
     HydrationQuarantine,
+    /// **S14** — two devices commit from one epoch, and one of them restarts in
+    /// the middle of it.
+    RestartRace,
     /// **S17** — a relay refuses subscriptions, machine-readably.
     ClosedPrefixes,
     /// **S18** — a relay stores an event and the acknowledgement never reaches
@@ -264,18 +302,27 @@ pub enum Scenario {
     SwallowedOk,
     /// **S19** — duplicated, reordered and cross-addressed delivery.
     DuplicateReorder,
+    /// **S22** — an event a relay will not take, and the removal that can never
+    /// be retried.
+    OversizedEvent,
 }
 
 impl Scenario {
-    /// Every scenario Phase 1 runs.
-    pub const REGISTRY: [Self; 7] = [
+    /// Every scenario this crate runs.
+    pub const REGISTRY: [Self; 13] = [
         Self::RelayOutage,
+        Self::OfflineMember,
+        Self::PublishConfirmWindow,
         Self::StuckRow,
+        Self::CursorPoisoning,
         Self::QuietCircle,
+        Self::KeyPackageRotation,
         Self::HydrationQuarantine,
+        Self::RestartRace,
         Self::ClosedPrefixes,
         Self::SwallowedOk,
         Self::DuplicateReorder,
+        Self::OversizedEvent,
     ];
 
     /// The id the profiles, the timeline and `--list-scenarios` spell.
@@ -283,12 +330,18 @@ impl Scenario {
     pub const fn id(self) -> &'static str {
         match self {
             Self::RelayOutage => "S01",
+            Self::OfflineMember => "S04",
+            Self::PublishConfirmWindow => "S05",
             Self::StuckRow => "S06",
+            Self::CursorPoisoning => "S09",
             Self::QuietCircle => "S11",
+            Self::KeyPackageRotation => "S12",
             Self::HydrationQuarantine => "S13",
+            Self::RestartRace => "S14",
             Self::ClosedPrefixes => "S17",
             Self::SwallowedOk => "S18",
             Self::DuplicateReorder => "S19",
+            Self::OversizedEvent => "S22",
         }
     }
 
@@ -297,12 +350,18 @@ impl Scenario {
     pub const fn title(self) -> &'static str {
         match self {
             Self::RelayOutage => "RELAY OUTAGE",
+            Self::OfflineMember => "MEMBER OFFLINE ACROSS A SPAN",
+            Self::PublishConfirmWindow => "PUBLISH-CONFIRM WINDOW",
             Self::StuckRow => "STUCK CONVERGENCE ROW",
+            Self::CursorPoisoning => "CURSOR-POISONING STANDING ADVERSARY",
             Self::QuietCircle => "QUIET CIRCLE RESUME",
+            Self::KeyPackageRotation => "KEYPACKAGE ROTATION SLOT",
             Self::HydrationQuarantine => "HYDRATION QUARANTINE",
+            Self::RestartRace => "RESTART DURING A COMMIT RACE",
             Self::ClosedPrefixes => "CLOSED PREFIXES AND NOTICE",
             Self::SwallowedOk => "SWALLOWED ACKNOWLEDGEMENT",
             Self::DuplicateReorder => "DUPLICATE AND REORDERED DELIVERY",
+            Self::OversizedEvent => "OVERSIZED COMMIT AND WELCOME",
         }
     }
 
@@ -311,12 +370,18 @@ impl Scenario {
     pub const fn arms(self) -> &'static [Arm] {
         match self {
             Self::RelayOutage => &s01_relay_outage::ARMS,
+            Self::OfflineMember => &s04_offline_member::ARMS,
+            Self::PublishConfirmWindow => &s05_publish_confirm::ARMS,
             Self::StuckRow => &s06_stuck_row::ARMS,
+            Self::CursorPoisoning => &s09_cursor_poisoning::ARMS,
             Self::QuietCircle => &s11_quiet_circle::ARMS,
+            Self::KeyPackageRotation => &s12_key_package_rotation::ARMS,
             Self::HydrationQuarantine => &s13_quarantine::ARMS,
+            Self::RestartRace => &s14_restart_race::ARMS,
             Self::ClosedPrefixes => &s17_closed_prefixes::ARMS,
             Self::SwallowedOk => &s18_swallowed_ok::ARMS,
             Self::DuplicateReorder => &s19_duplicate_reorder::ARMS,
+            Self::OversizedEvent => &s22_oversized_event::ARMS,
         }
     }
 
@@ -364,12 +429,18 @@ impl Scenario {
         let started = tokio::time::Instant::now();
         let outcome = match self {
             Self::RelayOutage => s01_relay_outage::run(world, arm, tick).await?,
+            Self::OfflineMember => s04_offline_member::run(world, arm, tick).await?,
+            Self::PublishConfirmWindow => s05_publish_confirm::run(world, arm, tick).await?,
             Self::StuckRow => s06_stuck_row::run(world, arm, tick).await?,
+            Self::CursorPoisoning => s09_cursor_poisoning::run(world, arm, tick).await?,
             Self::QuietCircle => s11_quiet_circle::run(world, arm, tick).await?,
+            Self::KeyPackageRotation => s12_key_package_rotation::run(world, arm, tick).await?,
             Self::HydrationQuarantine => s13_quarantine::run(world, arm, tick).await?,
+            Self::RestartRace => s14_restart_race::run(world, arm, tick).await?,
             Self::ClosedPrefixes => s17_closed_prefixes::run(world, arm, tick).await?,
             Self::SwallowedOk => s18_swallowed_ok::run(world, arm, tick).await?,
             Self::DuplicateReorder => s19_duplicate_reorder::run(world, arm, tick).await?,
+            Self::OversizedEvent => s22_oversized_event::run(world, arm, tick).await?,
         };
         Ok(ScenarioReport {
             scenario: self,
@@ -547,6 +618,12 @@ fn closing_over(chain: &[(DeviceTag, DeviceTag)], lead: DeviceTag) -> Vec<(Devic
 }
 
 /// Builds one round's declaration.
+///
+/// The retention edges are the one term this does not take: O4's subject is fed
+/// by exactly one arm, and an eighth parameter on every call site would price
+/// it on all of them. An arm that has edges attaches them with
+/// [`Round::with_retention`]; the empty slice here is the declaration that this
+/// round tested no window edge.
 pub(crate) const fn round<'a>(
     ordinal: u32,
     reach: Reach<'a>,
@@ -564,6 +641,7 @@ pub(crate) const fn round<'a>(
         row_envelope,
         burst_opened,
         classified,
+        retention: &[],
     }
 }
 
@@ -693,6 +771,155 @@ pub(crate) async fn relay_update<T: TimelineSink, L: LogDrain>(
     Ok((event, verdict))
 }
 
+/// Removes `victim` from `circle` under `admin`, resolved under Rule 13.
+///
+/// Public, unlike [`relay_update`], because the rig's membership ops are a
+/// capability of this crate rather than of one scenario: the arms that need
+/// them are not all written yet, and the crate's own tests drive them
+/// meanwhile.
+///
+/// The membership sibling of [`relay_update`], and the same shape: stage,
+/// publish-and-witness, confirm on an ack or roll back without one, drain the
+/// engine's replay. The commit event comes back so a scenario can withhold it,
+/// forge against it or watch for it on a plane.
+///
+/// The world's own roster table is NOT updated, deliberately: no oracle reads
+/// [`SimCircle::members`] — every roster verdict is read from the product's own
+/// converged roster — so a second, harness-side copy of the membership could
+/// only ever disagree with the subject.
+///
+/// # Errors
+///
+/// [`RigError::Core`] naming the step that failed: staging (the engine refused
+/// the removal, e.g. the caller is not an admin) or the Rule-13 resolution.
+pub async fn remove_member<T: TimelineSink, L: LogDrain>(
+    world: &ScenarioWorld<T, L>,
+    admin: DeviceTag,
+    circle: &SimCircle,
+    victim: DeviceTag,
+) -> Result<(Event, PublishVerdict), RigError> {
+    let victim_pubkey = world.device(victim)?.pubkey_hex();
+    let staged = world
+        .device(admin)?
+        .manager()?
+        .remove_members(circle.mls_group_id(), std::slice::from_ref(&victim_pubkey))
+        .await
+        .map_err(|_| RigError::Core(Step::StageCommit))?;
+    let commit = staged.commit_event.clone();
+    let verdict = world
+        .publish_and_confirm(admin, staged.pending, std::slice::from_ref(&commit))
+        .await?;
+    Ok((commit, verdict))
+}
+
+/// Adds `joiner` to `circle` under `admin`, and joins it from its own welcome.
+///
+/// The welcomes go out with the commit and the whole batch is resolved once:
+/// haven-core stages one pending state for an add, and a rig that confirmed the
+/// commit while a welcome was still in flight would be inventing a second
+/// Rule-13 window the product does not have.
+///
+/// The joiner processes its welcome only on a CONFIRMED add: a rolled-back
+/// commit means the group never advanced, and a member that joined from its
+/// welcome anyway would be a member of an epoch nobody else holds.
+///
+/// # Errors
+///
+/// [`RigError::Core`] naming the step that failed: minting the joiner's key
+/// package, staging the add, the Rule-13 resolution, or the join itself.
+pub async fn add_member<T: TimelineSink, L: LogDrain>(
+    world: &ScenarioWorld<T, L>,
+    admin: DeviceTag,
+    circle: &SimCircle,
+    joiner: DeviceTag,
+) -> Result<(Event, PublishVerdict), RigError> {
+    let urls = world.relay_urls();
+    let joining = world.device(joiner)?;
+    let key_package =
+        build_kp_maintenance_events(joining.session()?, &joining.keys, &urls, None, None)
+            .await
+            .map_err(|_| RigError::Core(Step::MintKeyPackage))?;
+    let sender = world.device(admin)?;
+    let staged = sender
+        .manager()?
+        .add_members_with_welcomes(
+            &sender.keys,
+            circle.mls_group_id(),
+            vec![MemberKeyPackage {
+                key_package_event: key_package.event,
+                // Explicit, always: an empty relay set falls back to the
+                // PRODUCTION default pool, which would take the welcome off
+                // this world's relay and onto the public network.
+                inbox_relays: urls.clone(),
+                nip65_relays: Vec::new(),
+            }],
+            &urls,
+        )
+        .await
+        .map_err(|_| RigError::Core(Step::StageCommit))?;
+
+    let commit = staged.commit_event.clone();
+    let mut batch = vec![commit.clone()];
+    batch.extend(
+        staged
+            .welcome_events
+            .iter()
+            .map(|welcome| welcome.event.clone()),
+    );
+    let verdict = world
+        .publish_and_confirm(admin, staged.pending, &batch)
+        .await?;
+    if verdict == PublishVerdict::Confirmed {
+        for welcome in &staged.welcome_events {
+            if welcome.recipient_pubkey != joining.pubkey_hex() {
+                continue;
+            }
+            joining
+                .manager()?
+                .process_gift_wrapped_invitation(&joining.keys, &welcome.event)
+                .await
+                .map_err(|_| RigError::Core(Step::ProcessInvitation))?;
+            joining
+                .manager()?
+                .accept_invitation(&welcome.event.id)
+                .await
+                .map_err(|_| RigError::Core(Step::AcceptInvitation))?;
+        }
+    }
+    Ok((commit, verdict))
+}
+
+/// Makes `successor` an admin of `circle`, resolved under Rule 13.
+///
+/// An ADDITIVE policy update, which is what the product's own call is: the
+/// existing admins keep the bit. A scenario that needs the handing-off device
+/// to lose it demotes itself afterwards, which is a second commit and a second
+/// Rule-13 window.
+///
+/// # Errors
+///
+/// [`RigError::Core`] naming the step that failed: staging (the caller is not
+/// an admin, or the successor holds no leaf in the group) or the resolution.
+pub async fn hand_off_admin<T: TimelineSink, L: LogDrain>(
+    world: &ScenarioWorld<T, L>,
+    admin: DeviceTag,
+    circle: &SimCircle,
+    successor: DeviceTag,
+) -> Result<(Event, PublishVerdict), RigError> {
+    let successor_pubkey = world.device(successor)?.keys.public_key();
+    let staged = world
+        .device(admin)?
+        .manager()?
+        .propose_admin_handoff(circle.mls_group_id(), &successor_pubkey)
+        .await
+        .map_err(|_| RigError::Core(Step::StageCommit))?;
+    let commit = staged.commit_event.clone();
+    let verdict = world
+        .publish_and_confirm(admin, staged.pending, std::slice::from_ref(&commit))
+        .await?;
+    Ok((commit, verdict))
+}
+
 /// How many location deliveries `device` has folded for `circle`.
 pub(crate) fn deliveries_for(device: &SimDevice, circle: CircleTag) -> u64 {
     device.ledger().deliveries_for(circle)
@@ -701,15 +928,245 @@ pub(crate) fn deliveries_for(device: &SimDevice, circle: CircleTag) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        registry, Absence, Arm, Scenario, WithheldAcks, MINIMAL_SHAPE, NO_GATING_ROWS,
-        WITNESS_BOUND,
+        add_member, hand_off_admin, registry, remove_member, Absence, Arm, PublishVerdict,
+        Scenario, SimCircle, WithheldAcks, MINIMAL_SHAPE, NO_GATING_ROWS, WITNESS_BOUND,
     };
+    use crate::nemesis::types::Schedule;
     use crate::oracle::bounds;
     use crate::oracle::Recovery;
     use crate::profiles::WorldShape;
     use crate::profiles::{ProfileName, ProfileSpec};
-    use crate::rig::{DeviceTag, SimWorld};
+    use crate::relay::SimRelay;
+    use crate::rig::circle::build_circle;
+    use crate::rig::doubles::{RecordingTimeline, StubDrain};
+    use crate::rig::{CircleTag, DeviceTag, RelayPlane, RelayTag, SimWorld};
+    use haven_core::nostr::mls::types::ConvergedRoster;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::Arc;
     use std::time::Duration;
+
+    /// The world the membership cases run in: three real devices on a real
+    /// plane, so a removal still leaves a pair that can talk.
+    type MembershipWorld = super::ScenarioWorld<RecordingTimeline, StubDrain>;
+
+    async fn membership_world() -> MembershipWorld {
+        let relay = SimRelay::start(RelayTag::new(0))
+            .await
+            .expect("the relay plane starts");
+        SimWorld::build(
+            &WorldShape {
+                members: 3,
+                circles: 1,
+                relays: 1,
+            },
+            Schedule::new(Vec::new()),
+            vec![relay],
+            RecordingTimeline::default(),
+            StubDrain::default(),
+        )
+        .await
+        .expect("the world builds")
+    }
+
+    /// A circle over the world's FIRST TWO devices only.
+    ///
+    /// Every circle a world builds holds every device, so this is the only
+    /// shape in which "add somebody" is a thing that can happen at all. It is
+    /// deliberately outside `world.circles()` — nothing world-wide grades it —
+    /// which is exactly the disposition `build_extra_circle` documents.
+    async fn circle_without_the_third_device(world: &MembershipWorld) -> SimCircle {
+        build_circle(
+            CircleTag::new(9),
+            &world.devices()[..2],
+            world.relays(),
+            &world.relay_urls(),
+            &Arc::new(AtomicUsize::new(0)),
+        )
+        .await
+        .expect("a two-member circle is created")
+    }
+
+    /// `device`'s own view of who is in `circle`.
+    async fn roster_of(
+        world: &MembershipWorld,
+        device: DeviceTag,
+        circle: &SimCircle,
+    ) -> Vec<String> {
+        let roster = world
+            .device(device)
+            .expect("a device")
+            .session()
+            .expect("a session")
+            .converged_member_pubkeys(circle.mls_group_id())
+            .await
+            .expect("a roster reads");
+        let ConvergedRoster::Converged {
+            mut member_pubkeys_hex,
+            ..
+        } = roster
+        else {
+            panic!("a device that just committed must hold a converged roster");
+        };
+        member_pubkeys_hex.sort();
+        member_pubkeys_hex
+    }
+
+    async fn epoch_of(world: &MembershipWorld, device: DeviceTag, circle: &SimCircle) -> u64 {
+        world
+            .device(device)
+            .expect("a device")
+            .manager()
+            .expect("a manager")
+            .group_epoch(circle.mls_group_id())
+            .await
+            .expect("an epoch reads")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_removal_is_confirmed_under_rule_13_and_takes_the_victim_off_the_roster() {
+        let world = membership_world().await;
+        let circle = circle_without_the_third_device(&world).await;
+        let (admin, victim) = (DeviceTag::new(0), DeviceTag::new(1));
+        let victim_pubkey = world.device(victim).expect("a device").pubkey_hex();
+
+        let before = epoch_of(&world, admin, &circle).await;
+        assert!(
+            roster_of(&world, admin, &circle)
+                .await
+                .contains(&victim_pubkey),
+            "the victim must be in the circle before it can be removed from one"
+        );
+
+        let (commit, verdict) = remove_member(&world, admin, &circle, victim)
+            .await
+            .expect("the removal stages and resolves");
+
+        assert!(
+            verdict == PublishVerdict::Confirmed,
+            "a witnessed ack is what licenses the merge (Rule 13)"
+        );
+        assert!(
+            epoch_of(&world, admin, &circle).await > before,
+            "a confirmed removal advances the epoch"
+        );
+        assert!(
+            !roster_of(&world, admin, &circle)
+                .await
+                .contains(&victim_pubkey),
+            "the roster the product reports is what the removal has to change"
+        );
+        assert!(
+            world.relays()[0].witnessed_ok(&commit.id),
+            "the commit the caller gets back is the one that really crossed the wire"
+        );
+        assert!(
+            world.outstanding_pending_refs() == 0,
+            "a staged commit nobody resolved forks the group"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_add_is_confirmed_under_rule_13_and_the_joiner_ends_up_in_the_group() {
+        let world = membership_world().await;
+        let circle = circle_without_the_third_device(&world).await;
+        let (admin, joiner) = (DeviceTag::new(0), DeviceTag::new(2));
+        let joiner_pubkey = world.device(joiner).expect("a device").pubkey_hex();
+
+        let before = epoch_of(&world, admin, &circle).await;
+        assert!(
+            !roster_of(&world, admin, &circle)
+                .await
+                .contains(&joiner_pubkey),
+            "the joiner must be outside the circle, or the add proves nothing"
+        );
+
+        let (commit, verdict) = add_member(&world, admin, &circle, joiner)
+            .await
+            .expect("the add stages, resolves and is joined");
+
+        assert!(
+            verdict == PublishVerdict::Confirmed,
+            "a witnessed ack is what licenses the merge (Rule 13)"
+        );
+        assert!(
+            epoch_of(&world, admin, &circle).await > before,
+            "a confirmed add advances the epoch"
+        );
+        assert!(
+            roster_of(&world, admin, &circle)
+                .await
+                .contains(&joiner_pubkey),
+            "the admin's own roster must carry the member it just added"
+        );
+        assert!(
+            roster_of(&world, joiner, &circle)
+                .await
+                .contains(&joiner_pubkey),
+            "and the joiner must hold the group it was welcomed into, not merely a welcome"
+        );
+        assert!(
+            world.relays()[0].witnessed_ok(&commit.id),
+            "the commit the caller gets back is the one that really crossed the wire"
+        );
+        assert!(
+            world.outstanding_pending_refs() == 0,
+            "a staged commit nobody resolved forks the group"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_handoff_is_confirmed_and_the_successor_can_then_commit_itself() {
+        let world = membership_world().await;
+        let circle = circle_without_the_third_device(&world).await;
+        let (admin, successor) = (DeviceTag::new(0), DeviceTag::new(1));
+
+        // The successor cannot commit before the handoff: the engine refuses a
+        // membership change from a non-admin, which is what makes the handoff
+        // the cause of the second half of this test.
+        let refused = remove_member(&world, successor, &circle, admin).await;
+        assert!(
+            refused.is_err(),
+            "a non-admin must not be able to remove anybody"
+        );
+
+        let (commit, verdict) = hand_off_admin(&world, admin, &circle, successor)
+            .await
+            .expect("the handoff stages and resolves");
+        assert!(
+            verdict == PublishVerdict::Confirmed,
+            "a witnessed ack is what licenses the merge (Rule 13)"
+        );
+        assert!(
+            world.relays()[0].witnessed_ok(&commit.id),
+            "the handoff commit really crossed the wire"
+        );
+
+        // The successor's own engine has to have APPLIED the handoff before it
+        // can use it, and in this world nothing delivers it: the commit goes
+        // in through the same ingest a live plane would use.
+        world
+            .device(successor)
+            .expect("a device")
+            .session()
+            .expect("a session")
+            .process_event_typed_for_test(&commit)
+            .await
+            .expect("the successor ingests the handoff commit")
+            .ingested()
+            .expect("a handoff commit is not screened before authentication");
+
+        let (_, verdict) = hand_off_admin(&world, successor, &circle, admin)
+            .await
+            .expect("the new admin can now commit a policy change of its own");
+        assert!(
+            verdict == PublishVerdict::Confirmed,
+            "the successor holds the admin bit the handoff gave it"
+        );
+        assert!(
+            world.outstanding_pending_refs() == 0,
+            "a staged commit nobody resolved forks the group"
+        );
+    }
 
     #[test]
     fn every_registered_scenario_has_a_distinct_id_and_at_least_one_arm() {
@@ -895,6 +1352,53 @@ mod tests {
         assert!(
             arm.deadline(tick, &MINIMAL_SHAPE) > arm.absence.window(),
             "the deadline must pay for the absence it asserts"
+        );
+    }
+
+    #[test]
+    fn every_absence_is_a_named_product_window_and_every_one_of_them_is_priced() {
+        // Exhaustive on purpose: an absence whose window nothing derives is a
+        // wait somebody can quietly shorten, and one nothing prices is a budget
+        // hole that shows up as a flake.
+        for absence in [
+            Absence::None,
+            Absence::ThrottledBackoffFloor,
+            Absence::DeliverySilenceWindow,
+            Absence::RemovalPublishTail,
+        ] {
+            let window = absence.window();
+            assert!(
+                (absence == Absence::None) == window.is_zero(),
+                "only the absence that asserts nothing may span nothing"
+            );
+            let arm = Arm {
+                label: "priced",
+                recovery: Recovery::Undisturbed,
+                probe_rounds: 0,
+                resubscribes: false,
+                absence,
+                withheld_acks: WithheldAcks::None,
+                floor: crate::oracle::vacuity::ExpectationFloor {
+                    faults_applied: 1,
+                    epochs_crossed: 0,
+                    deliveries_observed: 0,
+                    canaries_caught: 0,
+                },
+            };
+            let without = Arm {
+                absence: Absence::None,
+                ..arm
+            };
+            assert!(
+                arm.deadline(Duration::from_millis(250), &MINIMAL_SHAPE)
+                    == without.deadline(Duration::from_millis(250), &MINIMAL_SHAPE) + window,
+                "an arm's deadline must grow by exactly the window it waits out"
+            );
+        }
+        assert!(
+            Absence::RemovalPublishTail.window() == bounds::location_publish_window(),
+            "the removal tail is the product's own location publish window: one bounded \
+             attempt, with no retry behind it"
         );
     }
 

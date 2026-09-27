@@ -20,16 +20,38 @@ id = "S01"
 arms = ["single-relay-outage", "all-relay-outage", "rolling-outage"]
 
 [[scenarios]]
+id = "S04"
+arms = ["offline-quiet", "offline-across-commits", "offline-past-retention",
+        "offline-across-removal"]
+
+[[scenarios]]
+id = "S05"
+arms = ["confirm-err-is-not-a-failure"]
+
+[[scenarios]]
 id = "S06"
 arms = ["stuck-row-sweep"]
+
+[[scenarios]]
+id = "S09"
+arms = ["standing-adversary", "rewrap-created-at-binding"]
 
 [[scenarios]]
 id = "S11"
 arms = ["quiet-circle-resume"]
 
 [[scenarios]]
+id = "S12"
+arms = ["kp-rotation-slot"]          # the day-85 rejection is a later sub-phase
+
+[[scenarios]]
 id = "S13"
 arms = ["hydration-quarantine"]
+
+[[scenarios]]
+id = "S14"
+arms = ["race-no-restart", "race-restart-after-confirm", "race-restart-before-confirm",
+        "race-anchor-exhausted"]
 
 [[scenarios]]
 id = "S17"
@@ -42,3 +64,8 @@ arms = ["swallowed-ok-create", "swallowed-ok-relay-update", "swallowed-ok-locati
 [[scenarios]]
 id = "S19"
 arms = ["duplicate-replay", "reordered-pages", "cross-sub-eose", "commit-gap"]
+
+[[scenarios]]
+id = "S22"
+arms = ["oversized-commit", "refusal-is-relay-count-invariant", "oversized-welcome",
+        "oversized-removal-wedges-the-circle"]

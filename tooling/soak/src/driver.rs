@@ -49,6 +49,7 @@ use crate::rig::{
 };
 use crate::scenarios::{Scenario, ScenarioReport, ScenarioWorld};
 use crate::timeline::{self, Snapshot, Timeline};
+use crate::verdict::{RunVerdict, VerdictError, Violation};
 
 /// What one run is asked to do.
 ///
@@ -109,16 +110,55 @@ async fn run_inner(plan: &RunPlan) -> Result<Rc, Refusal> {
         .write_schedule(&dir, &plan.schedule)
         .map_err(|_| Refusal::Artifact)?;
 
-    let verdicts = drive(plan, &timeline, &dir).await?;
-    timeline::write_markers(&dir, verdicts).map_err(|_| Refusal::Artifact)?;
+    let outcome = drive(plan, &timeline, &dir).await?;
+    timeline::write_markers(&dir, outcome.verdicts).map_err(|_| Refusal::Artifact)?;
     timeline.flush().map_err(|_| Refusal::Artifact)?;
+
+    // The machine-readable half, written from the same two things the banner
+    // prints and the first violation the run recorded. Beside the banner, and
+    // after the markers: a reader that finds one finds the other.
+    let verdict = RunVerdict::new(
+        plan.spec.name,
+        plan.seed,
+        &plan.schedule.tag(),
+        &plan.provenance,
+        outcome.verdicts.rc(),
+    );
+    let verdict = match outcome.violation {
+        Some(violation) => verdict.with_violation(violation),
+        None => verdict,
+    };
+    if let Err(error) = verdict.write_to(&dir) {
+        if let Some(refused) = refusal_for(error) {
+            return Err(refused);
+        }
+        // The only variant `refusal_for` lets through, named so the line
+        // provably renders a fixed sentence and never a value.
+        eprintln!("haven-soak: {}", VerdictError::Unvalidated);
+    }
 
     let measured = Measured::new(started.elapsed());
     banner
         .write_to(&dir, Some(measured))
         .map_err(|_| Refusal::Artifact)?;
     print!("{}", banner.render(Some(measured)));
-    Ok(verdicts.rc())
+    Ok(outcome.verdicts.rc())
+}
+
+/// What a failed verdict write costs the run.
+///
+/// [`VerdictError::Unvalidated`] is **not** a rig fault. The run graded; what it
+/// could not do is vouch for a free-form field, so the file is dropped and the
+/// run's own exit code stays its verdict — which is what an absent `verdict.log`
+/// already means to every reader of it. Folding it into [`Refusal::Artifact`]
+/// would overwrite a real rc 0/1/3 with rc 2 and throw the grading away.
+/// [`VerdictError::Unwritable`] is the opposite: the artifact tree is then not
+/// the one the scan chain was promised, and that is a rig fault.
+const fn refusal_for(error: VerdictError) -> Option<Refusal> {
+    match error {
+        VerdictError::Unvalidated => None,
+        VerdictError::Unwritable => Some(Refusal::Artifact),
+    }
 }
 
 /// Why a run could not finish. A classification: everything underneath it
@@ -189,7 +229,7 @@ pub type RunWorld = ScenarioWorld<Timeline, SoakLogs>;
 /// The lease is taken here and passed on, so its life is the driven world's
 /// and not this function's: `SoakLogs` is a process-wide capture lease, and the
 /// next world waits on it.
-async fn drive(plan: &RunPlan, timeline: &Timeline, dir: &Path) -> Result<Verdicts, Refusal> {
+async fn drive(plan: &RunPlan, timeline: &Timeline, dir: &Path) -> Result<Outcome, Refusal> {
     // The run's own deadline bounds the wait: a lease still held here is a
     // leaked handle or a second run in this process, and either way the run has
     // to answer with a verdict rather than sit until the lane's reaper kills it
@@ -198,13 +238,24 @@ async fn drive(plan: &RunPlan, timeline: &Timeline, dir: &Path) -> Result<Verdic
     drive_with(plan, timeline, dir, logs).await
 }
 
+/// What a driven run leaves behind: the two verdicts it folds, and the first
+/// thing that broke.
+///
+/// The violation is carried out rather than left in the snapshot file, because
+/// the file is prose for a human and `verdict.log` is a field set for a job: a
+/// reader that had to parse the snapshot back would be parsing a rendering.
+struct Outcome {
+    verdicts: Verdicts,
+    violation: Option<Violation>,
+}
+
 /// Drives one run under an already-held capture lease.
 async fn drive_with(
     plan: &RunPlan,
     timeline: &Timeline,
     dir: &Path,
     logs: SoakLogs,
-) -> Result<Verdicts, Refusal> {
+) -> Result<Outcome, Refusal> {
     let needles = Arc::new(NeedleSink::new()?);
     let mut run = Run {
         dir: dir.to_path_buf(),
@@ -221,7 +272,7 @@ async fn drive_with(
         manifest_out: plan.needle_manifest.clone(),
         seal_generation: 0,
         verdicts: Verdicts::new(),
-        first_violation: false,
+        first_violation: None,
         last_scan: Vec::new(),
         stopped: false,
         phase_started: tokio::time::Instant::now(),
@@ -233,7 +284,10 @@ async fn drive_with(
     if !run.stopped {
         run.scenario_phase(&plan.spec, timeline).await?;
     }
-    Ok(run.verdicts)
+    Ok(Outcome {
+        verdicts: run.verdicts,
+        violation: run.first_violation,
+    })
 }
 
 /// The run's declaration sink: one [`Needles`] set behind a lock, because a
@@ -337,7 +391,10 @@ struct Run {
     /// two seals of one run never collide on a `create_new` open.
     seal_generation: u64,
     verdicts: Verdicts,
-    first_violation: bool,
+    /// The first thing that broke, in the shape `verdict.log` carries. `None`
+    /// is also the flag: the snapshot and the verdict both belong to the FIRST
+    /// violation, and a second one would overwrite the evidence for the first.
+    first_violation: Option<Violation>,
     /// What the last capture's scan found: class, encoding and `capture:line`,
     /// carried so a snapshot says what the scanner saw at the moment the oracle
     /// looked rather than leaving the field empty.
@@ -526,6 +583,9 @@ impl Run {
             row_envelope: 0,
             burst_opened: &[],
             classified: &[],
+            // The schedule's own rounds feed no retention edge: the window is
+            // a scenario's subject, not the background nemesis's.
+            retention: &[],
         };
         let verdict = Invariant::LocationRoundTrip.check(world, &round).await?;
         self.report_oracle(world, Invariant::LocationRoundTrip, verdict)
@@ -558,6 +618,7 @@ impl Run {
             row_envelope: 0,
             burst_opened: &[],
             classified: &[],
+            retention: &[],
         };
         for invariant in [
             Invariant::LocationRoundTrip,
@@ -717,12 +778,45 @@ impl Run {
             let rendered = format!("{invariant}: {verdict}");
             println!("{rendered}");
         }
-        if rc != Rc::Clean && !self.first_violation {
+        if rc != Rc::Clean && self.first_violation.is_none() {
             let snapshot = self.violation(world, report);
             self.snapshot(world, &snapshot)?;
-            self.first_violation = true;
+            self.first_violation = Self::machine_violation(world, report);
         }
         Ok(())
+    }
+
+    /// The same first violation, in the field set `verdict.log` carries.
+    ///
+    /// Built from the SAME two sources the snapshot is — the first oracle that
+    /// answered anything but `Holds`, or else the arm's own expectation floor —
+    /// so the file a job reads and the file a person reads cannot disagree
+    /// about what broke.
+    fn machine_violation(world: &RunWorld, report: &ScenarioReport) -> Option<Violation> {
+        let broken = report
+            .graded
+            .iter()
+            .find(|(_, verdict)| *verdict != Verdict::Holds)
+            .map_or_else(
+                || match report.floor {
+                    Verdict::Failed(finding) => Some((None, finding)),
+                    Verdict::Holds => None,
+                },
+                |(invariant, verdict)| match verdict {
+                    Verdict::Failed(finding) => Some((Some(*invariant), *finding)),
+                    Verdict::Holds => None,
+                },
+            );
+        let (invariant, finding) = broken?;
+        Some(Violation::new(
+            report.scenario.id(),
+            report.arm,
+            invariant,
+            finding,
+            world.current_tick(),
+            report.deadline.as_secs(),
+            report.elapsed.as_secs(),
+        ))
     }
 
     /// The first-violation snapshot for `report`.
@@ -806,21 +900,36 @@ impl Run {
         // The oracle's own rendering: a classification and the rig's handles.
         let rendered = format!("{invariant}: {verdict}");
         println!("{rendered}");
-        if verdict != Verdict::Holds && !self.first_violation {
+        if verdict != Verdict::Holds && self.first_violation.is_none() {
+            let bound_secs = bounds::quiescence(Recovery::Reconnect, self.tick).as_secs();
+            let observed_secs = self.phase_started.elapsed().as_secs();
             let snapshot = Snapshot {
                 scenario: "nemesis",
                 arm: "schedule",
                 violated: invariant.to_string(),
                 finding: verdict.to_string(),
-                bound_secs: bounds::quiescence(Recovery::Reconnect, self.tick).as_secs(),
-                observed_secs: self.phase_started.elapsed().as_secs(),
+                bound_secs,
+                observed_secs,
                 active: self.active.clone(),
                 devices: rendered_devices(world),
                 relays: rendered_relays(world),
                 scan: self.last_scan.clone(),
             };
             self.snapshot(world, &snapshot)?;
-            self.first_violation = true;
+            // The schedule's own phase runs no arm, so the scenario and arm
+            // fields carry the phase's own two literals rather than a
+            // registry id — the same pair the snapshot above names.
+            if let Verdict::Failed(finding) = verdict {
+                self.first_violation = Some(Violation::new(
+                    "nemesis",
+                    "schedule",
+                    Some(invariant),
+                    finding,
+                    world.current_tick(),
+                    bound_secs,
+                    observed_secs,
+                ));
+            }
         }
         Ok(())
     }
@@ -924,8 +1033,8 @@ mod tests {
     }
 
     use super::{
-        active_ops, glob_matches, run, run_id, scan_halts, NeedleSink, Run, RunPlan,
-        MANIFEST_SUFFIX,
+        active_ops, glob_matches, refusal_for, run, run_id, scan_halts, NeedleSink, Refusal, Run,
+        RunPlan, VerdictError, MANIFEST_SUFFIX,
     };
     use crate::banner::Provenance;
     use crate::logsink::SoakLogs;
@@ -937,6 +1046,22 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::Duration;
+
+    #[test]
+    fn a_verdict_the_rig_would_not_vouch_for_costs_the_run_nothing_but_the_file() {
+        assert!(
+            refusal_for(VerdictError::Unvalidated).is_none(),
+            "the run graded: folding an unvalidated field into a refusal would answer rc 2 for a \
+             run that had a real answer, and would contradict what an absent verdict.log means"
+        );
+        assert_eq!(
+            refusal_for(VerdictError::Unwritable),
+            Some(Refusal::Artifact),
+            "a verdict that could not be WRITTEN leaves an artifact tree the scan chain was not \
+             promised, which is a rig fault"
+        );
+        assert_eq!(Refusal::Artifact.rc(), Rc::RigBroken);
+    }
 
     #[test]
     fn a_scenario_filter_selects_by_glob() {
@@ -1025,7 +1150,7 @@ mod tests {
             manifest_out,
             seal_generation: 0,
             verdicts: Verdicts::new(),
-            first_violation: false,
+            first_violation: None,
             last_scan: Vec::new(),
             stopped: false,
             phase_started: tokio::time::Instant::now(),

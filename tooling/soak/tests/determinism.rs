@@ -94,6 +94,23 @@ fn the_same_seed_mints_a_byte_identical_schedule() {
 }
 
 #[test]
+fn a_wider_profiles_schedule_is_still_a_property_of_its_seed_and_its_shape() {
+    // Every arm applies its own faults, and `Run::arm` hands each one an empty
+    // schedule — so no scenario reads the generator's RNG, and adding scenarios
+    // to a profile must not move the schedule its seed mints. This is what says
+    // so: the widest profile, twice, at one seed.
+    let spec = ProfileSpec::embedded(ProfileName::Weekly).expect("the weekly profile");
+    let shape = spec.world;
+    let first = Generator::new(spec.clone(), 0x50a4).schedule(&shape);
+    let second = Generator::new(spec, 0x50a4).schedule(&shape);
+    assert!(
+        first.digest() == second.digest() && first.ops() == second.ops(),
+        "a profile's scenario list reached the schedule, so a run is no longer \
+         reproducible from its seed alone"
+    );
+}
+
+#[test]
 fn a_different_seed_mints_a_different_schedule() {
     // Without this the test above would pass on a generator that ignored its
     // seed entirely.

@@ -1,10 +1,10 @@
 # The nightly soak profile: everything the PR budget cannot hold.
 #
 # Superset of `pr` — every PR arm runs here too, so a nightly red is never
-# something the PR lane silently stopped covering. The three scenarios that
-# appear only here (S17, S18, S19) have NO lane execution in Phase 1: the
-# scheduler workflows land in Phase 2, and until then they run under
-# `run_soak_local.sh` and in the crate's own oracle tests.
+# something the PR lane silently stopped covering. The scenarios that appear
+# only here (S04, S05, S09, S12, S14, S17, S18, S19, S22) have NO scheduled lane
+# execution yet: the scheduler workflow lands with the rest of Phase 2, and until
+# then they run under `run_soak_local.sh` and in the crate's own oracle tests.
 name = "nightly"
 run_budget_secs = 4200
 deadline_secs = 4800
@@ -22,16 +22,38 @@ id = "S01"
 arms = ["single-relay-outage", "all-relay-outage", "rolling-outage"]
 
 [[scenarios]]
+id = "S04"
+arms = ["offline-quiet", "offline-across-commits", "offline-past-retention",
+        "offline-across-removal"]
+
+[[scenarios]]
+id = "S05"
+arms = ["confirm-err-is-not-a-failure"]
+
+[[scenarios]]
 id = "S06"
 arms = ["stuck-row-sweep"]
+
+[[scenarios]]
+id = "S09"
+arms = ["standing-adversary", "rewrap-created-at-binding"]
 
 [[scenarios]]
 id = "S11"
 arms = ["quiet-circle-resume"]
 
 [[scenarios]]
+id = "S12"
+arms = ["kp-rotation-slot"]          # the day-85 rejection is a later sub-phase
+
+[[scenarios]]
 id = "S13"
 arms = ["hydration-quarantine"]
+
+[[scenarios]]
+id = "S14"
+arms = ["race-no-restart", "race-restart-after-confirm", "race-restart-before-confirm",
+        "race-anchor-exhausted"]
 
 [[scenarios]]
 id = "S17"
@@ -44,3 +66,8 @@ arms = ["swallowed-ok-create", "swallowed-ok-relay-update", "swallowed-ok-locati
 [[scenarios]]
 id = "S19"
 arms = ["duplicate-replay", "reordered-pages", "cross-sub-eose", "commit-gap"]
+
+[[scenarios]]
+id = "S22"
+arms = ["oversized-commit", "refusal-is-relay-count-invariant", "oversized-welcome",
+        "oversized-removal-wedges-the-circle"]

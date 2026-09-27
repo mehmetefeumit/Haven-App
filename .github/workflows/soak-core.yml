@@ -11,10 +11,11 @@
 #
 # `pr` is the only profile ci.yml calls (stage 4, `needs: [rust]`). `nightly`
 # and `weekly` exist so the scheduler workflows Phase 2 adds have something to
-# call; in Phase 1 nothing dispatches them, and S17/S18/S19 therefore have no
-# LANE execution at all — they run in `tests/oracles.rs` and under
-# `scripts/run_soak_local.sh`. docs/SOAK_LANE.md says so in those words, so a
-# reader cannot mistake a green PR lane for coverage of the nightly set.
+# call; nothing dispatches them until sub-phase 2d, so NINE scenarios — S04,
+# S05, S09, S12, S14, S17, S18, S19, S22 — have no LANE execution at all. They
+# run in `tests/oracles.rs` and under `scripts/run_soak_local.sh`.
+# docs/SOAK_LANE.md says so in those words, so a reader cannot mistake a green
+# PR lane for coverage of the nightly set.
 #
 # # The bounds, innermost first (check_e2e_step_timeout_ordering.sh)
 #
@@ -180,8 +181,9 @@ jobs:
         run: rm -f /tmp/haven-soak/needles/*.needles.decl /tmp/haven-soak/needles/*.needles.json /tmp/haven-soak/needles/*.canaries.json
 
   # ---------------------------------------------------------------------------
-  # nightly — pr plus the all-relay and rolling S01 arms, S17's two ClosedKind
-  # arms, S18 and S19. No scheduler dispatches this in Phase 1.
+  # nightly — pr plus the all-relay and rolling S01 arms, S04, S05, S09, S12,
+  # S14, S17's two ClosedKind arms, S18, S19 and S22. No scheduler dispatches
+  # this until sub-phase 2d.
   # ---------------------------------------------------------------------------
   e2e_soak_core_nightly:
     name: e2e_soak_core_nightly

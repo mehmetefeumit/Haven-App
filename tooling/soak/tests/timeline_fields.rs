@@ -26,15 +26,18 @@ use std::collections::BTreeSet;
 use std::time::Duration;
 
 use haven_soak::banner::{Banner, Measured, Provenance};
-use haven_soak::nemesis::types::{ClosedPrefix, DeviceOp, Fault, Op, Schedule, ScheduledOp};
+use haven_soak::nemesis::types::{
+    ByteCap, ClosedPrefix, DeviceOp, Fault, Op, Schedule, ScheduledOp,
+};
 use haven_soak::profiles::ProfileName;
+use haven_soak::relay::Forgery;
 use haven_soak::rig::{DeviceTag, KillKind, RelayTag, TimelineRecord};
 
 /// Every field this rig renders, across all three surfaces.
 ///
 /// Pinned by equality and asserted below: a table whose length can drift is a
 /// table that can lose a field's class without anything saying so.
-const CLASSIFIED_FIELDS: usize = 42;
+const CLASSIFIED_FIELDS: usize = 44;
 
 /// What a moved pin means, kept as a constant so the assertion below stays on
 /// one line: the guard that requires this pin to be ASSERTED reads the
@@ -88,6 +91,11 @@ fn table() -> Vec<(Surface, &'static str, Class)> {
         (T, "op.fault.fault", Literal),
         (T, "op.fault.fault.closed", Literal),
         (T, "op.fault.fault.notice", Literal),
+        // A forgery renders its RECIPE and never what it is aimed at, and a
+        // size cap renders a bucket: the cap an arm chooses is measured off an
+        // event the world minted.
+        (T, "op.fault.fault.inject", Literal),
+        (T, "op.fault.fault.refuse-oversize.max_bytes", Bucket),
         (T, "op.device.device", Tag),
         (T, "op.device.op", Literal),
         (T, "op.device.op.restart", Literal),
@@ -155,6 +163,8 @@ fn vocabulary() -> BTreeSet<String> {
         "double-every-event",
         "reverse-pages",
         "eose-for-another-subscription",
+        "inject",
+        "refuse-oversize",
         "heal",
         "probe",
         "restart-soft",
@@ -180,6 +190,10 @@ fn vocabulary() -> BTreeSet<String> {
         words.insert(profile.as_str().to_owned());
     }
     words.insert(NOTICE.to_owned());
+    // A forgery's recipe, which is the only thing an injection renders.
+    for recipe in ["expired", "rewrap", "malformed-double-h", "unprocessable"] {
+        words.insert(recipe.to_owned());
+    }
     words
 }
 
@@ -195,6 +209,11 @@ struct Rendered {
 }
 
 /// Every record shape the timeline can carry.
+///
+/// One long list on purpose, like `renderings.rs`'s sample table: the list IS
+/// the population this file classifies, and splitting it into arbitrary halves
+/// would only make a missing shape harder to see.
+#[allow(clippy::too_many_lines)]
 fn records() -> Vec<TimelineRecord> {
     vec![
         TimelineRecord::Scheduled {
@@ -251,6 +270,27 @@ fn records() -> Vec<TimelineRecord> {
             op: Op::Fault {
                 relay: RelayTag::new(0),
                 fault: Fault::SwallowOk,
+            },
+        },
+        // The two arm-applied faults, sampled here because a record CAN carry
+        // them: what their fields render is a Rule-15 question, and answering
+        // it before a scenario records one is the cheap order to do it in.
+        TimelineRecord::Applied {
+            tick: 11,
+            op: Op::Fault {
+                relay: RelayTag::new(1),
+                fault: Fault::Inject(Forgery::Expired {
+                    group_id: [0x5a; 32],
+                }),
+            },
+        },
+        TimelineRecord::Applied {
+            tick: 11,
+            op: Op::Fault {
+                relay: RelayTag::new(1),
+                fault: Fault::RefuseOversize {
+                    max_bytes: ByteCap::new(7919),
+                },
             },
         },
         TimelineRecord::Restarted {

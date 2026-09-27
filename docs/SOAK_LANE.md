@@ -40,23 +40,37 @@ that a value printed by a step whose stdout is the public job log was contained
 timezone (the host log stamp is structural); single-branch soundness if a
 future MDK bump wires app witnesses.
 
-Five more, specific to Phase 1 and listed here so nobody has to infer them:
+Five more, specific to this tier and listed here so nobody has to infer them:
 
-* **The KeyPackage plane is bypassed.** A world's members are invited from key
-  packages minted in process and handed to `create_circle` as values: nothing
-  publishes a kind 30443, nothing fetches one, no NIP-65 (kind 10002) list is
-  read, and no rotation happens. Green here says nothing about KeyPackage
-  publication, discovery or rotation — `kp_rotation_e2e` owns that plane.
-* **The relay double does not enforce NIP-40 `expiration`.** A real relay drops
-  an expired kind-445 and refuses to serve it back; `nostr-relay-builder`'s
-  store does neither, so a long arm can be served catch-up pages a real relay
-  would not have. What mitigates it is client-side: Haven screens the
-  expiration on receive (`nostr/mls/manager.rs`), and the rig's own arms are
-  short against the 228 s retention. Nothing here grades relay-side expiry.
-* **`relay/forge.rs` forges WEBSOCKET FRAMES, not Nostr events.** It writes
-  `CLOSED`, `NOTICE`, `EOSE` and duplicate `EVENT` frames into the
-  client-facing stream. Every event the rig puts on the wire is minted by
-  haven-core and signed by a real key; nothing in this crate fabricates one.
+* **The KeyPackage plane is DISCOVERY-free.** A world's members are still
+  invited from key packages minted in process and handed to `create_circle` as
+  values: nothing fetches a kind 30443 and no NIP-65 (kind 10002) list is read.
+  What S12's `kp-rotation-slot` adds is the other half — a real 30443 published
+  into a real slot on a real plane, read back from the plane's own store, and
+  the rotation decision taken against the package's own MLS lifetime. Green
+  therefore says nothing about KeyPackage *discovery*, and it does say that the
+  rotation policy, the stable slot and the monotonic replacement stamp behave
+  over a relay — but only where S12 RUNS, which is not the PR lane: it is a
+  nightly scenario and no scheduler dispatches one yet. `kp_rotation_e2e` still
+  owns the shipped tick that drives them.
+* **The relay double DOES enforce NIP-40 `expiration` on save, and that is why
+  an expired event can only be injected.** Measured at this pin, not assumed:
+  the plane's store is `nostr-database`'s full `MemoryDatabase`, whose
+  `index_event` rejects an already-expired event with
+  `RejectedReason::Expired` and whose bulk import filters expired events out.
+  So nothing can SEED one, and S09's expired recipe is written straight onto a
+  subscriber's socket by the fault layer instead — which is also why that
+  recipe's evidence is the plane's ledger rather than the client: a conformant
+  `nostr_sdk` drops an already-expired event before it emits any notification.
+  A *stored* event that expires later is a different case and is not graded.
+* **`relay/forge.rs` forges WEBSOCKET FRAMES, and — since S09 — whole events
+  under a key belonging to nobody.** It writes `CLOSED`, `NOTICE`, `EOSE` and
+  duplicate `EVENT` frames into the client-facing stream, and it mints the four
+  outsider recipes S09 injects (expired, doubled `#h`, undecodable, and an
+  observed ciphertext re-signed at a `created_at` of the adversary's choosing).
+  Every event the rig puts on the wire as a MEMBER is still minted by haven-core
+  and signed by a real key; what this crate fabricates, it fabricates as the
+  attacker, and never stores.
 * **Recall for engine-minted secrets is structural, not declared.** The rig
   declares every value it mints — device keys, pubkeys, group ids, circle
   names, relay URLs, event ids, coordinates — through typed wrappers, and those
@@ -74,63 +88,148 @@ Five more, specific to Phase 1 and listed here so nobody has to infer them:
 
 ---
 
-## Which safety invariants Phase 1 actually grades
+## Which safety invariants the rig actually grades
 
-PLAN §2.1 lists nine. Phase 1 grades **S1 and S7**, partially grades **S3** and
-**S5**, grades **S6 structurally only**, and grades **none of S2, S4, S8, S9**.
-Spelled out, so a reader of the green tick knows what it covered:
+PLAN §2.1 lists nine. The rig grades **S1, S5 and S7**, partially grades **S3**
+and **S6** (S6's advance side only — its hold-back side is still structural), and
+grades **none of S2, S4, S8, S9**. Spelled out, so a reader of the green tick
+knows what it covered:
 
-| # | PLAN §2.1 invariant | Phase 1 |
+| # | PLAN §2.1 invariant | Graded? |
 |---|---|---|
 | S1 | Single branch (current-epoch cross-decrypt both ways, round-unique payloads) | **GRADED** — oracle O1, round-unique payloads. Both directions where it matters: every scenario's CLOSING round probes each chain pair BOTH ways, with the device that was restarted, reopened or resumed sending FIRST (a rebuilt epoch or exporter is invisible to the device itself and shows only as a peer failing to decrypt what it produced), and the nemesis phase's teardown round sweeps every ordered pair. Intermediate rounds stay one-directional over a spanning chain, which is the cost trade `Reach::These` exists for |
 | S2 | Forward secrecy after removal | **NOT GRADED** — needs O3 and scenarios S02/S21, both Phase 2 |
-| S3 | Publish-before-apply (Rule 13) | **PARTIAL** — per COMMIT, not per transition. One rung in the rig resolves a pending state (`rig::circle::resolve_one`, reached only through `publish_and_resolve` and the ladder `resolve_ingest` that drains what a resolution's own replay hands back), and it confirms only on an acknowledgement a relay's client-facing ledger really carried; S18's three arms assert the gap from both sides (stored HERE, unacknowledged THERE), assert that a rolled-back commit left the whole circle on one epoch, and assert from the rebind counters that no socket went away while the ack was withheld. What is NOT graded is the universal form — "every observed epoch transition has a stored, acked commit" — because no oracle walks the ledger against the epoch history. That walk needs a per-transition record the Phase-1 ledger does not keep |
-| S4 | Nothing identifying on the wire | **NOT GRADED** — the wire oracles are the e2e lanes' (`check-wire-journal.sh` and friends); the rig has no wire journal in Phase 1 |
-| S5 | Retention window (5 past epochs) | **PARTIAL** — O5 classifies an undecryptable row, but O4 (the window edge) is Phase 2, so "nothing older decrypts" is not asserted |
-| S6 | Cursor integrity | **STRUCTURAL ONLY** — and the reason is measured, not assumed. Reading the hold-back needs an event that is DELIVERED and un-applied while a subscription generation is open, and at this pin the rig cannot produce one: a message sealed at an epoch the receiver has not reached peel-fails (the kind-445 outer layer is keyed by the sender's epoch exporter), and the buffering outcome the engine does produce — the publish-before-apply transition, which S19's `commit-gap` arm grades — leaves no gating row, and the delivery it does produce lands only once the transition ENDS, on the confirm's own replay (S19 canary 4 reads it out of the last-known store), which is not a window a cursor is read against. Separately, every event the rig can mint through the product is dated `now`, so "advanced from the REQ's open instant" and "advanced from the event's `created_at`" are observationally identical at one-second resolution. What covers S6 is `haven-core`'s own anchor tests plus the structural fact that the rig never writes a cursor |
+| S3 | Publish-before-apply (Rule 13) | **PARTIAL** — per COMMIT, not per transition. One rung in the rig resolves a pending state (`rig::circle::resolve_one`, reached only through `publish_and_resolve` and the ladder `resolve_ingest` that drains what a resolution's own replay hands back), and it confirms only on an acknowledgement a relay's client-facing ledger really carried; S18's three arms assert the gap from both sides (stored HERE, unacknowledged THERE), assert that a rolled-back commit left the whole circle on one epoch, and assert from the rebind counters that no socket went away while the ack was withheld. Three more arms reach the same rule from other sides: S05's `confirm-err-is-not-a-failure` (an `Err` from `confirm_published` is not a publish failure), and S22's `oversized-commit` and `oversized-removal-wedges-the-circle` (a refusal the publisher hears, rolled back and — for an owed removal — deliberately not). What is NOT graded is the universal form — "every observed epoch transition has a stored, acked commit" — because no oracle walks the ledger against the epoch history. That walk needs a per-transition record the Phase-1 ledger does not keep |
+| S4 | Nothing identifying on the wire | **NOT GRADED** — the wire oracles are the e2e lanes' (`check-wire-journal.sh` and friends); the rig still has no wire journal, and Phase 2 adds none |
+| S5 | Retention window (5 past epochs) | **GRADED** — O4, over BOTH edges, produced by S04's `offline-past-retention`: one ciphertext sealed exactly `DEFAULT_MAX_PAST_EPOCHS` advances below the reader's tip still decrypts, and one a single epoch older does not. The window is READ from the engine at runtime, never restated, and each edge's distance is MEASURED from the epochs the run really reached — a world that did not reach the intended shape answers "this proved nothing" (one side of the window fed twice) rather than reporting a violation the arm manufactured. What it adds over `haven-core`'s own `rule5_retention_constants_are_pinned` and `rule5_epoch_n_ciphertext_still_decrypts_at_the_window_edge` is those two edges over a real relay and a real live plane, across a pause and a catch-up — and nothing else |
+| S6 | Cursor integrity | **PARTIAL — the ADVANCE side only.** S09's two arms grade what an adversary can and cannot do to a persisted anchor. The first is a standing outsider forging at the circle's public `#h` every round for the whole arm — three recipes per round, expired, doubled `#h` and undecodable — which moves neither `read_sync_cursor` nor `read_backfill_floor`, while a legitimate fix delivered in the SAME round proves the plane was carrying anything at all, and a catch-up sweep that still advances locally is the control that keeps the whole arm from being satisfied by a build where advance had been deleted. The second injects ONE forgery, after the original it copies has been folded: an observed ciphertext re-signed a day ahead, which applies nothing a second time and moves neither anchor. And the catch-up sweep's own advance is required to land inside a bracket taken from the same wall clock the sweep opens its window with, which is the advance's PROVENANCE rather than its arithmetic and which a forged `created_at` a day ahead could not satisfy. **The HOLD-BACK side is still structural only, and the reason is measured, not assumed:** reading it needs an event that is DELIVERED and un-applied while a subscription generation is open, and at this pin the rig cannot produce one — a message sealed at an epoch the receiver has not reached peel-fails (the kind-445 outer layer is keyed by the sender's epoch exporter), and the buffering outcome the engine does produce (the publish-before-apply transition, which S19's `commit-gap` arm grades) leaves no gating row, its delivery landing only once the transition ENDS, on the confirm's own replay, which is not a window a cursor is read against. `haven-core`'s own anchor tests still cover the hold-back |
 | S7 | One session per DB (Rule 14) | **GRADED** — every restart asserts `is_session_live` true before and false after, against a bounded poll, on the `session.sqlite` PATH (a directory computes a key nothing is registered under and answers `Ok(false)` for ever) |
 | S8 | Bounded removal-effectiveness lag | **NOT GRADED** — scenario S21, Phase 2 |
 | S9 | Nonce uniqueness (Rule 11) | **NOT GRADED** — nearly free once the relay ledger keeps 445 `content` prefixes, which is Phase 2 |
 
-Oracles **O3** (forward secrecy) and **O4** (retention window) are likewise not
-in the Phase-1 registry. The registry simply does not contain them: there is no
-stub, no skipped test and no "pending" row, because a scaffold that asserts
-nothing reports coverage it does not have.
+Oracle **O3** (forward secrecy) is likewise not in the registry. It simply does
+not contain one: there is no stub, no skipped test and no "pending" row, because
+a scaffold that asserts nothing reports coverage it does not have. **O4 is in
+the registry**, and S04's `offline-past-retention` is the arm that produces the
+state it grades.
 
 ## Which scenarios have no lane execution yet
 
-Seven scenarios exist this phase: **S01, S06, S11, S13, S17, S18, S19**.
+Thirteen scenarios exist: **S01, S04, S05, S06, S09, S11, S12, S13, S14, S17,
+S18, S19, S22**.
 
 * `pr` (the only profile CI dispatches) runs **S01's single-relay outage arm,
   S06, S11 and S13**.
-* **S17, S18 and S19 have NO lane execution until Phase 2.** The nightly and
-  weekly scheduler workflows are Phase 2; `soak-core.yml` carries their jobs so
-  there is something to call, and nothing calls them. Those three run in
-  `tests/oracles.rs` and under
+* **S04, S05, S09, S12, S14, S17, S18, S19 and S22 have NO lane execution yet.**
+  The nightly and weekly scheduler workflows are still to come; `soak-core.yml`
+  carries their jobs so there is something to call, and nothing calls them. Those
+  nine run in `tests/oracles.rs` and under
   `scripts/run_soak_local.sh core --profile nightly`.
 
-A green `soak-core-pr` therefore says nothing about the CLOSED-prefix
-behaviour (S17), the swallowed-OK Rule-13 arm (S18) or duplicate/reorder
-delivery (S19) beyond what a unit test proves.
+A green `soak-core-pr` therefore says nothing about the member-absence spans and
+the retention window (S04), the publish→confirm window (S05), the
+cursor-poisoning adversary and the two anchors (S09), the KeyPackage rotation
+slot (S12), a same-epoch commit race (S14), the CLOSED-prefix behaviour (S17),
+the three swallowed-OK Rule-13 arms (S18), duplicate/reorder delivery and the
+commit-gap fold (S19) or the oversized commit, Welcome and removal wedge (S22)
+beyond what a unit test proves.
+
+### The first recorded expectation, and what makes it stale
+
+S14's `race-anchor-exhausted` asserts a KNOWN-BAD outcome rather than grading
+it. Two devices commit from one epoch, each walks its own branch past
+`max_rewind_commits` (read from the policy the session installs, never
+restated), and neither can converge the other's sibling afterwards. What is left
+is a **twin fork**: both devices report the same epoch, the same roster and a
+healthy send path, and only a bidirectional cross-decrypt says otherwise.
+
+*At this commit Haven raises no per-circle verdict for that state.* The arm
+asserts the fork AND the silence — `unrecoverable_circles()` empty, no
+`GroupUnrecoverable` on either device's bus — as its expectation, so both
+directions are covered: if the fork stops happening, the canary is unmet and the
+arm is **rc 3**, "the recorded expectation is stale"; if a verdict starts
+appearing, the silence canary is unmet and it is **rc 3** again, which is the
+correct signal — the recorded expectation must be replaced by a graded one in
+the same commit. Changing it in either direction without citing OD-1 (DECIDED, a
+per-circle verdict inside the circle's details sheet; NOT BUILT) is a regression.
+The 684-second form of that silence is owed to S03's weekly arm, which is not
+yet built; a second eleven-minute absence here would buy no further claim, which
+is why every arm in that scenario declares no absence window at all.
+
+The scenario's other three arms assert the opposite and GRADE it: a race that
+does not converge is a finding about the subject, reported as
+`branch-diverged` / `epoch-diverged` / `roster-diverged` at rc 1, never as a
+floor that went unmet.
+
+### The second recorded expectation: a removal obligation that can never be discharged
+
+S22's `oversized-removal-wedges-the-circle` is the same shape for a different
+gap. A peer proposes its own removal, this device's engine stages the eviction
+commit, the plane refuses it for its size — and `publish_failed` deliberately
+does NOT roll it back, because rolling one back is a silent, permanent drop of
+the eviction and would leave the leaver deriving the group's keys until some
+unrelated commit moved the epoch. Parking is therefore correct and is already
+decided. What is undecided is the obligation itself: every retry refuses for the
+same reason the first one did, so it can never be discharged, and the circle
+stays in its publish-before-apply transition for ever.
+
+*At this commit Haven raises no verdict for that state either.* The arm asserts
+the whole of it as its expectation: the evictee still in the roster of the member
+that never saw the commit, a send that fails, an inbound fix that is buffered
+before the peel rather than applied, `unrecoverable_circles()` empty with no
+`GroupUnrecoverable` on any bus, a staged COMMIT rather than the stranded
+PROPOSAL a rollback would have left, and the obligation outliving three
+foreground publish passes — paired with its own control, because the arm then
+lifts the cap and lands the same commit, which discharges it. That release is
+what keeps "still owed after three passes" from being satisfied by a world in
+which nothing can be published at all, and it is also what keeps the DEVICE
+gradeable afterwards: an unredeemed eviction obligation is a per-device read, so
+O2 and O6 would otherwise report it — correctly — for every later round. A real
+oversized removal has no such release, and that permanence is the whole of OQ-A.
+Both directions are covered exactly as S14's are: if the wedge stops
+happening the canary is unmet and the arm is **rc 3**, "the recorded expectation
+is stale"; if a verdict starts appearing the silence canary is unmet and it is
+**rc 3** again, because the recorded expectation must then be replaced by a
+graded one in the same commit. Changing it in either direction without citing
+OD-1 (DECIDED — a per-circle verdict in the circle's details sheet — and NOT
+BUILT) and owner decision OQ-A (name the undischargeable obligation as its own
+cause, because its remedy differs: the user cannot retry, and a banner offering
+"retry" would offer something that can never succeed) is a regression.
+
+The circle it wedges is built with `build_extra_circle` and is deliberately
+outside `world.circles()`: a circle that never sends again may not be one a
+world-wide oracle grades, and that is also why the arm declares
+`epochs_crossed: 0` and carries every epoch claim as a canary instead.
+
+S22's other three arms GRADE their promise: a size refusal is
+machine-readable, nothing is applied locally, the same commit one byte of cap
+the other way is acked and applied, and two relays refuse the same bytes rather
+than one of them taking it. Tier 1 asserts the CLASSIFICATION and the local
+no-apply against a cap MEASURED off this run's own event; T2-19 hits a real
+strfry's real `maxEventSize`. Neither subsumes the other.
 
 ### What the crate's own tests run instead, and how much of it
 
-`tests/oracles.rs` runs **every registered arm** as its own test — all sixteen
-but one — rather than one "smallest arm" per scenario. That distinction is the
-whole point: an ordering over arms tie-breaks positionally, and the version
-that ordered by derived deadline left eight of the sixteen with no success path
-anywhere, including BOTH of the Rule-13 arms S18 exists for. The one exclusion
-is S17's `full-intake`, whose bound starts at the 684-second delivery-silence
-window, and `the_happy_path_sweep_runs_every_arm_but_the_one_it_excludes`
-asserts that the excluded set is exactly that one arm — so a new arm cannot
-join it silently.
+`tests/oracles.rs` runs **every registered arm** as its own test — all
+thirty-two but one — rather than one "smallest arm" per scenario. That
+distinction is the whole point: an ordering over arms tie-breaks positionally,
+and the version that ordered by derived deadline left most of the registry with
+no success path anywhere, including BOTH of the Rule-13 arms S18 exists for. The
+one exclusion is S17's `full-intake`, whose bound starts at the 684-second
+delivery-silence window, and
+`the_happy_path_sweep_runs_every_arm_but_the_one_it_excludes` asserts that the
+excluded set is exactly that one arm — so a new arm cannot join it silently.
 
 Beside the sweep there is **one deliberate mis-configuration control per
-scenario**, seven in all, each running the real arm against a world arranged so
-the condition it grades cannot arise — a second endpoint that never returns, a
+scenario**, thirteen in all, each running the real arm against a world arranged
+so the condition it grades cannot arise — a second endpoint that never returns, a
 policy clock that starts past the horizon the arm is supposed to straddle, a
-swallowed acknowledgement that stops the victim circle existing, a closed
-endpoint with nothing to duplicate — and each requiring the verdict to be
+swallowed acknowledgement that stops the victim circle existing or leaves no
+confirm that could fail, an endpoint that is gone so no epoch can be crossed
+above an absent device, a race in which neither sibling can be confirmed, no
+subscription open for a forgery to land on, no plane serving the KeyPackage slot
+a rotation would be decided for, nothing reaching a relay to be refused by one,
+and a closed endpoint with nothing to duplicate — each requiring the verdict to be
 **rc 3**, the world proving nothing, rather than the rc 0 every oracle would
 otherwise hand it.
 
@@ -164,9 +263,9 @@ and the scan verdict and the invariant verdict are folded separately:
 **Recorded taxonomy residual.** PLAN §9.3 labels rc 4 `SCANNER_BROKEN` / INFRA.
 That is rc **2**'s meaning in the shared taxonomy
 (`tooling/logscan/src/lib.rs`), where rc 4 is a META floor — "the run proves too
-little". One taxonomy holds across the tree; §9.3's wording is corrected in the
-change that lands `soak_finalize` in Phase 2. This is recorded, not silently
-reconciled.
+little". One taxonomy holds across the tree, and `soak_finalize` has since landed
+on it (`tooling/e2e/ci/run-soak-core.sh`), so §9.3's wording is SUPERSEDED rather
+than pending a change. This is recorded, not silently reconciled.
 
 ---
 
@@ -178,7 +277,7 @@ There are two trees and the split is the policy, not a convenience:
 |---|---|---|
 | `/tmp/haven-soak/needles/` | the sealed needle manifest — every value the run declared, verbatim | **Never.** Wholly upload-banned (`check_wire_proxy_test_only.sh` checks 3 and 6). No workflow or `tooling/e2e/ci` runner may name a path under it in an upload `path:`, a `$GITHUB_STEP_SUMMARY` write, a `gh issue`/`gh pr` body, or under `cat`/`tee`/`head`/`tail`/`awk`/`sed`/`jq`/… Writing, deleting and passing it as an argument are what a lane legitimately does |
 | `/tmp/haven-soak/evidence/<per-process>/` | each scenario's captured lines, scanned in place | Never, same ban |
-| `${RUNNER_TEMP}/soak-upload/` | the banner, the materialised schedule, the timeline, the redirected rig stdout, any first-violation snapshot | **This is the only uploadable tree**, as one `upload-artifact` step with `if-no-files-found: error` |
+| `${RUNNER_TEMP}/soak-upload/` | the banner, the machine-readable verdict, the materialised schedule, the timeline, the redirected rig stdout, any first-violation snapshot | **This is the only uploadable tree**, as one `upload-artifact` step with `if-no-files-found: error` |
 
 **The evidence directory is minted per process, and a clean capture leaves
 nothing in it.** Per process (`run-<pid>-<nonce>`, created `0700` under a root
@@ -340,10 +439,12 @@ can finalise — reads as an anonymous timeout.
 **The lane carries ONE inner bound, deliberately.** There is no second
 `timeout` around the rig itself. `check_e2e_lane_budget.sh` prices a lane as
 (the sum of its bounded waits + a flat 180 s unbounded-work allowance it
-declares once for every lane) and refuses a deadline below that, so a ~5 m inner
-bound under a 6 m deadline is arithmetically impossible: it would force the
-deadline to about 9 m for no diagnostic gain, since the rig's own rc taxonomy is
-what names WHAT went wrong and a deadline only ever names THAT it hung. The
+declares once for every lane) and refuses a deadline below that, so an inner
+bound large enough to let a healthy run finish — the 1320 s budget — cannot sit
+under the 1380 s deadline: with the allowance it prices the lane at 1500 s and
+would force the deadline to about 25 m for no diagnostic gain, since the rig's
+own rc taxonomy is what names WHAT went wrong and a deadline only ever names
+THAT it hung. The
 `cargo run` is unbounded work that is not a wait, so the budget guard prices it
 by that allowance alone — which is the honest reading: the deadline is the
 bound. The manifest section for `run-soak-core.sh` says so where the arithmetic
@@ -376,6 +477,51 @@ debug/release list, so `target/soak` is cleaned like any other.)
 
 ---
 
+## The verdict
+
+Written to `${RUNNER_TEMP}/soak-upload/verdict.log` at the end of the run,
+beside the banner: the banner is for a person, this is for the job that has to
+decide, without one, whether a night went red and what to say about it.
+
+One JSON object, one line, `.log` like every other artifact so the same scans
+select it. Its field set is an **allowlist**, pinned by equality as
+`verdict::VERDICT_KEYS` and asserted in `tooling/soak/tests/verdict_fields.rs`:
+
+```
+profile  seed  schedule_tag  commit  rustc  rc  rc_name
+scenario  arm  invariant  tick  bound_secs  observed_secs  finding_class  handles[]
+```
+
+A clean run carries the first seven and **no violation field at all**, so "is
+there a finding here?" is answerable without a rule. `invariant` is absent from a
+violation too when what broke was the arm's own expectation floor rather than one
+of the registry's promises, because a borrowed id would make a reader group a
+floor with an oracle.
+
+**Why an allowlist and not a re-scan.** A scanner finds what it was told to look
+for. Re-scanning a composed issue body catches a structural shape — a long hex
+run, a coordinate, an endpoint — and provably **cannot** catch an undeclared
+value such as a petname or a display name, because nothing declared it. So the
+guarantee is that no field CAN carry one: every value is a repository fact, a
+literal from one of the crate's closed vocabularies, a delta, a duration, or one
+of the rig's own handles. The scan over the tree stays, as the backstop.
+
+**`finding_class` and `handles[]` are separate fields**, never the rendered
+finding sentence: a reader outside the process needs a classification it can
+group by and a handle list it can bound, and the sentence's shape is not pinned.
+
+**The two free-form fields are validated ON WRITE** as well as by whatever reads
+the file — `handles[]` element-wise against the rig's own handle vocabulary,
+`invariant` against the CLOSED set of ids the oracle registry mints rather than
+against the `INV-` shape, since `INV-` plus an upper-case run also describes an
+event id. A verdict that fails either check is **not written at all**: an absent
+file reads as "no verdict", which a reader already has a branch for, while a
+written one would be published as validated. Dropping it costs the run nothing
+else — its own exit code is still its verdict, and the driver does not turn a
+refused verdict into a rig fault.
+
+---
+
 ## The banner
 
 Written to `${RUNNER_TEMP}/soak-upload/banner.log` **before the run starts**, so
@@ -389,9 +535,11 @@ haven-soak profile=pr seed=0x…  commit=<short sha, <=12 hex> rustc=<version> s
 ```
 
 **Why the seed and the schedule tag are printable.** Every preimage of a
-scheduler seed is public repository metadata, and the `pr` seed is checked into
-`tooling/soak/profiles/pr.toml`. Neither identifies a user, a circle or a
-device: they identify a SHAPE, and that shape is in the repo.
+scheduler seed is public repository metadata, and the `pr` seed is the
+`DEFAULT_SEED` constant in `tooling/soak/src/main.rs`: the PR lane passes no
+`--seed` and no profile TOML carries a seed at all, so a PR run is reproducible
+from the repository alone. Neither identifies a user, a circle or a device: they
+identify a SHAPE, and that shape is in the repo.
 
 **Why both are truncated.** The banner is scanned as a `soak` sink like every
 other capture, and `haven-logscan`'s structural rule S2 matches 32–63 hex — so a

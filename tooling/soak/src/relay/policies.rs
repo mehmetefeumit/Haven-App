@@ -81,9 +81,41 @@ pub fn closed_message(prefix: ClosedPrefix) -> String {
     format!("{} {reason}", prefix.as_str())
 }
 
+/// The prefix an over-size `EVENT` is refused with.
+///
+/// `invalid:` because the EVENT is what is refused, not the client: NIP-01
+/// reserves `blocked:` for a refusal about who is asking, the engine's own
+/// reaction ladder branches on the prefix, and the relay's native refusals of a
+/// malformed event render `invalid:` too — which is what makes the
+/// natively-corrupted control a comparison rather than a coincidence.
+pub const OVERSIZE_PREFIX: ClosedPrefix = ClosedPrefix::Invalid;
+
+/// The `OK false` message the proxy forges for an over-size `EVENT`.
+///
+/// Composed from [`ClosedPrefix::as_str`] for exactly the reason
+/// [`closed_message`] is: a refusal can never carry a prefix other than the one
+/// it was asked for.
+#[must_use]
+pub fn oversize_message() -> String {
+    format!("{} event too large", OVERSIZE_PREFIX.as_str())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_oversize_refusal_carries_the_prefix_it_was_composed_from() {
+        let message = oversize_message();
+        assert!(
+            message.starts_with(OVERSIZE_PREFIX.as_str()),
+            "a forged OK false must carry the prefix it was asked for"
+        );
+        assert!(
+            message.len() > OVERSIZE_PREFIX.as_str().len() + 1,
+            "a bare prefix is not a message a relay would send"
+        );
+    }
 
     #[test]
     fn every_prefix_has_a_message_that_begins_with_it() {

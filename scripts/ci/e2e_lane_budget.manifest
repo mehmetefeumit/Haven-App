@@ -268,10 +268,12 @@ unbudgeted e2e-profile.yml::e2e_profile_ios the attempt timeout is the only boun
 # It carries ONE bound, deliberately, and this manifest is where that decision
 # is visible. A second inner `timeout` around the rig would be charged here at
 # its own bound, and the pr lane's arithmetic makes that impossible: the run
-# budget is 300 s of scenario work under a 360 s deadline, and every lane also
+# budget is 1320 s of scenario work under a 1380 s deadline, which the lane arms
+# as `23m` (`profiles/pr.toml`, `soak-core.yml`), and every lane also
 # carries the 180 s unbounded-work allowance this check declares once for all
-# of them — so any inner bound large enough to let a healthy run finish would
-# push the worst case past the deadline and force it to ~9 m for no diagnostic
+# of them — so an inner bound large enough to let a healthy run finish is the
+# 1320 s budget, which with that allowance prices the lane at 1500 s, past its
+# own 1380 s deadline, and would force it to ~25 m for no diagnostic
 # gain. The rig's rc taxonomy names WHAT went wrong; the deadline only ever
 # names THAT it hung. The `cargo run` itself is unbounded work that is not a
 # wait (the header's last section), so it is priced by that allowance and by

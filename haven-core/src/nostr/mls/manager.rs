@@ -192,6 +192,19 @@ pub fn app_message_past_epoch_limit() -> u64 {
     session_convergence_policy().app_message_past_epoch_limit
 }
 
+/// How far below its tip a group rewinds to converge a sibling branch.
+///
+/// The session-wide value, which is what a group with no stored per-group
+/// override runs under; [`convergence_rewind_for_group`] is the per-group read
+/// the send gate uses. Public for the same reason
+/// [`app_message_past_epoch_limit`] is: a caller outside this module that has
+/// to know how many commits exhaust the rewind horizon must READ the policy the
+/// session installs, because a restated literal is a second copy that drifts.
+#[must_use]
+pub fn max_rewind_commits() -> u64 {
+    session_convergence_policy().convergence.max_rewind_commits
+}
+
 /// Manager for MLS session operations over the Dark Matter engine.
 ///
 /// Wraps a single, hydrated [`AccountDeviceSession`] behind a `tokio` mutex and
@@ -2443,6 +2456,29 @@ mod tests {
             !EPOCH_RETRYABLE_TOKENS.contains(&"Stable"),
             "`Stable` can never be a refusal's `from`; listing it would classify a future \
              refusal as retryable on no evidence"
+        );
+    }
+
+    #[test]
+    fn the_two_published_convergence_bounds_are_the_installed_policys_own() {
+        // Haven overrides exactly one field of the engine's policy
+        // (`settlement_quiescence_ms`), so both accessors must answer the
+        // ENGINE's default. A caller that restated either number would keep
+        // agreeing with itself after an engine bump moved it.
+        let engine = CanonicalizationPolicy::default();
+        assert_eq!(
+            app_message_past_epoch_limit(),
+            engine.app_message_past_epoch_limit
+        );
+        assert_eq!(
+            max_rewind_commits(),
+            engine.convergence.max_rewind_commits,
+            "the rewind window must be read from the policy the session installs"
+        );
+        assert!(
+            max_rewind_commits() > 0,
+            "a zero rewind window would make a sibling branch unconvergeable, and would make \
+             any bound derived from it vacuous"
         );
     }
 

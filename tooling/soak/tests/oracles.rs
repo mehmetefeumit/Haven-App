@@ -25,7 +25,7 @@ use std::time::Duration;
 
 use haven_core::circle::DecryptedIngest;
 use haven_core::location::LOCATION_MESSAGE_RETENTION_SECS;
-use haven_core::nostr::mls::types::{GroupId, OpenMlsContentKind, UNRESOLVABLE_INPUT_MAX_AGE_SECS};
+use haven_core::nostr::mls::types::{GroupId, UNRESOLVABLE_INPUT_MAX_AGE_SECS};
 use haven_core::relay::live_sync::config::{
     BACKOFF_JITTER_FRACTION_BP, BACKOFF_MAX_SECS, BURST_BACKLOG_WAIT_SECS,
     COMMIT_SETTLE_WINDOW_SECS, DELIVERY_SILENCE_RETENTION_MULTIPLE, SUBSCRIBE_CONNECT_WAIT_SECS,
@@ -37,11 +37,14 @@ use haven_soak::nemesis::types::{Fault, Schedule};
 use haven_soak::oracle::quiescence::{self, PendingReason, Quiescence, Settled};
 use haven_soak::oracle::undecryptable::{self, StoredRow};
 use haven_soak::oracle::vacuity::{grade, ExpectationFloor, FloorTerm, Observed};
-use haven_soak::oracle::{bounds, Finding, Invariant, ProbeToken, Reach, Recovery, Round, Verdict};
+use haven_soak::oracle::{
+    bounds, Finding, Invariant, ProbeToken, Reach, Recovery, RetentionEdge, Round, Verdict,
+};
 use haven_soak::profiles::{ProfileName, ProfileSpec, WorldShape};
 use haven_soak::rc::Rc;
 use haven_soak::relay::SimRelay;
 use haven_soak::rig::{CapturedLine, DeviceTag, LogDrain, RelayPlane, RelayTag, SimWorld};
+use haven_soak::scenarios::s14_restart_race::{co_admin, merge_race, stage_race, SecondCommit};
 use haven_soak::scenarios::Scenario;
 use haven_soak::timeline::Timeline;
 
@@ -120,6 +123,9 @@ const fn round(ordinal: u32) -> Round<'static> {
         row_envelope: 0,
         burst_opened: &[],
         classified: &[],
+        // O4's subject, fed by the one arm that crosses the window; a
+        // round that feeds none declares none.
+        retention: &[],
     }
 }
 
@@ -404,17 +410,196 @@ fn relay_set(world: &World) -> Vec<String> {
     relays
 }
 
+// ── O4 ──────────────────────────────────────────────────────────────────────
+
+/// One location ciphertext, sealed at `device`'s CURRENT epoch and never
+/// published.
+///
+/// Never published, deliberately: a peer with a live engine would ingest it the
+/// moment it crossed the relay, and the engine answers a second ingest of one
+/// MLS message with `Stale { AlreadySeen }` — so the retention edge would be
+/// graded on a duplicate rather than on the window.
+async fn sealed_now(world: &World, device: DeviceTag, group: &GroupId) -> nostr::Event {
+    let sender = world.device(device).expect("a device");
+    let (event, _, _) = sender
+        .manager()
+        .expect("a manager")
+        .encrypt_location(
+            group,
+            &sender.keys.public_key(),
+            &ProbeToken::mint(9, 9).as_location(),
+            LOCATION_MESSAGE_RETENTION_SECS,
+        )
+        .await
+        .expect("a location seals at the current epoch");
+    event
+}
+
+/// Advances the group by `count` confirmed commits, and waits for both devices
+/// to sit on the result.
+///
+/// Each commit carries a DIFFERENT relay list: a repeat of the list the group
+/// already holds is a no-op, and a no-op advances no epoch — which would leave
+/// the window uncrossed while the arm believed it had crossed it.
+async fn advance_epochs(world: &World, device: DeviceTag, group: &GroupId, count: u64) {
+    for index in 0..count {
+        let mut relays = world.relay_urls();
+        relays.push(format!("wss://o4-{index}.example.com"));
+        let staged = world
+            .device(device)
+            .expect("a device")
+            .manager()
+            .expect("a manager")
+            .update_circle_relays(group, &relays)
+            .await
+            .expect("a relay-list commit stages");
+        let guard = world.note_pending_staged();
+        let witnessed = world
+            .publish_witnessed(device, std::slice::from_ref(&staged.commit_event))
+            .await
+            .expect("the witness reads");
+        assert!(
+            witnessed.is_some(),
+            "a commit nobody acked may not be merged (Rule 13)"
+        );
+        let ingest = world
+            .device(device)
+            .expect("a device")
+            .manager()
+            .expect("a manager")
+            .finalize_relay_update(staged.pending, group)
+            .await
+            .expect("the confirmed commit merges");
+        drop(guard);
+        world
+            .resolve_ingest(device, ingest)
+            .await
+            .expect("whatever the replay released is resolved");
+    }
+    assert!(
+        wait_until_epochs_agree(world, group, bounds::round_trip(Recovery::Undisturbed)).await,
+        "both devices must reach the epoch the window is measured from"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn o4_grades_both_edges_of_the_window_the_engine_really_keeps() {
+    // The window is READ, never spelled: `DEFAULT_MAX_PAST_EPOCHS` is how many
+    // past epochs' exporter secrets the engine keeps (Security Rule 5), and
+    // `haven-core/tests/security_rule_gates.rs` is what pins its value. What
+    // this adds is the same two edges over a real relay and a real live plane.
+    let window = u64::try_from(haven_core::nostr::mls::DEFAULT_MAX_PAST_EPOCHS)
+        .expect("a retention window fits a u64");
+    let mut world = build_world().await;
+    let (alice, bob) = pair(&world);
+    let group = group(&world);
+
+    // `outside` is sealed one epoch older than `inside`, so after the same
+    // advances one lands exactly at the window's edge and the other one past it.
+    let outside = sealed_now(&world, alice, &group).await;
+    advance_epochs(&world, alice, &group, 1).await;
+    let inside = sealed_now(&world, alice, &group).await;
+    advance_epochs(&world, alice, &group, window).await;
+
+    let inside_outcome = undecryptable::classify(
+        world.device(bob).expect("a device"),
+        &inside,
+        StoredRow::Unknown,
+    )
+    .await
+    .expect("the ingest reads");
+    let outside_outcome = undecryptable::classify(
+        world.device(bob).expect("a device"),
+        &outside,
+        StoredRow::Unknown,
+    )
+    .await
+    .expect("the ingest reads");
+
+    assert!(
+        inside_outcome == undecryptable::Verdict::Applied,
+        "ciphertext at the window's own edge must still decrypt, or the engine keeps fewer \
+         secrets than Rule 5 promises"
+    );
+    assert!(
+        outside_outcome != undecryptable::Verdict::Applied,
+        "ciphertext older than the window must not decrypt anywhere"
+    );
+
+    let edges = [
+        RetentionEdge {
+            device: bob,
+            circle: world.circles()[0].tag,
+            distance: window,
+            outcome: inside_outcome,
+        },
+        RetentionEdge {
+            device: bob,
+            circle: world.circles()[0].tag,
+            distance: window + 1,
+            outcome: outside_outcome,
+        },
+    ];
+    let graded = round(1).with_retention(&edges);
+    let verdict = Invariant::RetentionWindow
+        .check(&mut world, &graded)
+        .await
+        .expect("the oracle reads");
+    assert!(
+        verdict == Verdict::Holds,
+        "both edges answered the way Rule 5 promises, so O4 must hold"
+    );
+
+    // The red half is planted at the ORACLE's input, and this is the one place
+    // in this file where that is the honest thing to do: an engine that kept a
+    // secret past its own window is the defect O4 exists to catch, and no seam
+    // can make the product produce it on demand.
+    let overrun = [
+        edges[0],
+        RetentionEdge {
+            outcome: undecryptable::Verdict::Applied,
+            ..edges[1]
+        },
+    ];
+    let graded = round(1).with_retention(&overrun);
+    let verdict = Invariant::RetentionWindow
+        .check(&mut world, &graded)
+        .await
+        .expect("the oracle reads");
+    assert!(
+        verdict
+            == Verdict::Failed(Finding::RetentionWindowOverrun {
+                device: bob,
+                circle: world.circles()[0].tag,
+            }),
+        "a secret that outlived the window must be reported as one"
+    );
+    assert!(
+        verdict.rc() == Rc::ViolationOrLeak,
+        "a secret outliving its window is a finding about the subject"
+    );
+
+    world.teardown().await.expect("teardown");
+}
+
 // ── O5 ──────────────────────────────────────────────────────────────────────
 
 /// One genuine same-epoch commit race, classified with or without the stored
 /// row the ingest wrote.
 ///
-/// Both devices are co-admins on one epoch; each stages, publishes and confirms
-/// a relay-list commit with its ENGINE PAUSED, so neither has ingested the
-/// other's when the classifier runs. That pause is not decoration: the engine
-/// records every message's disposition, and a live engine would have ingested
-/// the peer's commit first — the classifier would then be reading the SECOND
-/// look, where a lost branch reads as a duplicate.
+/// The race itself is the SCENARIO's, not this file's: S14 owns the one copy of
+/// it, and driving it from here is what keeps the oracle's control and the
+/// arm's own body from drifting apart. What this wrapper adds is the unnamed
+/// classification the second control needs, which is a call and not a second
+/// staging.
+///
+/// # Why the race runs in a circle of its own
+///
+/// The circle S14 builds is outside `world.circles()`, so no engine subscribes
+/// to it — which is what makes "neither device has ingested the other's commit"
+/// a property of the arm rather than of a pause that has to be timed. The engine
+/// records every message's disposition and answers the second look at one MLS
+/// message with a duplicate, so a race delivered live would classify as one.
 ///
 /// # Why the named arm does not go through `classify`
 ///
@@ -425,95 +610,44 @@ fn relay_set(world: &World) -> Vec<String> {
 /// after the ingest, which is exactly what the classifier's pure half exists
 /// for. One ingest either way.
 async fn same_epoch_race(name_the_row: bool) -> Vec<undecryptable::Verdict> {
-    let mut world = build_world().await;
+    let world = build_world().await;
+    let circle = world
+        .build_extra_circle()
+        .await
+        .expect("a circle no engine subscribes to");
     let (alice, bob) = pair(&world);
-    let group = group(&world);
+    co_admin(&world, &circle, alice, bob)
+        .await
+        .expect("the handoff confirms and the successor applies it");
 
-    // Bob must be able to commit at all, so alice hands him the admin bit and
-    // his live engine applies it — the last thing either engine does.
-    let handoff = world
-        .device(alice)
-        .expect("alice")
-        .manager()
-        .expect("a manager")
-        .propose_admin_handoff(&group, &world.device(bob).expect("bob").keys.public_key())
+    let stage = stage_race(&world, &circle, (alice, bob), SecondCommit::Confirmed)
         .await
-        .expect("an admin handoff stages");
-    world
-        .publish_and_confirm(alice, handoff.pending, &[handoff.commit_event])
-        .await
-        .expect("the handoff publishes and confirms");
+        .expect("both commits stage, publish and confirm");
     assert!(
-        wait_until_epochs_agree(&world, &group, bounds::round_trip(Recovery::Undisturbed)).await,
-        "both devices must sit on one epoch before a same-epoch race means anything"
+        stage.genuine,
+        "both devices must have staged from ONE acknowledged epoch, or this is \
+         two commits rather than a race"
     );
 
-    for device in world.devices_mut() {
-        device.go_offline().await.expect("the engine pauses");
-    }
-
-    let mut commits = Vec::with_capacity(2);
-    for (index, tag) in [alice, bob].into_iter().enumerate() {
-        let mut relays = world.relay_urls();
-        relays.push(format!("wss://race-{index}.example.com"));
-        let device = world.device(tag).expect("a device");
-        let staged = device
-            .manager()
-            .expect("a manager")
-            .update_circle_relays(&group, &relays)
+    let verdicts = if name_the_row {
+        merge_race(&world, &circle, (alice, bob), &stage)
             .await
-            .expect("a relay-list commit stages");
-        let outstanding = world.note_pending_staged();
-        assert!(
-            world
-                .publish_witnessed(tag, std::slice::from_ref(&staged.commit_event))
+            .expect("the classifier reads")
+    } else {
+        let mut out = Vec::with_capacity(2);
+        for (ingester, sibling) in [(bob, &stage.first), (alice, &stage.second)] {
+            out.push(
+                undecryptable::classify(
+                    world.device(ingester).expect("a device"),
+                    sibling,
+                    StoredRow::Unknown,
+                )
                 .await
-                .expect("the witness reads")
-                .is_some(),
-            "Rule 13: a commit is confirmed only on an acknowledgement that reached us"
-        );
-        let ingest = device
-            .manager()
-            .expect("a manager")
-            .finalize_relay_update(staged.pending, &group)
-            .await
-            .expect("the commit confirms");
-        assert!(
-            ingest.auto_commits.is_empty() && ingest.proposals.is_empty(),
-            "no window was open behind this commit, so its confirm stages \
-             nothing further"
-        );
-        drop(outstanding);
-        commits.push(staged.commit_event);
-    }
-
-    // Each device ingests the OTHER's commit, exactly once.
-    let mut verdicts = Vec::with_capacity(2);
-    for (ingester, source) in [(bob, 0_usize), (alice, 1_usize)] {
-        let device = world.device(ingester).expect("a device");
-        if name_the_row {
-            let session = device.session().expect("a session");
-            let ingested = session.process_event_typed_for_test(&commits[source]).await;
-            let record = session
-                .stored_convergence_input_for_test(&group, OpenMlsContentKind::Commit, 1)
-                .await
-                .expect("the ingest wrote a commit row");
-            let probe = session
-                .stored_message_record_for_test(&record.id)
-                .await
-                .expect("the row the locator just returned reads");
-            verdicts.push(undecryptable::classify_ingest(
-                &ingested,
-                undecryptable::Probe::Read(probe),
-            ));
-        } else {
-            verdicts.push(
-                undecryptable::classify(device, &commits[source], StoredRow::Unknown)
-                    .await
-                    .expect("the classifier reads"),
+                .expect("the classifier reads"),
             );
         }
-    }
+        out
+    };
 
     world.teardown().await.expect("teardown");
     verdicts
@@ -725,7 +859,28 @@ async fn an_arm_that_fired_no_fault_is_unusable_however_healthy_the_world_looks(
 async fn every_registered_oracle_holds_on_a_world_with_nothing_wrong_with_it() {
     let mut world = build_world().await;
     let classified = [undecryptable::Verdict::Applied];
-    let mut healthy = round(1);
+    // O4's subject is not a state of the world but the edges an arm fed it, so
+    // the healthy round declares the pair a healthy engine produces — exactly
+    // as it declares O5's classification above. A round that fed neither is
+    // `Unusable` by design, which is what keeps an arm from passing O4 by
+    // feeding nothing.
+    let window = u64::try_from(haven_core::nostr::mls::DEFAULT_MAX_PAST_EPOCHS)
+        .expect("a retention window fits a u64");
+    let edges = [
+        RetentionEdge {
+            device: DeviceTag::new(1),
+            circle: world.circles()[0].tag,
+            distance: window,
+            outcome: undecryptable::Verdict::Applied,
+        },
+        RetentionEdge {
+            device: DeviceTag::new(1),
+            circle: world.circles()[0].tag,
+            distance: window + 1,
+            outcome: undecryptable::Verdict::PastEpochOrBranchLoss { branch_loss: false },
+        },
+    ];
+    let mut healthy = round(1).with_retention(&edges);
     healthy.classified = &classified;
 
     for invariant in Invariant::REGISTRY {
@@ -776,13 +931,28 @@ const EXCLUDED_FROM_THE_SWEEP: [&str; 1] = ["full-intake"];
 
 /// Every (scenario, arm) the sweep below runs, written out so that an arm added
 /// to a scenario without a test here fails rather than widening a loop.
-const SWEPT: [(Scenario, &str); 15] = [
+const SWEPT: [(Scenario, &str); 31] = [
     (Scenario::RelayOutage, "single-relay-outage"),
     (Scenario::RelayOutage, "all-relay-outage"),
     (Scenario::RelayOutage, "rolling-outage"),
+    (Scenario::OfflineMember, "offline-quiet"),
+    (Scenario::OfflineMember, "offline-across-commits"),
+    (Scenario::OfflineMember, "offline-past-retention"),
+    (Scenario::OfflineMember, "offline-across-removal"),
+    (
+        Scenario::PublishConfirmWindow,
+        "confirm-err-is-not-a-failure",
+    ),
     (Scenario::StuckRow, "stuck-row-sweep"),
+    (Scenario::CursorPoisoning, "standing-adversary"),
+    (Scenario::CursorPoisoning, "rewrap-created-at-binding"),
     (Scenario::QuietCircle, "quiet-circle-resume"),
+    (Scenario::KeyPackageRotation, "kp-rotation-slot"),
     (Scenario::HydrationQuarantine, "hydration-quarantine"),
+    (Scenario::RestartRace, "race-no-restart"),
+    (Scenario::RestartRace, "race-restart-after-confirm"),
+    (Scenario::RestartRace, "race-restart-before-confirm"),
+    (Scenario::RestartRace, "race-anchor-exhausted"),
     (Scenario::ClosedPrefixes, "closed-prefixes"),
     (Scenario::ClosedPrefixes, "notice"),
     (Scenario::SwallowedOk, "swallowed-ok-create"),
@@ -792,20 +962,37 @@ const SWEPT: [(Scenario, &str); 15] = [
     (Scenario::DuplicateReorder, "reordered-pages"),
     (Scenario::DuplicateReorder, "cross-sub-eose"),
     (Scenario::DuplicateReorder, "commit-gap"),
+    (Scenario::OversizedEvent, "oversized-commit"),
+    (Scenario::OversizedEvent, "refusal-is-relay-count-invariant"),
+    (Scenario::OversizedEvent, "oversized-welcome"),
+    (
+        Scenario::OversizedEvent,
+        "oversized-removal-wedges-the-circle",
+    ),
 ];
 
 /// The world one arm is run in: the PR profile's own shape, widened only where
 /// an arm cannot run in it at all.
 ///
 /// The PR shape rather than each arm's own profile, because it is the shape the
-/// lane actually executes and the cheapest one every arm but two can use. The
-/// two exceptions need a second relay plane by definition: an all-relay or
-/// rolling outage over one plane is a single-relay outage wearing another arm's
-/// label.
+/// lane actually executes and the cheapest one every arm but four can use. Three
+/// exceptions need a second relay plane by definition: an all-relay or rolling
+/// outage over one plane is a single-relay outage wearing another arm's label,
+/// and "a second relay changes nothing about a size refusal" cannot be said in a
+/// world with one. The fourth needs a fourth device: a removal that left the
+/// circle with only the admin and the returning member would be testing an empty
+/// roster, which is also why that arm answers `ShapeMismatch` in the PR shape and
+/// is not in `pr.toml`.
 fn shape_for(label: &str) -> WorldShape {
     let mut shape = pr_spec().world;
-    if matches!(label, "all-relay-outage" | "rolling-outage") {
+    if matches!(
+        label,
+        "all-relay-outage" | "rolling-outage" | "refusal-is-relay-count-invariant"
+    ) {
         shape.relays = shape.relays.max(2);
+    }
+    if label == "offline-across-removal" {
+        shape.members = shape.members.max(4);
     }
     shape
 }
@@ -895,8 +1082,47 @@ async fn s01_rolling_outage_holds() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s04_offline_quiet_holds() {
+    happy_path(Scenario::OfflineMember, "offline-quiet").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s04_offline_across_commits_holds() {
+    happy_path(Scenario::OfflineMember, "offline-across-commits").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s04_offline_past_retention_holds() {
+    happy_path(Scenario::OfflineMember, "offline-past-retention").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s04_offline_across_removal_holds() {
+    happy_path(Scenario::OfflineMember, "offline-across-removal").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s05_confirm_err_is_not_a_failure_holds() {
+    happy_path(
+        Scenario::PublishConfirmWindow,
+        "confirm-err-is-not-a-failure",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn s06_stuck_row_sweep_holds() {
     happy_path(Scenario::StuckRow, "stuck-row-sweep").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s09_standing_adversary_holds() {
+    happy_path(Scenario::CursorPoisoning, "standing-adversary").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s09_rewrap_created_at_binding_holds() {
+    happy_path(Scenario::CursorPoisoning, "rewrap-created-at-binding").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -905,8 +1131,33 @@ async fn s11_quiet_circle_resume_holds() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s12_kp_rotation_slot_holds() {
+    happy_path(Scenario::KeyPackageRotation, "kp-rotation-slot").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn s13_hydration_quarantine_holds() {
     happy_path(Scenario::HydrationQuarantine, "hydration-quarantine").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s14_race_no_restart_holds() {
+    happy_path(Scenario::RestartRace, "race-no-restart").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s14_race_restart_after_confirm_holds() {
+    happy_path(Scenario::RestartRace, "race-restart-after-confirm").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s14_race_restart_before_confirm_holds() {
+    happy_path(Scenario::RestartRace, "race-restart-before-confirm").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s14_race_anchor_exhausted_holds() {
+    happy_path(Scenario::RestartRace, "race-anchor-exhausted").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -955,6 +1206,30 @@ async fn s19_commit_gap_holds() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s22_oversized_commit_holds() {
+    happy_path(Scenario::OversizedEvent, "oversized-commit").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s22_refusal_is_relay_count_invariant_holds() {
+    happy_path(Scenario::OversizedEvent, "refusal-is-relay-count-invariant").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s22_oversized_welcome_holds() {
+    happy_path(Scenario::OversizedEvent, "oversized-welcome").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s22_oversized_removal_wedges_the_circle_holds() {
+    happy_path(
+        Scenario::OversizedEvent,
+        "oversized-removal-wedges-the-circle",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_scenario_arm_graded_against_a_floor_it_cannot_reach_is_unusable() {
     let scenario = Scenario::StuckRow;
     let arm = arm_of(scenario, "stuck-row-sweep");
@@ -973,7 +1248,7 @@ async fn a_scenario_arm_graded_against_a_floor_it_cannot_reach_is_unusable() {
     // The plant: one more fault than the arm fires. Nothing about the world
     // changes — the same observation is graded against a declaration it cannot
     // satisfy, which is the ARITHMETIC of a floor rather than a world that
-    // proved nothing. The seven controls below are the other half: a real
+    // proved nothing. The thirteen controls below are the other half: a real
     // mis-configuration, one per scenario.
     let unreachable = ExpectationFloor {
         faults_applied: report.observed.faults_applied + 1,
@@ -995,12 +1270,12 @@ async fn a_scenario_arm_graded_against_a_floor_it_cannot_reach_is_unusable() {
 
 // ── One real mis-configuration control per scenario (R-M5) ──────────────────
 //
-// A floor re-graded against a bigger number is arithmetic. These seven are the
-// other thing: the arm is run for real against a world deliberately arranged so
+// A floor re-graded against a bigger number is arithmetic. These thirteen are
+// the other thing: the arm is run for real against a world deliberately arranged so
 // the condition it grades cannot arise, and the run must report rc 3 — "this
 // proves nothing" — rather than the rc 0 every oracle would otherwise give it.
 //
-// Two of them come back as a rig error rather than as a report, because the arm
+// Several come back as a rig error rather than as a report, because the arm
 // cannot reach its own grading point at all. That error's own verdict is rc 3
 // for the same reason, and the assertion says so.
 
@@ -1096,6 +1371,84 @@ async fn s01_an_outage_whose_recovery_cannot_be_observed_is_unusable() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s04_a_world_whose_epochs_cannot_move_strands_nobody() {
+    // The mis-configuration: the endpoint is gone, so Rule 13 rolls back every
+    // commit the arm stages and no epoch is ever crossed above the device that
+    // went away. "Away across commits it did not see" cannot arise in a world
+    // where nobody commits, and the arm says so rather than reporting a
+    // catch-up it never had to make.
+    let mut world = build_shaped_world(&shape_for("offline-across-commits")).await;
+    down_and_noticed(&mut world, 0).await;
+
+    let report = run_arm(
+        Scenario::OfflineMember,
+        "offline-across-commits",
+        &mut world,
+    )
+    .await;
+    match report {
+        Ok(report) => floor_is_unusable(&report),
+        // The arm refuses one step earlier, when the first commit goes
+        // unacknowledged. Same finding, same verdict.
+        Err(refused) => assert!(
+            refused.rc() == Rc::Unusable,
+            "an arm with no epoch above the absent device is rc 3, never clean"
+        ),
+    }
+
+    world.teardown().await.expect("teardown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s05_a_commit_nobody_acked_has_no_confirm_that_could_fail() {
+    // The mis-configuration: every acknowledgement is swallowed, so Rule 13
+    // never licenses a confirm anywhere in the arm — the victim circle cannot
+    // even be created. A confirm that fails after the engine already delivered
+    // is the arm's whole subject, and there is no confirm at all.
+    let mut world = build_shaped_world(&shape_for("confirm-err-is-not-a-failure")).await;
+    for plane in world.relays_mut() {
+        plane
+            .apply(Fault::SwallowOk)
+            .await
+            .expect("the plane takes the fault");
+    }
+
+    let refused = run_arm(
+        Scenario::PublishConfirmWindow,
+        "confirm-err-is-not-a-failure",
+        &mut world,
+    )
+    .await
+    .expect_err("nothing was acked, so nothing could be confirmed");
+    assert!(
+        refused.rc() == Rc::Unusable,
+        "an arm with no publish→confirm window to die inside is rc 3, never clean"
+    );
+
+    world.teardown().await.expect("teardown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s14_two_commits_nobody_acked_are_not_a_race() {
+    // The mis-configuration: the endpoint is gone, so neither racer's commit is
+    // ever acknowledged and Rule 13 rolls both back. A race is two CONFIRMED
+    // siblings at one epoch; two rolled-back commits are neither, and the arm
+    // refuses rather than classifying a branch loss nothing branched.
+    let mut world = build_shaped_world(&shape_for("race-no-restart")).await;
+    down_and_noticed(&mut world, 0).await;
+
+    let refused = run_arm(Scenario::RestartRace, "race-no-restart", &mut world)
+        .await
+        .expect_err("no ack, no confirmed sibling, no race");
+    assert!(
+        refused.rc() == Rc::Unusable,
+        "an arm with no second branch is rc 3, never clean"
+    );
+
+    world.teardown().await.expect("teardown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn s06_a_row_already_past_the_horizon_proves_no_age_rule() {
     // The mis-configuration: the gated device's POLICY clock starts past the
     // unresolvable horizon, so the sweep the arm calls "early" is already late.
@@ -1113,6 +1466,75 @@ async fn s06_a_row_already_past_the_horizon_proves_no_age_rule() {
         .await
         .expect("the scenario runs");
     floor_is_unusable(&report);
+
+    world.teardown().await.expect("teardown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s09_a_forgery_no_client_can_receive_poisons_nothing() {
+    // The mis-configuration: the endpoint is closed before the adversary
+    // forges, so no subscription is open on it and the forged frame reaches
+    // nobody. An injection nobody received did not happen, and every "the
+    // anchor did not move" below it would be a statement about an event that
+    // was never delivered.
+    let mut world = build_shaped_world(&shape_for("standing-adversary")).await;
+    down_and_noticed(&mut world, 0).await;
+
+    let report = run_arm(Scenario::CursorPoisoning, "standing-adversary", &mut world).await;
+    match report {
+        Ok(report) => floor_is_unusable(&report),
+        Err(refused) => assert!(
+            refused.rc() == Rc::Unusable,
+            "a forgery with nobody to write it towards is rc 3, never clean"
+        ),
+    }
+
+    world.teardown().await.expect("teardown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s12_a_slot_no_relay_serves_has_no_rotation_to_decide() {
+    // The mis-configuration: the endpoint is gone, so the key package is never
+    // acked and no plane serves the slot. `decide_kp_maintenance` fails closed
+    // on a tick where nobody responded — it can neither confirm a drop nor
+    // publish a rotation — so `Rotate` can never be the decision and the arm
+    // grades a policy it never reached.
+    let mut world = build_shaped_world(&shape_for("kp-rotation-slot")).await;
+    down_and_noticed(&mut world, 0).await;
+
+    let report = run_arm(Scenario::KeyPackageRotation, "kp-rotation-slot", &mut world).await;
+    match report {
+        Ok(report) => floor_is_unusable(&report),
+        // The arm refuses one step earlier, when the first key package goes
+        // unacknowledged. Same finding, same verdict.
+        Err(refused) => assert!(
+            refused.rc() == Rc::Unusable,
+            "an arm whose slot is on no plane is rc 3, never clean"
+        ),
+    }
+
+    world.teardown().await.expect("teardown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s22_an_event_that_reached_no_relay_was_refused_by_none() {
+    // The mis-configuration: the endpoint is closed, so the commit never
+    // crosses to a plane at all. "Nothing acknowledged it" is then true for the
+    // ordinary reason — an outage — and the machine-readable refusal this arm
+    // grades, `OK false invalid:` on the client's own stream, never happens. An
+    // outage is not a size cap, and the arm says so rather than reporting a
+    // refusal nothing produced.
+    let mut world = build_shaped_world(&shape_for("oversized-commit")).await;
+    down_and_noticed(&mut world, 0).await;
+
+    let report = run_arm(Scenario::OversizedEvent, "oversized-commit", &mut world).await;
+    match report {
+        Ok(report) => floor_is_unusable(&report),
+        Err(refused) => assert!(
+            refused.rc() == Rc::Unusable,
+            "an arm with no refusal on the wire is rc 3, never clean"
+        ),
+    }
 
     world.teardown().await.expect("teardown");
 }
@@ -1233,17 +1655,23 @@ async fn s19_a_probe_that_never_crossed_cannot_be_duplicated() {
 
 #[test]
 fn every_registered_scenario_has_a_mis_configuration_control() {
-    // The seven tests above, by the scenario each one controls. Written out so
-    // that a scenario added to the registry without a control fails here rather
-    // than inheriting somebody else's.
-    const CONTROLLED: [Scenario; 7] = [
+    // The thirteen tests above, by the scenario each one controls. Written out
+    // so that a scenario added to the registry without a control fails here
+    // rather than inheriting somebody else's.
+    const CONTROLLED: [Scenario; 13] = [
         Scenario::RelayOutage,
+        Scenario::OfflineMember,
+        Scenario::PublishConfirmWindow,
         Scenario::StuckRow,
+        Scenario::CursorPoisoning,
         Scenario::QuietCircle,
+        Scenario::KeyPackageRotation,
         Scenario::HydrationQuarantine,
+        Scenario::RestartRace,
         Scenario::ClosedPrefixes,
         Scenario::SwallowedOk,
         Scenario::DuplicateReorder,
+        Scenario::OversizedEvent,
     ];
     assert!(
         CONTROLLED.len() == Scenario::REGISTRY.len(),

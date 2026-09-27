@@ -209,6 +209,15 @@ const NEEDLE_COUNT_U64: u64 = 7919;
 /// The same magnitude, as it would render.
 const NEEDLE_COUNT_TEXT: &str = "7919";
 
+/// The hex needle as the 32 raw bytes a routing id, a group id or an event id
+/// really is.
+fn needle_bytes() -> [u8; 32] {
+    hex::decode(NEEDLE_HEX)
+        .expect("the needle is hex")
+        .try_into()
+        .expect("the needle is 32 bytes")
+}
+
 /// Adds one rendering to the table.
 fn add(into: &mut BTreeMap<String, Vec<String>>, key: &str, rendered: String) {
     into.entry(key.to_owned()).or_default().push(rendered);
@@ -224,23 +233,28 @@ fn static_samples() -> BTreeMap<String, Vec<String>> {
     use haven_soak::clock::{ClockError, PolicyNow, WallNow};
     use haven_soak::driver::Refusal;
     use haven_soak::logsink::{ScanReport, SinkError};
-    use haven_soak::nemesis::types::{ClosedPrefix, DeviceOp, Fault, Op, Schedule, ScheduledOp};
+    use haven_soak::nemesis::types::{
+        ByteCap, ClosedPrefix, DeviceOp, Fault, Op, Schedule, ScheduledOp,
+    };
     use haven_soak::oracle::bounds::{BoundDefect, Recovery, WaitScale};
     use haven_soak::oracle::quiescence::{PendingReason, Quiescence, Settled, StabilityWindow};
     use haven_soak::oracle::undecryptable::{self, Cause, Probe, StoredRow};
     use haven_soak::oracle::vacuity::{ExpectationFloor, FloorTerm, Observed};
-    use haven_soak::oracle::{Finding, Invariant, ProbeToken, Reach, Round, Verdict};
+    use haven_soak::oracle::{
+        Finding, Invariant, ProbeToken, Reach, RetentionEdge, Round, Verdict,
+    };
     use haven_soak::profiles::{
         ProfileError, ProfileName, ProfileSpec, ScenarioSelection, WorldShape,
     };
     use haven_soak::rc::{Rc, Verdicts};
-    use haven_soak::relay::NativeClosed;
+    use haven_soak::relay::{Forgery, NativeClosed};
     use haven_soak::rig::{
         CapturedLine, CircleTag, DeviceTag, EventTag, KillKind, PublishVerdict, RelayTag,
         ReopenReport, RigError, SimKind, Step, TimelineRecord, Wait, WorldId,
     };
     use haven_soak::scenarios::{Absence, ScenarioReport, WithheldAcks};
     use haven_soak::timeline::{read_lines, Snapshot, Timeline};
+    use haven_soak::verdict::{RunVerdict, VerdictError, Violation};
     use std::time::Duration;
 
     let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -338,9 +352,39 @@ fn static_samples() -> BTreeMap<String, Vec<String>> {
         Fault::DoubleEveryEvent,
         Fault::ReversePages,
         Fault::EoseForAnotherSubscription,
+        // The recipe names a circle and the cap is measured off an event this
+        // world minted, so both carry a needle here.
+        Fault::Inject(Forgery::Expired {
+            group_id: needle_bytes(),
+        }),
+        Fault::RefuseOversize {
+            max_bytes: ByteCap::new(NEEDLE_COUNT),
+        },
         Fault::Heal,
     ] {
         add(&mut out, "nemesis/types.rs::Fault", format!("{fault:?}"));
+    }
+    add(
+        &mut out,
+        "nemesis/types.rs::ByteCap",
+        format!("{:?}", ByteCap::new(NEEDLE_COUNT)),
+    );
+    for forgery in [
+        Forgery::Expired {
+            group_id: needle_bytes(),
+        },
+        Forgery::Rewrap {
+            source: nostr::EventId::from_slice(&needle_bytes()).expect("32 bytes is an event id"),
+            offset_secs: 86_400,
+        },
+        Forgery::MalformedDoubleH {
+            group_id: needle_bytes(),
+        },
+        Forgery::Unprocessable {
+            group_id: needle_bytes(),
+        },
+    ] {
+        add(&mut out, "relay/forge.rs::Forgery", format!("{forgery:?}"));
     }
     for op in [
         DeviceOp::Restart(KillKind::Soft),
@@ -458,6 +502,21 @@ fn static_samples() -> BTreeMap<String, Vec<String>> {
         "oracle/mod.rs::ProbeToken",
         format!("{:?}", ProbeToken::mint(7, 3)),
     );
+    // An epoch DISTANCE, which is a delta and is rendered exactly, beside the
+    // two handles and the classification the edge carries.
+    add(
+        &mut out,
+        "oracle/mod.rs::RetentionEdge",
+        format!(
+            "{:?}",
+            RetentionEdge {
+                device,
+                circle,
+                distance: 6,
+                outcome: undecryptable::Verdict::Applied,
+            }
+        ),
+    );
     let pairs = [(device, DeviceTag::new(1))];
     add(
         &mut out,
@@ -477,6 +536,7 @@ fn static_samples() -> BTreeMap<String, Vec<String>> {
                 row_envelope: 0,
                 burst_opened: &[device],
                 classified: &[undecryptable::Verdict::Applied],
+                retention: &[],
             }
         ),
     );
@@ -589,6 +649,44 @@ fn static_samples() -> BTreeMap<String, Vec<String>> {
             StoredRow::Unknown
         ),
     );
+
+    // verdict.rs
+    let violation = Violation::new(
+        "S01",
+        "single-relay-outage",
+        Some(Invariant::LocationRoundTrip),
+        Finding::ProbeNotDelivered {
+            from: device,
+            to: DeviceTag::new(1),
+            circle,
+        },
+        7,
+        145,
+        190,
+    );
+    add(&mut out, "verdict.rs::Violation", format!("{violation:?}"));
+    add(
+        &mut out,
+        "verdict.rs::RunVerdict",
+        format!(
+            "{:?}",
+            RunVerdict::new(
+                ProfileName::Pr,
+                0x5eed,
+                "a1b2c3d4",
+                &provenance,
+                Rc::ViolationOrLeak,
+            )
+            .with_violation(violation)
+        ),
+    );
+    for error in [VerdictError::Unvalidated, VerdictError::Unwritable] {
+        add(
+            &mut out,
+            "verdict.rs::VerdictError",
+            format!("{error:?} {error}"),
+        );
+    }
 
     // oracle/vacuity.rs
     // A floor is the arm's own DECLARATION, checked into a profile: it is a
@@ -1135,7 +1233,38 @@ fn offending_shape(rendered: &str) -> Option<String> {
     if rendered.contains(NEEDLE_COUNT_TEXT) {
         return Some("an exact count".to_owned());
     }
+    if has_byte_array_dump(rendered) {
+        return Some("a byte array spelled out".to_owned());
+    }
     None
+}
+
+/// Whether `rendered` carries a bracketed run of eight or more decimal bytes.
+///
+/// The shape a DERIVED `Debug` gives a `[u8; N]`, and the one shape no rule
+/// above sees: a group id, a key or a nonce written `[17, 17, 17, …]` contains
+/// no hex run, no endpoint and no dotted quad, so a type that dropped its
+/// hand-written `Debug` would sample clean. Eight is below every array this
+/// crate holds (32 bytes) and above any tuple of small numbers a rendering
+/// legitimately lists.
+fn has_byte_array_dump(rendered: &str) -> bool {
+    let mut rest = rendered;
+    while let Some(open) = rest.find('[') {
+        let after = &rest[open + 1..];
+        let Some(close) = after.find(']') else {
+            return false;
+        };
+        let items: Vec<&str> = after[..close].split(',').map(str::trim).collect();
+        if items.len() >= 8
+            && items
+                .iter()
+                .all(|item| item.parse::<u16>().is_ok_and(|byte| byte <= 255))
+        {
+            return true;
+        }
+        rest = &after[close + 1..];
+    }
+    false
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

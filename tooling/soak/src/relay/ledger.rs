@@ -28,7 +28,8 @@ use std::fmt;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use nostr::{EventId, SubscriptionId};
+use nostr::filter::MatchEventOptions;
+use nostr::{Event, EventId, Filter, SubscriptionId};
 
 use crate::rig::{sim_magnitude, EventTag};
 
@@ -45,14 +46,25 @@ pub struct Ledger {
 struct Inner {
     /// Event ids whose `OK … true` was written towards the client.
     acked: Vec<EventId>,
+    /// The message of every `OK … false` written towards the client, per
+    /// event. Verbatim, because a refusal's machine-readable prefix is what a
+    /// client branches on and a forged refusal is only worth what its shape is.
+    refusals: HashMap<EventId, String>,
     /// `EVENT` frames written towards the client, per event.
     delivered: HashMap<EventId, usize>,
     /// `EVENT` frames the client sent towards the relay, per event.
     published: HashMap<EventId, usize>,
+    /// Events this plane forged onto a subscription, in injection order.
+    injected: Vec<EventId>,
     /// `REQ`s the client sent, per subscription. Counted where they ARRIVE,
     /// not where they are forwarded: a `CLOSED` fault answers a REQ without
     /// forwarding it, and the re-issue evidence is about what the client did.
     reqs: HashMap<SubscriptionId, usize>,
+    /// The filters each open subscription asked for, latest `REQ` wins — which
+    /// is a relay's own rule for a re-issued subscription id. Held so an
+    /// injection can be delivered the way a relay delivers: onto every
+    /// subscription whose filter matches it.
+    filters: HashMap<SubscriptionId, Vec<Filter>>,
     /// `CLOSED` messages written towards the client, in order.
     closed: Vec<String>,
     /// `NOTICE` texts written towards the client, in order.
@@ -94,6 +106,47 @@ impl Ledger {
         self.with(|inner| inner.acked.contains(event_id))
     }
 
+    /// The message of the `OK … false` this plane wrote for `event_id`, if it
+    /// wrote one.
+    ///
+    /// The other shape of "not acked", and NOT the same evidence as a
+    /// swallowed acknowledgement: under a swallowed `OK` the relay stored the
+    /// event and the client heard nothing at all, so there is no refusal here;
+    /// under a refusal the client heard `OK false` and the store holds nothing.
+    /// Both answer [`Self::witnessed_ok`] with `false` — Rule 13's disposition
+    /// is the same — and an arm that needs to tell them apart reads this and
+    /// the store.
+    #[must_use]
+    pub fn refusal(&self, event_id: &EventId) -> Option<String> {
+        self.with(|inner| inner.refusals.get(event_id).cloned())
+    }
+
+    /// Every open subscription whose filter `event` matches.
+    ///
+    /// A relay's own delivery rule (NIP-01): an event goes to every
+    /// subscription that asked for it. Empty means nobody asked, which is what
+    /// makes an injection onto nothing a fault that did not fire.
+    #[must_use]
+    pub fn subscriptions_matching(&self, event: &Event) -> Vec<SubscriptionId> {
+        self.with(|inner| {
+            let mut matching: Vec<SubscriptionId> = inner
+                .filters
+                .iter()
+                .filter(|(_, filters)| {
+                    filters
+                        .iter()
+                        .any(|filter| filter.match_event(event, MatchEventOptions::new()))
+                })
+                .map(|(subscription_id, _)| subscription_id.clone())
+                .collect();
+            // A map has no order and an injection's frames are written in the
+            // order they come back, so they are sorted: two runs of one seed
+            // must put the same bytes on the wire in the same order.
+            matching.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+            matching
+        })
+    }
+
     /// How many `EVENT` frames naming `event_id` were written towards the
     /// client. Two is a duplicate on the wire, whatever the client's own
     /// de-duplication then does with it.
@@ -106,6 +159,17 @@ impl Ledger {
     #[must_use]
     pub fn published(&self, event_id: &EventId) -> usize {
         self.with(|inner| inner.published.get(event_id).copied().unwrap_or_default())
+    }
+
+    /// Every event this plane INJECTED, in injection order.
+    ///
+    /// The adversary's side of the wire: an injected event is one no member
+    /// published and no store holds, so a scenario that wants to classify what
+    /// its victim made of it has nowhere else to learn its id. Held and
+    /// returned, never rendered.
+    #[must_use]
+    pub fn injected_ids(&self) -> Vec<EventId> {
+        self.with(|inner| inner.injected.clone())
     }
 
     /// Every event the client published, by id.
@@ -188,11 +252,13 @@ impl Ledger {
         self.with(|inner| (inner.rebind_attempts, inner.rebind_wait))
     }
 
-    pub(crate) fn note_ok(&self, event_id: EventId, status: bool) {
+    pub(crate) fn note_ok(&self, event_id: EventId, status: bool, message: &str) {
         self.with(|inner| {
             inner.tag(event_id);
             if status {
                 inner.acked.push(event_id);
+            } else {
+                inner.refusals.insert(event_id, message.to_owned());
             }
         });
     }
@@ -204,6 +270,13 @@ impl Ledger {
         });
     }
 
+    pub(crate) fn note_injected(&self, event_id: EventId) {
+        self.with(|inner| {
+            inner.tag(event_id);
+            inner.injected.push(event_id);
+        });
+    }
+
     pub(crate) fn note_published(&self, event_id: EventId) {
         self.with(|inner| {
             inner.tag(event_id);
@@ -211,8 +284,11 @@ impl Ledger {
         });
     }
 
-    pub(crate) fn note_req(&self, subscription_id: SubscriptionId) {
-        self.with(|inner| *inner.reqs.entry(subscription_id).or_default() += 1);
+    pub(crate) fn note_req(&self, subscription_id: SubscriptionId, filters: Vec<Filter>) {
+        self.with(|inner| {
+            *inner.reqs.entry(subscription_id.clone()).or_default() += 1;
+            inner.filters.insert(subscription_id, filters);
+        });
     }
 
     pub(crate) fn note_closed(&self, message: String) {
@@ -261,8 +337,10 @@ impl fmt::Debug for Ledger {
         self.with(|inner| {
             f.debug_struct("Ledger")
                 .field("acked", &sim_magnitude(inner.acked.len()))
+                .field("refused", &sim_magnitude(inner.refusals.len()))
                 .field("delivered", &sim_magnitude(inner.delivered.len()))
                 .field("published", &sim_magnitude(inner.published.len()))
+                .field("injected", &sim_magnitude(inner.injected.len()))
                 .field("reqs", &sim_magnitude(inner.reqs.len()))
                 .field("closed", &sim_magnitude(inner.closed.len()))
                 .field("notices", &sim_magnitude(inner.notices.len()))
@@ -284,14 +362,69 @@ mod tests {
     #[test]
     fn an_ok_is_witnessed_only_when_it_carried_a_true_status() {
         let ledger = Ledger::new();
-        ledger.note_ok(an_event_id(1), true);
-        ledger.note_ok(an_event_id(2), false);
+        ledger.note_ok(an_event_id(1), true, "");
+        ledger.note_ok(an_event_id(2), false, "invalid: event too large");
         assert!(ledger.witnessed_ok(&an_event_id(1)));
         assert!(
             !ledger.witnessed_ok(&an_event_id(2)),
             "a rejection is not an acknowledgement"
         );
         assert!(!ledger.witnessed_ok(&an_event_id(3)));
+    }
+
+    #[test]
+    fn a_refusal_is_recorded_verbatim_and_a_silence_is_not_a_refusal() {
+        let ledger = Ledger::new();
+        ledger.note_ok(an_event_id(1), true, "");
+        ledger.note_ok(an_event_id(2), false, "invalid: event too large");
+        assert_eq!(
+            ledger.refusal(&an_event_id(2)).as_deref(),
+            Some("invalid: event too large"),
+            "a client branches on the machine-readable prefix, so it is kept as it was written"
+        );
+        assert_eq!(
+            ledger.refusal(&an_event_id(1)),
+            None,
+            "an acknowledgement is not a refusal"
+        );
+        assert_eq!(
+            ledger.refusal(&an_event_id(3)),
+            None,
+            "a swallowed OK leaves NO frame at all, which is the evidence that tells it \
+             apart from a refusal"
+        );
+    }
+
+    #[test]
+    fn an_injection_goes_to_every_subscription_that_asked_for_it_and_no_other() {
+        let ledger = Ledger::new();
+        let event = nostr::EventBuilder::new(nostr::Kind::Custom(445), "x")
+            .tags(vec![
+                nostr::Tag::parse(["h", &hex::encode([7u8; 32])]).expect("a tag")
+            ])
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("signs");
+
+        let wanted = SubscriptionId::new("wants-445s");
+        let other = SubscriptionId::new("wants-profiles");
+        ledger.note_req(
+            wanted.clone(),
+            vec![Filter::new().kind(nostr::Kind::Custom(445))],
+        );
+        ledger.note_req(other, vec![Filter::new().kind(nostr::Kind::Metadata)]);
+
+        assert_eq!(
+            ledger.subscriptions_matching(&event),
+            vec![wanted.clone()],
+            "a relay puts an event on the subscriptions whose filter matches it, and no others"
+        );
+
+        // A re-issued REQ replaces its own filters, as a relay's does.
+        ledger.note_req(wanted, vec![Filter::new().kind(nostr::Kind::Metadata)]);
+        assert!(
+            ledger.subscriptions_matching(&event).is_empty(),
+            "an injection nobody subscribed for is a fault that did not fire"
+        );
     }
 
     #[test]
@@ -315,9 +448,9 @@ mod tests {
         let ledger = Ledger::new();
         let one = SubscriptionId::new("one");
         let other = SubscriptionId::new("other");
-        ledger.note_req(one.clone());
-        ledger.note_req(one.clone());
-        ledger.note_req(other.clone());
+        ledger.note_req(one.clone(), Vec::new());
+        ledger.note_req(one.clone(), Vec::new());
+        ledger.note_req(other.clone(), Vec::new());
         assert_eq!(ledger.reqs_for(&one), 2);
         assert_eq!(ledger.reqs_for(&other), 1);
         assert_eq!(ledger.reqs(), 3);
@@ -378,30 +511,43 @@ mod tests {
     fn clones_share_one_ledger() {
         let ledger = Ledger::new();
         let other = ledger.clone();
-        other.note_ok(an_event_id(4), true);
+        other.note_ok(an_event_id(4), true, "");
         assert!(ledger.witnessed_ok(&an_event_id(4)));
     }
 
     #[test]
     fn rendering_a_ledger_buckets_its_counts_and_names_nothing_it_carried() {
         let ledger = Ledger::new();
-        ledger.note_ok(an_event_id(1), true);
+        ledger.note_ok(an_event_id(1), true, "");
         ledger.note_delivered(an_event_id(1));
         ledger.note_published(an_event_id(1));
-        ledger.note_req(SubscriptionId::new("needle-subscription"));
+        ledger.note_req(SubscriptionId::new("needle-subscription"), Vec::new());
         ledger.note_closed("rate-limited: needle-text".to_string());
         ledger.note_notice("npub1needleneedle".to_string());
+        // The two fields nothing else in this file plants into: a refusal's
+        // message is relay-authored prose, and an injected id is the only event
+        // id that reaches the ledger without a member having published it.
+        ledger.note_ok(an_event_id(2), false, "invalid: needle-refusal-prose");
+        ledger.note_injected(an_event_id(3));
 
         let rendered = format!("{ledger:?}");
         assert!(rendered.contains("Ledger"), "{rendered}");
         assert!(rendered.contains("acked"), "{rendered}");
+        // The counts still render, or "carries nothing" would be satisfied by a
+        // rendering that dropped the two fields instead of bucketing them.
+        assert!(rendered.contains(r#"refused: "1""#), "{rendered}");
+        assert!(rendered.contains(r#"injected: "1""#), "{rendered}");
         let event_hex = hex::encode([1u8; 32]);
+        let injected_hex = hex::encode([3u8; 32]);
         for needle in [
             "needle",
             "npub1",
             "rate-limited",
+            "invalid:",
             event_hex.as_str(),
+            injected_hex.as_str(),
             "0101",
+            "0303",
         ] {
             assert!(
                 !rendered.contains(needle),

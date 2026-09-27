@@ -20,6 +20,7 @@ use haven_soak::profiles::{ProfileName, ProfileSpec, WorldShape};
 use haven_soak::rc::{Rc, LEAK_MARKER, VIOLATION_MARKER};
 use haven_soak::rig::RelayTag;
 use haven_soak::timeline;
+use haven_soak::verdict::{is_handle, VERDICT_FILE, VERDICT_KEYS};
 
 /// The seed these runs record. Nothing is minted from it — the schedule is
 /// given — but the banner and the snapshot file are named after it.
@@ -102,6 +103,53 @@ async fn a_violated_invariant_leaves_its_marker_and_its_snapshot() {
         dir.join("banner.log").is_file(),
         "and the banner is on record whatever the verdict"
     );
+
+    // The machine-readable half of the same evidence, which is what the filing
+    // job reads: a run that reddened and left no verdict is indistinguishable
+    // from a job that never started.
+    let verdict = read_verdict(dir);
+    let fields = verdict.as_object().expect("a verdict is one object");
+    for key in fields.keys() {
+        assert!(
+            VERDICT_KEYS.contains(&key.as_str()),
+            "a key outside the allowlist would reach a public issue body"
+        );
+    }
+    assert!(
+        verdict["rc"] == serde_json::json!(Rc::ViolationOrLeak.code()),
+        "the verdict's rc is the run's own"
+    );
+    assert!(
+        verdict["scenario"] == serde_json::json!("nemesis")
+            && verdict["arm"] == serde_json::json!("schedule"),
+        "a violation the background schedule produced names the phase, not an arm"
+    );
+    assert!(
+        verdict["invariant"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("INV-")),
+        "the invariant is namespaced, as the filing job validates it"
+    );
+    assert!(
+        verdict["finding_class"]
+            .as_str()
+            .is_some_and(|class| !class.is_empty()),
+        "and the classification is the field a watcher groups by"
+    );
+    assert!(
+        verdict["handles"]
+            .as_array()
+            .expect("a handle list")
+            .iter()
+            .all(|handle| handle.as_str().is_some_and(is_handle)),
+        "every handle is one the rig minted"
+    );
+}
+
+/// The verdict the run left, parsed.
+fn read_verdict(dir: &Path) -> serde_json::Value {
+    let text = std::fs::read_to_string(dir.join(VERDICT_FILE)).expect("a run leaves a verdict");
+    serde_json::from_str(&text).expect("the verdict is JSON")
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -128,4 +176,18 @@ async fn a_clean_run_leaves_neither_marker() {
         dir.join("soak-timeline.log").is_file(),
         "the timeline is written either way"
     );
+
+    let verdict = read_verdict(dir);
+    let fields = verdict.as_object().expect("a verdict is one object");
+    assert!(
+        verdict["rc"] == serde_json::json!(Rc::Clean.code())
+            && verdict["rc_name"] == serde_json::json!(Rc::Clean.name()),
+        "a clean run says so in the file a job reads, not only in its exit code"
+    );
+    for absent in ["scenario", "arm", "invariant", "finding_class", "handles"] {
+        assert!(
+            !fields.contains_key(absent),
+            "a clean run has no violation to describe, and a half-filled one would be filed"
+        );
+    }
 }
