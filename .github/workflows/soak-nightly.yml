@@ -237,6 +237,8 @@ jobs:
           set -euo pipefail
           gh api "repos/${GH_REPO}/actions/runs/${GITHUB_RUN_ID}/jobs?filter=latest&per_page=100" \
             > "${RUNNER_TEMP}/soak-jobs.json"
+          # No globbing: the split below is wanted, a slot expanding to file names is not.
+          set -f
           # shellcheck disable=SC2086 # SOAK_SLOTS and SOAK_FILE split into their words by design.
           bash scripts/ci/file_soak_issue.sh --profile nightly \
             --tree "${RUNNER_TEMP}/soak-artifacts" --out "${RUNNER_TEMP}/soak-issue" \

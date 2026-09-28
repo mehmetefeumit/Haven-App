@@ -372,7 +372,7 @@ soak_self_test() {
   local tmp fails=0 cases=0
   # Equality pin: a fixture added or removed without moving this line is a
   # self-test that no longer says what it runs.
-  local -r want_cases=34
+  local -r want_cases=38
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
   trap "rm -rf '${tmp}'" RETURN
@@ -713,13 +713,18 @@ soak_self_test() {
   #      rig's Provenance::new reads as `unknown` (its own unit test pins that).
   #      The fake echoes its argv on stderr the way cargo's `Running` line does
   #      (measured: run 36375782567, `soak-pr-run.log:2`), so (20b) reads the
-  #      run log a real cargo would have left.
+  #      run log a real cargo would have left. Everything after the first `--`,
+  #      so a cargo flag added to the runner cannot shift it.
   local prov="${tmp}/prov" provbin="${tmp}/prov-bin"
   mkdir -p "${prov}" "${provbin}"
   cat > "${provbin}/cargo" <<'FAKE'
 #!/usr/bin/env bash
-printf '     Running `target/soak/haven-soak %s`\n' "${*:7}" >&2
 printf '%s\n' "$@" > "${SOAK_ARGV_OUT}"
+while (( $# )) && [[ "$1" != -- ]]; do shift; done
+shift
+rig=()
+for a in "$@"; do rig+=("${a:-''}"); done
+printf '     Running `target/soak/haven-soak %s`\n' "${rig[*]}" >&2
 exit 0
 FAKE
   printf '%s\n' '#!/usr/bin/env bash' 'echo "rustc 1.98.0 (0f0e0d0c0 2026-08-01)"' > "${provbin}/rustc"
@@ -751,6 +756,30 @@ FAKE
   _case "the run log carries cargo's echo of the rig's argv" 0 "${rc}"
   grep -qE '[0-9a-fA-F]{20,}' "${provlog}" 2>/dev/null && hexrun=1
   _case "...and no run of 20 or more hex characters" 0 "${hexrun}"
+  # The echo is the rig's argv alone, and an empty argument is `''` as cargo
+  # prints it, so the fake's fidelity is asserted rather than trusted.
+  rc=0
+  grep -qF -- '`target/soak/haven-soak --profile ' "${provlog}" 2>/dev/null || rc=1
+  _case "...and it starts at the rig's first argument" 0 "${rc}"
+  rc=0
+  grep -qF -- "--commit '' " "${prov}/local/soak-pr-run.log" 2>/dev/null || rc=1
+  _case "...and renders an empty commit as ''" 0 "${rc}"
+
+  #       In CI the argv also carries the rig's manifest path, run id and all,
+  #       so the same rule reads a run with the scan on. In-process, like (15),
+  #       because a child would seal into the real needle directory.
+  local provlogscan="${prov}/logscan" provneedles="${tmp}/prov-needles"
+  ( SOAK_SELF_TEST_NEEDLE_DIR="${provneedles}"
+    PATH="${provbin}:${PATH}" HAVEN_LOGSCAN=true HAVEN_LOGSCAN_BIN="${fakebin}" SCAN_LOGS="${fakewrap}" \
+      GITHUB_SHA=269b46c1a2b3c4d5e6f708192a3b4c5d6e7f8091 GITHUB_RUN_ID=36380550952 GITHUB_RUN_ATTEMPT=1 \
+      SOAK_ARGV_OUT="${tmp}/argv-logscan" SOAK_UPLOAD_DIR="${provlogscan}" SOAK_REPORT_DIR="${tmp}/prov-reports" \
+      soak_main pr ) >/dev/null 2>&1 || true
+  provlog="${provlogscan}/soak-pr-run.log" hexrun=0
+  rc=0
+  grep -qF -- "--needle-manifest ${provneedles}/$(GITHUB_RUN_ID=36380550952 GITHUB_RUN_ATTEMPT=1 soak_run_id)${SOAK_MANIFEST_SUFFIX}" "${provlog}" 2>/dev/null || rc=1
+  _case "with the scan on, the echo carries the manifest path" 0 "${rc}"
+  grep -qE '[0-9a-fA-F]{20,}' "${provlog}" 2>/dev/null && hexrun=1
+  _case "...and still no run of 20 or more hex characters" 0 "${hexrun}"
 
   # (20c) The runner's cut is the rig's, by the constant's own spelling.
   _eq "the runner's commit cut equals banner.rs COMMIT_MAX_HEX" \

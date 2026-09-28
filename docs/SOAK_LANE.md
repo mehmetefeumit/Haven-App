@@ -1125,6 +1125,15 @@ nothing for it and the `no-verdict` issue attempt 1 filed stays uncommented
 and stale until a person closes it; attempt 2 re-comments on every key still
 red.
 
+**The filing path has been proven live once** (OQ-G, the recipe in
+`docs/E2E_TROUBLESHOOTING.md`). From a scratch branch carrying two changes —
+S01's `single-relay-outage` arm downing every plane and never healing (in
+place of the recipe's derived bound), and a `--file` condition true for a
+dispatch — run 36380550952 filed issue #8, `soak(nightly): INV-O1`, with four
+slot blocks of the nineteen allowlisted fields, and a second dispatch, run
+36381827460, commented on #8 rather than opening another. Neither mutation
+reached `main`; #8 was closed and the branch deleted on 2026-09-28.
+
 **Reproducing it.** The seed is in the issue body and on the slot's banner:
 
 ```

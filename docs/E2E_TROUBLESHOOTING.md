@@ -1653,6 +1653,9 @@ relying on the nightly issues:
    issue path, then close the issue and delete the scratch branch. The change
    to the `--file` condition must never reach `main`.
 
+This has been run once, with a scenario mutation in place of step 2's bound —
+runs 36380550952 (filed the issue) and 36381827460 (commented on it) — and `docs/SOAK_LANE.md` "When a night goes red" records it.
+
 ## Failure mode 24 — a soak slot is rc 1 on `LEAK: …soak-<profile>-run.log:2 [S2]`
 
 A structural S2 hit (a run of 32–63 hex) at LINE 2 of the run transcript is a
