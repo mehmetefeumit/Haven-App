@@ -40,6 +40,7 @@ fn a_scale_stretches_a_delivery_budget_and_leaves_every_absence_window_alone() {
     let throttled_absence = Absence::ThrottledBackoffFloor.window();
     let silence_absence = Absence::DeliverySilenceWindow.window();
     let removal_absence = Absence::RemovalPublishTail.window();
+    let lookback_absence = Absence::ResubscribeLookback.window();
     let publish_window = bounds::location_publish_window();
 
     assert!(
@@ -88,6 +89,12 @@ fn a_scale_stretches_a_delivery_budget_and_leaves_every_absence_window_alone() {
         Absence::RemovalPublishTail.window() == removal_absence,
         "and the removal tail: an arm asserting that no remaining member published at the old \
          epoch asserts exactly its own window, whatever the machine"
+    );
+    assert!(
+        Absence::ResubscribeLookback.window() == lookback_absence
+            && bounds::resubscribe_lookback() == lookback_absence,
+        "and the resubscribe lookback: a scaled one would wait past the product's own window \
+         rather than to its edge"
     );
     assert!(
         bounds::location_publish_window() == publish_window,

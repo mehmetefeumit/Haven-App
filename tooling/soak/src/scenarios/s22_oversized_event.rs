@@ -26,7 +26,8 @@
 //! socket opens: `MAX_SUPPORTED_PLAINTEXT_SIZE` is private to the `nostr` crate
 //! and the error comes back without anything crossing the wire. That is a
 //! dependency invariant, and paying for a whole soak world to observe it would
-//! buy nothing — it belongs in a `haven-core` gate over the same public API. The
+//! buy nothing — it is proved in haven-core
+//! (`haven-core/tests/nip44_plaintext_ceiling.rs`), not by a soak arm. The
 //! Welcome arm below is a RELAY-side refusal and says so, so a reader does not
 //! take it for the other thing.
 //!

@@ -142,6 +142,42 @@ impl Serialize for ByteCap {
     }
 }
 
+/// A count the rig chose for a page fault: how many events a clamped page
+/// keeps, or which `REQ` on a connection is refused.
+///
+/// Its own type for the reason [`ByteCap`] is: every rendering of it is
+/// BUCKETED. An arm sizes it off the backlog its world seeded, so an exactly
+/// rendered count is a magnitude of that world.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct RigCount(usize);
+
+impl RigCount {
+    /// A count of `n`.
+    #[must_use]
+    pub const fn new(n: usize) -> Self {
+        Self(n)
+    }
+
+    /// The count itself, for the proxy that enforces it.
+    #[must_use]
+    pub const fn get(self) -> usize {
+        self.0
+    }
+}
+
+// Presence only, as `ByteCap`'s is.
+impl fmt::Debug for RigCount {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("RigCount").field(&"..").finish()
+    }
+}
+
+impl Serialize for RigCount {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(sim_magnitude(self.0))
+    }
+}
+
 /// The class of a server→client `EVENT` frame a plane can withhold.
 ///
 /// The one discriminator the rig owns, used by the proxy that drops a class and
@@ -216,6 +252,8 @@ pub enum Fault {
     DoubleEveryEvent,
     /// Stored-event pages are delivered in the reverse of the order the
     /// relay serves them: the store serves newest first, so oldest first.
+    /// Live events published while it is armed are held until the
+    /// subscription's next `EOSE` — do not publish while it is armed.
     ReversePages,
     /// `EOSE` is sent naming a different subscription.
     EoseForAnotherSubscription,
@@ -236,6 +274,21 @@ pub enum Fault {
     /// partition is between the relay and ONE endpoint, which is what makes it
     /// a per-device fault and not an outage.
     DropClass(DropClass),
+    /// Every stored-event page is cut to its newest `n` events, the way a
+    /// relay whose `max_limit` is `n` clamps a larger `limit`. Live events
+    /// after the page's `EOSE` pass untouched. Arm and heal it BETWEEN pages:
+    /// a page in flight across the arming or the heal is part forwarded, part
+    /// held, and comes out reordered or mis-truncated.
+    ClampLimit(RigCount),
+    /// The `nth` `REQ` each connection makes after this is armed (counting
+    /// from 1) is answered `CLOSED "error: …"` and never reaches the relay.
+    RefusePage {
+        /// Which `REQ` is refused.
+        nth: RigCount,
+    },
+    /// The next connection each endpoint accepts is dropped before its
+    /// handshake; every later one is served.
+    ColdFirstConnect,
     /// Everything above is undone.
     Heal,
 }
@@ -258,6 +311,9 @@ impl Fault {
             Self::Inject(_) => "inject",
             Self::RefuseOversize { .. } => "refuse-oversize",
             Self::DropClass(_) => "drop-class",
+            Self::ClampLimit(_) => "clamp-limit",
+            Self::RefusePage { .. } => "refuse-page",
+            Self::ColdFirstConnect => "cold-first-connect",
             Self::Heal => "heal",
         }
     }
@@ -277,6 +333,9 @@ impl Fault {
             Self::RefuseOversize { .. } => 10,
             Self::Heal => 11,
             Self::DropClass(_) => 12,
+            Self::ClampLimit(_) => 13,
+            Self::RefusePage { .. } => 14,
+            Self::ColdFirstConnect => 15,
         };
         buf.push(code);
         match self {
@@ -295,6 +354,9 @@ impl Fault {
                 buf.extend_from_slice(&(max_bytes.bytes() as u64).to_be_bytes());
             }
             Self::DropClass(class) => buf.push(class.code()),
+            Self::ClampLimit(n) | Self::RefusePage { nth: n } => {
+                buf.extend_from_slice(&(n.get() as u64).to_be_bytes());
+            }
             _ => {}
         }
     }
@@ -847,9 +909,73 @@ mod tests {
     }
 
     #[test]
+    fn two_page_faults_that_differ_only_in_their_count_digest_differently() {
+        let applied = |fault| {
+            Schedule::new(vec![ScheduledOp {
+                tick: 1,
+                op: Op::Fault {
+                    relay: RelayTag::new(0),
+                    fault,
+                },
+                heal_at: None,
+            }])
+        };
+        assert_ne!(
+            applied(Fault::ClampLimit(RigCount::new(1))).digest(),
+            applied(Fault::ClampLimit(RigCount::new(2))).digest(),
+            "two clamps must not digest as one op"
+        );
+        assert_ne!(
+            applied(Fault::RefusePage {
+                nth: RigCount::new(1)
+            })
+            .digest(),
+            applied(Fault::RefusePage {
+                nth: RigCount::new(2)
+            })
+            .digest(),
+            "two refused pages must not digest as one op"
+        );
+        // The same count under two faults is two recipes.
+        assert_ne!(
+            applied(Fault::ClampLimit(RigCount::new(1))).digest(),
+            applied(Fault::RefusePage {
+                nth: RigCount::new(1)
+            })
+            .digest()
+        );
+        assert_ne!(
+            applied(Fault::ColdFirstConnect).digest(),
+            applied(Fault::Heal).digest()
+        );
+
+        for fault in [
+            Fault::ClampLimit(RigCount::new(7919)),
+            Fault::RefusePage {
+                nth: RigCount::new(7919),
+            },
+        ] {
+            let rendered = format!("{fault:?}");
+            assert!(!rendered.contains("7919"), "{rendered}");
+            let json = serde_json::to_string(&fault).expect("a fault serialises");
+            assert!(!json.contains("7919"), "{json}");
+            assert!(json.contains("5+"), "{json}");
+        }
+    }
+
+    #[test]
     fn labels_are_literals_from_this_file() {
         assert_eq!(Fault::Closed(ClosedPrefix::Blocked).label(), "closed");
         assert_eq!(Fault::Notice("held for the harness").label(), "notice");
+        assert_eq!(Fault::ClampLimit(RigCount::new(2)).label(), "clamp-limit");
+        assert_eq!(
+            Fault::RefusePage {
+                nth: RigCount::new(2)
+            }
+            .label(),
+            "refuse-page"
+        );
+        assert_eq!(Fault::ColdFirstConnect.label(), "cold-first-connect");
         assert_eq!(
             Op::Device {
                 device: DeviceTag::new(0),

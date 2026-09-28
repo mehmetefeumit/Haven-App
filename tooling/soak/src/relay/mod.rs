@@ -34,10 +34,22 @@ use nostr::{Event, EventId, Filter};
 use nostr_database::{DatabaseEventStatus, MemoryDatabase, MemoryDatabaseOptions, NostrDatabase};
 use nostr_relay_builder::{LocalRelay, RelayBuilder};
 
-use crate::nemesis::types::Fault;
-use crate::relay::proxy::{FaultState, Proxy};
+use crate::nemesis::types::{Fault, RigCount};
+use crate::relay::proxy::{arm_refuse_page, FaultState, Proxy};
 use crate::rig::plane::RelayPlane;
 use crate::rig::{sim_magnitude, DeviceTag, RelayTag, RigError, Step};
+
+/// The most events a plane's relay serves for a REQ whose filter sets no
+/// `limit`.
+///
+/// `nostr-relay-builder`'s `default_filter_limit`
+/// (`nostr-relay-builder-0.44.1/src/builder.rs:225`, applied to a limitless
+/// filter at `local/inner.rs:852-854`). The field is `pub(crate)` with no
+/// getter, so no expression in this crate can read it: the value is written out
+/// here with its citation, and `tests/relay_faults.rs` pins it on the wire — a
+/// store one past it, a REQ with no limit, exactly the newest this many back.
+/// S08 buries a commit under it; Haven's live group REQ sets no limit.
+pub const RELAY_DEFAULT_REPLAY_CAP: usize = 500;
 
 /// One relay the world can break.
 ///
@@ -89,6 +101,22 @@ impl SimRelay {
         native: NativeClosed,
     ) -> Result<Self, RigError> {
         Self::build(tag, |builder| native.configure(builder)).await
+    }
+
+    /// Starts a plane whose relay clamps every filter's `limit` to `max` itself.
+    ///
+    /// The byte-fidelity control for [`Fault::ClampLimit`], which has to be
+    /// forged: a `QueryPolicy` answers `Accept`/`Reject` and cannot rewrite a
+    /// `limit` (`nostr-relay-builder-0.44.1/src/builder.rs:98-103`), and the
+    /// relay's own clamp runs before the policy loop ever sees the filter
+    /// (`local/inner.rs:838-877`). So this knob (`builder.rs:306`) is only ever
+    /// the comparison.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::start`].
+    pub async fn start_clamping_natively(tag: RelayTag, max: RigCount) -> Result<Self, RigError> {
+        Self::build(tag, |builder| builder.max_filter_limit(max.get())).await
     }
 
     async fn build(
@@ -164,6 +192,41 @@ impl SimRelay {
             .await
             .map(|events| events.into_iter().collect())
             .map_err(|_| RigError::Core(Step::Publish))
+    }
+
+    /// Writes `events` straight into the plane's store, as a relay that had
+    /// already accepted them would hold them, and returns how many were NEWLY
+    /// saved.
+    ///
+    /// Never through the client-facing proxy, and never through
+    /// `LocalRelay::notify_event`, which fans an event out to live
+    /// subscriptions without saving it (`nostr-relay-builder-0.44.1/src/local/mod.rs:59-67`):
+    /// the point is a backlog that exists BEFORE anybody subscribes, so a seed
+    /// reaches the store and no live subscriber. It is the store the builder
+    /// was handed, which holds events only because [`Self::build`] asks for a
+    /// full one.
+    ///
+    /// The count is exact because a duplicate is not an error: the store
+    /// answers `Ok(SaveEventStatus::Rejected(Duplicate))`
+    /// (`nostr-database-0.44.0/src/helper.rs:199-204`), so an arm reading
+    /// "strictly more than N were stored" compares the return value.
+    ///
+    /// # Errors
+    ///
+    /// [`RigError::Core`] with [`Step::ApplyFault`] if the store refuses a
+    /// write outright: a seed that did not land is a backlog that is not
+    /// there.
+    pub async fn store(&self, events: &[Event]) -> Result<usize, RigError> {
+        let mut saved = 0;
+        for event in events {
+            let status = self
+                .db
+                .save_event(event)
+                .await
+                .map_err(|_| RigError::Core(Step::ApplyFault))?;
+            saved += usize::from(status.is_success());
+        }
+        Ok(saved)
     }
 }
 
@@ -354,6 +417,21 @@ async fn apply_inner(
         }
         Fault::DropClass(class) => {
             edit_all(endpoints, |state| state.drop_class = Some(class));
+            Ok(())
+        }
+        Fault::ClampLimit(n) => {
+            edit_all(endpoints, |state| state.clamp_limit = Some(n.get()));
+            Ok(())
+        }
+        // One arming for every endpoint, so each connection on each of them
+        // counts from this call.
+        Fault::RefusePage { nth } => {
+            let armed = arm_refuse_page(nth);
+            edit_all(endpoints, |state| state.refuse_page = Some(armed));
+            Ok(())
+        }
+        Fault::ColdFirstConnect => {
+            edit_all(endpoints, |state| state.cold_first_connect = true);
             Ok(())
         }
         // A heal restores BEHAVIOUR, endpoint included. It cannot restore a

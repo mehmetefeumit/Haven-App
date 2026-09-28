@@ -722,20 +722,83 @@ fn endpoints(accepted: &[RelayUrl], sub_id: &SubscriptionId) -> Vec<RepairKey> {
         .collect()
 }
 
+/// The engine's own `Client` with a harness address map in front of it: the one
+/// shape [`LiveSyncCore::new_local_with_relay_map_for_test`] can build, private
+/// so no caller can hand the engine a publisher that is not the `Client`.
+#[cfg(any(test, feature = "test-utils"))]
+struct RelayMappedClient<M> {
+    client: Client,
+    map: M,
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl<M: Fn(&str) -> String + Send + Sync> crate::relay::auto_commit::AutoCommitPublisher
+    for RelayMappedClient<M>
+{
+    fn publish_auto_commit<'a>(
+        &'a self,
+        event: &'a nostr::Event,
+        relays: &'a [String],
+    ) -> std::pin::Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move {
+            let mapped: Vec<String> = relays.iter().map(|relay| (self.map)(relay)).collect();
+            crate::relay::auto_commit::AutoCommitPublisher::publish_auto_commit(
+                &self.client,
+                event,
+                &mapped,
+            )
+            .await
+        })
+    }
+}
+
 impl LiveSyncCore {
     /// Builds an engine over `circle` for `own_pubkey`, with a fresh ephemeral
     /// sub-id salt and a dedicated engine `Client`. Does not connect or
     /// subscribe — call [`Self::start`].
     #[must_use]
     pub fn new_local(circle: Arc<CircleManager>, own_pubkey: PublicKey) -> Self {
-        let bus = EventBus::with_capacity(BUS_CAP);
-        let client = build_engine_client();
         // The processor publishes receive-side auto-commits (a peer `SelfRemove`
         // eviction) over the SAME already-connected engine sockets and confirms
         // only after a ≥1-relay OK-ack (Rule 13 / security F13). `Client` is
         // cheaply cloneable (internally `Arc`-backed).
-        let publisher: Arc<dyn crate::relay::auto_commit::AutoCommitPublisher> =
-            Arc::new(client.clone());
+        Self::assemble(circle, own_pubkey, |client| Arc::new(client))
+    }
+
+    /// [`Self::new_local`], with every address the auto-commit publish targets
+    /// passed through `map` first.
+    ///
+    /// Test-only. A harness that fronts one relay with a distinct address per
+    /// device holds only its own address in the pool while storage names the
+    /// relay's shared one, and the pool refuses an address it does not hold
+    /// (`RelayNotFound`), so every receive-side commit would stay owed. `map`
+    /// changes the address and nothing else: the publish is still production's
+    /// `impl AutoCommitPublisher for Client` over the engine's own pool, so the
+    /// sockets and the ≥1-relay OK rule (Rule 13) cannot be substituted — and
+    /// the `Client`'s verdict is passed through unchanged, which
+    /// `test_utils_seams_sockets.rs`'s
+    /// `a_map_to_an_address_the_pool_does_not_hold_leaves_the_eviction_owed`
+    /// pins.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[must_use]
+    pub fn new_local_with_relay_map_for_test(
+        circle: Arc<CircleManager>,
+        own_pubkey: PublicKey,
+        map: impl Fn(&str) -> String + Send + Sync + 'static,
+    ) -> Self {
+        Self::assemble(circle, own_pubkey, |client| {
+            Arc::new(RelayMappedClient { client, map })
+        })
+    }
+
+    fn assemble(
+        circle: Arc<CircleManager>,
+        own_pubkey: PublicKey,
+        wrap: impl FnOnce(Client) -> Arc<dyn crate::relay::auto_commit::AutoCommitPublisher>,
+    ) -> Self {
+        let bus = EventBus::with_capacity(BUS_CAP);
+        let client = build_engine_client();
+        let publisher = wrap(client.clone());
         let shutdown = Arc::new(AtomicBool::new(false));
         let mut processor =
             EngineProcessor::with_publisher(Arc::clone(&circle), bus.clone(), publisher);

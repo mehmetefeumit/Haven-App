@@ -7,14 +7,16 @@
 //! `SQLCipher` database — none of them plants a row to "reach" the state it
 //! asserts.
 //!
-//! Six are READ seams; two are not. `set_stored_message_write_fault_for_test`
+//! Six are READ seams; three are not. `set_stored_message_write_fault_for_test`
 //! MUTATES a live database so a harness can make a write the engine performs
-//! mid-call fail, and `forge_future_header_445_for_test` SEALS a crafted event
-//! under the group key (a member's outbound power, not a reader's). Both are
-//! listed last and marked, because "a harness can see state the product does not
-//! expose" is not a true description of either.
+//! mid-call fail, `forge_future_header_445_for_test` SEALS a crafted event
+//! under the group key (a member's outbound power, not a reader's), and
+//! `LiveSyncCore::new_local_with_relay_map_for_test` lets a harness rewrite the
+//! addresses the engine's auto-commit publish targets. They are listed last and
+//! marked, because "a harness can see state the product does not expose" is not
+//! a true description of any of them.
 //!
-//! The eight seams and what each is for:
+//! The nine seams and what each is for:
 //!
 //! 1. `SessionManager::process_event_typed_for_test` — one ingest of one event
 //!    that keeps BOTH pre-authentication screens and hands back the engine's own
@@ -48,6 +50,17 @@
 //!    this (it holds no group key); only a member can, so the sealing lives at
 //!    the session. It is a member's forging power, not a reader's, which is why
 //!    it is marked here beside the write-fault seam.
+//! 9. `LiveSyncCore::new_local_with_relay_map_for_test` — the engine built with
+//!    an ADDRESS MAP in front of its auto-commit publish, and nothing wider. A
+//!    rig that fronts one relay with a distinct address per device holds only
+//!    the device's address in the pool while storage names the shared one, so
+//!    the production publisher is refused (`RelayNotFound`) and every
+//!    receive-side eviction stays owed. The harness supplies `Fn(&str) ->
+//!    String`; haven-core wraps the engine's OWN `Client` in a private type
+//!    that delegates to production's `impl AutoCommitPublisher for Client`, so
+//!    the pool, the sockets and the ≥1-relay OK rule cannot be substituted.
+//!    Its socket-opening tests live in `test_utils_seams_sockets.rs`, apart
+//!    from this file's process-wide log capture; its gate test is below.
 //!
 //! # Rule 15 over this file
 //!
@@ -1134,5 +1147,33 @@ fn forge_future_header_is_gated_by_its_own_test_utils_attribute() {
     assert!(
         !source[gate..declaration].contains("pub "),
         "the gate must be the seam's OWN attribute, not one belonging to an earlier item"
+    );
+}
+
+// ── Seam 9: the auto-commit address map (socket tests: test_utils_seams_sockets.rs)
+
+#[test]
+fn new_local_with_relay_map_is_gated_by_its_own_test_utils_attribute() {
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/relay/live_sync/session.rs"),
+    )
+    .expect("read the session module");
+    let declaration = source
+        .find("pub fn new_local_with_relay_map_for_test")
+        .expect("the seam is declared here");
+    let gate = source[..declaration]
+        .rfind("#[cfg(any(test, feature = \"test-utils\"))]")
+        .expect("and it carries a gate");
+    assert!(
+        !source[gate..declaration].contains("pub "),
+        "the gate must be the seam's OWN attribute, not one belonging to an earlier item"
+    );
+    // "Cannot substitute a transport" holds only while the wrapper is haven-core's
+    // own and unreachable: a visible one could be built around anything.
+    assert!(
+        source.contains("\nstruct RelayMappedClient<")
+            && !source.contains("pub struct RelayMappedClient")
+            && !source.contains("pub(crate) struct RelayMappedClient"),
+        "the address-map wrapper stays private to the session module"
     );
 }

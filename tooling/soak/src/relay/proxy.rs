@@ -19,7 +19,7 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::net::{Ipv4Addr, SocketAddr};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::Duration;
 
@@ -30,7 +30,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 
-use crate::nemesis::types::{ClosedPrefix, DropClass};
+use crate::nemesis::types::{ClosedPrefix, DropClass, RigCount};
 use crate::relay::forge::{take_frame, take_http_head, text_frame, Frame};
 use crate::relay::ledger::Ledger;
 use crate::relay::policies::{closed_message, oversize_message};
@@ -62,7 +62,8 @@ const FOREIGN_SUBSCRIPTION: &str = "a-subscription-this-client-never-opened";
 /// later `EOSE` releases it.
 type HeldEvent = (Vec<u8>, EventId, Option<DropClass>);
 
-/// Pages held back under [`FaultState::reverse_pages`], PER SUBSCRIPTION.
+/// Pages held back under [`FaultState::reverse_pages`] or
+/// [`FaultState::clamp_limit`], PER SUBSCRIPTION.
 ///
 /// Per subscription and never per connection: one pooled socket carries every
 /// REQ a device makes, so a connection-wide hold releases one subscription's
@@ -77,13 +78,74 @@ fn hold(held: &mut HeldPages, subscription: SubscriptionId, event: HeldEvent) {
     held.entry(subscription).or_default().push(event);
 }
 
-/// Takes the page `subscription`'s `EOSE` releases, in the reverse of the
-/// order the relay served it (oldest first), leaving every other
-/// subscription's alone.
-fn release(held: &mut HeldPages, subscription: &SubscriptionId) -> Vec<HeldEvent> {
+/// Takes the page `subscription`'s `EOSE` releases, leaving every other
+/// subscription's alone: cut to the newest `clamp_limit` events, then — under
+/// `reverse_pages` — in the reverse of the order the relay served it.
+///
+/// The relay serves newest first, so the newest `n` are the first `n` it
+/// served, which is exactly the page a relay clamping `limit` to `n` would
+/// have served (`nostr-relay-builder-0.44.1/src/local/inner.rs:838-857` clamps
+/// the filter, then the store answers it). Shaped by the state at the `EOSE`,
+/// so a heal that lands mid-page releases the page as the relay served it.
+fn release(
+    held: &mut HeldPages,
+    subscription: &SubscriptionId,
+    faults: FaultState,
+) -> Vec<HeldEvent> {
     let mut page = held.remove(subscription).unwrap_or_default();
-    page.reverse();
+    if let Some(n) = faults.clamp_limit {
+        page.truncate(n);
+    }
+    if faults.reverse_pages {
+        page.reverse();
+    }
     page
+}
+
+/// Where [`RefusedPage::arming`] comes from: a fresh value per arming, so a
+/// connection counts its `REQ`s from the arming it sees and never from its
+/// own first `REQ`.
+static ARMINGS: AtomicU64 = AtomicU64::new(1);
+
+/// A [`FaultState::refuse_page`] armed now, refusing the `nth` `REQ`.
+pub fn arm_refuse_page(nth: RigCount) -> RefusedPage {
+    RefusedPage {
+        nth: nth.get(),
+        arming: ARMINGS.fetch_add(1, Ordering::Relaxed),
+    }
+}
+
+/// Which `REQ` a connection refuses, and which arming that count belongs to.
+#[derive(Clone, Copy)]
+pub struct RefusedPage {
+    nth: usize,
+    arming: u64,
+}
+
+/// The `REQ`s one connection has made under the current arming.
+///
+/// Per connection because a relay's page is per connection, and per ARMING
+/// because the fault is armed mid-run: counted from the connection's own first
+/// `REQ`, a pooled socket that had already made `nth` would never be refused.
+#[derive(Default)]
+struct ReqCount {
+    arming: u64,
+    seen: usize,
+}
+
+impl ReqCount {
+    /// Counts one `REQ`; whether it is the one `armed` refuses.
+    const fn refuses(&mut self, armed: Option<RefusedPage>) -> bool {
+        let Some(armed) = armed else {
+            return false;
+        };
+        if armed.arming != self.arming {
+            self.arming = armed.arming;
+            self.seen = 0;
+        }
+        self.seen += 1;
+        self.seen == armed.nth
+    }
 }
 
 /// What is currently wrong with a plane's client-facing stream.
@@ -106,6 +168,12 @@ pub struct FaultState {
     pub max_event_bytes: Option<usize>,
     /// The class of `EVENT` frame this endpoint withholds, when one is.
     pub drop_class: Option<DropClass>,
+    /// The most events a stored-event page carries, when pages are clamped.
+    pub clamp_limit: Option<usize>,
+    /// The `REQ` each connection has refused, when one is.
+    pub refuse_page: Option<RefusedPage>,
+    /// Whether the next connection this endpoint accepts is dropped.
+    pub cold_first_connect: bool,
 }
 
 impl FaultState {
@@ -291,6 +359,14 @@ impl Proxy {
         let inject = self.inject.clone();
         self.accept = Some(tokio::spawn(async move {
             while let Ok((client, _)) = listener.accept().await {
+                if refuses_connect(&state) {
+                    // Closed before the upgrade head is read: the client's
+                    // handshake fails the way a relay that is still starting
+                    // fails it, and nothing reaches the relay behind.
+                    drop(client);
+                    ledger.note_refused_connect();
+                    continue;
+                }
                 tokio::spawn(serve(
                     client,
                     target.clone(),
@@ -303,6 +379,13 @@ impl Proxy {
             }
         }));
     }
+}
+
+/// Whether this accept is the one [`FaultState::cold_first_connect`] refuses,
+/// consuming the fault so exactly one is.
+fn refuses_connect(state: &RwLock<FaultState>) -> bool {
+    let mut state = state.write().unwrap_or_else(PoisonError::into_inner);
+    std::mem::take(&mut state.cold_first_connect)
 }
 
 // The accept task owns the listener, so the endpoint stays bound until the task
@@ -339,7 +422,7 @@ async fn serve(
     // notifies an event ONCE per id: a forged frame carrying somebody else's
     // subscription id would burn that one notification on a REQ this client
     // never opened, and the engine behind it would never see the injection.
-    let opened: Arc<Mutex<HashSet<SubscriptionId>>> = Arc::default();
+    let subscriptions: Arc<Mutex<Subscriptions>> = Arc::default();
 
     let mut upstream = tokio::spawn(pump_to_relay(
         from_client,
@@ -347,13 +430,13 @@ async fn serve(
         Arc::clone(&state),
         ledger.clone(),
         forged_tx,
-        Arc::clone(&opened),
+        Arc::clone(&subscriptions),
     ));
     let connection = Connection {
         device,
         state,
         ledger,
-        opened,
+        subscriptions,
     };
     let mut downstream = tokio::spawn(pump_to_client(
         from_relay, to_client, connection, forged_rx, inject,
@@ -376,16 +459,22 @@ async fn pump_to_relay(
     state: Arc<RwLock<FaultState>>,
     ledger: Ledger,
     forged: mpsc::Sender<String>,
-    opened: Arc<Mutex<HashSet<SubscriptionId>>>,
+    subscriptions: Arc<Mutex<Subscriptions>>,
 ) {
     if !forward_head(&mut from_client, &mut to_relay).await {
         return;
     }
     let mut buf = Vec::new();
+    let mut reqs = ReqCount::default();
     loop {
         while let Some(frame) = take_frame(&mut buf) {
-            if !forward_from_client(&frame, &mut to_relay, &state, &ledger, &forged, &opened).await
-            {
+            let upstream = Upstream {
+                state: &state,
+                ledger: &ledger,
+                forged: &forged,
+                subscriptions: &subscriptions,
+            };
+            if !forward_from_client(&frame, &mut to_relay, upstream, &mut reqs).await {
                 return;
             }
         }
@@ -415,7 +504,7 @@ async fn pump_to_client(
         device: connection.device,
         state: &connection.state,
         ledger: &connection.ledger,
-        opened: &connection.opened,
+        subscriptions: &connection.subscriptions,
     };
     loop {
         while let Some(frame) = take_frame(&mut buf) {
@@ -473,14 +562,38 @@ async fn read_more(from: &mut OwnedReadHalf, buf: &mut Vec<u8>) -> Option<usize>
     }
 }
 
+/// The client→relay side of one connection: what is wrong with it, where its
+/// frames are recorded, where a forged answer goes, and what it has open.
+#[derive(Clone, Copy)]
+struct Upstream<'a> {
+    state: &'a RwLock<FaultState>,
+    ledger: &'a Ledger,
+    forged: &'a mpsc::Sender<String>,
+    subscriptions: &'a Mutex<Subscriptions>,
+}
+
+/// The subscriptions one connection holds.
+#[derive(Default)]
+struct Subscriptions {
+    /// Opened and not closed.
+    open: HashSet<SubscriptionId>,
+    /// Forwarded and not yet answered with `EOSE`: an `EVENT` for one of these
+    /// is a stored-event page, and any other is a live delivery.
+    paging: HashSet<SubscriptionId>,
+}
+
 async fn forward_from_client(
     frame: &Frame,
     to_relay: &mut OwnedWriteHalf,
-    state: &RwLock<FaultState>,
-    ledger: &Ledger,
-    forged: &mpsc::Sender<String>,
-    opened: &Mutex<HashSet<SubscriptionId>>,
+    upstream: Upstream<'_>,
+    reqs: &mut ReqCount,
 ) -> bool {
+    let Upstream {
+        state,
+        ledger,
+        forged,
+        subscriptions,
+    } = upstream;
     if frame.is_text() {
         if let Ok(message) = ClientMessage::from_json(frame.payload().as_ref()) {
             let faults = *state.read().unwrap_or_else(PoisonError::into_inner);
@@ -529,10 +642,27 @@ async fn forward_from_client(
                             .await
                             .is_ok();
                     }
-                    opened
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .insert(subscription_id);
+                    if reqs.refuses(faults.refuse_page) {
+                        // The relay's own `QueryPolicy` rejection, forged:
+                        // `CLOSED "error: …"` and no page at all.
+                        return forged
+                            .send(
+                                RelayMessage::Closed {
+                                    subscription_id: Cow::Owned(subscription_id),
+                                    message: Cow::Owned(closed_message(ClosedPrefix::Error)),
+                                }
+                                .as_json(),
+                            )
+                            .await
+                            .is_ok();
+                    }
+                    {
+                        let mut held = subscriptions.lock().unwrap_or_else(PoisonError::into_inner);
+                        held.open.insert(subscription_id.clone());
+                        // Before the REQ is forwarded, so no frame of its page
+                        // can arrive ahead of the mark.
+                        held.paging.insert(subscription_id);
+                    }
                     if faults.cross_eose
                         && forged
                             .send(
@@ -548,10 +678,9 @@ async fn forward_from_client(
                     }
                 }
                 ClientMessage::Close(subscription_id) => {
-                    opened
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .remove(subscription_id.as_ref());
+                    let mut held = subscriptions.lock().unwrap_or_else(PoisonError::into_inner);
+                    held.open.remove(subscription_id.as_ref());
+                    held.paging.remove(subscription_id.as_ref());
                 }
                 _ => {}
             }
@@ -566,7 +695,7 @@ struct Connection {
     device: Option<DeviceTag>,
     state: Arc<RwLock<FaultState>>,
     ledger: Ledger,
-    opened: Arc<Mutex<HashSet<SubscriptionId>>>,
+    subscriptions: Arc<Mutex<Subscriptions>>,
 }
 
 /// The client-facing side of one connection: whose endpoint it is, what is
@@ -577,7 +706,7 @@ struct Endpoint<'a> {
     state: &'a RwLock<FaultState>,
     ledger: &'a Ledger,
     /// The subscriptions this connection opened and has not closed.
-    opened: &'a Mutex<HashSet<SubscriptionId>>,
+    subscriptions: &'a Mutex<Subscriptions>,
 }
 
 impl Endpoint<'_> {
@@ -586,10 +715,27 @@ impl Endpoint<'_> {
     }
 
     fn opened(self, subscription_id: &SubscriptionId) -> bool {
-        self.opened
+        self.subscriptions
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+            .open
             .contains(subscription_id)
+    }
+
+    fn paging(self, subscription_id: &SubscriptionId) -> bool {
+        self.subscriptions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .paging
+            .contains(subscription_id)
+    }
+
+    fn page_ended(self, subscription_id: &SubscriptionId) {
+        self.subscriptions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .paging
+            .remove(subscription_id);
     }
 }
 
@@ -625,7 +771,9 @@ async fn deliver(
                     event,
                 } => {
                     let class = DropClass::of(&event);
-                    if faults.reverse_pages {
+                    if faults.reverse_pages
+                        || (faults.clamp_limit.is_some() && endpoint.paging(&subscription_id))
+                    {
                         hold(
                             held,
                             subscription_id.into_owned(),
@@ -637,7 +785,9 @@ async fn deliver(
                         .await;
                 }
                 RelayMessage::EndOfStoredEvents(subscription_id) => {
-                    for (bytes, event_id, class) in release(held, subscription_id.as_ref()) {
+                    endpoint.page_ended(subscription_id.as_ref());
+                    for (bytes, event_id, class) in release(held, subscription_id.as_ref(), faults)
+                    {
                         if !write_event(to_client, &bytes, (event_id, class), endpoint).await {
                             return false;
                         }
@@ -757,8 +907,16 @@ async fn write(to_client: &mut OwnedWriteHalf, bytes: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{hold, release, FaultState, HeldEvent, HeldPages};
+    use super::{arm_refuse_page, hold, release, FaultState, HeldEvent, HeldPages, ReqCount};
+    use crate::nemesis::types::RigCount;
     use nostr::{EventId, SubscriptionId};
+
+    fn reversing() -> FaultState {
+        FaultState {
+            reverse_pages: true,
+            ..FaultState::default()
+        }
+    }
 
     fn an_event(byte: u8) -> HeldEvent {
         (
@@ -804,21 +962,21 @@ mod tests {
         hold(&mut held, second.clone(), an_event(9));
         hold(&mut held, first.clone(), an_event(3));
 
-        let stranger = release(&mut held, &second);
+        let stranger = release(&mut held, &second, reversing());
         assert_eq!(
             stranger,
             vec![an_event(9)],
             "one subscription's EOSE released another's page"
         );
 
-        let page = release(&mut held, &first);
+        let page = release(&mut held, &first, reversing());
         assert_eq!(
             page,
             vec![an_event(3), an_event(2), an_event(1)],
             "a page released by its own EOSE must carry every event it held, newest first"
         );
         assert!(
-            release(&mut held, &first).is_empty(),
+            release(&mut held, &first, reversing()).is_empty(),
             "a page is released once; a second EOSE has nothing to deliver"
         );
     }
@@ -826,11 +984,76 @@ mod tests {
     #[test]
     fn a_subscription_that_held_nothing_releases_nothing() {
         let mut held = HeldPages::new();
-        assert!(release(&mut held, &SubscriptionId::new("quiet")).is_empty());
+        assert!(release(&mut held, &SubscriptionId::new("quiet"), reversing()).is_empty());
         hold(&mut held, SubscriptionId::new("loud"), an_event(1));
         assert!(
-            release(&mut held, &SubscriptionId::new("quiet")).is_empty(),
+            release(&mut held, &SubscriptionId::new("quiet"), reversing()).is_empty(),
             "an EOSE for a subscription this connection never carried takes nobody's page"
+        );
+    }
+
+    #[test]
+    fn a_clamped_page_keeps_the_newest_events_in_the_relays_order_and_reverses_after_the_cut() {
+        let page = || {
+            let mut held = HeldPages::new();
+            // Held in the order the relay served them: newest first.
+            for byte in 1..=4 {
+                hold(&mut held, SubscriptionId::new("page"), an_event(byte));
+            }
+            held
+        };
+        let clamped = FaultState {
+            clamp_limit: Some(2),
+            ..FaultState::default()
+        };
+        assert_eq!(
+            release(&mut page(), &SubscriptionId::new("page"), clamped),
+            vec![an_event(1), an_event(2)],
+            "a clamp keeps the first events the relay served, which are its newest"
+        );
+        assert_eq!(
+            release(
+                &mut page(),
+                &SubscriptionId::new("page"),
+                FaultState {
+                    reverse_pages: true,
+                    ..clamped
+                }
+            ),
+            vec![an_event(2), an_event(1)],
+            "both armed, the page is cut first and reversed after: reversing first would keep the oldest"
+        );
+        assert_eq!(
+            release(
+                &mut page(),
+                &SubscriptionId::new("page"),
+                FaultState::default()
+            )
+            .len(),
+            4,
+            "a page held under a fault healed before its EOSE is released whole, as served"
+        );
+    }
+
+    #[test]
+    fn a_refused_page_is_the_nth_req_after_the_arming_and_no_other() {
+        let mut reqs = ReqCount::default();
+        assert!(!reqs.refuses(None), "nothing armed refuses nothing");
+        assert!(!reqs.refuses(None));
+
+        // Two REQs already made on this connection do not count towards it.
+        let armed = Some(arm_refuse_page(RigCount::new(2)));
+        assert!(
+            !reqs.refuses(armed),
+            "the first REQ after the arming is served"
+        );
+        assert!(reqs.refuses(armed), "the second is refused");
+        assert!(!reqs.refuses(armed), "and only the second");
+
+        let rearmed = Some(arm_refuse_page(RigCount::new(1)));
+        assert!(
+            reqs.refuses(rearmed),
+            "a fresh arming counts afresh, whatever the connection made before it"
         );
     }
 }

@@ -232,7 +232,9 @@ pub struct CatchupOutcome {
 /// for" would never start against one at all. The chase runs on what a page
 /// CONTRIBUTES instead ([`summarize_round`] carries that argument), and this
 /// number is once more only what its name says.
-const CATCHUP_MAX_EVENTS_PER_PAGE: usize = 500;
+///
+/// Public so the soak rig's saturation predicate reads this bound, never a copy.
+pub const CATCHUP_MAX_EVENTS_PER_PAGE: usize = 500;
 
 /// Max backward pages one circle's window may cost in a single sweep.
 ///
@@ -282,7 +284,9 @@ const CATCHUP_MAX_EVENTS_PER_PAGE: usize = 500;
 /// fetched so far APPLIED. Deferring the whole union instead made the next wake
 /// re-fetch the same pages and apply nothing again, on every wake, for as long
 /// as the backlog outlasted the budget.
-const CATCHUP_MAX_PAGES_PER_CIRCLE: usize = 8;
+///
+/// Public so the soak rig's multi-page backlog is sized from this bound, never a copy.
+pub const CATCHUP_MAX_PAGES_PER_CIRCLE: usize = 8;
 
 /// Max unique events one circle's paged window may take in a single sweep.
 ///

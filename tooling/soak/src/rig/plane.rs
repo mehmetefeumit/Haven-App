@@ -212,6 +212,19 @@ pub enum TimelineRecord {
         /// literal — [`BUFFER_GREW`] or [`BUFFER_DID_NOT_GROW`].
         grew: &'static str,
     },
+    /// Which side of a disjunction a killed device's circle took once it was
+    /// back. The arm's canary accepts either, so this record is the only place
+    /// the day the product moves from one side to the other shows up.
+    AfterKill {
+        /// delta.
+        tick: u64,
+        /// tag.
+        device: DeviceTag,
+        /// tag.
+        circle: CircleTag,
+        /// literal — one of the `AFTER_KILL_*` words.
+        outcome: &'static str,
+    },
 }
 
 /// The store grew across the flood.
@@ -219,6 +232,19 @@ pub const BUFFER_GREW: &str = "grew";
 
 /// It did not, which is the arm's mis-configuration control failing its floor.
 pub const BUFFER_DID_NOT_GROW: &str = "did-not-grow";
+
+/// The circle whose commit died with the process sends again.
+pub const AFTER_KILL_SENDS_RESUMED: &str = "sends-resumed";
+
+/// Its send was refused, and the refusal was classified.
+pub const AFTER_KILL_SEND_CLASSIFIED: &str = "send-classified";
+
+/// The eviction owed across the kill was published by the next foreground
+/// pass.
+pub const AFTER_KILL_REMOVAL_PUBLISHED: &str = "removal-published";
+
+/// It was orphaned, and the foreground verdict sweep named the circle.
+pub const AFTER_KILL_REMOVAL_REPORTED: &str = "removal-reported";
 
 /// One captured log line.
 ///

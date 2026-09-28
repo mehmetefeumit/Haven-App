@@ -15,9 +15,11 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
-use haven_soak::nemesis::types::{ByteCap, ClosedPrefix, DropClass, Fault, Schedule};
+use haven_soak::nemesis::types::{ByteCap, ClosedPrefix, DropClass, Fault, RigCount, Schedule};
 use haven_soak::profiles::WorldShape;
-use haven_soak::relay::{mint, Forgery, Ledger, NativeClosed, SimRelay, OVERSIZE_PREFIX};
+use haven_soak::relay::{
+    mint, Forgery, Ledger, NativeClosed, SimRelay, OVERSIZE_PREFIX, RELAY_DEFAULT_REPLAY_CAP,
+};
 use haven_soak::rig::circle::{build_circle, publish_witnessed};
 use haven_soak::rig::{
     install_process_globals, poll_until, CapturedLine, CircleTag, DeviceTag, EventTag, LogDrain,
@@ -1866,6 +1868,9 @@ async fn a_heal_restores_the_pass_through_whatever_was_wrong() {
     let seeded = an_event("seeded before everything broke");
     publish(&client, &plane, &seeded).await;
     assert!(stored_within(&plane, &seeded.id, WIRE_BOUND).await);
+    // Gone before anything breaks, so no reconnect of its own can spend the
+    // cold first connect the heal is meant to have cleared.
+    client.disconnect().await;
 
     for fault in [
         Fault::SwallowOk,
@@ -1883,6 +1888,14 @@ async fn a_heal_restores_the_pass_through_whatever_was_wrong() {
         // event of each class to prove it.
         Fault::DropClass(DropClass::Application),
         Fault::DropClass(DropClass::Handshake),
+        // Each would leave its own mark below: a clamp of one cuts the page to
+        // one event, a refusal of the first REQ closes the healed client's
+        // only subscription, and a cold first connect refuses its connection.
+        Fault::ClampLimit(RigCount::new(1)),
+        Fault::RefusePage {
+            nth: RigCount::new(1),
+        },
+        Fault::ColdFirstConnect,
         Fault::Down,
     ] {
         plane.apply(fault).await.expect("the fault applies");
@@ -1934,6 +1947,445 @@ async fn a_heal_restores_the_pass_through_whatever_was_wrong() {
     assert!(
         ledger.eose() == 1,
         "a healed plane sends one EOSE for one subscription"
+    );
+    assert!(
+        ledger.refused_connects() == 0,
+        "a healed plane refuses no connection"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A seeded backlog (R3) and the three page faults (R4)
+// ---------------------------------------------------------------------------
+
+/// Three notes a second apart, oldest first, and the order the relay serves
+/// them in: newest first.
+fn a_backlog() -> (Vec<Event>, Vec<EventId>) {
+    let seed: Vec<Event> = (0..3)
+        .map(|n| an_event_at(&format!("backlog entry {n}"), 30 - n))
+        .collect();
+    let served = seed.iter().rev().map(|event| event.id).collect();
+    (seed, served)
+}
+
+/// The event ids delivered for `subscription`, in arrival order, up to its
+/// `EOSE`.
+///
+/// Ids, not handles, where a page is compared ACROSS two planes: each ledger
+/// mints its handles in its own observation order, so the first event either
+/// plane served is `simevt#0` on both, whichever event it was. Compared inside
+/// `assert!` with a literal message, so no id is ever rendered.
+async fn page_ids_within(
+    notifications: &mut broadcast::Receiver<RelayPoolNotification>,
+    bound: Duration,
+    subscription: &SubscriptionId,
+) -> Vec<EventId> {
+    let mut page = Vec::new();
+    let _ = tokio::time::timeout(bound, async {
+        loop {
+            match notifications.recv().await {
+                Ok(RelayPoolNotification::Message { message, .. }) => match message {
+                    RelayMessage::Event {
+                        subscription_id,
+                        event,
+                    } if subscription_id.as_ref() == subscription => page.push(event.id),
+                    RelayMessage::EndOfStoredEvents(id) if id.as_ref() == subscription => return,
+                    _ => {}
+                },
+                Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Closed) => return,
+            }
+        }
+    })
+    .await;
+    page
+}
+
+/// A fresh REQ for everything on `client`, and the page it is served.
+async fn a_fresh_page(
+    client: &Client,
+    notifications: &mut broadcast::Receiver<RelayPoolNotification>,
+    id: &str,
+    filter: Filter,
+) -> Vec<EventId> {
+    let subscription = SubscriptionId::new(id);
+    client
+        .subscribe_with_id(subscription.clone(), filter, None)
+        .await
+        .expect("the REQ goes out");
+    page_ids_within(notifications, WIRE_BOUND, &subscription).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_seeded_backlog_is_stored_in_the_relays_own_order_and_reaches_no_live_subscriber() {
+    let plane = plane().await;
+    let client = connected_client(&plane).await;
+    let mut notifications = client.notifications();
+    assert!(
+        a_fresh_page(&client, &mut notifications, "live", Filter::new())
+            .await
+            .is_empty(),
+        "the store starts empty, so the live subscription's page is too"
+    );
+
+    let (seed, served) = a_backlog();
+    assert!(
+        plane.store(&seed).await.expect("the store takes the seed") == seed.len(),
+        "every event of a fresh seed is newly saved"
+    );
+    let stored: Vec<EventId> = plane
+        .stored_page(Filter::new())
+        .await
+        .expect("the store answers")
+        .iter()
+        .map(|event| event.id)
+        .collect();
+    assert!(
+        stored == served,
+        "a seed is held exactly as a relay that accepted it would serve it: newest first"
+    );
+
+    // Frames on one connection are written in order, so a marker published
+    // AFTER the seed and delivered live proves the seed's absence from the live
+    // subscription is final rather than in flight.
+    let marker = an_event("published after the seed");
+    publish(&client, &plane, &marker).await;
+    let ledger = plane.ledger().clone();
+    assert!(
+        reaching(WIRE_BOUND, 1, || ledger.delivered(&marker.id)).await == 1,
+        "a live subscription carries what is published after it"
+    );
+    assert!(
+        seed.iter().all(|event| ledger.delivered(&event.id) == 0),
+        "a seed reaches the store, never a live subscriber: that is what makes it a backlog"
+    );
+
+    // The client-visible change: a fresh REQ is served the backlog.
+    let page = a_fresh_page(&client, &mut notifications, "fresh", Filter::new()).await;
+    assert!(
+        seed.iter().all(|event| page.contains(&event.id)),
+        "a fresh REQ must be served the seeded backlog"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn seeding_the_same_event_twice_reports_one_new_save_and_stores_it_once() {
+    let plane = plane().await;
+    let (seed, _) = a_backlog();
+    let repeated = [seed[0].clone(), seed[0].clone(), seed[1].clone()];
+    assert!(
+        plane
+            .store(&repeated)
+            .await
+            .expect("a duplicate is not an error")
+            == 2,
+        "a duplicate inside one seed is not a new save"
+    );
+    assert!(
+        plane
+            .store(&seed[..1])
+            .await
+            .expect("a duplicate is not an error")
+            == 0,
+        "nor is one the store already holds"
+    );
+
+    let client = connected_client(&plane).await;
+    let mut notifications = client.notifications();
+    let page = a_fresh_page(&client, &mut notifications, "page", Filter::new()).await;
+    assert!(
+        page.len() == 2 && page.iter().filter(|id| **id == seed[0].id).count() == 1,
+        "the relay serves a twice-seeded event once"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_req_with_no_limit_is_served_exactly_the_relays_default_replay_cap_newest_first() {
+    // The relay's own field is `pub(crate)` with no getter, so the rig's
+    // constant is a literal and this is what holds it to the relay: one more
+    // than the cap in the store, a REQ that sets no limit — Haven's live group
+    // REQ sets none — and exactly the newest cap back, in the relay's order.
+    let plane = plane().await;
+    let seconds = u64::try_from(RELAY_DEFAULT_REPLAY_CAP).expect("a small cap");
+    let seed: Vec<Event> = (0..=seconds)
+        .map(|n| an_event_at("past the replay cap", n))
+        .collect();
+    assert!(
+        plane.store(&seed).await.expect("the store takes the seed") == seed.len(),
+        "every event of the seed is newly saved"
+    );
+    let newest: Vec<EventId> = plane
+        .stored_page(Filter::new())
+        .await
+        .expect("the store answers")
+        .iter()
+        .take(RELAY_DEFAULT_REPLAY_CAP)
+        .map(|event| event.id)
+        .collect();
+
+    let client = connected_client(&plane).await;
+    let mut notifications = client.notifications();
+    let page = a_fresh_page(&client, &mut notifications, "limitless", Filter::new()).await;
+    assert!(
+        page.len() == RELAY_DEFAULT_REPLAY_CAP,
+        "a REQ with no limit is served the relay's default cap and not one more"
+    );
+    assert!(
+        page == newest,
+        "and it is the newest of them, in the order the relay serves its own page"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_clamped_plane_serves_the_newest_n_of_the_relays_own_page_and_live_events_pass() {
+    let mut plane = plane().await;
+    let (seed, served) = a_backlog();
+    plane.store(&seed).await.expect("the store takes the seed");
+    let client = connected_client(&plane).await;
+    let mut notifications = client.notifications();
+
+    let healthy = a_fresh_page(&client, &mut notifications, "healthy", Filter::new()).await;
+    assert!(healthy == served, "the healthy page is the relay's own");
+
+    plane
+        .apply(Fault::ClampLimit(RigCount::new(2)))
+        .await
+        .expect("the fault applies");
+    let clamped = a_fresh_page(&client, &mut notifications, "clamped", Filter::new()).await;
+    assert!(
+        clamped == served[..2],
+        "a clamped page is the newest two of the relay's own page, in its order"
+    );
+
+    // Past its EOSE the clamped subscription is live, and a live event is not
+    // a page: holding it for an EOSE that never comes would silence the
+    // subscription for good.
+    let live = an_event("live after the clamped page");
+    publish(&client, &plane, &live).await;
+    let ledger = plane.ledger().clone();
+    assert!(
+        reaching(WIRE_BOUND, 2, || ledger.delivered(&live.id)).await == 2,
+        "a live event reaches both open subscriptions under a clamp"
+    );
+
+    plane.apply(Fault::Heal).await.expect("the heal applies");
+    let healed = a_fresh_page(&client, &mut notifications, "healed", Filter::new()).await;
+    assert!(
+        healed.len() == seed.len() + 1,
+        "a healed plane serves the whole page again"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_clamped_page_is_the_page_a_relay_clamping_natively_serves() {
+    let clamp = RigCount::new(2);
+    let (seed, _) = a_backlog();
+    // A limit above the clamp: the relay's own clamp only rewrites a `limit`
+    // the client set (`local/inner.rs:840-848`).
+    let asked = Filter::new().limit(seed.len() * 2);
+
+    let control = SimRelay::start_clamping_natively(RelayTag::new(0), clamp)
+        .await
+        .expect("the control plane starts");
+    control
+        .store(&seed)
+        .await
+        .expect("the store takes the seed");
+    let watcher = connected_client(&control).await;
+    let mut native_frames = watcher.notifications();
+    let native = a_fresh_page(&watcher, &mut native_frames, "probe", asked.clone()).await;
+
+    let mut forged = plane().await;
+    forged.store(&seed).await.expect("the store takes the seed");
+    forged
+        .apply(Fault::ClampLimit(clamp))
+        .await
+        .expect("the fault applies");
+    let client = connected_client(&forged).await;
+    let mut notifications = client.notifications();
+    let page = a_fresh_page(&client, &mut notifications, "probe", asked).await;
+
+    assert!(
+        native.len() == clamp.get(),
+        "the control must really clamp, or the comparison is with an unclamped page"
+    );
+    assert!(
+        page == native,
+        "a forged clamp must serve the events a relay clamping its own limit serves, in its order"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_nth_req_on_a_connection_is_refused_and_never_reaches_the_relay() {
+    let mut plane = plane().await;
+    let (seed, _) = a_backlog();
+    plane.store(&seed).await.expect("the store takes the seed");
+    let client = connected_client(&plane).await;
+    let mut notifications = client.notifications();
+    // Made before the arming, so it must not count towards it.
+    assert!(
+        a_fresh_page(&client, &mut notifications, "before", Filter::new())
+            .await
+            .len()
+            == seed.len(),
+        "the healthy page is served whole"
+    );
+
+    plane
+        .apply(Fault::RefusePage {
+            nth: RigCount::new(2),
+        })
+        .await
+        .expect("the fault applies");
+    let ledger = plane.ledger().clone();
+    let served = a_fresh_page(&client, &mut notifications, "first", Filter::new()).await;
+    assert!(
+        served.len() == seed.len(),
+        "the first REQ after the arming is served"
+    );
+    let refused_id = SubscriptionId::new("second");
+    client
+        .subscribe_with_id(refused_id.clone(), Filter::new(), None)
+        .await
+        .expect("the REQ goes out");
+    assert!(
+        reaching(WIRE_BOUND, 1, || ledger.closed_messages().len()).await == 1,
+        "the second is closed"
+    );
+    assert!(
+        ledger.closed_messages()[0].starts_with(ClosedPrefix::Error.as_str()),
+        "with the prefix a relay's own query policy refuses with"
+    );
+    assert!(
+        seed.iter().all(|event| ledger.delivered(&event.id) == 2),
+        "a refused REQ never reaches the relay, so no page of it is delivered"
+    );
+    let third = a_fresh_page(&client, &mut notifications, "third", Filter::new()).await;
+    assert!(
+        third.len() == seed.len() && ledger.closed_messages().len() == 1,
+        "only the nth is refused"
+    );
+
+    plane
+        .apply(Fault::RefusePage {
+            nth: RigCount::new(1),
+        })
+        .await
+        .expect("the fault applies");
+    plane.apply(Fault::Heal).await.expect("the heal applies");
+    let healed = a_fresh_page(&client, &mut notifications, "healed", Filter::new()).await;
+    assert!(
+        healed.len() == seed.len() && ledger.closed_messages().len() == 1,
+        "a healed plane serves the REQ it would have refused"
+    );
+}
+
+/// Compares the `CLOSED` message strings the ledger records, not raw frames,
+/// and the forged and native refusals share one reason constant — so what this
+/// proves is the relay's FRAMING of a policy refusal (prefix and separator),
+/// never the reason's wording.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_forged_refused_page_is_framed_as_the_relays_own_policy_refusal() {
+    let nth = RigCount::new(2);
+    let two_reqs = |client: Client| async move {
+        for id in ["one", "two"] {
+            client
+                .subscribe_with_id(SubscriptionId::new(id), Filter::new(), None)
+                .await
+                .expect("the REQ goes out");
+        }
+        client
+    };
+
+    let control =
+        SimRelay::start_refusing_natively(RelayTag::new(0), NativeClosed::RefusesPage { nth })
+            .await
+            .expect("the control plane starts");
+    let _watcher = two_reqs(connected_client(&control).await).await;
+    let native = {
+        let ledger = control.ledger().clone();
+        reaching(WIRE_BOUND, 1, || ledger.closed_messages().len()).await;
+        ledger.closed_messages()
+    };
+
+    let mut forged = plane().await;
+    forged
+        .apply(Fault::RefusePage { nth })
+        .await
+        .expect("the fault applies");
+    let _client = two_reqs(connected_client(&forged).await).await;
+    let forged_messages = {
+        let ledger = forged.ledger().clone();
+        reaching(WIRE_BOUND, 1, || ledger.closed_messages().len()).await;
+        ledger.closed_messages()
+    };
+
+    assert!(
+        native.len() == 1,
+        "the control must refuse exactly its nth REQ, or the comparison is with nothing"
+    );
+    assert!(
+        forged_messages == native,
+        "a forged refused page must be the CLOSED a relay's own query policy sends"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cold_first_connect_refuses_one_connection_and_serves_the_next() {
+    let mut plane = plane().await;
+    let dial = |plane: &SimRelay| {
+        let url = plane.url().to_owned();
+        async move {
+            let client = Client::builder().build();
+            client.automatic_authentication(false);
+            client
+                .add_relay(url.as_str())
+                .await
+                .expect("the client takes the plane's address");
+            let connected = client
+                .try_connect_relay(url.as_str(), WIRE_BOUND)
+                .await
+                .is_ok();
+            (client, connected)
+        }
+    };
+
+    plane
+        .apply(Fault::ColdFirstConnect)
+        .await
+        .expect("the fault applies");
+    let (_cold, connected) = dial(&plane).await;
+    assert!(
+        !connected,
+        "the first connection after the arming is refused"
+    );
+    assert!(
+        plane.ledger().refused_connects() == 1,
+        "and the plane records that it refused it"
+    );
+
+    let (warm, connected) = dial(&plane).await;
+    assert!(connected, "the next one is served");
+    let event = an_event("after a cold first connect");
+    publish(&warm, &plane, &event).await;
+    assert!(
+        acked_within(&plane, &event.id, WIRE_BOUND).await,
+        "and served in full, acknowledgement included"
+    );
+    assert!(
+        plane.ledger().refused_connects() == 1,
+        "exactly one connection is refused"
+    );
+
+    plane
+        .apply(Fault::ColdFirstConnect)
+        .await
+        .expect("the fault applies");
+    plane.apply(Fault::Heal).await.expect("the heal applies");
+    let (_healed, connected) = dial(&plane).await;
+    assert!(
+        connected && plane.ledger().refused_connects() == 1,
+        "a healed plane refuses no connection"
     );
 }
 
@@ -2202,5 +2654,290 @@ async fn an_injection_reaches_each_connection_once_and_only_on_its_own_subscript
         reaching(WIRE_BOUND, 2, move || ledger.delivered(&forged)).await == 2,
         "one frame per connection: a second frame on either socket would name a \
          subscription that socket never opened"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A live engine's own auto-commit crosses its own endpoint
+// ---------------------------------------------------------------------------
+
+type EngineWorld = SimWorld<SimRelay, Timeline, NoDrain>;
+
+/// Long enough for the jittered auto-commit, every remaining engine's fold of
+/// it and — under a swallowed `OK` — the relay pool's own 10 s wait for an
+/// acknowledgement that never comes
+/// (`nostr-relay-pool-0.44.3/src/relay/constants.rs:10`).
+const AUTO_COMMIT_BOUND: Duration = Duration::from_secs(30);
+/// How often an engine predicate is re-read.
+const ENGINE_POLL: Duration = Duration::from_millis(25);
+const LEAVER: DeviceTag = DeviceTag::new(1);
+
+async fn engine_world(members: usize) -> EngineWorld {
+    install_process_globals().expect("the ws:// loopback opt-in");
+    SimWorld::build(
+        &WorldShape {
+            members,
+            circles: 1,
+            relays: 1,
+        },
+        Schedule::new(Vec::new()),
+        vec![plane().await],
+        Timeline::in_memory(),
+        NoDrain,
+    )
+    .await
+    .expect("a world builds")
+}
+
+/// dev#1 leaves: its `SelfRemove` proposal is on the relay, acknowledged, for
+/// every remaining LIVE engine to fold and commit by itself.
+async fn a_published_leave(world: &EngineWorld) -> EventId {
+    let leaver = world.device(LEAVER).expect("dev#1");
+    let proposal = leaver
+        .manager()
+        .expect("dev#1's manager")
+        .propose_leave(world.circles()[0].mls_group_id())
+        .await
+        .expect("dev#1 proposes to leave");
+    let acked = publish_witnessed(leaver, world.relays(), std::slice::from_ref(&proposal))
+        .await
+        .expect("the proposal publishes");
+    assert!(
+        acked.is_some(),
+        "the proposal is on the relay, acknowledged"
+    );
+    proposal.id
+}
+
+fn remaining(world: &EngineWorld) -> Vec<DeviceTag> {
+    world
+        .devices()
+        .iter()
+        .map(|device| device.tag)
+        .filter(|tag| *tag != LEAVER)
+        .collect()
+}
+
+fn owes(world: &EngineWorld, tag: DeviceTag) -> bool {
+    !world
+        .device(tag)
+        .and_then(SimDevice::manager)
+        .expect("a live manager")
+        .owed_removal_commits()
+        .is_empty()
+}
+
+/// Whether `tag`'s engine has a publish between SEND and its outcome.
+fn publishing(world: &EngineWorld, tag: DeviceTag) -> bool {
+    world
+        .device(tag)
+        .and_then(SimDevice::engine)
+        .expect("a live engine")
+        .processor()
+        .in_flight_publishes()
+        > 0
+}
+
+async fn still_a_member(world: &EngineWorld, tag: DeviceTag) -> bool {
+    let leaver = world.device(LEAVER).expect("dev#1").pubkey_hex();
+    let session = world
+        .device(tag)
+        .and_then(SimDevice::session)
+        .expect("a live session");
+    // Matched, never formatted: the engine's error can carry a group id.
+    let Ok(roster) = session
+        .member_pubkeys(world.circles()[0].mls_group_id())
+        .await
+    else {
+        panic!("the roster reads");
+    };
+    roster.contains(&leaver)
+}
+
+/// Every commit on the relay: a kind-445 handshake other than the proposal.
+async fn commits_besides(world: &EngineWorld, proposal: &EventId) -> Vec<EventId> {
+    world.relays()[0]
+        .stored_page(Filter::new().kind(Kind::Custom(445)))
+        .await
+        .expect("the store reads")
+        .into_iter()
+        .filter(|event| DropClass::of(event) == Some(DropClass::Handshake) && event.id != *proposal)
+        .map(|event| event.id)
+        .collect()
+}
+
+/// Waits until some commit is on the relay and every remaining engine that
+/// owes the removal has had its publish come back.
+async fn an_owed_commit_settles(world: &EngineWorld, proposal: &EventId) {
+    let settled = poll_until(AUTO_COMMIT_BOUND, ENGINE_POLL, || async move {
+        let tags = remaining(world);
+        Ok(!commits_besides(world, proposal).await.is_empty()
+            && tags.iter().any(|tag| owes(world, *tag))
+            && tags.iter().all(|tag| !publishing(world, *tag)))
+    })
+    .await
+    .expect("the predicate reads");
+    assert!(
+        settled.is_some(),
+        "a remaining engine publishes its auto-commit over its own endpoint and the publish returns"
+    );
+}
+
+/// The fix, pinned: two live engines fold a peer's published leave, and the
+/// commit they publish over their OWN endpoints (the stored address mapped to
+/// the device's) is stored and acknowledged on the wire, with nothing owed on
+/// either device. With production's publisher in this rig the pool refuses
+/// the stored address and both devices owe the eviction for ever.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_peers_leave_folded_by_two_live_engines_is_committed_on_the_wire_and_owed_by_neither() {
+    let world = engine_world(3).await;
+    let proposal = a_published_leave(&world).await;
+
+    let world_ref = &world;
+    let proposal_ref = &proposal;
+    let converged = poll_until(AUTO_COMMIT_BOUND, ENGINE_POLL, || async move {
+        for tag in remaining(world_ref) {
+            if owes(world_ref, tag)
+                || publishing(world_ref, tag)
+                || still_a_member(world_ref, tag).await
+            {
+                return Ok(false);
+            }
+        }
+        Ok(!commits_besides(world_ref, proposal_ref).await.is_empty())
+    })
+    .await
+    .expect("the predicate reads");
+
+    let commits = commits_besides(&world, &proposal).await;
+    let witnessed = commits
+        .iter()
+        .any(|commit| world.relays()[0].witnessed_ok(commit));
+    let owed: Vec<bool> = remaining(&world)
+        .into_iter()
+        .map(|tag| owes(&world, tag))
+        .collect();
+    world.teardown().await.expect("teardown");
+    assert!(!commits.is_empty(), "an eviction commit is on the relay");
+    assert!(
+        witnessed,
+        "and its OK crossed the client-facing stream: a Rule-13 ack"
+    );
+    assert!(
+        owed.iter().all(|owed| !owed),
+        "an acknowledged eviction is owed by neither remaining device"
+    );
+    assert!(
+        converged.is_some(),
+        "both remaining devices evict the leaver"
+    );
+}
+
+/// The twin with the committer's OWN endpoint swallowing the `OK`: the
+/// commit reaches the relay over that endpoint (so the fault reaches the
+/// publish) and the removal stays owed and unacknowledged.
+///
+/// Two members, so the one remaining engine is unambiguously the committer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_swallowed_ok_on_the_committers_own_endpoint_leaves_its_auto_commit_owed_and_unacked() {
+    let mut world = engine_world(2).await;
+    world.relays_mut()[0]
+        .apply_for(DeviceTag::new(0), Fault::SwallowOk)
+        .await
+        .expect("the device's fault applies");
+    let proposal = a_published_leave(&world).await;
+    an_owed_commit_settles(&world, &proposal).await;
+
+    let commits = commits_besides(&world, &proposal).await;
+    let witnessed = commits
+        .iter()
+        .any(|commit| world.relays()[0].witnessed_ok(commit));
+    let owed = world
+        .device(DeviceTag::new(0))
+        .and_then(SimDevice::manager)
+        .expect("dev#0's manager")
+        .owed_removal_commits();
+    let routing = *world.circles()[0].nostr_group_id();
+    world.teardown().await.expect("teardown");
+    assert!(
+        commits.len() == 1,
+        "the commit went out over the device's endpoint and the relay stored it"
+    );
+    assert!(
+        !witnessed,
+        "the device's endpoint swallowed the OK: Rule 13 says that is no ack"
+    );
+    assert!(
+        owed == vec![routing],
+        "an unacknowledged eviction stays owed: a removal is never rolled back"
+    );
+}
+
+/// The same with the fault plane-wide: `apply` reaches every endpoint, the
+/// device's included, so the engine's publish is swallowed too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_plane_wide_swallowed_ok_reaches_the_engines_own_auto_commit_publish() {
+    let mut world = engine_world(2).await;
+    let proposal = a_published_leave(&world).await;
+    // Armed after the proposal's own ack, which a plane-wide swallow would
+    // have eaten.
+    world.relays_mut()[0]
+        .apply(Fault::SwallowOk)
+        .await
+        .expect("the fault applies");
+    an_owed_commit_settles(&world, &proposal).await;
+
+    let commits = commits_besides(&world, &proposal).await;
+    let witnessed = commits
+        .iter()
+        .any(|commit| world.relays()[0].witnessed_ok(commit));
+    let owes_it = owes(&world, DeviceTag::new(0));
+    world.teardown().await.expect("teardown");
+    assert!(
+        commits.len() == 1 && !witnessed,
+        "the relay stored the commit and the client never heard so"
+    );
+    assert!(owes_it, "so the eviction stays owed");
+}
+
+/// A foreground open redeems an owed eviction once the acknowledgement comes
+/// back: the redemption pass publishes through the same mapped publisher.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_foreground_open_redeems_an_owed_eviction_once_the_ok_returns() {
+    let mut world = engine_world(2).await;
+    let committer = DeviceTag::new(0);
+    world.relays_mut()[0]
+        .apply_for(committer, Fault::SwallowOk)
+        .await
+        .expect("the device's fault applies");
+    let proposal = a_published_leave(&world).await;
+    an_owed_commit_settles(&world, &proposal).await;
+    let commits = commits_besides(&world, &proposal).await;
+    assert!(
+        commits.len() == 1 && !world.relays()[0].witnessed_ok(&commits[0]),
+        "premise: one commit on the relay, never acknowledged"
+    );
+
+    world.relays_mut()[0]
+        .apply_for(committer, Fault::Heal)
+        .await
+        .expect("the device's endpoint heals");
+    let device = world.device_mut(committer).expect("dev#0");
+    device.go_offline().await.expect("the engine pauses");
+    // The redemption pass runs inside the foreground open, before it returns.
+    device.come_online().await.expect("the foreground open");
+
+    let owes_it = owes(&world, committer);
+    let witnessed = world.relays()[0].witnessed_ok(&commits[0]);
+    let still_one = commits_besides(&world, &proposal).await == commits;
+    world.teardown().await.expect("teardown");
+    assert!(!owes_it, "the foreground open published the owed eviction");
+    assert!(
+        witnessed,
+        "and the relay's OK for that same commit crossed the device's endpoint"
+    );
+    assert!(
+        still_one,
+        "the redemption re-sent the one commit, not a new one"
     );
 }

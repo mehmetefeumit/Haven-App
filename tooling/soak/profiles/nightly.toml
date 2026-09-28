@@ -2,8 +2,8 @@
 #
 # Superset of `pr` — every PR arm runs here too, so a nightly red is never
 # something the PR lane silently stopped covering. The scenarios that appear
-# only here (S02, S03, S04, S05, S09, S10, S12, S14, S16, S17, S18, S19, S21,
-# S22, S23) have NO scheduled lane execution yet: the scheduler workflow lands
+# only here (S02, S03, S04, S05, S08, S09, S10, S12, S14, S16, S17, S18, S19,
+# S20, S21, S22, S23) have NO scheduled lane execution yet: the scheduler workflow lands
 # with the rest of Phase 2, and until then they run under `run_soak_local.sh`
 # and in the crate's own oracle tests.
 #
@@ -15,6 +15,9 @@
 # the arm set moves or a product constant does; the slack it leaves is what an
 # added arm spends, and a plain arm (undisturbed recovery, two probe rounds, a
 # resubscribe) costs 48.75 s of it. Raise the budget rather than loosen a bound.
+# That slack is now 1.25 s: S08's `buried-past-the-cap` (96.75 s, its lookback
+# included) brings the priced run to 4 798.75 s, so its `unpacked-control`
+# sibling runs weekly only — both would be 4 895.50 s.
 #
 # `deadline_secs` is the timeout the lane arms above it: the budget plus twice
 # the margin, as every profile here does. `check_soak_lane_reachable.sh` L6 ties
@@ -51,11 +54,16 @@ arms = ["offline-quiet", "offline-across-commits", "offline-past-retention",
 
 [[scenarios]]
 id = "S05"
-arms = ["confirm-err-is-not-a-failure"]
+arms = ["confirm-err-is-not-a-failure", "kill-send-plane", "kill-receive-auto-commit",
+        "negative-gates-silent"]  # kill-receive-auto-commit EXPECTED RED (C9, attribution OPEN)
 
 [[scenarios]]
 id = "S06"
 arms = ["stuck-row-sweep"]
+
+[[scenarios]]
+id = "S08"
+arms = ["buried-past-the-cap"]  # EXPECTED RED (C8); unpacked-control is weekly (budget, above)
 
 [[scenarios]]
 id = "S09"
@@ -67,7 +75,7 @@ arms = ["quiet-circle-resume"]
 
 [[scenarios]]
 id = "S12"
-arms = ["kp-rotation-slot"]          # the day-85 rejection is a later sub-phase
+arms = ["kp-rotation-slot", "kp-expired-rejected"]
 
 [[scenarios]]
 id = "S13"
@@ -106,6 +114,11 @@ arms = ["chained-commit-backlog"]  # EXPECTED RED (C7) until the deferred-peel s
 [[scenarios]]
 id = "S16"
 arms = ["outsider-flood", "member-future-header-flood", "pending-window-flood"]
+
+[[scenarios]]
+id = "S20"
+arms = ["healthy-drain", "clamped-limit", "refused-page", "cold-first-connect",
+        "future-dated-page"]
 
 [[scenarios]]
 id = "S21"

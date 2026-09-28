@@ -432,7 +432,7 @@ impl<R: RelayPlane, T: TimelineSink, L: LogDrain> SimWorld<R, T, L> {
                 .iter()
                 .map(|relay| relay.url_for(tag).to_owned())
                 .collect();
-            devices.push(SimDevice::open(tag, &own)?);
+            devices.push(SimDevice::open_behind(tag, &urls, &own)?);
         }
 
         // Minted before the first create rather than with the struct: a create

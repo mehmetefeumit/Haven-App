@@ -1,4 +1,5 @@
-//! **S12** — the day-63 rotation decision, over a real slot on a real relay.
+//! **S12** — the day-63 rotation decision over a real slot on a real relay, and
+//! the day-85 rejection as the engine's own validator gives it.
 //!
 //! An `OpenMLS` `KeyPackage` carries its own MLS `Lifetime`, and on the day
 //! `not_after` passes, an un-rotated account becomes silently uninvitable: the
@@ -36,83 +37,211 @@
 //! `decide_kp_maintenance` takes its instant as an argument, and the argument is
 //! the package's own `rotate_at()`.
 //!
+//! # The cliff itself: `kp-expired-rejected`
+//!
+//! The second arm asks the engine's own directory validator,
+//! `cgka_engine::key_package_metadata`, about two packages that differ in
+//! nothing but their lifetime: one that expired an hour ago and a twin carrying
+//! the lifetime the device's production mint gave it. No group, no invite, no
+//! relay — the refusal is a function of the bytes, so the bytes are the whole
+//! subject.
+//!
+//! `OpenMLS` checks the lifetime LAST inside `KeyPackageIn::validate`
+//! (`openmls-0.8.1/src/key_packages/key_package_in.rs:136-207`): a package whose
+//! capability list does not cover every extension it carries fails with
+//! `UnsupportedExtension` (`:185-193`) before the lifetime gate (`:196-204`) is
+//! reached — measured: an expired package missing one capability reports
+//! `UnsupportedExtension`, never the lifetime. The engine's capability helpers
+//! are `pub(crate)`, so rather than restate them this arm copies the leaf
+//! capabilities, leaf extensions and package extensions of a package the
+//! device's own session just minted, and re-signs the account-identity proof
+//! over a fresh MLS signer with the device's Nostr keys. The twin passing the
+//! whole chain is what proves the copy conformant, and what isolates the
+//! lifetime as the only reason its sibling was refused. The MLS signer is a
+//! fresh Ed25519 pair and the proof is signed by the secp256k1 identity, so
+//! the two keys differ by construction (Security Rule 1), and nothing here
+//! goes through a production signing seam.
+//!
+//! Setting the lifetime is what this arm does and what the product must never
+//! do: a shipped override could LENGTHEN `not_after` past the rotation, which is
+//! why OD-8 refused it as a seam and `scripts/ci/check_no_kp_lifetime_override.sh`
+//! bans the setter's name in every shipped path. The production package the arm
+//! copies from is deleted from the device's store on every path out, a failed
+//! judgement included (mdk#160), so the run leaves no orphaned private init key
+//! behind.
+//!
+//! # What is NOT provable
+//!
+//! A reader must not over-read this arm's green. A **relay** never rejects an
+//! expired 30443 — nothing in NIP-01/NIP-33 or strfry expires a kind-30443 by
+//! its embedded MLS lifetime. And wall-clock ageing is not reached: the
+//! rejection is a function of the bytes, and Tier 2's −70 d clock jump is the
+//! wall-clock analogue. Two upstream pins cover the invite path and are cited
+//! rather than restated: `create_group_rejects_expired_invitee_keypackage`
+//! (`cgka-engine/tests/group_creation.rs:695`) and
+//! `create_group_rejects_invitee_keypackage_with_excessive_lifetime_range`
+//! (`:730`). And two constants must not be conflated:
+//! `DEFAULT_KEY_PACKAGE_LIFETIME_SECONDS` is **84 days**
+//! (`openmls-0.8.1/src/key_packages/lifetime.rs:11`), while **7 261 200 s
+//! (84 d + 1 h) is the MAX RANGE**, as
+//! `haven-core/src/relay/maintenance/kp_lifetime.rs:6-13` states.
+//! `has_acceptable_range()` is **`OpenMLS`'s** policy (`lifetime.rs:20-21`,
+//! `:100-103`), not a Marmot one — MDK merely calls it.
+//!
 //! # Rule 15
 //!
 //! `RelayKpSnapshot` and `KpMaintenanceDecision` both carry relay URLs, and both
 //! of their own doc comments forbid logging them. This module therefore MATCHES
 //! them and never formats one; every canary here is a boolean, a slot-shape
 //! predicate or a comparison between two byte strings the run itself minted.
+//! The same holds for every engine and `OpenMLS` value the second arm touches:
+//! an `EngineError` is matched by variant, never rendered.
 
 use std::time::Duration;
 
+use cgka_engine::account_identity_proof::{
+    account_identity_proof_extension, AccountIdentityProofRequest, AccountIdentityProofSigner,
+};
+use cgka_engine::key_package_metadata;
+use haven_core::nostr::mls::types::{EngineError, KeyPackage};
 use haven_core::relay::maintenance::{
     build_kp_maintenance_events, build_kp_maintenance_events_reusing, decide_kp_maintenance,
     is_conformant_slot_id, monotonic_kp_created_at, read_kp_lifetime, KeyPackageLifetime,
     KpMaintenanceDecision, KpMaintenanceEvents, RelayKpEntry, RelayKpPerRelay, RelayKpSnapshot,
     TrackedKpLifetime, KIND_MARMOT_KEY_PACKAGE,
 };
-use nostr::{Filter, Kind};
+use nostr::{Filter, Keys, Kind};
+use openmls::prelude::tls_codec::Deserialize as _;
+use openmls::prelude::{
+    BasicCredential, CredentialWithKey, KeyPackage as MlsKeyPackage, Lifetime, MlsMessageBodyIn,
+    MlsMessageIn, MlsMessageOut, OpenMlsProvider as _, ProtocolVersion,
+};
+use openmls_basic_credential::SignatureKeyPair;
+use openmls_rust_crypto::OpenMlsRustCrypto;
+use tokio::time::Instant;
 
-use crate::clock::WallNow;
+use crate::clock::{ClockError, WallNow};
 use crate::oracle::vacuity::{ExpectationFloor, Observed};
 use crate::oracle::{Invariant, Reach, Recovery};
 use crate::rig::{DeviceTag, LogDrain, RelayPlane, RigError, Step, TimelineSink};
 use crate::scenarios::{
-    closing_pairs, grade_round, round, Absence, Arm, ArmOutcome, ScenarioWorld, WithheldAcks,
-    NO_GATING_ROWS,
+    closing_pairs, grade_round, round, Absence, Arm, ArmOutcome, Scenario, ScenarioReport,
+    ScenarioWorld, WithheldAcks, NO_GATING_ROWS,
 };
 
-/// The arm this scenario offers.
-///
-/// The day-85 rejection — an EXPIRED package refused by the engine's own
-/// validator — is a second arm this one deliberately does not carry: it needs a
-/// hand-built leaf whose capability list survives every check `KeyPackageIn`
-/// runs before it reaches the lifetime gate, and that is a prototype item rather
-/// than a scenario. Saying so here is the point: a reader must not take this
-/// arm's green as coverage of the cliff itself.
-pub const ARMS: [Arm; 1] = [Arm {
-    label: "kp-rotation-slot",
-    recovery: Recovery::Undisturbed,
-    probe_rounds: 1,
-    resubscribes: false,
-    absence: Absence::None,
-    withheld_acks: WithheldAcks::None,
-    floor: ExpectationFloor {
-        // Nothing is done to a relay: the subject is a decision and a slot.
-        faults_applied: 0,
-        // A key package is not a group operation; no epoch moves.
-        epochs_crossed: 0,
-        deliveries_observed: 1,
-        canaries_caught: 6,
+/// The arms this scenario offers: the rotation DECISION over a real slot, and
+/// the rejection itself over bytes.
+pub const ARMS: [Arm; 2] = [
+    Arm {
+        label: "kp-rotation-slot",
+        recovery: Recovery::Undisturbed,
+        probe_rounds: 1,
+        resubscribes: false,
+        absence: Absence::None,
+        withheld_acks: WithheldAcks::None,
+        floor: ExpectationFloor {
+            // Nothing is done to a relay: the subject is a decision and a slot.
+            faults_applied: 0,
+            // A key package is not a group operation; no epoch moves.
+            epochs_crossed: 0,
+            deliveries_observed: 1,
+            canaries_caught: 6,
+        },
     },
-}];
+    Arm {
+        label: "kp-expired-rejected",
+        recovery: Recovery::Undisturbed,
+        probe_rounds: 1,
+        resubscribes: false,
+        absence: Absence::None,
+        withheld_acks: WithheldAcks::None,
+        floor: ExpectationFloor {
+            faults_applied: 0,
+            epochs_crossed: 0,
+            deliveries_observed: 1,
+            canaries_caught: 3,
+        },
+    },
+];
+
+/// Which lifetime the second arm's refused package is minted under.
+#[derive(Clone, Copy)]
+enum Minted {
+    /// An hour past its `not_after`: the arm.
+    Expired,
+    /// The production lifetime, so nothing is refused: the control.
+    Unexpired,
+}
 
 /// Runs the arm.
 ///
 /// # Errors
 ///
-/// [`RigError::UnknownTarget`] if the label is not the one this scenario
-/// offers, [`RigError::ShapeMismatch`] if the world has fewer than two devices,
+/// [`RigError::UnknownTarget`] if the label is not one this scenario offers,
+/// [`RigError::ShapeMismatch`] if the world has fewer than two devices,
 /// [`RigError::PublishNeverAcked`] if no relay acknowledged a key package — the
-/// slot is then on no plane and there is nothing to rotate — otherwise
-/// [`RigError`] naming the step that failed.
+/// slot is then on no plane and there is nothing to rotate —
+/// [`RigError::InductionMechanismMoved`] if the device's own production package
+/// no longer validates, otherwise [`RigError`] naming the step that failed.
 pub(crate) async fn run<T: TimelineSink, L: LogDrain>(
     world: &mut ScenarioWorld<T, L>,
     arm: &Arm,
     tick: Duration,
 ) -> Result<ArmOutcome, RigError> {
-    if arm.label != ARMS[0].label {
-        // A label this scenario does not offer means the dispatch table and the
-        // registry disagree, which is the rig being wrong about itself.
+    // A label this scenario does not offer means the dispatch table and the
+    // registry disagree, which is the rig being wrong about itself.
+    let Some(which) = ARMS.iter().position(|offered| offered.label == arm.label) else {
         return Err(RigError::UnknownTarget);
-    }
+    };
+    let (lead, owner) = lead_and_owner(world)?;
+    let canaries = if which == 0 {
+        rotation_slot(world, owner).await?
+    } else {
+        expired_rejected(world, owner, Minted::Expired).await?
+    };
+    close(world, lead, canaries, tick).await
+}
+
+/// The second arm with its refused package minted under the production
+/// lifetime instead.
+///
+/// Nothing is then refused, so the lifetime canary cannot be caught and the
+/// floor goes unmet over green oracles. The mis-configuration control in
+/// `tests/oracles.rs` runs it and requires rc 3.
+///
+/// # Errors
+///
+/// As [`run`].
+pub async fn unexpired_control<T: TimelineSink, L: LogDrain>(
+    world: &mut ScenarioWorld<T, L>,
+    tick: Duration,
+) -> Result<ScenarioReport, RigError> {
+    let started = Instant::now();
+    let (lead, owner) = lead_and_owner(world)?;
+    let canaries = expired_rejected(world, owner, Minted::Unexpired).await?;
+    let outcome = close(world, lead, canaries, tick).await?;
+    Ok(Scenario::KeyPackageRotation.report(world, &ARMS[1], outcome, started))
+}
+
+/// The device that leads the closing round, and the one whose packages the
+/// arm mints.
+fn lead_and_owner<T: TimelineSink, L: LogDrain>(
+    world: &ScenarioWorld<T, L>,
+) -> Result<(DeviceTag, DeviceTag), RigError> {
     let tags: Vec<DeviceTag> = world.devices().iter().map(|device| device.tag).collect();
     let [lead, owner, ..] = *tags.as_slice() else {
         return Err(RigError::ShapeMismatch);
     };
+    Ok((lead, owner))
+}
 
-    let canaries = rotation_slot(world, owner).await?;
-
+/// The closing round both arms end on.
+async fn close<T: TimelineSink, L: LogDrain>(
+    world: &mut ScenarioWorld<T, L>,
+    lead: DeviceTag,
+    canaries: usize,
+    tick: Duration,
+) -> Result<ArmOutcome, RigError> {
     // Graded over the world's own circles, which this arm never touches: a key
     // package is published beside them, and the device that owns the slot must
     // go on serving every circle it is in.
@@ -230,6 +359,167 @@ async fn rotation_slot<T: TimelineSink, L: LogDrain>(
         canaries += 1;
     }
     Ok(canaries)
+}
+
+/// The second arm: an expired package and its unexpired twin, both minted in
+/// the device's own production shape, asked of the engine's own validator.
+///
+/// The production package is deleted from the device's store on EVERY path
+/// out, a failed judgement included (mdk#160). The two throwaway MLS signers
+/// `mint_like` builds hold their private keys in `OpenMLS`'s own
+/// `SignatureKeyPair { private: Vec<u8> }`, which does not zeroize
+/// (`openmls_basic_credential-0.5.0/src/lib.rs:29-33`), and in the provider's
+/// in-memory store, until `mint_like` returns: test-only keys in a test
+/// process over temp dirs, below Security Rule 7's bar, and said here rather
+/// than left for a reader to find.
+async fn expired_rejected<T: TimelineSink, L: LogDrain>(
+    world: &ScenarioWorld<T, L>,
+    owner: DeviceTag,
+    minted: Minted,
+) -> Result<usize, RigError> {
+    let device = world.device(owner)?;
+    let session = device.session()?;
+    let production = session
+        .fresh_key_package()
+        .await
+        .map_err(|_| RigError::Core(Step::MintKeyPackage))?;
+    let judged = judge(&production, &device.keys, minted);
+    let deleted = session
+        .delete_key_package(&production)
+        .await
+        .map_err(|_| RigError::Core(Step::DeleteKeyPackage));
+    let canaries = judged?;
+    deleted?;
+    Ok(canaries)
+}
+
+/// The second arm's three canaries over `production`'s shape.
+fn judge(production: &KeyPackage, keys: &Keys, minted: Minted) -> Result<usize, RigError> {
+    let mut canaries = 0_usize;
+    let template = validated(production).ok_or(RigError::InductionMechanismMoved)?;
+    // `OpenMLS` reads its own un-offset system clock inside `validate`, so the
+    // refused window is minted against the wall, never the policy clock.
+    let wall = u64::try_from(WallNow::now().secs())
+        .map_err(|_| RigError::Clock(ClockError::BeforeEpoch))?;
+    let refused_lifetime = match minted {
+        // Upstream's own window (`group_creation.rs:695`): one hour wide, so far
+        // inside the acceptable range that the range policy cannot be what
+        // refuses it.
+        Minted::Expired => Lifetime::init(wall.saturating_sub(7_200), wall.saturating_sub(3_600)),
+        Minted::Unexpired => *template.life_time(),
+    };
+    let refused = mint_like(&template, keys, refused_lifetime)?;
+    let twin = mint_like(&template, keys, *template.life_time())?;
+
+    // 1. The expired package is refused by the lifetime-VALIDITY gate: the
+    //    `None`/`None` shape is `OpenMLS`'s `InvalidLifetime`, where the range
+    //    policy would carry both bounds.
+    if matches!(
+        key_package_metadata(&refused),
+        Err(EngineError::InvalidKeyPackageLifetime {
+            not_before: None,
+            not_after: None,
+        })
+    ) {
+        canaries += 1;
+    }
+
+    // 2. The twin clears the WHOLE chain — capabilities, signatures, identity,
+    //    proof — and names the device's own account. Without this, canary 1
+    //    could be any earlier gate wearing the lifetime's name.
+    if key_package_metadata(&twin)
+        .is_ok_and(|metadata| metadata.credential_identity_hex == keys.public_key().to_hex())
+    {
+        canaries += 1;
+    }
+
+    // 3. Haven's own rotation reader agrees: it classifies the refused bytes as
+    //    positively unusable, not unreadable — the distinction that decides
+    //    whether the device re-mints or merely retries.
+    if read_kp_lifetime(refused.bytes()) == TrackedKpLifetime::NotCurrent {
+        canaries += 1;
+    }
+    Ok(canaries)
+}
+
+/// The package inside `production`, validated as `OpenMLS` validates any
+/// transported one.
+fn validated(production: &KeyPackage) -> Option<MlsKeyPackage> {
+    let MlsMessageBodyIn::KeyPackage(key_package) =
+        MlsMessageIn::tls_deserialize_exact(production.bytes())
+            .ok()?
+            .extract()
+    else {
+        return None;
+    };
+    key_package
+        .validate(
+            OpenMlsRustCrypto::default().crypto(),
+            ProtocolVersion::Mls10,
+        )
+        .ok()
+}
+
+/// A package shaped exactly like `template` but for `lifetime`, under a fresh
+/// MLS signer bound to `keys` by a fresh account-identity proof.
+fn mint_like(
+    template: &MlsKeyPackage,
+    keys: &Keys,
+    lifetime: Lifetime,
+) -> Result<KeyPackage, RigError> {
+    let minting = || RigError::Core(Step::MintKeyPackage);
+    let provider = OpenMlsRustCrypto::default();
+    let ciphersuite = template.ciphersuite();
+    let signer = SignatureKeyPair::new(ciphersuite.signature_algorithm()).map_err(|_| minting())?;
+    let identity = keys.public_key().to_bytes().to_vec();
+    let proof = account_identity_proof_extension(
+        &identity,
+        &signer.to_public_vec(),
+        ciphersuite,
+        ciphersuite.signature_algorithm(),
+        &ProofSigner(keys),
+    )
+    .map_err(|_| minting())?;
+    let mut leaf_extensions = template.leaf_node().extensions().clone();
+    leaf_extensions
+        .add_or_replace(proof)
+        .map_err(|_| minting())?;
+    let bundle = MlsKeyPackage::builder()
+        .leaf_node_capabilities(template.leaf_node().capabilities().clone())
+        .leaf_node_extensions(leaf_extensions)
+        .key_package_extensions(template.extensions().clone())
+        .key_package_lifetime(lifetime)
+        .build(
+            ciphersuite,
+            &provider,
+            &signer,
+            CredentialWithKey {
+                credential: BasicCredential::new(identity).into(),
+                signature_key: signer.public().into(),
+            },
+        )
+        .map_err(|_| minting())?;
+    MlsMessageOut::from(bundle.key_package().clone())
+        .to_bytes()
+        .map(KeyPackage::new)
+        .map_err(|_| minting())
+}
+
+/// The account-identity proof signed with the device's own Nostr keys, through
+/// the engine's public request type rather than any production signer.
+struct ProofSigner<'a>(&'a Keys);
+
+impl AccountIdentityProofSigner for ProofSigner<'_> {
+    fn sign_account_identity_proof(
+        &self,
+        request: &AccountIdentityProofRequest,
+    ) -> Result<[u8; 64], String> {
+        let event = request
+            .proof_event()?
+            .sign_with_keys(self.0)
+            .map_err(|_| String::from("proof signing failed"))?;
+        request.signature_from_signed_event(event)
+    }
 }
 
 /// Mints a fresh package into `existing_d` (or a new slot) and publishes it.
@@ -433,23 +723,43 @@ mod tests {
     use crate::oracle::Recovery;
 
     #[test]
-    fn the_arm_breaks_no_relay_and_crosses_no_epoch() {
-        let arm = ARMS[0];
+    fn neither_arm_breaks_a_relay_or_crosses_an_epoch() {
+        for arm in ARMS {
+            assert!(
+                arm.recovery == Recovery::Undisturbed,
+                "a key package is minted beside the circles, not against them"
+            );
+            assert!(
+                arm.floor.faults_applied == 0,
+                "the subject is a decision, a slot or a package's bytes, and none is \
+                 something a relay does"
+            );
+            assert!(
+                arm.floor.epochs_crossed == 0,
+                "a key package is not a group operation"
+            );
+            assert!(
+                !arm.resubscribes,
+                "nothing re-opens a REQ, so the subscribe ladder is not in the bound"
+            );
+        }
+    }
+
+    #[test]
+    fn the_rejection_arm_demands_the_refusal_its_twin_and_havens_own_reading() {
+        let arm = ARMS[1];
         assert!(
-            arm.recovery == Recovery::Undisturbed,
-            "a key package is published beside the circles, not against them"
+            arm.label == "kp-expired-rejected",
+            "the second arm is the day-85 rejection"
         );
         assert!(
-            arm.floor.faults_applied == 0,
-            "the subject is a decision and a slot, and neither is something a relay does"
+            arm.floor.canaries_caught == 3,
+            "the expired package refused by the lifetime gate, the twin that clears \
+             the whole chain, and Haven's own reader calling it not current"
         );
         assert!(
-            arm.floor.epochs_crossed == 0,
-            "a key package is not a group operation"
-        );
-        assert!(
-            !arm.resubscribes,
-            "nothing re-opens a REQ, so the subscribe ladder is not in the bound"
+            arm.floor.deliveries_observed == 1,
+            "the closing round over the world's own circles still has to deliver"
         );
     }
 

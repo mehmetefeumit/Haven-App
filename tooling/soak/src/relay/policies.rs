@@ -6,14 +6,19 @@
 //! machine-readable prefix: `WritePolicy::Reject` always renders
 //! `OK false "blocked: …"` and `QueryPolicy::Reject` always renders
 //! `CLOSED "error: …"`. So every prefix the scenarios need is forged by the
-//! proxy, and these two build-time knobs exist for one purpose: to be the
-//! CONTROL that proves the forged bytes are the bytes a relay really sends.
+//! proxy, and these build-time knobs exist for one purpose: to be the CONTROL
+//! that proves the forged bytes are the bytes a relay really sends.
 
+use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use nostr::util::BoxedFuture;
+use nostr::Filter;
 use nostr_relay_builder::builder::{
-    RateLimit, RelayBuilder, RelayBuilderNip42, RelayBuilderNip42Mode,
+    PolicyResult, QueryPolicy, RateLimit, RelayBuilder, RelayBuilderNip42, RelayBuilderNip42Mode,
 };
 
-use crate::nemesis::types::ClosedPrefix;
+use crate::nemesis::types::{ClosedPrefix, RigCount};
 
 /// A `CLOSED` the relay itself produces, from a build-time knob.
 ///
@@ -26,6 +31,13 @@ pub enum NativeClosed {
     RateLimited,
     /// Every `REQ` is refused until the session authenticates.
     AuthRequired,
+    /// The `nth` `REQ` the relay serves is refused by a stateful query
+    /// policy — the relay's own `CLOSED "error: …"`, which
+    /// `Fault::RefusePage` forges.
+    RefusesPage {
+        /// Which `REQ`, counting from 1.
+        nth: RigCount,
+    },
 }
 
 impl NativeClosed {
@@ -35,6 +47,7 @@ impl NativeClosed {
         match self {
             Self::RateLimited => ClosedPrefix::RateLimited,
             Self::AuthRequired => ClosedPrefix::AuthRequired,
+            Self::RefusesPage { .. } => ClosedPrefix::Error,
         }
     }
 
@@ -55,9 +68,51 @@ impl NativeClosed {
             Self::AuthRequired => builder.nip42(RelayBuilderNip42 {
                 mode: RelayBuilderNip42Mode::Read,
             }),
+            // Only the registration is build-time: `admit_query` takes `&self`
+            // behind an `Arc` (`nostr-relay-builder-0.44.1/src/local/inner.rs:56-57`),
+            // so the policy counts, as the crate's own `examples/policy.rs` does.
+            Self::RefusesPage { nth } => builder.query_policy(RefuseNth {
+                nth: nth.get(),
+                seen: AtomicUsize::new(0),
+            }),
         }
     }
 }
+
+/// Refuses the `nth` query this relay is asked, and no other.
+///
+/// Counted per filter, which is per `REQ` for the one-filter `REQ`s the control
+/// sends: the relay calls a query policy once for every filter of a `REQ`
+/// (`local/inner.rs:859-862`).
+#[derive(Debug)]
+struct RefuseNth {
+    nth: usize,
+    seen: AtomicUsize,
+}
+
+impl QueryPolicy for RefuseNth {
+    fn admit_query<'a>(
+        &'a self,
+        _query: &'a Filter,
+        _addr: &'a SocketAddr,
+    ) -> BoxedFuture<'a, PolicyResult> {
+        let seen = self.seen.fetch_add(1, Ordering::Relaxed) + 1;
+        Box::pin(async move {
+            if seen == self.nth {
+                PolicyResult::Reject(ERROR_REASON.to_owned())
+            } else {
+                PolicyResult::Accept
+            }
+        })
+    }
+}
+
+/// What follows `error:` in a refused subscription's `CLOSED`, forged or native.
+///
+/// One constant for both, so the byte-fidelity control compares the relay's
+/// framing — `format!("{prefix}: {msg}")` at `local/inner.rs:862-875` — and
+/// never two spellings of the reason.
+const ERROR_REASON: &str = "the relay could not serve this subscription";
 
 /// The `CLOSED` message the proxy forges for `prefix`.
 ///
@@ -73,7 +128,7 @@ pub fn closed_message(prefix: ClosedPrefix) -> String {
         ClosedPrefix::Blocked => "this subscription is not permitted",
         ClosedPrefix::RateLimited => "too many REQs",
         ClosedPrefix::Invalid => "malformed filter",
-        ClosedPrefix::Error => "the relay could not serve this subscription",
+        ClosedPrefix::Error => ERROR_REASON,
         ClosedPrefix::Unsupported => "this filter is not supported",
         ClosedPrefix::AuthRequired => "you must auth",
         ClosedPrefix::Restricted => "not permitted for this key",
@@ -141,6 +196,13 @@ mod tests {
         assert_eq!(
             NativeClosed::AuthRequired.prefix(),
             ClosedPrefix::AuthRequired
+        );
+        assert_eq!(
+            NativeClosed::RefusesPage {
+                nth: RigCount::new(2)
+            }
+            .prefix(),
+            ClosedPrefix::Error
         );
     }
 }

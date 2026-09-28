@@ -1,9 +1,11 @@
 # The weekly soak profile: every scenario, every arm, the biggest world.
 #
-# Superset of `nightly`. The two arms that appear only here — S17's full
+# Superset of `nightly`. Two of the arms that appear only here — S17's full
 # intake and S03's unnamed strand — each wait out the 684-second
 # delivery-silence window as an absence, and an absence cannot share a run
-# with anything shorter.
+# with anything shorter. The third, S08's `unpacked-control`, is here for the
+# nightly's budget alone: `tests/budget.rs` has no room for it beside its
+# expected-red sibling there.
 name = "weekly"
 run_budget_secs = 16200
 deadline_secs = 18000
@@ -35,11 +37,16 @@ arms = ["offline-quiet", "offline-across-commits", "offline-past-retention",
 
 [[scenarios]]
 id = "S05"
-arms = ["confirm-err-is-not-a-failure"]
+arms = ["confirm-err-is-not-a-failure", "kill-send-plane", "kill-receive-auto-commit",
+        "negative-gates-silent"]
 
 [[scenarios]]
 id = "S06"
 arms = ["stuck-row-sweep"]
+
+[[scenarios]]
+id = "S08"
+arms = ["buried-past-the-cap", "unpacked-control"]
 
 [[scenarios]]
 id = "S09"
@@ -51,7 +58,7 @@ arms = ["quiet-circle-resume"]
 
 [[scenarios]]
 id = "S12"
-arms = ["kp-rotation-slot"]          # the day-85 rejection is a later sub-phase
+arms = ["kp-rotation-slot", "kp-expired-rejected"]
 
 [[scenarios]]
 id = "S13"
@@ -90,6 +97,11 @@ arms = ["chained-commit-backlog"]  # EXPECTED RED (C7) until the deferred-peel s
 [[scenarios]]
 id = "S16"
 arms = ["outsider-flood", "member-future-header-flood", "pending-window-flood"]
+
+[[scenarios]]
+id = "S20"
+arms = ["healthy-drain", "clamped-limit", "refused-page", "cold-first-connect",
+        "future-dated-page"]
 
 [[scenarios]]
 id = "S21"

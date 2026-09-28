@@ -328,8 +328,9 @@ pub async fn resolve_ingest<R: RelayPlane>(
 /// stays relay-global, and a scenario that partitions a device's ENGINE
 /// endpoint must not run a sweep during the partition or the withheld commit
 /// arrives by the other path. Only the engine — its group REQs
-/// ([`SimCircle::spec_for`]) and its inbox REQ (`SimDevice::open`) — and the
-/// publish plane ([`publish_witnessed`]) dial a device's own endpoint.
+/// ([`SimCircle::spec_for`]), its inbox REQ (`SimDevice::open`) and its own
+/// auto-commit publishes, mapped from the stored address (`rig/auto_commit.rs`)
+/// — and the publish plane ([`publish_witnessed`]) dial a device's own endpoint.
 ///
 /// # Errors
 ///

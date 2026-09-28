@@ -309,6 +309,43 @@ mod tests {
     }
 
     #[test]
+    fn a_schedule_mints_no_arm_applied_fault() {
+        // No wildcard, on purpose: a fault added to the catalogue has to be
+        // placed on one side of this line before the crate compiles. The page
+        // faults are arm-applied because each arm sizes its own — a clamp or a
+        // refused page with no backlog behind it is a fault that cannot fire.
+        let schedulable = |fault: Fault| match fault {
+            Fault::Down
+            | Fault::WipeStore
+            | Fault::Closed(_)
+            | Fault::Notice(_)
+            | Fault::SwallowOk
+            | Fault::DoubleEveryEvent
+            | Fault::ReversePages => true,
+            Fault::Up
+            | Fault::Heal
+            | Fault::EoseForAnotherSubscription
+            | Fault::Inject(_)
+            | Fault::RefuseOversize { .. }
+            | Fault::DropClass(_)
+            | Fault::ClampLimit(_)
+            | Fault::RefusePage { .. }
+            | Fault::ColdFirstConnect => false,
+        };
+        assert!(FAULT_PALETTE.into_iter().all(schedulable));
+        for seed in 0..16 {
+            for scheduled in Generator::new(pr(), seed).schedule(&shape()).ops() {
+                if let Op::Fault { fault, .. } = scheduled.op {
+                    assert!(
+                        schedulable(fault),
+                        "the generator minted an arm-applied fault"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn a_schedule_never_heals_by_naming_a_fault() {
         let schedule = Generator::new(pr(), 11).schedule(&shape());
         for scheduled in schedule.ops() {

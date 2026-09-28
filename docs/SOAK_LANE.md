@@ -52,7 +52,27 @@ Five more, specific to this tier and listed here so nobody has to infer them:
   rotation policy, the stable slot and the monotonic replacement stamp behave
   over a relay — but only where S12 RUNS, which is not the PR lane: it is a
   nightly scenario and no scheduler dispatches one yet. `kp_rotation_e2e` still
-  owns the shipped tick that drives them.
+  owns the shipped tick that drives them. S12's second arm,
+  `kp-expired-rejected`, reaches the cliff itself as BYTES: it mints an expired
+  package in the device's own production shape (capabilities and extensions
+  copied from a package the session just minted, the account-identity proof
+  re-signed over a fresh MLS signer) and asks the engine's own
+  `key_package_metadata`, which refuses it with the lifetime-validity variant,
+  while a twin differing only in its lifetime clears the whole chain and
+  haven-core's own `read_kp_lifetime` classifies the refused bytes `NotCurrent`
+  (positively unusable, not unreadable). The copy
+  is not optional: `OpenMLS` checks the lifetime LAST, and a hand-built package
+  missing one capability was measured to fail with `UnsupportedExtension`
+  instead — the false negative the twin exists to exclude. **What that arm does
+  NOT prove:** a relay never rejects an expired 30443 — nothing in NIP-01/NIP-33
+  or strfry expires a kind-30443 by its embedded MLS lifetime — and wall-clock
+  ageing is not reached, because the rejection is a function of the bytes
+  (Tier 2's −70 d clock jump is the wall-clock analogue). The invite path's
+  refusal is pinned upstream (`cgka-engine/tests/group_creation.rs:695`, and
+  `:730` for the range), `DEFAULT_KEY_PACKAGE_LIFETIME_SECONDS` is 84 days while
+  7 261 200 s (84 d + 1 h) is the MAX RANGE, and `has_acceptable_range()` is
+  `OpenMLS`'s policy, not a Marmot one. Measured cost: 1.8 s of wall per run
+  of the arm in `cargo test` (world build included), 26.75 s of derived bound.
 * **The relay double DOES enforce NIP-40 `expiration` on save, and that is why
   an expired event can only be injected.** Measured at this pin, not assumed:
   the plane's store is `nostr-database`'s full `MemoryDatabase`, whose
@@ -120,26 +140,28 @@ state it grades.
 
 ## Which scenarios have no lane execution yet
 
-Nineteen scenarios exist: **S01, S02, S03, S04, S05, S06, S09, S10, S11, S12,
-S13, S14, S16, S17, S18, S19, S21, S22, S23**.
+Twenty-one scenarios exist: **S01, S02, S03, S04, S05, S06, S08, S09, S10, S11,
+S12, S13, S14, S16, S17, S18, S19, S20, S21, S22, S23**.
 
 * `pr` (the only profile CI dispatches) runs **S01's single-relay outage arm,
   S06, S11 and S13**.
-* **S02, S03, S04, S05, S09, S10, S12, S14, S16, S17, S18, S19, S21, S22 and
-  S23 have NO lane execution yet.** The nightly and weekly scheduler workflows are still to come;
+* **S02, S03, S04, S05, S08, S09, S10, S12, S14, S16, S17, S18, S19, S20, S21,
+  S22 and S23 have NO lane execution yet.** The nightly and weekly scheduler workflows are still to come;
   `soak-core.yml` carries their jobs so there is something to call, and nothing
-  calls them. Those fifteen run in `tests/oracles.rs` and under
+  calls them. Those seventeen run in `tests/oracles.rs` and under
   `scripts/run_soak_local.sh core --profile nightly`.
 
 A green `soak-core-pr` therefore says nothing about a receiver partitioned
 behind a second publisher (S02), a commit a relay forgot before a paused member
 returned (S03), the member-absence spans and
-the retention window (S04), the publish→confirm window (S05), the
+the retention window (S04), the publish→confirm window (S05), a commit buried
+on the live plane past a relay's replay cap (S08), the
 cursor-poisoning adversary and the two anchors (S09), the ten-circle roster
 under one outage (S10), the KeyPackage rotation slot (S12), a same-epoch commit
 race (S14), the three durable stores a flood can grow (S16), the CLOSED-prefix
 behaviour (S17), the three swallowed-OK Rule-13 arms (S18), duplicate/reorder
-delivery and the commit-gap fold (S19), post-removal unreadability and the
+delivery and the commit-gap fold (S19), the catch-up sweep under clamped,
+refused, cold and forged pages (S20), post-removal unreadability and the
 removal lag (S21), the oversized commit, Welcome and removal wedge (S22) or the
 chained-commit backlog C7 records (S23) beyond what a unit test proves.
 
@@ -279,7 +301,8 @@ canonical endpoint for every circle and would heal it by the other path.
 ### What the crate's own tests run instead, and how much of it
 
 `tests/oracles.rs` runs **every registered arm** as its own test — all
-forty-four but three (two excluded, one expected red — S23, below) — rather
+fifty-five but five (two excluded, three expected red — S23, S05's
+`kill-receive-auto-commit` and S08's `buried-past-the-cap`, below) — rather
 than one "smallest arm" per scenario. That
 distinction is the whole point: an ordering over arms tie-breaks positionally,
 and the version that ordered by derived deadline left most of the registry with
@@ -290,7 +313,7 @@ bounds each start at the 684-second delivery-silence window, and
 excluded set is exactly those two arms — so a new arm cannot join it silently.
 
 Beside the sweep there is **one deliberate mis-configuration control per
-scenario**, nineteen in all, each running the real arm against a world arranged
+scenario**, twenty-one in all, each running the real arm against a world arranged
 so the condition it grades cannot arise — a partition armed on the witness
 instead of the victim, an endpoint that is gone so no commit is ever stored to
 be lost, a second endpoint that never returns, a
@@ -299,8 +322,9 @@ swallowed acknowledgement that stops the victim circle existing or leaves no
 confirm that could fail, an endpoint that is gone so no epoch can be crossed
 above an absent device, a race in which neither sibling can be confirmed, no
 subscription open for a forgery to land on, no plane serving the KeyPackage slot
-a rotation would be decided for, nothing reaching a relay to be refused by one,
-and a closed endpoint with nothing to duplicate — each requiring the verdict to be
+a rotation would be decided for (and, S12's second control, a package minted
+unexpired so the engine has nothing to refuse), nothing reaching a relay to be refused by one,
+a store with no backlog for a catch-up sweep to drain, a seed the relay serves whole so no commit is buried under it, and a closed endpoint with nothing to duplicate — each requiring the verdict to be
 **rc 3**, the world proving nothing, rather than the rc 0 every oracle would
 otherwise hand it.
 
@@ -368,6 +392,121 @@ Its mis-configuration control withholds the handshake class from the victim's
 own endpoint, so no backlog is ever served to it: a device that received no
 chain cannot be stranded behind one (that is S03's strand, a partition's), the
 served-backlog canary cannot hold, and the arm reports rc 3.
+
+### Expected red: S05's receive-plane kill (C9, attribution OPEN)
+
+A second arm is REQUIRED to be red, for a reason that is measured but not yet
+attributed. S05's `kill-receive-auto-commit` subscribes ONE device's live engine
+to an extra circle, lets that engine fold a peer's published leave inside a
+background burst (the eviction is parked, owed, and nothing is on the wire),
+then publishes it from a foreground open into an `OK` the device's own endpoint
+swallows, and hard-kills and reopens the device. After the reopen the
+obligation is orphaned: the next foreground open publishes nothing,
+`orphaned_removal_deferrals()` names the circle and the device's own verdict
+sweep emits `GroupUnrecoverable` for it (`unrecoverable_circles()` stays empty —
+it is the engine's latch alone). Recorded on the timeline as `after-kill` /
+`removal-reported`, the OD4-c answer for a hard kill in that window.
+
+Two findings make it red. **A:** every send on the wedged circle is refused
+with no typed reason at either layer, so the classifier can only call it a
+`Defect` — hydrate marks the group stable at the epoch the staged commit
+projected while `OpenMLS` still holds that removal-bearing commit; the arm
+records the refusal and hands O5 nothing. **B:** a peer's own commit of the
+same removal, acknowledged and confirmed, is answered `Buffered` by the reopened
+device and never heals it, so O2 and O6 report the owed eviction at **rc 1**.
+`haven-core`'s `a_deferral_a_peer_healed_after_a_restart_is_not_reported` heals
+the same shape on a bare processor, and a replica of it still does; the
+difference lies in the live-engine restart path and is not pinned, so **whether
+this is the product's or the rig's is OPEN** (C9 in
+`docs/BACKGROUND_SHARING_FAILURE_ANALYSIS.md`, owner question OQ-U; the
+reproduction and every hypothesis ruled out are in the 2c S05 implementation
+notes of the Phase-2 plan). The promotion rule is S23's: its own test asserts rc
+1 with O2's `removal-owed` for the killed device, and the day it grades rc 0 it
+is promoted to `SWEPT` in the same change. Its mis-configuration control
+swallows nothing, so the eviction is acknowledged before the kill and nothing is
+left to orphan: rc 3.
+
+S05's other two new arms are swept. `kill-send-plane` kills a device between
+SEND and confirm of its own relay-list commit (a swallowed `OK`, the commit
+stored and unacknowledged, on an extra circle no peer receives), after the same
+update acknowledged has advanced the circle: the reopened device reports
+nothing unrecoverable, has no gating row, and sends again (recorded as
+`sends-resumed`), and the `Restarted` record carries the C1 release and reopen
+latencies. Its control acknowledges the commit, so the kill has no window to
+land in: rc 3. `negative-gates-silent` holds one staged eviction and reads the
+committer's own live-engine verdict at each of the five OD4-c non-wedge states
+in turn — awaiting its own ack, its endpoint dark, its engine paused, a
+future-epoch fix from a world circle it missed, an unprocessable event — five
+canaries, because one read at the end would pass a verdict that fired and
+cleared; it then lands the eviction on an acknowledged publish. Every restart
+here is a clean cancel, not a SIGKILL, and the kill kind is not what either kill
+arm measures (`Soft` reaches the same outcomes; each doc says why). Measured
+2026-09-27 in `cargo test`, three runs each: `kill-send-plane` 44.7 s of wall
+(79.75 s of bound; release 21 ms, reopen 174-192 ms), `kill-receive-auto-commit`
+about 38 s (79.75 s; release 20-21 ms, reopen 175-190 ms),
+`negative-gates-silent` 0.6 s (35.75 s).
+
+### Expected red: S08's live-plane burial (C8)
+
+A third arm is REQUIRED to be red. S08's `buried-past-the-cap`
+(`scenarios/s08_live_plane_burial.rs`) grades C8
+(`docs/BACKGROUND_SHARING_FAILURE_ANALYSIS.md`): the victim is paused, the
+admin hands the admin bit to the witness (a confirmed commit, stored on every
+plane, applied live by the witness), the arm waits out
+`Absence::ResubscribeLookback` — `GROUP_RESUBSCRIBE_BUFFER_SECS` plus one wall
+second, derived in `oracle::bounds` and read back against the commit's stamp in
+the relay's own store — and then writes 501 outsider kind-445s carrying the
+circle's `#h` into every store (`SimRelay::store`, no more than half a catch-up
+page in any wall second). The victim resumes. Haven's live group REQ sets no
+`limit`, so the relay serves its default 500 (`RELAY_DEFAULT_REPLAY_CAP`, pinned
+on the wire in `tests/relay_faults.rs` because `default_filter_limit` is
+`pub(crate)` with no getter) — every one a forgery — and an `EOSE`; the live
+plane trusts it, the cursor passes the commit, and neither a second REQ nor a
+clean catch-up sweep (every circle swept, nothing truncated, no deadline, no
+relay error) asks for it again. The closing round reports `epoch-diverged` (O2)
+and `probe-not-delivered` towards the victim (O1) at **rc 1**.
+
+The five canaries are the burial's CONDITIONS, never its symptoms — the real
+commit, the lookback waited, every store's newest page all forgeries and a full
+page served to the victim on every plane, a fresh REQ answered on every plane,
+the clean sweep — so a product that serves the buried commit grades **rc 0**,
+not rc 3, and the arm's own test fails its first assertion with the promotion
+rule: C8 is fixed, promote to `SWEPT` in the same change. Measured: feeding the
+buried commit to the victim after the burial fires exactly that assertion; with
+the seed one second after the commit instead of a lookback after it, the live
+page still lacks the commit and the SWEEP recovers it (rc 0) — which is why the
+lookback is waited; and a seed of 501 forgeries all inside one second left even
+that sweep with two pages of forgeries, no commit and no truncation reported,
+which is the sweep's one-second pile-up residual reaching further than
+`catchup.rs` says, and why the seed is spread. Its mis-configuration control
+runs the arm over a seed BELOW the cap: the commit is on the page, the victim
+converges, and the capped-page canary goes unmet — rc 3.
+
+`unpacked-control` is the same world with sixteen forgeries: the commit is
+served on every plane, the victim applies it live, its cursor moves past it,
+and `relay_health()` reports every expected REQ live. It is swept, and runs in
+`weekly` only, for the nightly's budget: the burial alone brings the priced
+nightly to 4 798.75 s of 4 800, both would be 4 895.50 (`tests/budget.rs` is
+the gate). Measured 2026-09-27 in `cargo test`: about 78 s of wall for the
+burial and 71 s for the control, each against a 96.75 s bound — the 61 s
+lookback is most of both, and the burial's failing O1 probe pays its whole
+round-trip bound.
+
+**What S08 is not any longer.** PLAN §2.5 designed S08 around the intake cap:
+`packed-window` would replay more than `WORKER_QUEUE_CAP` (8 192) and read the
+hold the full queue puts on the cursor. Measured, that is out of Tier 1's reach
+for three reasons none of which is the product's: the relay serves at most 500
+per REQ, so no replay reaches the queue; the relay pool's 35 000-id tracker
+(`nostr-relay-pool-0.44.3/src/relay/inner.rs:1209-1239`) drops an id it has
+already seen in the session, so `DoubleEveryEvent` doubles nothing that reaches
+Haven and a carried-over hold PINS the cursor instead of being re-asked; and a
+relay rate-limits publishing to sixty events a minute per connection, so a
+backlog can only be seeded. OQ-D (`packed-window` weekly-only until seven clean
+weeklies) is OVERTAKEN BY MEASUREMENT: there is no such arm. **The Tier-1/Tier-2
+halves:** S08 drives the re-anchor itself (`go_offline`/`come_online`) and
+asserts the core's half; WHEN the app re-anchors — resume, the Dart
+`subscriptionHealthInterval` backstop — is Dart's schedule, which Tier 1 does
+not run and Tier 2 owns. Neither half covers the other.
 
 ### Durable-storage growth: S16's three arms are three different stores
 
@@ -448,6 +587,62 @@ first, and S09's wire canaries were (honestly) wire-only. The proxy now writes
 an injected `EVENT` on a connection only for the subscriptions that connection
 opened, pinned by `tests/relay_faults.rs`, and every S16 arm's live-plane canary
 reads the injected event's row (or its absence) out of the ENGINE's store.
+
+### The catch-up sweep under page faults: S20's five arms
+
+RLY-05 was five ways for `run_catchup_all_circles` to call a window finished when
+it was not, or never finished at all. S20 (`scenarios/s20_catchup_sweep.rs`, all
+five arms nightly) rebuilds each against the real relay double. Every arm seeds a
+backlog of GENUINE kind-445s — locations members sealed and never published,
+written into every plane's store with `SimRelay::store`, one per circle per wall
+second, none in the second a cursor already names — and a seed reaches no live
+subscriber, so the harness-driven sweep is the only way the backlog reaches the
+device. Every arm is `Undisturbed`: the sweep runs on the device's own
+`RelayManager` with an injected `max_duration_secs`, and no live socket is ever
+closed, so the pool's reconnect ladder is not in the path. The faults are
+relay-global by construction — the sweep dials the canonical endpoint it reads
+out of storage — so there is no per-device arm, and because the sweep takes every
+circle in an order the product chooses over one connection per relay, every
+circle is seeded alike and the one circle a single-shot fault met is found from
+the ledger, never assumed.
+
+| arm | sub-defect | what is asserted |
+|---|---|---|
+| `healthy-drain` | control | the same backlog `clamped-limit` walks down drains in ONE pass: every circle swept, every event applied, every cursor advanced, no deadline, no relay error |
+| `clamped-limit` | (c), (d) | every page clamped to two events, so no page can ever satisfy `page.len() >= CATCHUP_MAX_EVENTS_PER_PAGE`; a backlog sized from `CATCHUP_MAX_PAGES_PER_CIRCLE` is fetched whole and the window is still HELD (the budget ran out on the confirming page), and the next sweep resumes at the backfill floor — a band of ONE event on its own ceiling, inclusive at both ends — composes it, and advances |
+| `refused-page` | (a) | the relay that answered page one refuses page two (`CLOSED "error:"`): exactly that circle holds, every other advances, and the next sweep finishes the chase |
+| `cold-first-connect` | (e) | the second plane refuses the sweep's first connection and answers every later page; no circle is held, so the late relay was not marked silent and no page started from a poisoned floor |
+| `future-dated-page` | (b) | a whole page (`CATCHUP_MAX_EVENTS_PER_PAGE`) of rewraps dated a day ahead in every circle's store: none is served, and every cursor lands on the sweep's own open time |
+
+An advance is asserted on the cursor VALUE read back, strictly above where it
+was and inside a bracket of two readings of the wall clock the sweep opens its
+window with; a hold is bounded from above by the oldest backlog event. The
+mis-configuration control is `healthy-drain` over an empty store: the sweep
+drains nothing, the advance still lands, and the drain canary has nothing to
+have drained — rc 3. Each arm was also run with the product behaviour it grades
+deleted from `catchup.rs` (the chased-empty-page hold, the first page's
+`until`, the contribution rule, the ceiling's one-second offset, the
+`responded` gate on `silent`), and each went rc 3 while `healthy-drain` stayed
+clean. `the_boundary_is_the_maximum_across_truncating_relays` remains the unit
+proof of the cross-relay boundary rule. **What S20 does not assert** is the
+`since` edge of (d): a sweep's floor is its cursor less a re-verification buffer,
+never an event's second, so no genuine event can be placed on it.
+
+Measured 2026-09-26, `cargo test`, world build included, three runs each:
+`healthy-drain` 9.1–9.3 s, `clamped-limit` 11.5–11.8 s, `refused-page` 4.1–4.2 s,
+`cold-first-connect` 2.9–3.7 s, `future-dated-page` 2.9 s, the control 1.4 s —
+against 26.75 s of derived bound each (133.75 s for the five). The two long arms
+are the backlog's one-event-per-second mint.
+
+**Found while building it (owner decision pending):** the page-bound fix closes
+(b) for a FUTURE-dated page only. A full page of kind-445s dated inside ONE
+second of the window — here, the same rewraps dated at their source's own
+second — is served, keeps the chase alive by page size, repeats at a boundary
+that cannot descend, and halts: measured, three consecutive sweeps held every
+circle and never served the genuine event one second below the pile-up. The
+forgeries carry no `expiration`, so nothing retires them. Recorded as **C10** in
+`docs/BACKGROUND_SHARING_FAILURE_ANALYSIS.md` (mechanism and `catchup.rs`
+cites); not graded — whether it gets an expected-red arm is owner question OQ-V.
 
 ---
 
@@ -828,6 +1023,7 @@ than resolved silently (owner decision Q4).
 |---|---|
 | `scripts/ci/check_soak_test_only.sh` | The rig stays out of the app and out of every build path; `test-utils` stays a DEV edge of `rust_builder` and is in no `[features]` alias of any manifest, `default` included (that one word would open the probe seams on every DEBUG build, where the `compile_error!` never fires); no shipped manifest sets `debug-assertions = true` under any `[profile.*]` (that one line disarms haven-core's `compile_error!`); no `{:?}` of a foreign type in the rig; the timeline field-class test exists and pins its count |
 | `scripts/ci/check_soak_clock_partition.sh` | The two clocks do not convert, and neither reaches the other's seams. Its seam vocabulary is derived from `haven-core`, so a rename is BROKEN rather than clean |
+| `scripts/ci/check_no_kp_lifetime_override.sh` | No shipped Rust path (`haven-core/src`, `haven/rust_builder/src`, comments included) names `key_package_lifetime`: S12's `kp-expired-rejected` sets the lifetime on purpose, and the same call in the product could lengthen `not_after` past the rotation (OD-8) |
 | `scripts/ci/check_soak_lane_reachable.sh` | Something RUNS the rig: `ci.yml` calls the `pr` profile on `needs: [rust]`, the job names are inside the pattern `e2e-flakiness.yml` counts, `rust-check.yml` self-tests the shipped binary, every job drives through the gated runner under an inner deadline and uploads only after it, every job also scans in a step of its own whose condition the drive's outcome cannot switch off (L7), the profiles nest, and the TOML's deadline equals the workflow's literal |
 | `check_e2e_step_timeout_ordering.sh` + `check_e2e_lane_budget.sh` | Extended with `is_soak_body()` (excluding `--self-test`). Before it, a plain `ubuntu-latest` `run:` step got C3 alone: the lane could have driven the rig with no inner deadline at all and both guards would have reported it compliant |
 | `check_no_identifier_logging.sh`, `check_no_key_logging.sh` | `tooling/soak` as its own root with its own floor in each |

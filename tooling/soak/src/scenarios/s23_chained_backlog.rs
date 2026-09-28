@@ -119,13 +119,6 @@ const FIXES_AFTER_RESUME: u32 = 3;
 /// ordinal, so a late replay can never satisfy a closing-round probe.
 const FIX_ROUND: u32 = 123;
 
-/// How long the wall second a commit was sealed in may take to turn over.
-///
-/// A harness bound on a clock, not a product bound: one second plus the poll
-/// granularity is the most the turnover can take, and a wait that ran out is
-/// folded into the page-order canary rather than reported as a failure.
-const SECOND_TURNOVER_BOUND: Duration = Duration::from_secs(2);
-
 /// How often a bounded wait for a delivery re-reads the ledger. A harness
 /// cadence; no expectation is derived from it.
 const DELIVERY_POLL: Duration = Duration::from_millis(20);
@@ -366,7 +359,8 @@ async fn confirmed_commit<T: TimelineSink, L: LogDrain>(
 /// answers whether it did.
 ///
 /// Read back off the first plane's store rather than off the event in hand:
-/// the stamp the page is ordered by is the one the relay holds.
+/// the stamp the page is ordered by is the one the relay holds. A wait that ran
+/// out is folded into the page-order canary rather than reported as a failure.
 async fn wall_second_turned_over<T: TimelineSink, L: LogDrain>(
     world: &ScenarioWorld<T, L>,
     event_id: &EventId,
@@ -375,7 +369,7 @@ async fn wall_second_turned_over<T: TimelineSink, L: LogDrain>(
     let Some(stored_at) = stored_created_at(plane, event_id).await? else {
         return Ok(false);
     };
-    await_condition(SECOND_TURNOVER_BOUND, || async {
+    await_condition(bounds::wall_second_turnover(), || async {
         Ok(WallNow::now().secs() > stored_at)
     })
     .await

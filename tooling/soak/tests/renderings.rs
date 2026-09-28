@@ -234,7 +234,7 @@ fn static_samples() -> BTreeMap<String, Vec<String>> {
     use haven_soak::driver::Refusal;
     use haven_soak::logsink::{ScanReport, SinkError};
     use haven_soak::nemesis::types::{
-        ByteCap, ClosedPrefix, DeviceOp, DropClass, Fault, Op, Schedule, ScheduledOp,
+        ByteCap, ClosedPrefix, DeviceOp, DropClass, Fault, Op, RigCount, Schedule, ScheduledOp,
     };
     use haven_soak::oracle::bounds::{BoundDefect, Recovery, WaitScale};
     use haven_soak::oracle::quiescence::{PendingReason, Quiescence, Settled, StabilityWindow};
@@ -364,6 +364,12 @@ fn static_samples() -> BTreeMap<String, Vec<String>> {
             max_bytes: ByteCap::new(NEEDLE_COUNT),
         },
         Fault::DropClass(DropClass::Application),
+        // A page fault is sized off the backlog a world seeded.
+        Fault::ClampLimit(RigCount::new(NEEDLE_COUNT)),
+        Fault::RefusePage {
+            nth: RigCount::new(NEEDLE_COUNT),
+        },
+        Fault::ColdFirstConnect,
         Fault::Heal,
     ] {
         add(&mut out, "nemesis/types.rs::Fault", format!("{fault:?}"));
@@ -383,6 +389,11 @@ fn static_samples() -> BTreeMap<String, Vec<String>> {
         &mut out,
         "nemesis/types.rs::ByteCap",
         format!("{:?}", ByteCap::new(NEEDLE_COUNT)),
+    );
+    add(
+        &mut out,
+        "nemesis/types.rs::RigCount",
+        format!("{:?}", RigCount::new(NEEDLE_COUNT)),
     );
     for forgery in [
         Forgery::Expired {
@@ -466,6 +477,8 @@ fn static_samples() -> BTreeMap<String, Vec<String>> {
         BoundDefect::SilenceWindow,
         BoundDefect::UnresolvableInputMaxAge,
         BoundDefect::BurstBacklogWait,
+        BoundDefect::ResubscribeLookback,
+        BoundDefect::WallSecondTurnover,
     ] {
         add(
             &mut out,
@@ -858,7 +871,13 @@ fn static_samples() -> BTreeMap<String, Vec<String>> {
     add(&mut out, "rc.rs::Verdicts", format!("{verdicts:?}"));
 
     // relay/policies.rs
-    for native in [NativeClosed::RateLimited, NativeClosed::AuthRequired] {
+    for native in [
+        NativeClosed::RateLimited,
+        NativeClosed::AuthRequired,
+        NativeClosed::RefusesPage {
+            nth: RigCount::new(NEEDLE_COUNT),
+        },
+    ] {
         add(
             &mut out,
             "relay/policies.rs::NativeClosed",
@@ -913,6 +932,7 @@ fn static_samples() -> BTreeMap<String, Vec<String>> {
     for step in [
         Step::OpenStore,
         Step::MintKeyPackage,
+        Step::DeleteKeyPackage,
         Step::CreateCircle,
         Step::Publish,
         Step::ConfirmPublished,
@@ -1030,6 +1050,12 @@ fn static_samples() -> BTreeMap<String, Vec<String>> {
             circle,
             grew: haven_soak::rig::BUFFER_GREW,
         },
+        TimelineRecord::AfterKill {
+            tick: 11,
+            device,
+            circle,
+            outcome: haven_soak::rig::AFTER_KILL_SENDS_RESUMED,
+        },
     ] {
         add(
             &mut out,
@@ -1064,6 +1090,7 @@ fn static_samples() -> BTreeMap<String, Vec<String>> {
         Absence::None,
         Absence::ThrottledBackoffFloor,
         Absence::DeliverySilenceWindow,
+        Absence::ResubscribeLookback,
     ] {
         add(
             &mut out,

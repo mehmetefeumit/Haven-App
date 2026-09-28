@@ -484,16 +484,19 @@ jobs:
       # ONE VERSION, ONE SOURCE — and the same version haven-core resolved.
       #
       # The soak crate has its own Cargo.lock, so nothing but this step stops it
-      # resolving a second `openmls` (the two-universes trap: two openmls
-      # versions in one binary are two incompatible type graphs that still
-      # compile), or a `nostr` 0.44.x different from the one MDK's pinned rev
+      # resolving a second `openmls` or a drifted sibling (`openmls_rust_crypto`,
+      # `openmls_basic_credential`, `openmls_traits` — S12 names all three, and
+      # a `cargo update` inside tooling/soak alone could move one), the
+      # two-universes trap: two openmls versions in one binary are two
+      # incompatible type graphs that still compile, or a `nostr` 0.44.x different from the one MDK's pinned rev
       # was built against — which would split the nostr type graph between
       # haven-core's events and the rig's relay.
       - name: One version, one source, and equal to haven-core's
         run: |
           set -euo pipefail
           status=0
-          for crate in openmls cgka-traits cgka-engine libsqlite3-sys \
+          for crate in openmls openmls_rust_crypto openmls_basic_credential openmls_traits \
+                       cgka-traits cgka-engine libsqlite3-sys \
                        nostr nostr-sdk nostr-relay-pool nostr-database; do
             versions="$(cargo tree -i "${crate}" --prefix none --no-dedupe 2>/dev/null \
                           | awk -v c="${crate}" '$1 == c { print $2 }' | sort -u)"
@@ -536,7 +539,7 @@ jobs:
           set -euo pipefail
           tree="$(cargo tree -e features,no-dev -p haven-core)"
           if grep -qE '(^|[^a-z-])feature "test-utils"' <<<"${tree}"; then
-            echo '::error::haven-core is built with the test-utils feature on the non-dev graph of rust_builder. That feature gates the five soak seams and re-exports types whose Debug prints a real MLS group id.'
+            echo '::error::haven-core is built with the test-utils feature on the non-dev graph of rust_builder. That feature gates the nine soak seams and re-exports types whose Debug prints a real MLS group id.'
             exit 1
           fi
           echo "test-utils is absent from rust_builder's non-dev haven-core graph"

@@ -27,20 +27,21 @@ use std::time::Duration;
 
 use haven_soak::banner::{Banner, Measured, Provenance};
 use haven_soak::nemesis::types::{
-    ByteCap, ClosedPrefix, DeviceOp, DropClass, Fault, Op, Schedule, ScheduledOp,
+    ByteCap, ClosedPrefix, DeviceOp, DropClass, Fault, Op, RigCount, Schedule, ScheduledOp,
 };
 use haven_soak::profiles::ProfileName;
 use haven_soak::relay::Forgery;
 use haven_soak::rig::{
-    CircleTag, DeviceTag, KillKind, RelayTag, SessionStoreUse, TimelineRecord, BUFFER_DID_NOT_GROW,
-    BUFFER_GREW,
+    CircleTag, DeviceTag, KillKind, RelayTag, SessionStoreUse, TimelineRecord,
+    AFTER_KILL_REMOVAL_PUBLISHED, AFTER_KILL_REMOVAL_REPORTED, AFTER_KILL_SENDS_RESUMED,
+    AFTER_KILL_SEND_CLASSIFIED, BUFFER_DID_NOT_GROW, BUFFER_GREW,
 };
 
 /// Every field this rig renders, across all three surfaces.
 ///
 /// Pinned by equality and asserted below: a table whose length can drift is a
 /// table that can lose a field's class without anything saying so.
-const CLASSIFIED_FIELDS: usize = 52;
+const CLASSIFIED_FIELDS: usize = 54;
 
 /// What a moved pin means, kept as a constant so the assertion below stays on
 /// one line: the guard that requires this pin to be ASSERTED reads the
@@ -102,6 +103,10 @@ fn table() -> Vec<(Surface, &'static str, Class)> {
         // A dropped class is a word from this crate's own vocabulary, on the
         // canonical endpoint or on one device's, and the device is a handle.
         (T, "op.fault.fault.drop-class", Literal),
+        // A page fault's count is sized off the backlog the arm seeded, so it
+        // renders a bucket for the reason a size cap does.
+        (T, "op.fault.fault.clamp-limit", Bucket),
+        (T, "op.fault.fault.refuse-page.nth", Bucket),
         (T, "op.device-fault.relay", Tag),
         (T, "op.device-fault.device", Tag),
         (T, "op.device-fault.fault", Literal),
@@ -169,6 +174,7 @@ fn vocabulary() -> BTreeSet<String> {
         "published",
         "rebound",
         "buffer-grew",
+        "after-kill",
     ] {
         words.insert(kind.to_owned());
     }
@@ -185,6 +191,9 @@ fn vocabulary() -> BTreeSet<String> {
         "inject",
         "refuse-oversize",
         "drop-class",
+        "clamp-limit",
+        "refuse-page",
+        "cold-first-connect",
         "heal",
         "probe",
         "restart-soft",
@@ -229,6 +238,15 @@ fn vocabulary() -> BTreeSet<String> {
     // negation, never a count.
     for reading in [BUFFER_GREW, BUFFER_DID_NOT_GROW] {
         words.insert(reading.to_owned());
+    }
+    // Which side of its disjunction a killed device's circle took.
+    for side in [
+        AFTER_KILL_SENDS_RESUMED,
+        AFTER_KILL_SEND_CLASSIFIED,
+        AFTER_KILL_REMOVAL_PUBLISHED,
+        AFTER_KILL_REMOVAL_REPORTED,
+    ] {
+        words.insert(side.to_owned());
     }
     // The quarters of the session-store ceiling the banner prints.
     for usage in [
@@ -348,6 +366,30 @@ fn records() -> Vec<TimelineRecord> {
                 fault: Fault::DropClass(DropClass::GiftWrap),
             },
         },
+        // The three page faults: two carry a count, one is a word alone.
+        TimelineRecord::Applied {
+            tick: 11,
+            op: Op::Fault {
+                relay: RelayTag::new(1),
+                fault: Fault::ClampLimit(RigCount::new(500)),
+            },
+        },
+        TimelineRecord::Applied {
+            tick: 11,
+            op: Op::Fault {
+                relay: RelayTag::new(1),
+                fault: Fault::RefusePage {
+                    nth: RigCount::new(2),
+                },
+            },
+        },
+        TimelineRecord::Applied {
+            tick: 11,
+            op: Op::Fault {
+                relay: RelayTag::new(1),
+                fault: Fault::ColdFirstConnect,
+            },
+        },
         TimelineRecord::Applied {
             tick: 11,
             op: Op::DeviceFault {
@@ -408,6 +450,31 @@ fn records() -> Vec<TimelineRecord> {
             device: DeviceTag::new(1),
             circle: CircleTag::new(0),
             grew: BUFFER_DID_NOT_GROW,
+        },
+        // Every side a kill arm can record, so the literal class sees each.
+        TimelineRecord::AfterKill {
+            tick: 15,
+            device: DeviceTag::new(0),
+            circle: CircleTag::new(2),
+            outcome: AFTER_KILL_SENDS_RESUMED,
+        },
+        TimelineRecord::AfterKill {
+            tick: 15,
+            device: DeviceTag::new(0),
+            circle: CircleTag::new(2),
+            outcome: AFTER_KILL_SEND_CLASSIFIED,
+        },
+        TimelineRecord::AfterKill {
+            tick: 16,
+            device: DeviceTag::new(2),
+            circle: CircleTag::new(3),
+            outcome: AFTER_KILL_REMOVAL_PUBLISHED,
+        },
+        TimelineRecord::AfterKill {
+            tick: 16,
+            device: DeviceTag::new(2),
+            circle: CircleTag::new(3),
+            outcome: AFTER_KILL_REMOVAL_REPORTED,
         },
     ]
 }

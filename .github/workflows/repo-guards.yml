@@ -221,6 +221,10 @@
 #     lever that can downgrade the kind-445 exporter derivation away from
 #     "marmot/group-event"; Haven's Rust source must never name it.
 #
+#   No KeyPackage lifetime override   scripts/ci/check_no_kp_lifetime_override.sh
+#     openmls's KeyPackage lifetime setter could lengthen not_after past the
+#     rotation Haven promises; no shipped Rust path may name it (soak OD-8).
+#
 #   Inner location kind is pinned     scripts/ci/check_inner_location_kind.sh
 #     The inner MLS-tunnelled location rumor's kind is the dispatch token every
 #     other Marmot client in the circle renders on. At kind 9 — MDK's chat
@@ -1005,6 +1009,14 @@ jobs:
       - name: No exporter-label override
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_no_exporter_label_override.sh
+
+      - name: No KeyPackage lifetime override
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_no_kp_lifetime_override.sh
+
+      - name: KeyPackage lifetime guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_no_kp_lifetime_override.sh --self-test
 
       - name: Inner location kind is pinned
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}

@@ -90,6 +90,9 @@ struct Inner {
     /// retry.
     rebind_attempts: u32,
     rebind_wait: Duration,
+    /// Connections an endpoint dropped before their handshake under
+    /// `ColdFirstConnect`: armed is not fired, and this is the firing.
+    refused_connects: usize,
 }
 
 impl Ledger {
@@ -278,6 +281,12 @@ impl Ledger {
         self.with(|inner| (inner.rebind_attempts, inner.rebind_wait))
     }
 
+    /// How many connections were dropped before their handshake.
+    #[must_use]
+    pub fn refused_connects(&self) -> usize {
+        self.with(|inner| inner.refused_connects)
+    }
+
     pub(crate) fn note_ok(&self, event_id: EventId, status: bool, message: &str) {
         self.with(|inner| {
             inner.tag(event_id);
@@ -341,6 +350,10 @@ impl Ledger {
         self.with(|inner| inner.faults.push(label));
     }
 
+    pub(crate) fn note_refused_connect(&self) {
+        self.with(|inner| inner.refused_connects += 1);
+    }
+
     pub(crate) fn note_rebind(&self, attempts: u32, waited: Duration) {
         self.with(|inner| {
             inner.rebind_attempts = attempts;
@@ -377,6 +390,7 @@ impl fmt::Debug for Ledger {
                 .field("notices", &sim_magnitude(inner.notices.len()))
                 .field("eose", &sim_magnitude(inner.eose))
                 .field("faults", &sim_magnitude(inner.faults.len()))
+                .field("refused_connects", &sim_magnitude(inner.refused_connects))
                 .finish_non_exhaustive()
         })
     }

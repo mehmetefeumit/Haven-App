@@ -7,21 +7,26 @@
 # ## What the rig is, and why it needs a boundary
 #
 # `tooling/soak` builds `haven-soak`, which links haven-core with the
-# `test-utils` feature ON. That feature is the door to eight test-only seams.
+# `test-utils` feature ON. That feature is the door to nine test-only seams.
 # Six only READ state the product deliberately does not expose (a typed ingest
 # that returns the engine's own error, a stored-message probe, the live-sync
 # processor, the circle rotation stamps, direct read/delete of the OpenMLS group
 # state inside the SQLCipher store, and a count of the uncapped convergence
 # buffer) plus the unencrypted-store constructors.
 #
-# Two do MORE than read, and are worse. `set_stored_message_write_fault_for_test`
+# Three do MORE than read, and are worse. `set_stored_message_write_fault_for_test`
 # is a MUTATION seam: it installs an abort trigger on the engine's stored-message
 # table in a LIVE database, so the feature can make the product's own writes
 # fail rather than merely observe them. `forge_future_header_445_for_test` is an
 # OUTBOUND SEALING seam: it seals a kind-445 under the group key with a crafted
-# future inner header — member-level forging power, not a reader's. A shipped
-# build that carried any of this would ship a door into its own MLS store, and
-# with those two a lever on it and a forge inside it.
+# future inner header — member-level forging power, not a reader's.
+# `LiveSyncCore::new_local_with_relay_map_for_test` is an ADDRESS-MAP seam: it
+# rewrites each address the engine's auto-commit publish targets, so the
+# feature decides where an MLS commit goes (the publish itself stays the
+# engine's own `Client`, wrapped privately inside haven-core). A shipped build
+# that carried any of this would ship a door into its own MLS store, and with
+# those three a lever on it, a forge inside it and a hand on where its commits
+# go.
 #
 # What stops a shipped build from CALLING any of them is the compiler, not this
 # guard: every seam is `#[cfg(any(test, feature = "test-utils"))]`, so the symbol
@@ -62,7 +67,7 @@
 #
 #      A dependency table is not the only door. A `[features]` ALIAS is the
 #      other one, and it is wider: `default = ["test-utils"]` in
-#      haven-core/Cargo.toml turns those eight test-only seams on for every consumer
+#      haven-core/Cargo.toml turns those nine test-only seams on for every consumer
 #      that does not opt out — every DEBUG build of the app included, since the
 #      `compile_error!` fires only with `debug_assertions` off. Checks 2, 3 and
 #      4 as first written all stay green through that one-word diff. So: no
@@ -83,7 +88,7 @@
 #      ships, not of the tree.
 #
 #   5. NO `{:?}` OF A FOREIGN TYPE. Nothing under `tooling/soak` (src AND
-#      tests), and nothing in the haven-core seam test, may render a
+#      tests), and nothing in the two haven-core seam test binaries, may render a
 #      `haven_core`/`cgka_*`/`nostr*`/`openmls` value through the Debug format
 #      family (`{:?}`, `{:#?}`, `{x:?}`, `{:x?}`) or `dbg!`. Those Debug impls
 #      print a real MLS group id and absolute epochs (`EngineError::ForkedEpoch`
@@ -140,9 +145,12 @@ readonly FFI_MANIFEST='haven/rust_builder/Cargo.toml'
 readonly CORE_MANIFEST='haven-core/Cargo.toml'
 readonly TIMELINE_TEST='tooling/soak/tests/timeline_fields.rs'
 readonly SEAM_TEST='haven-core/tests/test_utils_seams.rs'
+# Seam 9's socket-opening tests, split out so they cannot race the log capture
+# in SEAM_TEST; the same rule covers them.
+readonly SEAM_SOCKET_TEST='haven-core/tests/test_utils_seams_sockets.rs'
 # Equality pin: a fixture added or removed without moving this line is a
 # self-test that no longer says what it runs.
-readonly SELF_TEST_FIXTURES=41
+readonly SELF_TEST_FIXTURES=42
 
 # Trees that ship. `haven/integration_test` and `tooling/` are deliberately
 # absent: that is the harness, and it is where the rig belongs.
@@ -219,7 +227,7 @@ check_no_production_reach() {
       hits="$(grep -rlF -- "${token}" "${root}/${tree}" 2>/dev/null)"
       if [[ -n "${hits}" ]]; then
         printf '%s\n' "${hits}" >&2
-        fail "'${token}' appears under ${tree}. The soak rig links haven-core with test-utils on — eight test-only seams (a mutation seam and an outbound sealing seam among them) and the unencrypted-store constructors — and must be unreachable from the shipped app."
+        fail "'${token}' appears under ${tree}. The soak rig links haven-core with test-utils on — nine test-only seams (a mutation seam, an outbound sealing seam and an address-map seam among them) and the unencrypted-store constructors — and must be unreachable from the shipped app."
         rc=1
       fi
     done
@@ -350,7 +358,7 @@ check_test_utils_is_dev_only() {
     hits="$(feature_alias_hits "${m}")"
     if [[ -n "${hits}" ]]; then
       printf '%s\n' "${hits}" >&2
-      fail "${m#"${root}/"} pulls haven-core's test-utils into a [features] alias (line:alias above). An alias is not a dev edge: \`default = [\"test-utils\"]\` opens all eight test-only seams for every consumer that does not opt out, and haven-core's compile_error! only fires with debug_assertions OFF — so every DEBUG build of the app would carry them while checks 2-4 stayed green."
+      fail "${m#"${root}/"} pulls haven-core's test-utils into a [features] alias (line:alias above). An alias is not a dev edge: \`default = [\"test-utils\"]\` opens all nine test-only seams for every consumer that does not opt out, and haven-core's compile_error! only fires with debug_assertions OFF — so every DEBUG build of the app would carry them while checks 2-4 stayed green."
       rc=1
     fi
   done < <(other_manifests "${root}")
@@ -444,7 +452,7 @@ debug_format_hits() { # debug_format_hits <file>
   ' "$1"
 }
 
-# 5. No `{:?}` of a foreign type anywhere in the rig or in the seam test.
+# 5. No `{:?}` of a foreign type anywhere in the rig or in the seam tests.
 check_no_foreign_debug_format() {
   local root="$1" rc=0 f hits n=0
   local -a files=()
@@ -453,6 +461,7 @@ check_no_foreign_debug_format() {
       < <(find "${root}/${SOAK_DIR}/src" "${root}/${SOAK_DIR}/tests" -name '*.rs' 2>/dev/null | sort)
   fi
   [[ -f "${root}/${SEAM_TEST}" ]] && files+=("${root}/${SEAM_TEST}")
+  [[ -f "${root}/${SEAM_SOCKET_TEST}" ]] && files+=("${root}/${SEAM_SOCKET_TEST}")
   if (( ${#files[@]} == 0 )); then
     log "check 5 is inert: neither ${SOAK_DIR}/src nor ${SEAM_TEST} is in the tree yet."
     return 0
@@ -596,6 +605,7 @@ fn every_timeline_field_has_a_privacy_class() {
 }
 RS
     printf '#[test]\nfn seams() {}\n' > "${r}/${SEAM_TEST}"
+    printf '#[test]\nfn sockets() {}\n' > "${r}/${SEAM_SOCKET_TEST}"
   }
 
   echo "[${SELF_NAME}] self-test"
@@ -730,6 +740,10 @@ TOML
   printf 'fn f(o: IngestOutcome) { panic!("{:#?}", o); }\n' >> "${seamfmt}/${SEAM_TEST}"
   _case "the haven-core seam test is scanned too" 1 check_no_foreign_debug_format "${seamfmt}"
 
+  local sockfmt="${tmp}/sockfmt"; _mk "${sockfmt}"
+  printf 'fn f(e: EngineError) { panic!("{e:?}"); }\n' >> "${sockfmt}/${SEAM_SOCKET_TEST}"
+  _case "the seam socket test is scanned too" 1 check_no_foreign_debug_format "${sockfmt}"
+
   # The three bare-name classes a scenario imports without a crate path, one
   # fixture each: a roster's member pubkeys, a KeyPackage relay's URL, and a
   # KeyPackage slot `d` beside a Nostr event id.
@@ -813,9 +827,10 @@ main() {
 
   if (( FAILED )); then
     echo >&2
-    echo "The Tier-1 soak rig links haven-core with test-utils on: eight test-only" >&2
-    echo "seams (a mutation seam and an outbound sealing seam among them) and the" >&2
-    echo "unencrypted-store constructors. It must stay out of the" >&2
+    echo "The Tier-1 soak rig links haven-core with test-utils on: nine test-only" >&2
+    echo "seams (a mutation seam, an outbound sealing seam and an address-map" >&2
+    echo "seam among them) and the unencrypted-store constructors. It must stay" >&2
+    echo "out of the" >&2
     echo "shipped app and out of every build path, and the compile-time trap that" >&2
     echo "enforces that must stay armed. See the header of this script and" >&2
     echo "docs/SOAK_LANE.md." >&2

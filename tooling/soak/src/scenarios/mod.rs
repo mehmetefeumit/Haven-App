@@ -37,6 +37,7 @@ pub mod s03_lost_commit;
 pub mod s04_offline_member;
 pub mod s05_publish_confirm;
 pub mod s06_stuck_row;
+pub mod s08_live_plane_burial;
 pub mod s09_cursor_poisoning;
 pub mod s10_ten_circles;
 pub mod s11_quiet_circle;
@@ -47,6 +48,7 @@ pub mod s16_storage_growth;
 pub mod s17_closed_prefixes;
 pub mod s18_swallowed_ok;
 pub mod s19_duplicate_reorder;
+pub mod s20_catchup_sweep;
 pub mod s21_removal_effectiveness;
 pub mod s22_oversized_event;
 pub mod s23_chained_backlog;
@@ -256,6 +258,16 @@ pub enum Absence {
     /// scheduler, so the tail it owes is one publish attempt per remaining
     /// member rather than a scheduler's own period.
     RemovalPublishTail,
+    /// Haven's resubscribe lookback plus one wall second: the least time after
+    /// an event's own second at which a re-anchor, and the catch-up sweep
+    /// behind it, no longer ask for that event.
+    ///
+    /// Not an absence the arm asserts but a span it lets pass, carried here
+    /// for the same two reasons: it is priced, and it may never be scaled — a
+    /// scaled lookback would wait past the product's window rather than to its
+    /// edge, and a shortened one would let the sweep recover what the arm set
+    /// out to bury.
+    ResubscribeLookback,
 }
 
 impl Absence {
@@ -273,6 +285,7 @@ impl Absence {
             Self::ThrottledBackoffFloor => bounds::throttled_backoff_floor(),
             Self::DeliverySilenceWindow => bounds::silence_window(),
             Self::RemovalPublishTail => bounds::location_publish_window(),
+            Self::ResubscribeLookback => bounds::resubscribe_lookback(),
         }
     }
 }
@@ -295,6 +308,9 @@ pub enum Scenario {
     /// **S06** — a stored convergence input gates a circle until the sweep
     /// retires it.
     StuckRow,
+    /// **S08** — a commit buried on the live plane under a page of forgeries
+    /// past the relay's replay cap. Expected red until C8 is fixed.
+    LivePlaneBurial,
     /// **S09** — an adversary forges at a circle's public routing id for the
     /// whole run, and neither receive plane's anchor takes a number from it.
     CursorPoisoning,
@@ -328,17 +344,21 @@ pub enum Scenario {
     /// **S21** — a removed member stops reading the circle, on both delivery
     /// paths, and the removal-effectiveness lag is bounded (invariant S8).
     RemovalEffectiveness,
+    /// **S20** — the catch-up sweep against clamped, refused, cold and forged
+    /// pages (RLY-05).
+    CatchupSweep,
 }
 
 impl Scenario {
     /// Every scenario this crate runs.
-    pub const REGISTRY: [Self; 19] = [
+    pub const REGISTRY: [Self; 21] = [
         Self::RelayOutage,
         Self::ReceiverPartition,
         Self::LostCommit,
         Self::OfflineMember,
         Self::PublishConfirmWindow,
         Self::StuckRow,
+        Self::LivePlaneBurial,
         Self::CursorPoisoning,
         Self::TenCircleRoster,
         Self::QuietCircle,
@@ -349,6 +369,7 @@ impl Scenario {
         Self::ClosedPrefixes,
         Self::SwallowedOk,
         Self::DuplicateReorder,
+        Self::CatchupSweep,
         Self::RemovalEffectiveness,
         Self::OversizedEvent,
         Self::ChainedBacklog,
@@ -364,6 +385,7 @@ impl Scenario {
             Self::OfflineMember => "S04",
             Self::PublishConfirmWindow => "S05",
             Self::StuckRow => "S06",
+            Self::LivePlaneBurial => "S08",
             Self::CursorPoisoning => "S09",
             Self::QuietCircle => "S11",
             Self::KeyPackageRotation => "S12",
@@ -377,6 +399,7 @@ impl Scenario {
             Self::ChainedBacklog => "S23",
             Self::StorageGrowth => "S16",
             Self::RemovalEffectiveness => "S21",
+            Self::CatchupSweep => "S20",
         }
     }
 
@@ -390,6 +413,7 @@ impl Scenario {
             Self::OfflineMember => "MEMBER OFFLINE ACROSS A SPAN",
             Self::PublishConfirmWindow => "PUBLISH-CONFIRM WINDOW",
             Self::StuckRow => "STUCK CONVERGENCE ROW",
+            Self::LivePlaneBurial => "LIVE-PLANE BURIAL PAST THE RELAY CAP",
             Self::CursorPoisoning => "CURSOR-POISONING STANDING ADVERSARY",
             Self::QuietCircle => "QUIET CIRCLE RESUME",
             Self::KeyPackageRotation => "KEYPACKAGE ROTATION SLOT",
@@ -403,6 +427,7 @@ impl Scenario {
             Self::ChainedBacklog => "CHAINED-COMMIT BACKLOG",
             Self::StorageGrowth => "DURABLE-STORAGE GROWTH",
             Self::RemovalEffectiveness => "BOUNDED REMOVAL EFFECTIVENESS",
+            Self::CatchupSweep => "CATCH-UP SWEEP UNDER PAGE FAULTS",
         }
     }
 
@@ -416,6 +441,7 @@ impl Scenario {
             Self::OfflineMember => &s04_offline_member::ARMS,
             Self::PublishConfirmWindow => &s05_publish_confirm::ARMS,
             Self::StuckRow => &s06_stuck_row::ARMS,
+            Self::LivePlaneBurial => &s08_live_plane_burial::ARMS,
             Self::CursorPoisoning => &s09_cursor_poisoning::ARMS,
             Self::QuietCircle => &s11_quiet_circle::ARMS,
             Self::KeyPackageRotation => &s12_key_package_rotation::ARMS,
@@ -429,6 +455,7 @@ impl Scenario {
             Self::ChainedBacklog => &s23_chained_backlog::ARMS,
             Self::StorageGrowth => &s16_storage_growth::ARMS,
             Self::RemovalEffectiveness => &s21_removal_effectiveness::ARMS,
+            Self::CatchupSweep => &s20_catchup_sweep::ARMS,
         }
     }
 
@@ -481,6 +508,7 @@ impl Scenario {
             Self::OfflineMember => s04_offline_member::run(world, arm, tick).await?,
             Self::PublishConfirmWindow => s05_publish_confirm::run(world, arm, tick).await?,
             Self::StuckRow => s06_stuck_row::run(world, arm, tick).await?,
+            Self::LivePlaneBurial => s08_live_plane_burial::run(world, arm, tick).await?,
             Self::CursorPoisoning => s09_cursor_poisoning::run(world, arm, tick).await?,
             Self::QuietCircle => s11_quiet_circle::run(world, arm, tick).await?,
             Self::KeyPackageRotation => s12_key_package_rotation::run(world, arm, tick).await?,
@@ -494,6 +522,7 @@ impl Scenario {
             Self::ChainedBacklog => s23_chained_backlog::run(world, arm, tick).await?,
             Self::StorageGrowth => s16_storage_growth::run(world, arm, tick).await?,
             Self::RemovalEffectiveness => s21_removal_effectiveness::run(world, arm, tick).await?,
+            Self::CatchupSweep => s20_catchup_sweep::run(world, arm, tick).await?,
         };
         Ok(self.report(world, arm, outcome, started))
     }
@@ -1430,6 +1459,7 @@ mod tests {
             Absence::ThrottledBackoffFloor,
             Absence::DeliverySilenceWindow,
             Absence::RemovalPublishTail,
+            Absence::ResubscribeLookback,
         ] {
             let window = absence.window();
             assert!(
@@ -1464,6 +1494,10 @@ mod tests {
             Absence::RemovalPublishTail.window() == bounds::location_publish_window(),
             "the removal tail is the product's own location publish window: one bounded \
              attempt, with no retry behind it"
+        );
+        assert!(
+            Absence::ResubscribeLookback.window() == bounds::resubscribe_lookback(),
+            "the lookback is the product's own resubscribe buffer plus one wall second"
         );
     }
 

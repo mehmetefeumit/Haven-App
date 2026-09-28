@@ -13,15 +13,17 @@
 //! table in the brief prints today's values for a reader, and that is the one
 //! place they appear.
 //!
-//! # Upper bounds, and the one lower bound
+//! # Upper bounds, and the two lower bounds
 //!
 //! Every function here is an UPPER bound — "if it has not happened by now, it is
-//! not going to" — except [`throttled_backoff_floor`], which is the only lower
-//! one. It exists because the two `ClosedKind` arms cannot be told apart by
-//! upper bounds alone: a dropped subscription is re-issued at once and a
-//! throttled one waits, so the only observable difference is an ABSENCE before
-//! the floor. An absence window is never scaled by `HAVEN_TEST_WAIT_SCALE` —
-//! scaling it would widen the window in which the product is allowed to do
+//! not going to" — except [`throttled_backoff_floor`] and
+//! [`resubscribe_lookback`]. The first exists because the two `ClosedKind` arms
+//! cannot be told apart by upper bounds alone: a dropped subscription is
+//! re-issued at once and a throttled one waits, so the only observable
+//! difference is an ABSENCE before the floor. The second is the span S08 must
+//! let pass before the product's own lookback stops reaching an event. Neither
+//! is ever scaled by `HAVEN_TEST_WAIT_SCALE` —
+//! scaling one would widen the window in which the product is allowed to do
 //! nothing, which is the opposite of what the scale knob is for.
 
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -33,6 +35,7 @@ use haven_core::relay::live_sync::config::{
     BURST_BACKLOG_WAIT_SECS, COMMIT_SETTLE_WINDOW_SECS, SUBSCRIBE_CONNECT_WAIT_SECS,
     SUBSCRIBE_MAX_ATTEMPTS, SUBSCRIBE_RETRY_WAIT_SECS,
 };
+use haven_core::relay::GROUP_RESUBSCRIBE_BUFFER_SECS;
 
 /// Basis-point denominator, as `BACKOFF_JITTER_FRACTION_BP`'s own doc uses it.
 const BASIS_POINTS: u64 = 10_000;
@@ -194,6 +197,34 @@ pub const fn unresolvable_input_max_age() -> Duration {
     Duration::from_secs(UNRESOLVABLE_INPUT_MAX_AGE_SECS)
 }
 
+/// How long after an event's own second a re-anchor must land before neither
+/// the live REQ nor the catch-up sweep asks for it again.
+///
+/// `GROUP_RESUBSCRIBE_BUFFER_SECS` plus one wall second (`haven-core/src/relay/cursor.rs`):
+/// both the resubscribe `since` and the sweep's floor are the cursor less that
+/// buffer, a cursor is floored to whole seconds and `since` is inclusive, so a
+/// re-anchor anywhere inside the event's second plus the buffer still reaches
+/// it. A LOWER bound, like [`throttled_backoff_floor`], and never scaled: S08
+/// waits it out so that what follows is past the product's own lookback.
+#[must_use]
+pub const fn resubscribe_lookback() -> Duration {
+    Duration::from_secs(GROUP_RESUBSCRIBE_BUFFER_SECS.unsigned_abs() + ONE_WALL_SECOND)
+}
+
+/// The grain `since` and a cursor's second are both counted in.
+const ONE_WALL_SECOND: u64 = 1;
+
+/// How long a wall second an event was stored or sealed in may take to turn
+/// over.
+///
+/// A harness bound on a clock, not a product bound, and never scaled: a
+/// turnover takes at most [`ONE_WALL_SECOND`], and one more second covers the
+/// poll granularity of the wait that watches it.
+#[must_use]
+pub const fn wall_second_turnover() -> Duration {
+    Duration::from_secs(2 * ONE_WALL_SECOND)
+}
+
 /// How long a burst waits for the endpoints it opened to finish their replay.
 ///
 /// `BURST_BACKLOG_WAIT_SECS` (`haven-core/src/relay/live_sync/config.rs:324`).
@@ -350,6 +381,12 @@ pub enum BoundDefect {
     /// the commit ladder, so one of the two literals has drifted from the
     /// source it cites.
     LocationPublishWindow,
+    /// The resubscribe lookback no longer sits exactly one wall second past
+    /// the product's resubscribe buffer.
+    ResubscribeLookback,
+    /// The wall-second turnover bound no longer exceeds one wall second, so a
+    /// wait on it could run out before the second it watches ends.
+    WallSecondTurnover,
 }
 
 /// Re-derives every bound from its source constant — the `--self-test` case.
@@ -405,6 +442,15 @@ pub fn self_check() -> Result<(), BoundDefect> {
         || location_publish_window() >= withheld_publish_ladder()
     {
         return Err(BoundDefect::LocationPublishWindow);
+    }
+    if resubscribe_lookback()
+        != Duration::from_secs(GROUP_RESUBSCRIBE_BUFFER_SECS.unsigned_abs())
+            + Duration::from_secs(ONE_WALL_SECOND)
+    {
+        return Err(BoundDefect::ResubscribeLookback);
+    }
+    if wall_second_turnover() <= Duration::from_secs(ONE_WALL_SECOND) {
+        return Err(BoundDefect::WallSecondTurnover);
     }
     if round_trip(Recovery::Undisturbed) >= round_trip(Recovery::Reconnect)
         || round_trip(Recovery::Undisturbed) >= round_trip(Recovery::Throttled)

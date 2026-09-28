@@ -67,10 +67,25 @@ toml = "0.8"
 # `check_soak_test_only.sh`'s `FOREIGN_RE`): the caps are matched and compared,
 # never rendered.
 cgka-engine = { git = "https://github.com/marmot-protocol/mdk", rev = "e391adc133a9b60e420da7a0446f014a180ac8d2" }
+# `OpenMLS`, for S12's `kp-expired-rejected` and nothing else: the arm mints an
+# expired KeyPackage in the device's own production shape (`KeyPackageBuilder`,
+# `Lifetime`), which no haven-core or engine surface exposes. The provider and
+# the basic-credential signer come with it, because `KeyPackageBuilder::build`
+# takes both. Pinned exactly as haven-core pins them (same version, same
+# `extensions-draft-08` feature), so this adds ZERO crates. `rust-check.yml`'s
+# `soak-tooling` step asserts that `openmls`, `openmls_rust_crypto`,
+# `openmls_basic_credential` and `openmls_traits` each resolve to exactly one
+# version here, equal to the one in haven-core's lock, so a `cargo update` in
+# this crate alone cannot drift a sibling. The same
+# rule as the engine's caps: a value of these crates is matched, never
+# formatted.
+openmls = { version = "~0.8.1", default-features = false, features = [
+  "extensions-draft-08",
+] }
+openmls_rust_crypto = "~0.5"
+openmls_basic_credential = "0.5"
 #
-# NOT here, deliberately: `openmls` (until S12(b)'s KeyPackage minting is its
-# first consumer — the same first-consumer rule that admitted `cgka-engine`
-# above), `rusqlite`, and `transport-nostr-peeler`, EVER:
+# NOT here, deliberately: `rusqlite`, and `transport-nostr-peeler`, EVER:
 # `check_no_exporter_label_override.sh` roots at `haven-core/src` +
 # `haven/rust_builder/src` and would not see a Rule-11 exporter-label downgrade
 # written here. Adding it means extending that guard in the same change.

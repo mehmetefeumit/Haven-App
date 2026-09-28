@@ -20,6 +20,7 @@
 //! [`sim_magnitude`] is the other minting function, and it delegates to
 //! haven-core's bucket policy rather than inventing a second one.
 
+mod auto_commit;
 pub mod circle;
 pub mod declare;
 pub mod device;
@@ -40,8 +41,9 @@ pub use circle::{PublishVerdict, SimCircle};
 pub use declare::DeclareSink;
 pub use device::{DeviceLedger, SimDevice};
 pub use plane::{
-    CapturedLine, LogDrain, RelayPlane, TimelineRecord, TimelineSink, BUFFER_DID_NOT_GROW,
-    BUFFER_GREW,
+    CapturedLine, LogDrain, RelayPlane, TimelineRecord, TimelineSink, AFTER_KILL_REMOVAL_PUBLISHED,
+    AFTER_KILL_REMOVAL_REPORTED, AFTER_KILL_SENDS_RESUMED, AFTER_KILL_SEND_CLASSIFIED,
+    BUFFER_DID_NOT_GROW, BUFFER_GREW,
 };
 pub use restart::{kill_and_reopen, KillKind, ReopenReport};
 pub use world::{
@@ -188,6 +190,8 @@ pub enum Step {
     OpenStore,
     /// Minting a member's key package.
     MintKeyPackage,
+    /// Deleting a key package's private bundle from a device's store.
+    DeleteKeyPackage,
     /// Creating a circle.
     CreateCircle,
     /// Publishing an event to a relay plane.

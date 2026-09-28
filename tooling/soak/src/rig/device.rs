@@ -30,6 +30,7 @@ use tokio::sync::broadcast::Receiver;
 use zeroize::Zeroizing;
 
 use crate::clock::{PolicyNow, WallNow};
+use crate::rig::auto_commit::endpoint_map;
 use crate::rig::{CircleTag, DeviceTag, RigError, SimCircle, Step};
 
 /// What a device has seen on its engine bus.
@@ -154,6 +155,10 @@ pub struct SimDevice {
     /// key package STORES as its inbox relays stays canonical
     /// (`rig/circle.rs`).
     inbox_relays: Vec<String>,
+    /// Each plane's STORED address, index for index with `inbox_relays`: what
+    /// the engine's auto-commit publisher swaps for the device's own endpoint
+    /// (`rig/auto_commit.rs`).
+    stored_relays: Vec<String>,
     ledger: DeviceLedger,
 }
 
@@ -166,6 +171,20 @@ impl SimDevice {
     /// opened — which includes another live session already holding it
     /// (Rule 14).
     pub fn open(tag: DeviceTag, inbox_relays: &[String]) -> Result<Self, RigError> {
+        Self::open_behind(tag, inbox_relays, inbox_relays)
+    }
+
+    /// Opens a device whose endpoints (`own`) front planes storage knows by
+    /// `stored`, one of each per plane in the same order.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::open`].
+    pub(crate) fn open_behind(
+        tag: DeviceTag,
+        stored: &[String],
+        own: &[String],
+    ) -> Result<Self, RigError> {
         let dir = tempfile::TempDir::new().map_err(|_| RigError::Core(Step::OpenStore))?;
         let keys = Keys::generate();
         let manager = CircleManager::new_unencrypted(dir.path(), &keys)
@@ -181,7 +200,8 @@ impl SimDevice {
             policy_offset_secs: 0,
             bus_rx: None,
             specs: Vec::new(),
-            inbox_relays: inbox_relays.to_vec(),
+            inbox_relays: own.to_vec(),
+            stored_relays: stored.to_vec(),
             ledger: DeviceLedger::default(),
         })
     }
@@ -316,7 +336,17 @@ impl SimDevice {
     /// [`RigError::Core`] with [`Step::StartEngine`] if a subscription fails.
     pub async fn start_engine(&mut self, specs: Vec<CircleSpec>) -> Result<(), RigError> {
         let manager = Arc::clone(self.manager()?);
-        let core = LiveSyncCore::new_local(manager, self.keys.public_key());
+        let routes: Vec<(String, String)> = self
+            .stored_relays
+            .iter()
+            .cloned()
+            .zip(self.inbox_relays.iter().cloned())
+            .collect();
+        let core = LiveSyncCore::new_local_with_relay_map_for_test(
+            manager,
+            self.keys.public_key(),
+            endpoint_map(routes),
+        );
         // Subscribed BEFORE start: a broadcast receiver only sees what is sent
         // after it subscribes, and the first deliveries can land inside start.
         let bus_rx = core.bus().subscribe();

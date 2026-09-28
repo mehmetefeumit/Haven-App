@@ -11,9 +11,9 @@
 #
 # `pr` is the only profile ci.yml calls (stage 4, `needs: [rust]`). `nightly`
 # and `weekly` exist so the scheduler workflows Phase 2 adds have something to
-# call; nothing dispatches them until sub-phase 2d, so FIFTEEN scenarios — S02,
-# S03, S04, S05, S09, S10, S12, S14, S16, S17, S18, S19, S21, S22, S23 — have no
-# LANE execution at all. They
+# call; nothing dispatches them until sub-phase 2d, so SEVENTEEN scenarios — S02,
+# S03, S04, S05, S08, S09, S10, S12, S14, S16, S17, S18, S19, S20, S21, S22, S23 —
+# have no LANE execution at all. They
 # run in `tests/oracles.rs` and under `scripts/run_soak_local.sh`.
 # docs/SOAK_LANE.md says so in those words, so a reader cannot mistake a green
 # PR lane for coverage of the nightly set.
@@ -183,9 +183,11 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # nightly — pr plus the all-relay and rolling S01 arms, S02, S03's nightly
-  # arm, S04, S05, S09, S10, S12, S14, S16, S17's two ClosedKind arms, S18, S19,
-  # S21, S22 and S23 (expected red until C7 is fixed). No scheduler dispatches
-  # this until sub-phase 2d.
+  # arm, S04, S05, S08's burial arm, S09, S10, S12, S14, S16, S17's two
+  # ClosedKind arms, S18, S19, S20, S21, S22 and S23. Three arms are EXPECTED
+  # RED: S23 `chained-commit-backlog` (until C7 is fixed), S08
+  # `buried-past-the-cap` (until C8 is fixed) and S05 `kill-receive-auto-commit`
+  # (C9, attribution open). No scheduler dispatches this until sub-phase 2d.
   # ---------------------------------------------------------------------------
   e2e_soak_core_nightly:
     name: e2e_soak_core_nightly

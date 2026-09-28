@@ -9,6 +9,15 @@ never a closed-world claim about the wedge set. Every five-wedge phrase below re
 **AMENDED 2026-09-24: a SEVENTH was added — C7, the chained-commit backlog that never drains, measured
 by the Tier-1 soak rig while building S04. Same reading of "COMPLETE": the amendment above is a standing
 one, not a one-off. Every five- or six-wedge phrase below reads as that number plus C7.**
+**AMENDED 2026-09-26: C8 was added — a commit buried on the live plane under more than a relay's
+replay cap of outsider forgeries is never fetched again, measured by the soak's S08
+`buried-past-the-cap`.**
+**AMENDED 2026-09-27: C9 was added — a device hard-killed while owing a peer's eviction stays wedged
+on that circle even after a peer lands the same removal, measured by the soak's S05
+`kill-receive-auto-commit`; whether the product or the rig owns it is OPEN.**
+**AMENDED 2026-09-27: C10 was added (measured 2026-09-26) — a full catch-up page of forged kind-445s
+dated inside one second freezes the sweep's chase on every sweep, so the genuine event below it never
+drains; found while building the soak's S20, not graded.**
 This is the canonical reference for every session working on the
 "sharing stops after a few hours and reopening does not help" incident. Update the work-unit
 status lines in place; do not fork this document.
@@ -365,6 +374,131 @@ which is why it is measured rather than argued.
   recover is not a receive plane — and the fix is unchanged: a drain that does not wait for a
   local send. The page order is not a coin toss when the two commits fall in different wall
   seconds (the store orders by `created_at` descending, ties by id), which is how S23 pins it.
+
+### C8 — a commit buried past a relay's replay cap on the live plane is never fetched again (added 2026-09-26)
+
+**Silent receive blackout, PERMANENT for a buried commit. A PRODUCT DEFECT, measured by the Tier-1
+soak rig (2026-09-26) while re-scoping S08; the product fix is NOT designed here.** Graded by S08's
+`buried-past-the-cap` (`tooling/soak/src/scenarios/s08_live_plane_burial.rs`), which is
+`EXPECTED_RED` at rc 1 until it is fixed.
+
+- **Consequence, in the user's words.** A device that was paused while a commit landed comes back,
+  re-subscribes and is handed a page that does not hold the commit. It stays one epoch behind for
+  good: every later fix from its peers is sealed above it, the map's other markers stop moving, and
+  nothing says so. A buried location merely ages out; a buried COMMIT is a permanent strand.
+- **What it takes.** The circle's public `#h` — which any relay observer has — and more signed
+  kind-445s carrying it than the relay serves per REQ, dated after the real event, stored on the
+  relays the device reads. No key, no membership, no relay cooperation beyond storing events.
+- **Mechanism, measured.**
+  1. The live group REQ carries no `limit` (`haven-core/src/relay/live_sync/planes/group.rs:33-42`).
+  2. A relay answers a filter with no `limit` at its own default — `nostr-relay-builder`'s
+     `default_filter_limit` is 500 (`nostr-relay-builder-0.44.1/src/builder.rs:225`, applied at
+     `local/inner.rs:852-854`) — so only the newest 500 arrive, then `EOSE`.
+  3. The live plane trusts that `EOSE` as "everything stored has been handed over"
+     (`haven-core/src/relay/live_sync/anchor.rs`) and advances the cursor past the commit, held
+     no lower than the oldest forgery it could not apply. Unlike the catch-up sweep, which since
+     RLY-05(c) does not read a page arriving as the window finishing (`relay/catchup.rs`,
+     `CATCHUP_MAX_EVENTS_PER_PAGE`), the live plane has no truncation rule at all.
+  4. The next REQ's `since` and the catch-up sweep's floor are both that cursor less
+     `GROUP_RESUBSCRIBE_BUFFER_SECS` (60 s, `relay/cursor.rs`). Once the re-anchor lands at least
+     61 s after the commit's second, neither ever asks for it again: a second REQ delivers nothing,
+     and `run_catchup_all_circles` sweeps every circle cleanly and applies nothing.
+- **Measured edges.** With the forgeries only one second after the commit, the live page still
+  lacks it but the SWEEP (whose floor still reaches it, and which pages past a capped answer)
+  recovers it. With 500 or fewer forgeries the commit is on the page and is applied live. And 501
+  forgeries all inside ONE second, one second after the commit, left even the sweep with two pages
+  of forgeries, no commit, nothing applied and no truncation reported — the sweep's one-second
+  pile-up residual (`catchup.rs`'s `Pager::step`, "the residual, which is a DROP") reaching an
+  event one second BELOW the pile-up, further than that doc says. Not graded by S08, which spreads
+  its seed so the strand is the live plane's alone; recorded for whoever plans the fix.
+- **Status.** Recorded, not fixed. S08 grades it RED; its canaries are the burial's conditions, so a
+  fix grades rc 0 and the arm's own test tells the next reader to promote it.
+- **Doc-accuracy note — "the next REQ asks for it again" is false within a session.**
+  `WORKER_QUEUE_CAP`'s doc (`haven-core/src/relay/live_sync/config.rs:~30-48`) and
+  `note_dropped_before_ingest` (`live_sync/processor.rs:584-604`) promise that an intake-dropped
+  445 is re-asked by the next REQ. On the wire it is re-served; at the engine it is not: the relay
+  pool emits its `Event` notification only for an id its own database has not seen
+  (`nostr-relay-pool-0.44.3/src/relay/inner.rs:1209-1239`; the client's memory database tracks
+  35 000 ids, `nostr-database-0.44.0/src/memory.rs:19`), so an id delivered once in a session does
+  not reach Haven again until it is evicted from that 35 000-entry LRU (`memory.rs:19`). A carried-over hold therefore PINS the cursor rather than
+  being re-asked — cursor-safe, but not what either doc says. S08's original `packed-window` arm
+  measured it; the fix, or a doc correction, is a product decision.
+
+### C9 — a hard kill while owing a peer's eviction leaves a wedge a peer cannot heal (added 2026-09-27)
+
+**Measured by the Tier-1 soak rig; attribution between product and rig OPEN; fix not designed here.**
+Graded by S05's `kill-receive-auto-commit` (`tooling/soak/src/scenarios/s05_publish_confirm.rs`),
+which is `EXPECTED_RED` at rc 1 until this is resolved.
+
+- **What the arm does.** Three members; an extra circle only the committer's LIVE engine is
+  subscribed to. The committer's engine is paused and a background burst opened; a peer's
+  `propose_leave` is published, and the engine folds it and PARKS the eviction (OD4-c (iv)): owed,
+  nothing on the wire. The committer's own endpoint then swallows the `OK`, a foreground open
+  publishes the parked commit (stored on the relay, never acknowledged, still owed), and the process
+  is killed (`KillKind::Hard`) and reopened on the same store.
+- **What the product does after the reopen (measured, three runs, identical).** The durable row
+  survives; the next foreground open publishes nothing; `orphaned_removal_deferrals()` names the
+  circle and the device's own verdict sweep emits `GroupUnrecoverable` for it
+  (`unrecoverable_circles()` stays empty — it is the engine's latch alone). So far this is OD4-c (i)
+  working as designed.
+- **Finding A — the refusal has no type.** Every send on the wedged circle is refused with
+  `CircleError::Mls` at the circle layer and an equally opaque session error below it, so the only
+  classification available is `Defect(OpaqueSendError)`. The cause: hydrate marks the group
+  `Stable` at the epoch the staged commit projected (measured: the committer reads epoch 2 while its
+  peers read 1) while `OpenMLS` still holds the removal-bearing pending commit, so the refusal is not
+  `EpochNotStable` but a bare `create_message` failure.
+- **Finding B — a peer's identical removal does not heal it.** The admin commits the same eviction
+  on its own, a relay acknowledges it and the admin confirms it; the reopened committer answers that
+  commit `Buffered` — fed directly or delivered live, before or after the relay has it — and keeps
+  refusing sends across 13 s of convergence passes. O2 and O6 therefore report the owed eviction for
+  the device. `haven-core/tests/od4c_removal_deferral_e2e.rs`'s
+  `a_deferral_a_peer_healed_after_a_restart_is_not_reported` heals the same shape on a bare
+  processor over a reborn manager, and a replica of it (with the proposal redelivered too) still
+  returns `Applied`. The difference lies in the live-engine life and restart path and is NOT pinned;
+  until it is, this may be a rig artifact as easily as a product defect.
+- **Consequence, if it is the product's.** A device the OS kills while it owes a peer's eviction
+  loses that circle for good: it cannot send, a remaining member's own commit of the departure does
+  not bring it back, and the only remedy is the re-invite the verdict tells the user to make.
+- **Open.** Owner question **OQ-U** in `PLAN_PHASE2.md` §8 (does production's restart path
+  reproduce Finding B — needs an MDK/haven-core trace; should OD4-c's typed verdict cover the
+  orphaned-removal wedge — Finding A). The minimal reproduction and every hypothesis already ruled
+  out are in `PLAN_PHASE2.md`'s `## Implementation notes (2c — S05 kill-receive)`.
+
+### C10 — a same-second full page of forgeries freezes the catch-up chase on every sweep (added 2026-09-26)
+
+**Measured by the Tier-1 soak rig while building S20 (2026-09-26); a PRODUCT DEFECT in
+`haven-core/src/relay/catchup.rs`; the fix is NOT designed here, and nothing grades it yet.**
+
+- **What it takes.** The circle's public `#h` and `CATCHUP_MAX_EVENTS_PER_PAGE` (500) signed
+  kind-445s carrying it, all dated inside ONE wall second of the sweep's window, stored on a relay the
+  device reads. No key, no membership. Measured with rewraps dated at their source's own second; the
+  forgeries carry no NIP-40 `expiration`, so nothing retires them.
+- **Mechanism.**
+  1. `summarize_round` counts a relay as CONTRIBUTING when its page is full by size alone —
+     `fo.events.len() >= CATCHUP_MAX_EVENTS_PER_PAGE` (`catchup.rs:838`) — even when every event on
+     it is one already held, and proposes the page's oldest second as the next boundary (`:842`).
+  2. A full page inside one second makes that second the boundary. `Pager::step` follows it once
+     (`PageStep::Next`, `:633`), which makes it the new exclusive bound (`:1562-1564`); the next
+     `until` is that same second, which answers the same 500 events again, so the proposed boundary
+     now equals the bound and the step halts (`:627-631`) with the window saturated and the cursor
+     held. The boundary cannot descend, and every later sweep replays the identical two rounds.
+  3. `until` is inclusive and one second is NIP-01's finest grain, so no request can address what
+     sits one second below the pile-up without first being handed the pile-up again. The step doc's
+     "dates a full page inside a single second, terminates the loop instead of spinning it"
+     (`:565-568`) is true — it terminates — but the window never completes.
+- **Measured.** Three consecutive sweeps held every circle, and none retrieved the genuine event one
+  second below the pile-up.
+- **Consequence.** A backlog that can never drain — the LIVENESS half of Rule 12. The cursor holds,
+  so nothing is dropped silently: the safety half stands, and a fix is owed on liveness, not on loss.
+  The circle's catch-up is frozen for as long as the forgeries stay stored.
+- **Distinct from C8's one-second pile-up residual.** C8's measured edge (501 forgeries inside one
+  second, one second above the commit) ended with no truncation reported — a COMPLETED window that
+  dropped the event below it, `Pager::step`'s "the residual, which is a DROP". C10 ends in a HELD
+  window: it drops nothing and never finishes.
+- **Status.** Recorded, not graded. S20 does not seed it (its arms mint one genuine event per
+  circle per second), so an `EXPECTED_RED` arm for it is owed, or the owner records why not — owner
+  question **OQ-V** in `PLAN_PHASE2.md` §8. The measurement is also in `docs/SOAK_LANE.md`'s S20
+  section.
 
 ### Downgraded hypotheses (kept so nobody re-investigates them)
 

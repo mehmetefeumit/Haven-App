@@ -336,7 +336,7 @@ jobs:
   # invariants no functional lane reaches — one branch, a converged roster, no
   # permanently undecryptable row, quiescence. No emulator and no app: the
   # subject is haven-core. Only the `pr` profile runs per commit; `nightly` and
-  # `weekly` wait for the sub-phase 2d schedulers, so the fifteen scenarios they
+  # `weekly` wait for the sub-phase 2d schedulers, so the seventeen scenarios they
   # alone carry have no lane execution yet — docs/SOAK_LANE.md names them.
   soak-core-pr:
     name: Soak Core (pr profile)

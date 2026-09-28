@@ -934,6 +934,19 @@ un-poison workaround — all deleted):
   can grow durable storage with future-epoch messages. Haven mitigates with intake backpressure
   (Rule 12: rate-limit, NEVER silently drop legitimate offline backlog), but an intake cap
   throttles only — it cannot bound engine storage. #757 closure is the real fix.
+- **The relay's own replay cap sits IN FRONT of the intake cap — recorded 2026-09-26 (C8;
+  measured by `haven-soak` S08 `buried-past-the-cap`).** Haven's live group REQ sets no `limit`,
+  so a relay answers it at its own default (500 for `nostr-relay-builder`) and the intake queue
+  (`WORKER_QUEUE_CAP`, 8 192) never sees more than that per REQ. The live plane trusts the `EOSE`
+  after that page and advances the cursor, with no truncation rule of the kind the catch-up sweep
+  has. So anyone who has seen a circle's public `#h` can bury a real commit under more than the
+  cap of signed kind-445s dated after it: once the re-anchor lands 61 s or more after the commit
+  (`GROUP_RESUBSCRIBE_BUFFER_SECS` + 1), neither the next REQ nor the sweep asks for it again and
+  the device that missed it is stranded. Rule 12's "never silently drop legitimate backlog" is
+  broken one layer before the intake cap it names; the fix is a product change, not designed yet.
+  Also measured: the relay pool emits an event only for an id it has not seen this session
+  (35 000-id memory database), so the intake hold's "the next REQ asks again" is true on the wire
+  and false at the engine within one session.
 - **A third store, OUTSIDER-reachable and uncapped — recorded 2026-09-26 (owner decision
   OQ-B; measured by `haven-soak` S16 `pending-window-flood`).** While a group is
   `PendingPublish`/`Merging`, `can_ingest` is false and `ingest_group_message` persists
