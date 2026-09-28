@@ -27,6 +27,7 @@ what keeps that true).
 | `e2e-background-catchup.yml` | M7 background catch-up runtime proof (4 phases + a guest reboot); each drive log is gated through `scan-logs.sh` (host needles) before it is echoed, and the whole log directory before upload (failure mode 13) | `run-m7-background-catchup.sh` under `reactivecircus/android-emulator-runner` | strfry container, `ws://10.0.2.2:7777` |
 | `e2e-live-sync.yml` | The SAME two lanes, flag-ON (`HAVEN_LIVE_SYNC=true`) — a manual re-run of what `ci.yml` already gates on | `workflow_dispatch` only | — |
 | `soak-core.yml` | the Tier-1 soak rig (`tooling/soak`): several whole Haven devices in one process against hermetic relays broken on a seeded schedule, grading haven-core's invariants; no app, no emulator. Every capture is scanned twice before the upload — against the manifest the rig sealed from its own declarations and against the host needles (failure mode 14) | `run-soak-core.sh` under `run-with-deadline.sh`, on a plain ubuntu runner | in-process `nostr-relay-builder` relays, ws:// loopback |
+| `soak-nightly.yml` | the same rig at the `nightly` profile on four matrix slots (`Soak Core (nightly, s1)` … `s4`), each with its own seed from `scripts/ci/soak_seed.sh` (the run's `created_at`, never the local clock); the three expected-red arms (C7/C8/C9) are deliberately NOT in the nightly — `verdict.log` keeps a run's first violation only, so they would mask every later defect — and are asserted red by `cargo test` instead, so a red night is a finding. A red night files one issue per key (`docs/SOAK_LANE.md`, "When a night goes red") | cron `23 0 * * 1-6`, or `workflow_dispatch` with a pinned `seed` and 1–4 `slots`; each slot calls `soak-core.yml` | as `soak-core.yml` |
 | `e2e-integration.yml` | seven component targets (`smoke_test`, `app_test`, `keyring_test`, …), one after another; the lane's one manifest is sealed from the host needles before the first target, and every target's captures and the aggregate go through `scan-logs.sh` (failure mode 13) | `run-integration-tests.sh` → `run-single-avd-scenario.sh` per target, on one AVD | strfry container reset per target, `ws://10.0.2.2:7777` |
 
 `e2e-android.yml` / `e2e-ios.yml` take a `live_sync` boolean input (default
@@ -573,6 +574,14 @@ passed in the same run — so the build profile is not the differentiator. Re-ru
 the lane. If it recurs on the same lane across runs, the resource peak is the
 first thing to measure (see failure mode 2's `free -h` / `df -h` diagnostics and
 the build-before-boot discipline every Android lane already follows).
+
+**In `Soak Nightly`** the re-run is automatic and happens AFTER the night's
+`file-issue` job: `rerun-runner-losses.yml` fires on the run completing, so the
+lost slot has already been filed as `no-verdict`, and its re-run re-runs
+`file-issue` too (it depends on the slots). A slot re-run GREEN is no longer
+red, so attempt 2 files nothing for it and leaves that `no-verdict` issue
+uncommented — stale, for a person to close (failure mode 21); attempt 2 does
+re-comment on every key still red that night.
 
 ## Failure mode 11 — rc=124 after `All tests passed!`: MainActivity relaunched under the driver
 
@@ -1178,7 +1187,7 @@ Two failures that look like the product and are not:
   every other file.
 
 Everything else — what green does and does not prove, which of PLAN §2.1's
-S1–S9 this actually grades, and which scenarios have no lane execution yet — is
+S1–S9 this actually grades, and which scenarios have lane execution, and where — is
 in `docs/SOAK_LANE.md`, and is worth reading before concluding that a green
 soak lane covers a behaviour.
 
@@ -1498,6 +1507,150 @@ second-failure path the recovery hands back to the watchdog (B6) — and it has 
 fired inside a proof window. If it ever does, it is a finding to file, not a floor
 to widen.
 
+## Failure mode 20 — a soak slot is rc 3: the faults did not fire
+
+`Soak Core (nightly, <slot>)` or `soak-core-pr` red with the rig's rc 3
+(`unusable`), filed as `soak(nightly): no-faults-fired`. **This is a statement
+about the world the rig built, not about the app.** A scheduled fault that
+never fired, an arm's expectation floor that was unmet, or a recorded
+expectation (S03, S14, S22) that went stale all fold to rc 3, because a bound
+derived from a fault that did not happen is a fiction and grading it green
+would be a vacuous pass. So read the evidence in this order:
+
+1. `banner.log` — profile, seed, commit, toolchain, schedule tag. It is written
+   BEFORE the run, so an rc-3 run always has it.
+2. `schedule.log` — what the schedule was going to do, tick by tick.
+3. The timeline's `applied` records against that schedule: the op that is
+   scheduled and never applied is the one that did not fire. For an arm, its
+   first-violation snapshot names the floor term (`floor-unmet`) that was short.
+
+Do not open a product issue from an rc 3, and do not widen the floor to make it
+pass: a floor is the arm's own declaration, and the fix is the arm or the rig.
+A stale recorded expectation is the one rc 3 that is GOOD news — the product
+improved under a canary — and is replaced by a graded assertion in the same
+commit (docs/SOAK_LANE.md, "The first recorded expectation").
+
+## Failure mode 21 — the scanner is rc 4, or the slot left no verdict
+
+Two shapes that both read as INFRASTRUCTURE until shown otherwise.
+
+**Scanner rc 4** (`META-FLOOR` in `scan-logs:`'s last line): a line or
+declaration floor was unmet, or no manifest resolved — the scan proved too
+little to call the capture clean. The evidence is **withheld by design**:
+nothing was proven to be a leak, so the sinks are kept on the runner and
+uploaded (rc 2, 3 and 4 keep them; only rc 1 deletes), but no line of them is
+echoed into the job log, and the scanner never prints a matched value in any
+case. Diagnose from the artifact and from the class/encoding/`sink:line` of the
+findings — never by re-running the lane with a triage flag.
+
+**No verdict** (filed as `soak(nightly): no-verdict`, whose body carries only
+the profile, slot, run URL, run attempt and artifact name): the slot's
+artifact had no `verdict.log`, or there was no artifact at all. The commonest
+cause is a failed rig build — the soak step is skipped, the upload is gated on
+it, and nothing is uploaded — so read that slot's job log for the build step
+first. A runner loss is the other cause (failure mode 10); check `run_attempt`
+in the body against the run's latest attempt before acting on the issue.
+
+## Failure mode 22 — reproducing a soak red, and what "not reproducible" means
+
+Everything needed is in the issue body (or on the slot's banner): the profile,
+the seed and the 8-hex schedule tag. The body's `repro` line is the command:
+
+```
+scripts/run_soak_local.sh core --profile nightly --seed <seed> --count 3
+```
+
+The seed materialises the schedule, and the schedule tag printed on every one
+of the three banners must equal the one in the issue — if it does not, the
+commit or the toolchain differs from the night's (both are in the body), and
+the comparison is void until they match. Then:
+
+* **3/3 red at that seed** — a defect. File or fix it against the scenario the
+  body names.
+* **1/3 or 2/3** — "not reproducible" does NOT mean "flaky, ignore it": the rig
+  is deterministic in its schedule, so a verdict that varies across runs of one
+  seed is a race IN THE RIG, and a race in the rig is a rig bug to fix. Never a
+  retry and never a loosened bound (CLAUDE.md, test reliability).
+* **0/3** — record the three banners in the issue and look at what the night
+  had that the laptop did not (load, the runner's clock, a slower build):
+  still a rig finding, because the harness is not allowed to depend on that.
+
+To replay the whole night in CI, dispatch `Soak Nightly` with `seed` pinned
+(every slot runs it) and `slots` 1–4. A dispatch files nothing (failure
+mode 23).
+
+## Failure mode 23 — acting on an auto-filed soak issue
+
+The issue's `invariant` and `finding_class` say WHAT the oracle saw — a probe
+not delivered, a roster not converged, a send refused — and never WHY. They
+are a classifier HINT, not an attribution to one of the causes in
+docs/BACKGROUND_SHARING_FAILURE_ANALYSIS.md §5. Before attributing a soak red
+to a cause, run that table's single highest-value experiment: does the wedge
+survive a process restart? In the rig that means giving the failing arm a
+`restart-hard` of the stuck device after the break (the S05 and S14 arms show
+the shape) and re-running the seed; on phones it is force-stopping both apps
+and relaunching.
+Recovers → an in-process cause (C1/C3). Does not → a persisted one (C2/C4/C5,
+and C5b, which a reboot does not clear either).
+
+How the filing works, so the issue itself is read correctly:
+
+* ONE issue per key per night (the invariant id; else the finding class; else
+  `violation-or-leak`, `rig-broken`, `no-faults-fired`, `ungraded`,
+  `leak-contained`, `no-verdict`, or `lane-red` — a slot whose rig said rc 0
+  but whose JOB is red, because the lane's own scan or a later step reddened
+  it; `file-issue` reads the slot jobs' conclusions for exactly that),
+  titled `soak(nightly): <key>`, labelled `soak` + `soak:core`, never assigned.
+  Four slots on one key are four blocks in one body; a later night on the same
+  key COMMENTS on the open issue. The seed is in the body, never the title.
+* The body is the allowlisted fields and nothing else — no log line, no path,
+  no host, no name. `scripts/ci/file_soak_issue.sh` refuses the whole night
+  (exit 2, nothing filed) if ANY field is off its shape, so a red `file-issue`
+  job with no new issue means a verdict it would not vouch for. The refusal
+  line is in the job log — it names a slot, a field NAME or a key, never a
+  value — while the script's stdout went to a file nothing uploads; to
+  reproduce, download the night's artifacts with
+  `gh run download <run> -p 'soak-core-nightly-*' -D <dir>` (one directory per
+  artifact, which the script requires: a slot's files at the top of the tree
+  are refused as a flattened download) and run
+  `GITHUB_SERVER_URL=https://github.com GITHUB_REPOSITORY=<owner/repo> GITHUB_RUN_ID=<run> GITHUB_RUN_ATTEMPT=<n> bash scripts/ci/file_soak_issue.sh --profile nightly --tree <dir> --out <empty dir> --slots s1 s2 s3 s4 --red-slots <the red slots, comma-joined>`
+  — without `--file` it makes no API call.
+* Only a SCHEDULED night files. A `workflow_dispatch` repro composes and scans
+  the same body and files nothing.
+* `gh` cannot label an issue with a label the repository does not have, so
+  `soak` and `soak:core` must exist before the first scheduled night (a
+  missing label reds `file-issue` with "do the labels soak soak:core exist?").
+
+### The one-time live proof of the filing path (owner action, OQ-G)
+
+The self-test proves the script against a stubbed `gh`; only a real run proves
+the real `gh` and a real `issues: write` token behave the same. Once, before
+relying on the nightly issues:
+
+1. Create the two labels if they do not exist yet:
+   `gh label create soak` and `gh label create soak:core`.
+2. On a scratch branch, mutate ONE derived bound so exactly one nightly arm
+   fails on every seed — every slot then goes red on the same invariant — and
+   push the branch. Change nothing else. Pick a bound only S01's
+   `single-relay-outage` reads: it is the first arm the nightly walks after the
+   background phase, and `verdict.log` keeps a run's FIRST violation only, so
+   the first-walked arm's red is the one every slot reports. (A bound the
+   background phase also reads would make its `nemesis` round the reported
+   violation instead.)
+3. Because a dispatch never files, temporarily make the `--file` condition in
+   `soak-nightly.yml`'s `file-issue` step true for this dispatch on the scratch
+   branch only (for example `github.event_name == 'workflow_dispatch'`), then
+   dispatch `Soak Nightly` on that branch ONCE, with a pinned `seed` and
+   `slots: 4`: `gh workflow run soak-nightly.yml --ref <scratch branch> -f seed=0x<16 hex> -f slots=4`.
+4. Verify: exactly ONE new issue, titled `soak(nightly): <that invariant>`,
+   labelled `soak` and `soak:core`, unassigned, whose body is the fenced block
+   of allowlisted `key: value` lines, four slot blocks, and nothing else — no
+   log line, no path, no host, no name. Dispatching the same branch a second
+   time must add a COMMENT to that issue, not a second issue.
+5. Cite the run id and the issue number in the commit that closes the Phase-2
+   issue path, then close the issue and delete the scratch branch. The change
+   to the `--file` condition must never reach `main`.
+
 ## What these lanes do NOT cover
 
 The iOS simulator keeps the app alive and the VM-service attached, so it does
@@ -1527,3 +1680,18 @@ that background execution survives.
   the engine ON), so a silent re-inert to `false` turns it red. An intentional
   live-sync rollback (M11 plan §8) reverts 14b together with the default it
   pins — it correctly fails first.
+- Soak Nightly in the weekly flakiness report: its **Soak Nightly** section
+  (`scripts/ci/soak_monitor_section.sh`) prints per-slot rows with derived
+  seeds and the `consecutive all-slot-green nights` count; the nightly is not
+  in the fail-rate table (the table never read `soak-nightly.yml`), while the
+  PR-profile soak lane is, like any lane — one fixed seed, so an intermittent
+  red on main is rig non-determinism. That step red with exit 3 means a GitHub
+  API read failed and nothing was written — re-run the monitor; exit 2 is an
+  input it refuses (a `coverage.log` off its schema, a `soak_seed.sh
+  --default-slots` that answers no slot list, a soak issue at gh's
+  100-comment page), which is a repository fix, not a re-run. Either way the
+  step summary carries one fixed line saying which.
+- `rerun-runner-losses.yml` watches `Soak Nightly` as well as `CI`: a slot the
+  runner lost is re-run once, together with `file-issue`; a lost `prepare`
+  re-runs the whole night with the same seeds (they come from the run's
+  `created_at`); a slot the rig itself failed is never re-run.

@@ -57,7 +57,9 @@
 #       coverage.yml — with a floor on how many such captures exist.
 #   (g) RULES-ONLY IS FOR TRANSCRIPTS. `--rules-only` (no manifest: the rules
 #       ran, nothing declared was searched) appears in rust-check.yml and
-#       coverage.yml only, and in no lane runner. The `rust-test` SINK CLASS is
+#       coverage.yml only, and in no lane runner; in scripts/ci/ it appears in
+#       file_soak_issue.sh alone, whose composed issue body has no manifest to
+#       scan against (RULES_ONLY_SCRIPTS says why). The `rust-test` SINK CLASS is
 #       confined the same way, to rust-check.yml alone, because that class is
 #       the one that exempts cargo's crate-build line from S2 and S6
 #       (`cargo_status = "exempt"` in tooling/logscan/policy.toml). Typing any
@@ -166,6 +168,14 @@ readonly GATE_SOURCE_RE='^[[:space:]]*(source|[.])[[:space:]].*logscan-gate[.]sh
 readonly RULES_ONLY_RE='--rules-only|logscan_gate[[:space:]]+rules([[:space:]]|$)'
 readonly XTRACE_RE='(^|[[:space:];&|(])(set[[:space:]]+(-[a-zA-Z]*x[a-zA-Z]*|[+]x|-o[[:space:]]+xtrace)|bash[[:space:]]+-x)([[:space:]]|$)'
 readonly RULES_ONLY_WORKFLOWS=('rust-check.yml' 'coverage.yml')
+# The third --rules-only site, in scripts/ci/. Its sink is the issue body it
+# composed from an ALLOWLIST of verdict.log fields: no run's values are
+# declarable into it, so there is no manifest to search, and the scan is a
+# backstop over a body whose control is the allowlist — not a lane capture
+# scanned without its needles.
+declare -A RULES_ONLY_SCRIPTS=(
+  ['file_soak_issue.sh']='the issue body it composes from verdict.log allowlisted fields has no manifest; the scan is the backstop to that allowlist'
+)
 # The `rust-test` sink class carries the cargo-status exemption, so it belongs to
 # the workflow that scans cargo transcripts and nowhere else. coverage.yml's
 # `flutter test` logs are `drive`, which has no exemption of any kind.
@@ -645,12 +655,13 @@ check_extractor_sees_the_tree() { # <records> <workflow-dir>
   done
 }
 
-check_tree() { # check_tree <workflow-dir> <harness-dir> <min-jobs> <min-tees>
-  local wf="$1" harness="$2" min_jobs="$3" min_tees="$4"
+check_tree() { # check_tree <workflow-dir> <harness-dir> <min-jobs> <min-tees> <scripts-dir>
+  local wf="$1" harness="$2" min_jobs="$3" min_tees="$4" scripts="$5"
   local records="" f base jobs job
   CAPTURING_JOBS=0; TEE_CAPTURES=0
   [[ -d "${wf}" ]] || { broken "${wf} not found"; return; }
   [[ -d "${harness}" ]] || { broken "${harness} not found"; return; }
+  [[ -d "${scripts}" ]] || { broken "${scripts} not found"; return; }
 
   reconcile_gated_runners "${harness}"
   check_harness "${harness}"
@@ -678,6 +689,21 @@ check_tree() { # check_tree <workflow-dir> <harness-dir> <min-jobs> <min-tees>
     if (( hits > 0 )); then
       violation "${base}: --rules-only appears outside ${RULES_ONLY_WORKFLOWS[*]}. It certifies that the rules ran and nothing more; every lane scans against a sealed manifest."
     fi
+  done
+
+  # (g) over scripts/ci. This guard is skipped by name: its own rules and
+  # fixtures spell the flag they police.
+  for f in "${scripts}"/*.sh; do
+    [[ -f "${f}" ]] || continue
+    base="${f##*/}"
+    [[ "${base}" == "${SELF_NAME}" || -n "${RULES_ONLY_SCRIPTS[${base}]+x}" ]] && continue
+    hits="$(grep -F -- '--rules-only' "${f}" | grep -vcE '^[[:space:]]*#' || true)"
+    if (( hits > 0 )); then
+      violation "scripts/ci/${base}: --rules-only appears outside ${RULES_ONLY_WORKFLOWS[*]} and ${!RULES_ONLY_SCRIPTS[*]}. It certifies that the rules ran and nothing more; a new rules-only site joins RULES_ONLY_SCRIPTS with its reason, in the same change."
+    fi
+  done
+  for base in "${!RULES_ONLY_SCRIPTS[@]}"; do
+    [[ -f "${scripts}/${base}" ]] || violation "RULES_ONLY_SCRIPTS names scripts/ci/${base}, which does not exist. An exemption for a script that is gone is a claim nobody can check; delete the entry."
   done
 
   # (g) the `rust-test` SINK CLASS, confined the same way and for a sharper
@@ -970,7 +996,7 @@ YAML
 }
 
 self_test() {
-  local -r SELF_TEST_CASES=59
+  local -r SELF_TEST_CASES=62
   local tmp cases=0 failures=0
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
@@ -982,7 +1008,10 @@ self_test() {
   # (`${RUNNER_TEMP}` tee), one no-capture workflow, one guards workflow that
   # runs self-tests only, one gated runner.
   base_tree() { # base_tree <dir>
-    mkdir -p "$1/wf" "$1/harness"
+    mkdir -p "$1/wf" "$1/harness" "$1/scripts"
+    printf '#!/usr/bin/env bash\nbash tooling/e2e/ci/scan-logs.sh --rules-only --sink "diag=${OUT}/k.body.log"\n' \
+      > "$1/scripts/file_soak_issue.sh"
+    printf '#!/usr/bin/env bash\n# a comment naming --rules-only is not a site\ntrue\n' > "$1/scripts/other.sh"
     write_lane "$1/wf" 'e2e-android.yml' 'e2e_android'
     write_ios_lane "$1/wf"
     write_transcript_lane "$1/wf" 'rust-check.yml'
@@ -997,7 +1026,7 @@ self_test() {
     local out rc=0
     cases=$(( cases + 1 ))
     VIOLATIONS=0; BROKEN=0
-    check_tree "${dir}/wf" "${dir}/harness" "${mj}" "${mt}" >"${tmp}/out.txt" 2>"${tmp}/err.txt"
+    check_tree "${dir}/wf" "${dir}/harness" "${mj}" "${mt}" "${dir}/scripts" >"${tmp}/out.txt" 2>"${tmp}/err.txt"
     out="$(cat "${tmp}/out.txt" "${tmp}/err.txt")"
     if (( BROKEN > 0 )); then rc=2; elif (( VIOLATIONS > 0 )); then rc=1; fi
     if (( rc != want )) || { [[ -n "${want_grep}" ]] && ! grep -qF -- "${want_grep}" <<<"${out}"; }; then
@@ -1121,6 +1150,13 @@ self_test() {
   _expect "(g) a rust-test sink in a lane fails" "${d}" 1 "outside rust-check.yml"
   d="${tmp}/g4"; rm -rf "${d}"; cp -r "${b}" "${d}"; sed -i 's|--sink drive=/tmp/flutter-drive.log|--sink rust-test=/tmp/flutter-drive.log|' "${d}/harness/run-good.sh"
   _expect "(g) a rust-test sink in a lane runner fails" "${d}" 1 "appears in a lane runner"
+  # scripts/ci: the base names --rules-only in file_soak_issue.sh (the passing
+  # half) and only in a comment in other.sh.
+  _expect "(g) --rules-only in file_soak_issue.sh passes (base)" "${b}" 0
+  d="${tmp}/g5"; rm -rf "${d}"; cp -r "${b}" "${d}"; printf 'bash tooling/e2e/ci/scan-logs.sh --rules-only --sink diag=/tmp/x.log\n' >> "${d}/scripts/other.sh"
+  _expect "(g) --rules-only in another scripts/ci script fails" "${d}" 1 "scripts/ci/other.sh: --rules-only appears outside"
+  d="${tmp}/g6"; rm -rf "${d}"; cp -r "${b}" "${d}"; rm "${d}/scripts/file_soak_issue.sh"
+  _expect "(g) a RULES_ONLY_SCRIPTS entry for a script that is gone is stale" "${d}" 1 "RULES_ONLY_SCRIPTS names scripts/ci/file_soak_issue.sh"
 
   # (j) The base passes because both lanes hand over the DIRECTORY; putting the
   # pattern back is the regression this rule exists for.
@@ -1198,7 +1234,7 @@ main() {
     exit 2
   }
   log "checking that every captured log reaches the log-privacy wrapper (${wf#"${REPO_ROOT}"/}, ${harness#"${REPO_ROOT}"/})"
-  check_tree "${wf}" "${harness}" "${MIN_CAPTURING_JOBS}" "${MIN_TEE_CAPTURES}"
+  check_tree "${wf}" "${harness}" "${MIN_CAPTURING_JOBS}" "${MIN_TEE_CAPTURES}" "${REPO_ROOT}/scripts/ci"
   if (( BROKEN > 0 )); then
     echo >&2
     echo "This guard could not see the repository the way it expects to. That is not" >&2

@@ -1,0 +1,246 @@
+# The Tier-1 soak scheduler: the `nightly` profile, four slots, four seeds,
+# Monday to Saturday.
+#
+# Each slot is one call of soak-core.yml's nightly job with its own `slot` and
+# `seed`. The seeds come from scripts/ci/soak_seed.sh, the one definition of
+# `0x + sha256("<profile>|<date>|<slot>")[:16]`, where the date is the RUN's
+# `created_at` — so a re-run of a slot (rerun-runner-losses.yml) repeats the
+# same experiment rather than running the next day's. Four slots are four
+# repeats of every nightly arm over four schedules; the monitor attributes a red
+# to its slot because the `core` job's `name:` carries it.
+#
+# # The cron, and the ledger it clears
+#
+# `23 0 * * 1-6`: off the hour, because scheduled runs queue hardest at `:00`,
+# and 00:xx is the only hour no other scheduled workflow uses. 00:23 plus the
+# nightly job cap (135 min) is 02:38, clear of e2e-nightly.yml at 03:00 — that
+# is DESIGN INTENT, not a bound: GitHub delays scheduled runs under load, and a
+# collision queues (`cancel-in-progress: false`) rather than kills. No Sunday,
+# so the Phase-4 weekly never overlaps. check_soak_lane_reachable.sh L8 reads
+# every other `- cron:` in the tree and reds a collision, so no copy of the
+# ledger lives here to go stale.
+#
+# # What is deliberately NOT an input (decision 0.40)
+#
+# `seed` and `slots` only. Not `scenario_filter`: L5's `pr ⊆ nightly ⊆ weekly`
+# nesting over the checked-in TOMLs is the only thing constraining what a run
+# executes, and a filter routes around it (a nightly could run one scenario and
+# stay green). The rig's own `--scenario-filter` CLI flag exists for local
+# debugging and is NOT to be wired into this workflow for the same reason. Not
+# `duration_minutes`: `--duration` buys ticks, not wall time, so shortening it
+# thins the schedule. Not `repeat`: `slots` plus a pinned `seed` is that. Not
+# `file_issue`: filing lives in one job here, never in the reusable, because
+# ci.yml calls the same reusable and a fork PR's token cannot carry
+# `issues: write`.
+#
+# # Expected red, and why it is not run here
+#
+# Three arms are REQUIRED to be red until their product fixes land — S23
+# `chained-commit-backlog` (C7), S08 `buried-past-the-cap` (C8) and S05
+# `kill-receive-auto-commit` (C9, attribution open) — and none of them is in
+# the nightly profile. `verdict.log` records a run's FIRST violation only, so
+# an expected-red arm early in the walk would mask every later defect from the
+# issue path and the monitor, and no night could be all-slot green. They are
+# asserted red on every commit by tooling/soak/tests/oracles.rs and return to
+# the nightly in the change that fixes each. A red night is therefore a finding.
+# docs/SOAK_LANE.md "When a night goes red" says what each rc means for a
+# night and what to do.
+
+name: Soak Nightly
+
+on:
+  schedule:
+    - cron: '23 0 * * 1-6'
+  workflow_dispatch:
+    inputs:
+      seed:
+        description: 'Repro: run every slot at this seed (0x + 16 lowercase hex). Empty = derive per slot from the run date.'
+        required: false
+        type: string
+        default: ''
+      slots:
+        description: 'How many slots to run (1-4).'
+        required: false
+        type: number
+        default: 4
+
+# Each job grants what it needs and nothing more.
+permissions: {}
+
+# A cancelled soak is evidence-free; a queued one is merely late. Dispatches are
+# keyed on their own run id so a repro never queues behind a night.
+concurrency:
+  group: soak-nightly-${{ github.event_name == 'schedule' && 'schedule' || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Derive the slot seeds
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # `contents` for the checkout; `actions` to read this run's `created_at`.
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      seeds: ${{ steps.seeds.outputs.seeds }}
+      date: ${{ steps.seeds.outputs.date }}
+      slot_list: ${{ steps.seeds.outputs.slot_list }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # A pinned seed skips the API entirely; otherwise a failed read is exit 2,
+      # never a fallback to the runner's clock. On a schedule both inputs are
+      # empty, which the script reads as four derived slots.
+      - name: Derive the per-slot seeds
+        id: seeds
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOAK_PINNED_SEED: ${{ inputs.seed }}
+          SOAK_SLOT_COUNT: ${{ inputs.slots }}
+        run: bash scripts/ci/soak_seed.sh --prepare nightly
+
+  # The matrix reads `slot_list`, never a static list, or the `slots` input
+  # would be silently ignored. `fail-fast: false`: each slot asserts what the
+  # others cannot, and a gate on "every slot green" cannot afford an unrun slot
+  # reported as a cancellation.
+  core:
+    needs: [prepare]
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: ${{ fromJSON(needs.prepare.outputs.slot_list) }}
+    # The flakiness monitor groups rows by the FULL display name, and all slots
+    # share the inner job id; without the slot here four slots are one row.
+    name: Soak Core (nightly, ${{ matrix.slot }})
+    # The reusable runs actions/checkout and inherits this job's grant.
+    permissions:
+      contents: read
+    uses: ./.github/workflows/soak-core.yml
+    with:
+      profile: nightly
+      slot: ${{ matrix.slot }}
+      seed: ${{ fromJSON(needs.prepare.outputs.seeds)[matrix.slot] }}
+
+  # One issue per red KEY of the night (an invariant id, a finding class, or a
+  # synthetic key such as `no-verdict`), composed by scripts/ci/file_soak_issue.sh
+  # from an allowlist of verdict.log fields and nothing else; its header says why
+  # the allowlist is the control and the scan only a backstop.
+  #
+  # `if: always()`: a green night must reach the script too, because its green
+  # path — every slot green, no issue call at all — is only proved by running it,
+  # and a slot whose build failed uploaded nothing and is filed as `no-verdict`.
+  # `prepare` is needed as well as `core` for its `slot_list`: a slot the
+  # dispatch asked for and no artifact answers is exactly the no-verdict case.
+  #
+  # Files ONLY on a scheduled night (`--file`, PLAN_PHASE2 OQ-H): a
+  # `workflow_dispatch` repro composes, validates and scans the same body and
+  # files nothing, since a repro is a human already looking at the failure.
+  # Labelled `soak` + `soak:core`, never assigned (OQ-N); both labels must exist
+  # in the repository before the first scheduled night. Nothing is uploaded from
+  # this job. The script's stdout goes to a file nothing uploads; its stderr
+  # reaches the public job log, because it carries refusals only — a slot, a
+  # field NAME or a key the title already makes public, never a value (its
+  # --self-test plants values and proves them absent) — and an exit 2 with no
+  # reason is a refusal nobody can act on.
+  #
+  # A slot is red by its JOB, not only by its verdict: the lane folds its own
+  # scan into the job's result, so a rig rc 0 under a scan that reddened the
+  # slot is filed as `lane-red` from the job conclusions read here.
+  #
+  # A runner-loss re-run of a slot (rerun-runner-losses.yml) re-runs this job
+  # too, since it depends on `core`; attempt 1 may already have filed that slot
+  # as `no-verdict` (OQ-I). A slot re-run green files nothing on attempt 2, so
+  # that issue stays uncommented and stale; every key still red is
+  # commented on again.
+  file-issue:
+    name: File the night's soak issue
+    needs: [prepare, core]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    # C13, derived: the scanner build's 10 + the download's 5 + the filing
+    # step's 10 (the job listing, compose, one scan per key, one issue listing
+    # and at most one call per key) = 25 of step caps, + 5 for the uncapped
+    # checkout, toolchain and cache restore = 30.
+    timeout-minutes: 30
+    permissions:
+      issues: write
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tooling/logscan
+
+      # C2: the backstop scan needs the scanner, and a scanner that is absent
+      # is a refusal, never a skipped scan.
+      - name: Build the runtime log scanner
+        timeout-minutes: 10
+        run: cargo build --release --manifest-path tooling/logscan/Cargo.toml
+
+      # One directory per slot, named for the artifact, which is where the
+      # script reads each slot's name from. `gh run download` with a pattern
+      # always isolates each artifact in its own directory; download-artifact
+      # does NOT when exactly one artifact matches (it flattens a lone match
+      # into the path), which would file every slot of a one-upload night as
+      # `no-verdict`. gh exits 1 when nothing matched — the commonest cause is
+      # a night whose every build failed — and that is an empty tree only once
+      # the run's own artifact listing agrees; any other failure is a refusal
+      # to file from a partial tree.
+      - name: Download the night's soak verdicts
+        id: download
+        timeout-minutes: 5
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          dest="${RUNNER_TEMP}/soak-artifacts"
+          mkdir -p "${dest}"
+          if gh run download "${GITHUB_RUN_ID}" -p "soak-core-nightly-*-${GITHUB_RUN_ID}" \
+               -D "${dest}" > "${RUNNER_TEMP}/soak-download.log" 2>&1; then
+            exit 0
+          fi
+          matched="$(gh api "repos/${GH_REPO}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100" \
+            --jq "if .total_count >= 100 then error(\"page\") else [.artifacts[]
+                  | select(.expired == false and (.name | test(\"^soak-core-nightly-.*-${GITHUB_RUN_ID}\$\")))]
+                  | length end")"
+          if [[ "${matched}" != 0 ]]; then
+            echo 'The download failed although slot artifacts exist; nothing is filed from a partial tree.' >&2
+            exit 1
+          fi
+          echo 'No slot uploaded an artifact: every slot is filed as no-verdict.'
+
+      # Gated on the download: a tree it could not vouch for is never composed.
+      # The slot jobs' conclusions come from the run's latest attempt; a slot
+      # whose job is absent or anything but `success` is red.
+      - name: Compose, scan and file
+        if: ${{ !cancelled() && steps.download.outcome == 'success' }}
+        timeout-minutes: 10
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SOAK_SLOT_LIST: ${{ needs.prepare.outputs.slot_list }}
+          SOAK_FILE: ${{ github.event_name == 'schedule' && '--file' || '' }}
+        run: |
+          set -euo pipefail
+          mapfile -t slots < <(jq -r '.[]' <<<"${SOAK_SLOT_LIST}")
+          gh api "repos/${GH_REPO}/actions/runs/${GITHUB_RUN_ID}/jobs?filter=latest&per_page=100" \
+            > "${RUNNER_TEMP}/soak-jobs.json"
+          red="$(jq -r --argjson slots "${SOAK_SLOT_LIST}" '
+            if .total_count >= 100 then error("page") else .jobs end as $jobs
+            | [$slots[] as $s
+               | select(([$jobs[] | select(.name == "Soak Core (nightly, \($s)) / e2e_soak_core_nightly")
+                          | .conclusion] | first) != "success") | $s]
+            | join(",")' "${RUNNER_TEMP}/soak-jobs.json")"
+          bash scripts/ci/file_soak_issue.sh --profile nightly \
+            --tree "${RUNNER_TEMP}/soak-artifacts" --out "${RUNNER_TEMP}/soak-issue" \
+            --slots "${slots[@]}" --red-slots "${red}" ${SOAK_FILE} > "${RUNNER_TEMP}/file-soak-issue.log"

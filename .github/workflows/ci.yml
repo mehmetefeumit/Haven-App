@@ -335,9 +335,9 @@ jobs:
   # hermetic relays the rig breaks on a seeded schedule, asserting the
   # invariants no functional lane reaches — one branch, a converged roster, no
   # permanently undecryptable row, quiescence. No emulator and no app: the
-  # subject is haven-core. Only the `pr` profile runs per commit; `nightly` and
-  # `weekly` wait for the sub-phase 2d schedulers, so the seventeen scenarios they
-  # alone carry have no lane execution yet — docs/SOAK_LANE.md names them.
+  # subject is haven-core. Only the `pr` profile runs per commit; `nightly` runs
+  # from soak-nightly.yml's schedule, never here, and `weekly` waits for Phase
+  # 4 — docs/SOAK_LANE.md names which scenarios run where.
   soak-core-pr:
     name: Soak Core (pr profile)
     needs: [rust]

@@ -25,6 +25,7 @@ use haven_core::relay::live_sync::StopOutcome;
 use serde::Serialize;
 use tokio::time::{Instant, MissedTickBehavior};
 
+use crate::nemesis::types::DeviceOp;
 use crate::rig::{poll_until, RigError, SimDevice, Step, Wait};
 
 /// How long the rig waits for a killed device's session to be released.
@@ -155,6 +156,7 @@ pub async fn kill_and_reopen(
     if engine_restarted {
         device.start_engine(specs).await?;
     }
+    device.record_op(DeviceOp::Restart(kind));
 
     Ok(ReopenReport {
         release,
@@ -191,6 +193,11 @@ mod tests {
             "the reopened device holds the session again"
         );
         assert!(device.manager().is_ok());
+        assert_eq!(
+            device.applied_ops(),
+            ["restart-hard"],
+            "a restart that happened is one coverage.log can name"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -200,6 +207,7 @@ mod tests {
             .await
             .expect("restart");
         assert!(device.session_is_live().expect("liveness"));
+        assert_eq!(device.applied_ops(), ["restart-soft"]);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -210,6 +218,10 @@ mod tests {
             kill_and_reopen(&mut device, KillKind::Hard).await,
             Err(RigError::SessionNotLive),
             "a restart control that starts from a dead session proves nothing"
+        );
+        assert!(
+            device.applied_ops().is_empty(),
+            "a refused restart is not an operation the device took"
         );
     }
 

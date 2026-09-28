@@ -9,14 +9,16 @@
 #
 # # Three profiles, one workflow
 #
-# `pr` is the only profile ci.yml calls (stage 4, `needs: [rust]`). `nightly`
-# and `weekly` exist so the scheduler workflows Phase 2 adds have something to
-# call; nothing dispatches them until sub-phase 2d, so SEVENTEEN scenarios — S02,
-# S03, S04, S05, S08, S09, S10, S12, S14, S16, S17, S18, S19, S20, S21, S22, S23 —
-# have no LANE execution at all. They
-# run in `tests/oracles.rs` and under `scripts/run_soak_local.sh`.
-# docs/SOAK_LANE.md says so in those words, so a reader cannot mistake a green
-# PR lane for coverage of the nightly set.
+# `pr` is the only profile ci.yml calls (stage 4, `needs: [rust]`).
+# `nightly` is called by soak-nightly.yml, once per matrix slot with that
+# slot's `slot` and `seed`; the nightly scenarios have LANE execution only
+# there, never on a pull request, so a green PR lane is not coverage of them.
+# `weekly` has no scheduler until Phase 4 (`soak-weekly.yml`), so its five
+# weekly-only arms have no lane execution: the three expected-red arms are
+# asserted red by `tests/oracles.rs` on every commit, and the two whose bounds
+# start at the 684-second silence window are outside the crate's sweep and run
+# under `scripts/run_soak_local.sh` alone. docs/SOAK_LANE.md says so in those
+# words.
 #
 # # The bounds, innermost first (check_e2e_step_timeout_ordering.sh)
 #
@@ -63,6 +65,23 @@ on:
         description: 'Which soak profile to run (pr | nightly | weekly).'
         required: true
         type: string
+      # Both optional so ci.yml's `profile: pr` call stays valid unchanged.
+      # `slot` keys the nightly artifact: four matrix slots in one run would
+      # otherwise upload four artifacts of one name, and since upload-artifact
+      # v4 the second is a 409 that reds a slot for a reason unrelated to the
+      # soak.
+      slot:
+        description: 'The scheduler matrix slot (s1..s4); pr for the per-commit lane.'
+        required: false
+        type: string
+        default: 'pr'
+      # `0x` + 16 hex from scripts/ci/soak_seed.sh. Empty reads as unset in the
+      # rig (CI-R1), which then runs its DEFAULT_SEED.
+      seed:
+        description: 'The rig seed for this slot; empty = the rig default.'
+        required: false
+        type: string
+        default: ''
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -183,11 +202,13 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # nightly — pr plus the all-relay and rolling S01 arms, S02, S03's nightly
-  # arm, S04, S05, S08's burial arm, S09, S10, S12, S14, S16, S17's two
-  # ClosedKind arms, S18, S19, S20, S21, S22 and S23. Three arms are EXPECTED
-  # RED: S23 `chained-commit-backlog` (until C7 is fixed), S08
-  # `buried-past-the-cap` (until C8 is fixed) and S05 `kill-receive-auto-commit`
-  # (C9, attribution open). No scheduler dispatches this until sub-phase 2d.
+  # arm, S04, S05's three swept arms, S08's `unpacked-control`, S09, S10, S12,
+  # S14, S16, S17's two ClosedKind arms, S18, S19, S20, S21 and S22. The three
+  # EXPECTED-RED arms (S23 `chained-commit-backlog` C7, S08
+  # `buried-past-the-cap` C8, S05 `kill-receive-auto-commit` C9) are NOT here:
+  # verdict.log keeps a run's first violation only, so one of them would mask
+  # every later defect. tests/oracles.rs asserts them red on every commit.
+  # Dispatched by soak-nightly.yml, once per matrix slot.
   # ---------------------------------------------------------------------------
   e2e_soak_core_nightly:
     name: e2e_soak_core_nightly
@@ -202,6 +223,9 @@ jobs:
     env:
       HAVEN_LOGSCAN: "true"
       HAVEN_LOGSCAN_PROFILE: host
+      # Set on this job only, so the pr path never carries it. The runner
+      # passes no `--seed`; `cargo run` inherits this and the rig reads it.
+      HAVEN_SOAK_SEED: ${{ inputs.seed }}
 
     steps:
       - name: Checkout
@@ -245,7 +269,7 @@ jobs:
         if: ${{ !cancelled() && steps.soak.outcome != 'skipped' }}
         uses: actions/upload-artifact@v6
         with:
-          name: soak-core-nightly-${{ github.run_id }}
+          name: soak-core-nightly-${{ inputs.slot }}-${{ github.run_id }}
           path: ${{ runner.temp }}/soak-upload/
           retention-days: 14
           if-no-files-found: error
@@ -257,7 +281,7 @@ jobs:
   # ---------------------------------------------------------------------------
   # weekly — every registered scenario, including S17's full-intake arm, whose
   # bound alone starts at the engine's 684 s silence window. No scheduler
-  # dispatches this in Phase 1.
+  # dispatches this until Phase 4 (soak-weekly.yml).
   # ---------------------------------------------------------------------------
   e2e_soak_core_weekly:
     name: e2e_soak_core_weekly

@@ -991,7 +991,9 @@ async fn every_registered_oracle_holds_on_a_world_with_nothing_wrong_with_it() {
 const EXCLUDED_FROM_THE_SWEEP: [&str; 2] = ["lost-commit-unnamed", "full-intake"];
 
 /// The arms the sweep runs and REQUIRES to be red, and the one reason: each is
-/// a measured PRODUCT-side red the nightly reports until it is fixed, graded at
+/// a measured PRODUCT-side red this sweep asserts on every commit until it is
+/// fixed (the `weekly` profile runs it too; the nightly does not, because
+/// `verdict.log` keeps a run's first violation only), graded at
 /// rc 1 rather than recorded as a canary, and the day one grades rc 0 its own
 /// test fails with the instruction to promote it to `SWEPT` in the same change.
 ///

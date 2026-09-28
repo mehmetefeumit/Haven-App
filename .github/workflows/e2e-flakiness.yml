@@ -19,6 +19,15 @@
 #   * e2e-flakiness-stress.yml — the nightly N-iteration stress loop (its
 #                                `flake_stress` job fails on ANY iteration
 #                                failing, so it reports as its own row).
+#   * soak-nightly.yml         — NOT in the table's union: the scheduled soak
+#                                slots are read by the Soak section's own
+#                                script (scripts/ci/soak_monitor_section.sh),
+#                                which needs what the table's query throws
+#                                away — cancelled and absent slots (neither
+#                                green nor red, and both end the
+#                                all-slot-green streak) and each run's
+#                                createdAt (the seed's date) — and rates
+#                                nothing, because a nightly red is a find.
 #
 # In those runs, a reusable lane's job is named
 # "<caller job name> / <inner job name>" (e.g. "E2E Core Flow (Android) /
@@ -39,8 +48,14 @@
 # above warrants action (a flaky lane erodes trust in the gate). Cron mirrors
 # audit.yml's weekly run.
 #
+# The PR-profile soak lane (ci.yml's `soak-core-pr`) IS in the table: it runs
+# one fixed seed, so a red that comes and goes on main is rig
+# non-determinism, which is exactly what the 1% target exists to catch.
+#
 # Reads only — no writes to branches, no PR comments, no third-party
-# services. Uses the workflow's default GITHUB_TOKEN with read-only scopes.
+# services. Uses the workflow's default GITHUB_TOKEN with read-only scopes:
+# `issues: read` is for the Soak section, which links a red night to the issue
+# scripts/ci/file_soak_issue.sh filed for it.
 
 name: E2E Flakiness Monitor
 
@@ -52,6 +67,7 @@ on:
 permissions:
   actions: read
   contents: read
+  issues: read
 
 jobs:
   report:
@@ -210,6 +226,34 @@ jobs:
                 "${lane}" "${lane_total}" "${lane_failed}"
             done <<< "${lane_names}"
           } > out/summary.tsv
+
+      # Its own step, so the table's early exit on an empty window cannot skip
+      # it. The script writes nothing to stdout (this log is public); it
+      # composes the section into a file and exits 3 — red, writing nothing —
+      # when an API read fails, or 2 on an input it refuses, because a missing
+      # section must not read as a quiet week. On either, the summary gets ONE
+      # fixed line saying which, so the report is not silently missing a
+      # section, and the step still fails with the script's code. Capped at 6:
+      # measured 3-4 minutes, inside the job's 10.
+      - name: Soak Nightly section
+        if: ${{ !cancelled() }}
+        timeout-minutes: 6
+        run: |
+          set -euo pipefail
+          since="$(date -u -d '30 days ago' +%Y-%m-%dT%H:%M:%SZ)"
+          coverage_since="$(date -u -d '14 days ago' +%Y-%m-%dT%H:%M:%SZ)"
+          mkdir -p out
+          rc=0
+          bash scripts/ci/soak_monitor_section.sh \
+            --out out/soak_section.md \
+            --since "${since}" \
+            --coverage-since "${coverage_since}" || rc=$?
+          case "${rc}" in
+            0) cat out/soak_section.md >> "${GITHUB_STEP_SUMMARY}" ;;
+            3) echo 'Soak section unavailable: an API read failed — re-run the monitor.' >> "${GITHUB_STEP_SUMMARY}" ;;
+            *) echo 'Soak section unavailable: the monitor refused an input — a repository fix, not a re-run (docs/E2E_TROUBLESHOOTING.md).' >> "${GITHUB_STEP_SUMMARY}" ;;
+          esac
+          exit "${rc}"
 
       - name: Upload report artifacts
         if: always()

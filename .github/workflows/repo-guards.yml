@@ -749,6 +749,28 @@
 #     with stubbed `gh`/`curl` must re-run one job out of a mixed run and not
 #     the other. Widening any of that turns a bounded re-run into the blanket
 #     retry tooling/e2e/ci/ios-flake-lib.sh exists to refuse.
+#
+#   Soak monitor section              scripts/ci/soak_monitor_section.sh
+#     The Soak Nightly rows of the weekly flakiness report. Its subject is the
+#     Actions API, read weekly by e2e-flakiness.yml, so it never runs in an
+#     enforcing mode here; the fixtures drive it against a stubbed `gh` and
+#     the real soak_seed.sh, and they are what keeps a streak from counting an
+#     unrun slot and a seed from naming a night no slot ran.
+#
+#   Soak seed derivation              scripts/ci/soak_seed.sh
+#     The one definition of a nightly slot's seed, shared by the scheduler and
+#     the monitor. Its subject is another workflow's behaviour (the run's
+#     created_at, read once, never `/attempts/<n>`, never the local clock), so
+#     the fixtures are the whole proof.
+#
+#   Soak issue filing                 scripts/ci/file_soak_issue.sh
+#     Composes soak-nightly.yml's one issue per red key from an ALLOWLIST of
+#     verdict.log fields and nothing else, and files it only on a scheduled
+#     night. Its subject is the GitHub API, so it never runs in an enforcing
+#     mode here; the fixtures are the proof — every body field from its one
+#     source, a refusal per shape (an undeclared value never reaches an
+#     issue), nothing from the tree but verdict.log, dedup through a stateful
+#     `gh` stub, and the rules-only backstop scan that runs before any call.
 
 name: Repo Guards
 
@@ -2111,13 +2133,18 @@ jobs:
       # The POSITIVE half: does anything RUN the rig? A soak rig nothing drives
       # is the most expensive instance of the failure mode
       # docs/CI_HARDENING_BACKLOG.md catalogues — written, reviewed, green on
-      # its own fixtures, executed nowhere. Six links: ci.yml calls the pr
-      # profile on `needs: [rust]`; the job names are inside the pattern
-      # e2e-flakiness.yml counts (read from that file, never restated);
-      # rust-check.yml runs the shipped binary's `--self-test`; every job drives
-      # through the gated runner under an inner deadline and uploads only after
-      # it; the profiles nest; and the TOML's deadline equals the workflow's
-      # literal.
+      # its own fixtures, executed nowhere. Eight links: ci.yml calls the pr
+      # profile on `needs: [rust]` (L1); the job names are inside the pattern
+      # e2e-flakiness.yml counts (read from that file, never restated), and a
+      # scheduler's matrix caller carries its slot in its name (L2);
+      # rust-check.yml runs the shipped binary's `--self-test` (L3); every job
+      # in every soak-*.yml drives through the gated runner under an inner
+      # deadline and uploads only after it (L4); every such job also scans in a
+      # step of its own that the drive's outcome cannot switch off (L7); the
+      # profiles nest over (scenario, arm) pairs (L5); the TOML's deadline
+      # equals the workflow's literal (L6); and soak-nightly.yml calls the
+      # nightly profile with per-slot seeds, off every other cron,
+      # non-cancelling, each checkout granted, one artifact name per slot (L8).
       - name: Soak lane is reached and its numbers agree
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_soak_lane_reachable.sh
@@ -2129,6 +2156,45 @@ jobs:
       - name: Soak lane-reachability guard self-test
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_soak_lane_reachable.sh --self-test
+
+      # The one definition of a scheduled soak seed (`0x` + 16 hex of
+      # sha256("<profile>|<date>|<slot>")), from the RUN's created_at, never the
+      # local clock and never `/attempts/<n>`. Not a `check_*`: it is the
+      # scheduler's tool, so its fixtures are the proof — a known vector from an
+      # independent hash, every refusal printing no seed, and a recording `gh`
+      # that reds if the re-run's attempt URL is ever built. Count pinned by
+      # equality.
+      - name: Soak seed derivation self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/soak_seed.sh --self-test
+
+      # The flakiness monitor's Soak section runs weekly in e2e-flakiness.yml,
+      # never here — its subject is the Actions API — so its fixtures are the
+      # proof: per-slot rows grouped by the full job name (the slot count read
+      # from soak_seed.sh's DEFAULT_SLOTS, never restated), the seed derived by
+      # the REAL soak_seed.sh from each run's created_at (a fixed vector from an
+      # independent hash, never the job's start, never `/attempts/`), a red or a
+      # cancelled or an absent slot each ending the all-slot-green streak, the
+      # 14-day coverage knee, the 30-night review trigger, "no nights yet" at
+      # rc 0, and every refused API read exit 3 with nothing written. Count
+      # pinned by equality.
+      - name: Soak monitor section self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/soak_monitor_section.sh --self-test
+
+      # The nightly's issue path. Not a `check_*`: its subject is the GitHub
+      # API, so its fixtures are the proof — the body EQUALS the allowlist, each
+      # field from its one source; one refusal per shape, each with zero `gh`
+      # calls; a tree full of stray names, endpoints and instants contributes
+      # nothing but verdict.log; no-verdict (an empty AND a missing slot) and
+      # leak-contained carry no tree field; one issue per key, a second night
+      # comments, a doubled or saturated dedup refuses; no `--file`, no call of
+      # any kind; and the backstop scan refuses on anything but clean. `gh` and
+      # the scanner binary are stubs; scan-logs.sh and its key-material floor
+      # are real. Count pinned by equality.
+      - name: Soak issue filing self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/file_soak_issue.sh --self-test
 
       # The soak runner's own hermetic fixtures: the sink spec, the containment
       # branch (every capture deleted, one harness-authored line left, nothing

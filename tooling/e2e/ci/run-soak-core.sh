@@ -320,9 +320,18 @@ soak_main() { # soak_main <profile>
   trap soak_on_exit EXIT
   mkdir -p "${upload}"
 
+  # Provenance for the banner and verdict.log, which a filed issue carries: the
+  # commit from the Actions environment (empty locally, which the rig reads as
+  # `unknown`) and the version of the rustc that builds the rig, asked from the
+  # crate's own directory so a toolchain file there is honoured.
+  local rustc_version=''
+  rustc_version="$(cd "${SOAK_REPO_ROOT}/tooling/soak" && rustc --version 2>/dev/null | cut -d' ' -f2)" \
+    || rustc_version=''
   local -a rig_args=(
     --profile "${profile}"
     --timeline-out "${upload}/soak-timeline.log"
+    --commit "${GITHUB_SHA:-}"
+    --rustc "${rustc_version}"
   )
   # CI only (owner decision Q5): the scan below is the manifest's reader and
   # the job's always() discard is what removes it. A local run seals in memory
@@ -357,7 +366,7 @@ soak_self_test() {
   local tmp fails=0 cases=0
   # Equality pin: a fixture added or removed without moving this line is a
   # self-test that no longer says what it runs.
-  local -r want_cases=29
+  local -r want_cases=31
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
   trap "rm -rf '${tmp}'" RETURN
@@ -693,7 +702,32 @@ soak_self_test() {
     bash "${BASH_SOURCE[0]}" pr >/dev/null 2>&1 || rc=$?
   _case "a violation the rig proved is not demoted to the scan's milder code" 1 "${rc}"
 
-  # (20) And none of the above went near the real needle directory. Its
+  # (20) Provenance reaches the rig: the commit from GITHUB_SHA and the
+  #      rustc's version, and with no GITHUB_SHA an EMPTY commit, which the
+  #      rig's Provenance::new reads as `unknown` (its own unit test pins that).
+  local prov="${tmp}/prov" provbin="${tmp}/prov-bin"
+  mkdir -p "${prov}" "${provbin}"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" "$@" > "${SOAK_ARGV_OUT}"' 'exit 0' > "${provbin}/cargo"
+  printf '%s\n' '#!/usr/bin/env bash' 'echo "rustc 1.98.0 (0f0e0d0c0 2026-08-01)"' > "${provbin}/rustc"
+  chmod +x "${provbin}/cargo" "${provbin}/rustc"
+  _argv_after() { # _argv_after <argv-file> <flag>: the value after <flag>, or ABSENT
+    awk -v f="$2" 'hit { print; found = 1; exit } $0 == f { hit = 1 } END { if (!found) print "ABSENT" }' "$1"
+  }
+  PATH="${provbin}:${PATH}" HAVEN_LOGSCAN='' GITHUB_SHA=269b46c1a2b3c4d5e6f708192a3b4c5d6e7f8091 \
+    SOAK_ARGV_OUT="${tmp}/argv-ci" SOAK_UPLOAD_DIR="${prov}/ci" SOAK_REPORT_DIR="${tmp}/prov-reports" \
+    bash "${BASH_SOURCE[0]}" pr >/dev/null 2>&1 || true
+  _eq "in CI the rig is handed the commit and the rustc version" \
+    "269b46c1a2b3c4d5e6f708192a3b4c5d6e7f8091 1.98.0" \
+    "$(_argv_after "${tmp}/argv-ci" --commit) $(_argv_after "${tmp}/argv-ci" --rustc)"
+  ( unset GITHUB_SHA
+    PATH="${provbin}:${PATH}" HAVEN_LOGSCAN='' \
+      SOAK_ARGV_OUT="${tmp}/argv-local" SOAK_UPLOAD_DIR="${prov}/local" SOAK_REPORT_DIR="${tmp}/prov-reports" \
+      bash "${BASH_SOURCE[0]}" pr >/dev/null 2>&1 ) || true
+  _eq "with no GITHUB_SHA the commit is passed EMPTY, never guessed" \
+    "[] 1.98.0" \
+    "[$(_argv_after "${tmp}/argv-local" --commit)] $(_argv_after "${tmp}/argv-local" --rustc)"
+
+  # (21) And none of the above went near the real needle directory. Its
   #      contents are another run's, so a fixture that reads them passes or
   #      fails by what was left on the machine, and one that writes them plants
   #      a needle in the directory the next run's scan will seal from.

@@ -27,20 +27,34 @@
 #       every flakiness report, so a lane that starts failing intermittently
 #       would never appear in the one place that looks for exactly that. The
 #       regex is read FROM e2e-flakiness.yml rather than restated here, so the
-#       two cannot drift.
+#       two cannot drift. A scheduler job that calls the lane under a matrix
+#       must also carry the matrix key in its own `name:`: the report groups
+#       rows by the full display name, every slot shares the inner job id, and
+#       without it four slots collapse into one row.
 #
 #   L3  THE ARTIFACT IS SELF-TESTED. rust-check.yml runs the shipped binary's
 #       `--self-test`. `cargo test` proves the code; the self-test proves the
 #       artifact the lane launches, which is a different build with a different
 #       profile.
 #
-#   L4  THE SCAN STANDS BETWEEN THE RUN AND THE UPLOAD. Every soak job drives
+#   L4  THE SCAN STANDS BETWEEN THE RUN AND THE UPLOAD. Every soak job — in
+#       every `soak-*.yml`, the schedulers included — drives
 #       through `run-soak-core.sh` under `run-with-deadline.sh`, and its
 #       upload-artifact step comes after that drive. The runner is what gates:
 #       it sources logscan-gate.sh and calls `logscan_gate`, so every capture
 #       passes the key-material floor and the identifier scanner before the
 #       workflow can publish any of it. A lane that uploaded first would
-#       publish the leak its own scan was about to find.
+#       publish the leak its own scan was about to find. In a scheduler the
+#       skip is STRUCTURAL, never by keyword: the job whose `uses:` is the
+#       reusable (it delegates the drive, and the reusable is read job by job)
+#       and the job ids in SCHEDULER_JOBS, each with its reason, are skipped;
+#       every other scheduler job must drive through the gated runner like a
+#       lane job. A keyword classifier would pass a job running
+#       `scripts/run_soak_local.sh` — the rig, with no deadline, no gate and
+#       no upload — because none of its words were on the list. In the
+#       REUSABLE every job must still drive. The `soak-*.yml` count is pinned by equality
+#       (two now, three once Phase 4 adds the weekly), so a new scheduler is a
+#       decision this guard sees rather than a file it silently reads.
 #
 #   L7  THE SCAN ALSO STANDS OUTSIDE THE DRIVE. L4 is not enough on its own,
 #       and the reason is the reaper: `run-with-deadline.sh` bounds the drive
@@ -54,7 +68,10 @@
 #       success is skipped in exactly the case it was written for.
 #
 #   L5  THE PROFILES NEST. `pr` ⊆ `nightly` ⊆ `weekly` in the checked-in
-#       profile TOMLs. A scenario that is in `pr` but not in `nightly` means
+#       profile TOMLs, over `(id, arm)` PAIRS, not scenario ids: `pr` runs one
+#       S01 arm where `nightly` runs three, and an id-level check would pass a
+#       `pr` arm the nightly never runs. A pair that is in `pr` but not in
+#       `nightly` means
 #       the nightly run proves LESS than the per-commit one, which is never
 #       what anybody intends — and it is invisible in a diff that touches two
 #       files. Also: no `tooling/e2e/expected_drive_skips.txt` row may name a
@@ -68,6 +85,19 @@
 #       as an anonymous timeout. This tie belongs to a guard rather than to a
 #       crate test — a Rust test parsing a workflow would split the workflow's
 #       ownership.
+#
+#   L8  A SCHEDULER CALLS THE NIGHTLY. soak-nightly.yml calls the lane with
+#       `profile: nightly`, from a job whose `needs:` reaches the job that runs
+#       scripts/ci/soak_seed.sh and whose `seed:` reads that job's output; its
+#       matrix reads that job's `slot_list` (a static list would ignore the
+#       `slots` input); it has a cron, off the `:00` minute, whose
+#       (minute, hour) collides with no other `- cron:` in the tree — derived
+#       from the tree, so no ledger copy lives here to go stale; its
+#       concurrency is non-cancelling (a cancelled soak is evidence-free);
+#       `contents: read` is granted to the seed job AND the caller (under a
+#       file-level `permissions: {}` both run actions/checkout, the caller
+#       through the reusable); and the lane's nightly artifact name carries
+#       `inputs.slot` (one run, four slots, one name = three 409s).
 #
 # ## Absent crate
 #
@@ -105,9 +135,19 @@ readonly RUNNER_SH='tooling/e2e/ci/run-soak-core.sh'
 readonly GATE_SH='tooling/e2e/ci/logscan-gate.sh'
 readonly PROFILE_DIR='tooling/soak/profiles'
 readonly DRIVE_SKIPS='tooling/e2e/expected_drive_skips.txt'
+readonly NIGHTLY_YML='.github/workflows/soak-nightly.yml'
+readonly SEED_SH='scripts/ci/soak_seed.sh'
+# C15: soak-core.yml + soak-nightly.yml; Phase 4's soak-weekly.yml makes it 3.
+readonly SOAK_WORKFLOWS=2
 # Equality pin: a fixture added or removed without moving this line is a
 # self-test that no longer says what it runs.
-readonly SELF_TEST_FIXTURES=32
+readonly SELF_TEST_FIXTURES=54
+# The scheduler jobs L4/L7 skip by id, and why each has nothing to gate. Any
+# other job in a scheduler either calls the reusable or drives the rig itself.
+declare -A SCHEDULER_JOBS=(
+  [prepare]='derives the per-slot seeds; runs no rig and uploads nothing'
+  [file-issue]='composes an issue from downloaded verdicts through its own backstop scan; runs no rig and uploads nothing'
+)
 
 FAILED=0
 BROKEN=0
@@ -132,6 +172,48 @@ lane_jobs() { # lane_jobs <workflow>
     }
     END { if (job != "") print job "\t" start "\t" NR }
   ' "$1"
+}
+
+# One job's lines, full-line comments dropped.
+job_body() { # job_body <workflow> <first> <last>
+  sed -n "$2,$3p" "$1" | grep -vE '^[[:space:]]*#' || true
+}
+
+# The first job id in <workflow> whose body matches the ERE <re>.
+job_matching() { # job_matching <workflow> <re>
+  local job first last
+  while IFS=$'\t' read -r job first last; do
+    [[ -n "${job}" ]] || continue
+    if grep -qE -- "$2" <<<"$(job_body "$1" "${first}" "${last}")"; then
+      printf '%s\n' "${job}"; return 0
+    fi
+  done < <(lane_jobs "$1")
+  return 1
+}
+
+# The body of job <id> in <workflow>.
+job_body_of() { # job_body_of <workflow> <id>
+  local job first last
+  while IFS=$'\t' read -r job first last; do
+    [[ "${job}" == "$2" ]] && { job_body "$1" "${first}" "${last}"; return 0; }
+  done < <(lane_jobs "$1")
+  return 1
+}
+
+# The matrix key a job declares: the first key under `matrix:`.
+matrix_key() { # matrix_key <job-body>
+  awk '
+    /^[[:space:]]*matrix:[[:space:]]*$/ { m = 1; next }
+    m && /^[[:space:]]*[A-Za-z0-9_-]+:/ { k = $1; sub(/:$/, "", k); print k; exit }
+  ' <<<"$1"
+}
+
+# Every soak-*.yml, sorted.
+soak_workflows() { # soak_workflows <root>
+  local f
+  for f in "$1"/.github/workflows/soak-*.yml; do
+    [[ -f "${f}" ]] && printf '%s\n' "${f#"$1/"}"
+  done
 }
 
 # L1 — ci.yml calls the lane with the pr profile, gated on rust only.
@@ -188,6 +270,22 @@ check_job_names_are_counted() {
     broken "${LANE_YML} declares no job this guard can read — the job extractor has rotted, so every check over it is vacuous."
     return 2
   fi
+  # A scheduler's matrix caller must carry its matrix key in its `name:`.
+  local wf first last body key name
+  while IFS= read -r wf; do
+    [[ "${wf}" == "${LANE_YML}" ]] && continue
+    while IFS=$'\t' read -r job first last; do
+      body="$(job_body "${root}/${wf}" "${first}" "${last}")"
+      grep -qF -- "uses: ./${LANE_YML}" <<<"${body}" || continue
+      key="$(matrix_key "${body}")"
+      [[ -n "${key}" ]] || continue
+      name="$(grep -m1 -E '^    name:' <<<"${body}" || true)"
+      if [[ "${name}" != *"matrix.${key}"* ]]; then
+        fail "${wf}:${job} calls ${LANE_YML} under a matrix over \`${key}\` but its \`name:\` does not interpolate \`matrix.${key}\`. ${FLAKINESS_YML} groups rows by the full display name and every slot shares the inner job id, so the slots collapse into one row and a red loses its slot."
+        rc=1
+      fi
+    done < <(lane_jobs "${root}/${wf}")
+  done < <(soak_workflows "${root}")
   log "L2: ${n} soak job(s) all match ${FLAKINESS_YML}'s pattern."
   return "${rc}"
 }
@@ -208,10 +306,20 @@ check_self_test_runs() {
   return 0
 }
 
+# A job L4/L7 do not read: in a scheduler (a workflow nothing `workflow_call`s),
+# the caller of the reusable — whose drive is read there — or an id
+# SCHEDULER_JOBS names. In the reusable every job is read.
+skip_job() { # skip_job <workflow> <job-id> <job-body>
+  grep -qE '^[[:space:]]*workflow_call:' "$1" && return 1
+  [[ -n "${SCHEDULER_JOBS[$2]+x}" ]] && return 0
+  grep -qE "^[[:space:]]*uses:[[:space:]]*['\"]?[.]/${LANE_YML//./[.]}['\"]?[[:space:]]*\$" <<<"$3"
+}
+
+
 # L4 — drive through the gated runner, then upload. Per job.
 check_scan_precedes_upload() {
-  local root="$1" f="${root}/${LANE_YML}" rc=0 job first last body drive driving upload n=0
-  [[ -f "${f}" ]] || { broken "${LANE_YML} not found."; return 2; }
+  local root="$1" f rc=0 job first last body drive driving upload n=0 wf
+  [[ -f "${root}/${LANE_YML}" ]] || { broken "${LANE_YML} not found."; return 2; }
   # The runner is what gates; if it stopped, no ordering in the workflow helps.
   local runner="${root}/${RUNNER_SH}"
   if [[ ! -f "${runner}" ]]; then
@@ -223,14 +331,25 @@ check_scan_precedes_upload() {
   grep -qE '^[[:space:]]*(if[[:space:]]+)?logscan_gate([[:space:]]|$)' "${runner}" \
     || { fail "${RUNNER_SH} sources the gate but never calls logscan_gate at a command position. A sourced gate nobody calls scans nothing."; rc=1; }
 
+  local set count
+  set="$(soak_workflows "${root}")"
+  count="$(grep -c . <<<"${set}" || true)"
+  if (( count != SOAK_WORKFLOWS )); then
+    fail ".github/workflows holds ${count} soak-*.yml file(s), pinned at ${SOAK_WORKFLOWS}. Every one is read by L4/L7; a new scheduler moves this pin in the change that adds it, so it is a decision rather than a file nobody looked at."
+    rc=1
+  fi
+  while IFS= read -r wf; do
+  [[ -n "${wf}" ]] || continue
+  f="${root}/${wf}"
   while IFS=$'\t' read -r job first last; do
     [[ -n "${job}" ]] || continue
-    n=$(( n + 1 ))
-    body="$(sed -n "${first},${last}p" "${f}" | grep -vE '^[[:space:]]*#')"
+    body="$(job_body "${f}" "${first}" "${last}")"
+    skip_job "${f}" "${job}" "${body}" && continue
+    [[ "${wf}" == "${LANE_YML}" ]] && n=$(( n + 1 ))
     drive="$(grep -nF -- "${RUNNER_SH}" <<<"${body}" | cut -d: -f1 | head -1)"
     upload="$(grep -nE 'uses:[[:space:]]*actions/upload-artifact' <<<"${body}" | cut -d: -f1 | head -1)"
     if [[ -z "${drive}" ]]; then
-      fail "${LANE_YML}:${job} never runs ${RUNNER_SH}. A soak job that does not drive the rig is a job that proves nothing."
+      fail "${wf}:${job} never runs ${RUNNER_SH}. A soak job that does not drive the rig is a job that proves nothing."
       rc=1
       continue
     fi
@@ -238,19 +357,20 @@ check_scan_precedes_upload() {
     # of a pipeline turns a MATCH into a 141 under `pipefail`.
     driving="$(grep -F -- "${RUNNER_SH}" <<<"${body}" || true)"
     if ! grep -qF -- 'run-with-deadline.sh' <<<"${driving}"; then
-      fail "${LANE_YML}:${job} drives the rig without run-with-deadline.sh. A hang then burns to the step cap and reports an anonymous 124 with no artifacts."
+      fail "${wf}:${job} drives the rig without run-with-deadline.sh. A hang then burns to the step cap and reports an anonymous 124 with no artifacts."
       rc=1
     fi
     if [[ -z "${upload}" ]]; then
-      fail "${LANE_YML}:${job} uploads nothing. The evidence tree is the run's whole record; a job that keeps it on the runner has none."
+      fail "${wf}:${job} uploads nothing. The evidence tree is the run's whole record; a job that keeps it on the runner has none."
       rc=1
       continue
     fi
     if (( upload < drive )); then
-      fail "${LANE_YML}:${job} uploads (line $(( first + upload - 1 ))) BEFORE it drives (line $(( first + drive - 1 ))). The gate runs inside the drive, so an upload above it publishes captures nothing has scanned."
+      fail "${wf}:${job} uploads (line $(( first + upload - 1 ))) BEFORE it drives (line $(( first + drive - 1 ))). The gate runs inside the drive, so an upload above it publishes captures nothing has scanned."
       rc=1
     fi
   done < <(lane_jobs "${f}")
+  done <<<"${set:-${LANE_YML}}"
   if (( n == 0 )); then
     broken "${LANE_YML} declares no job this guard can read."
     return 2
@@ -290,12 +410,17 @@ lane_steps() { # lane_steps <workflow> <first> <last>
 # L7 — a scan step the reaper cannot switch off stands before every upload.
 check_scan_step_survives_the_reaper() {
   local root="$1"
-  local f="${root}/${LANE_YML}" rc=0 job first last n=0
-  [[ -f "${f}" ]] || { broken "${LANE_YML} not found."; return 2; }
+  local f rc=0 job first last n=0 wf set
+  [[ -f "${root}/${LANE_YML}" ]] || { broken "${LANE_YML} not found."; return 2; }
   local line cond body drive_id scan_at scan_cond upload_at
+  set="$(soak_workflows "${root}")"
+  while IFS= read -r wf; do
+  [[ -n "${wf}" ]] || continue
+  f="${root}/${wf}"
   while IFS=$'\t' read -r job first last; do
     [[ -n "${job}" ]] || continue
-    n=$(( n + 1 ))
+    skip_job "${f}" "${job}" "$(job_body "${f}" "${first}" "${last}")" && continue
+    [[ "${wf}" == "${LANE_YML}" ]] && n=$(( n + 1 ))
     drive_id=''; scan_at=''; scan_cond=''; upload_at=''
     while IFS=$'\t' read -r line body cond; do
       case "${body}" in
@@ -311,23 +436,24 @@ check_scan_step_survives_the_reaper() {
     done < <(lane_steps "${f}" "${first}" "${last}")
 
     if [[ -z "${scan_at}" ]]; then
-      fail "${LANE_YML}:${job} has no scan step of its own between the drive and the upload. The drive's scan dies with the drive: the deadline's \`timeout\` signals the whole process group, and the upload then publishes a tree nothing has read."
+      fail "${wf}:${job} has no scan step of its own between the drive and the upload. The drive's scan dies with the drive: the deadline's \`timeout\` signals the whole process group, and the upload then publishes a tree nothing has read."
       rc=1
       continue
     fi
     if [[ ! "${scan_cond}" =~ (^|[^[:alnum:]_])(![[:space:]]*cancelled\(\)|always\(\)) ]]; then
-      fail "${LANE_YML}:${job}'s scan step (line ${scan_at}) is not outcome-independent: its \`if:\` is '${scan_cond# }'. Without \`!cancelled()\` or \`always()\` a step runs only while every step before it succeeded — so a reaped drive (rc 124) skips the scan and the upload publishes the captures it would have read."
+      fail "${wf}:${job}'s scan step (line ${scan_at}) is not outcome-independent: its \`if:\` is '${scan_cond# }'. Without \`!cancelled()\` or \`always()\` a step runs only while every step before it succeeded — so a reaped drive (rc 124) skips the scan and the upload publishes the captures it would have read."
       rc=1
     fi
     if [[ -n "${drive_id}" && "${scan_cond}" == *"steps.${drive_id}."* ]]; then
-      fail "${LANE_YML}:${job}'s scan step (line ${scan_at}) keys its \`if:\` on the drive step (steps.${drive_id}). That is the one outcome it may not read: the case it exists for IS the drive failing."
+      fail "${wf}:${job}'s scan step (line ${scan_at}) keys its \`if:\` on the drive step (steps.${drive_id}). That is the one outcome it may not read: the case it exists for IS the drive failing."
       rc=1
     fi
     if [[ -n "${upload_at}" ]] && (( scan_at > upload_at )); then
-      fail "${LANE_YML}:${job} scans (line ${scan_at}) AFTER it uploads (line ${upload_at}). A scan below the upload reads what has already been published."
+      fail "${wf}:${job} scans (line ${scan_at}) AFTER it uploads (line ${upload_at}). A scan below the upload reads what has already been published."
       rc=1
     fi
   done < <(lane_jobs "${f}")
+  done <<<"${set:-${LANE_YML}}"
   if (( n == 0 )); then
     broken "${LANE_YML} declares no job this guard can read."
     return 2
@@ -336,15 +462,30 @@ check_scan_step_survives_the_reaper() {
   return "${rc}"
 }
 
-# The scenario ids a profile TOML declares, lower-cased and sorted.
+# The `s<id>/<arm>` pairs a profile TOML declares, sorted: each `id = "Sxx"`
+# with every label of the `arms = [...]` after it, across continuation lines.
 #
-# Comment lines dropped first. A profile's header prose names the scenarios it
-# deliberately does NOT run — `pr.toml` explains why S17 is not in it — and
-# counting those would let a profile drop a scenario from its `[[scenarios]]`
-# tables and still satisfy the nesting check by mentioning it in a sentence.
-profile_scenarios() { # profile_scenarios <toml>
-  grep -vE '^[[:space:]]*#' "$1" 2>/dev/null \
-    | grep -ohEi '\bs[0-9]{2}\b' | tr 'A-Z' 'a-z' | sort -u
+# Comments are stripped first, trailing ones included. A profile's prose names
+# what it deliberately does NOT run — `pr.toml` explains why S17 is not in it,
+# `nightly.toml` notes which arm is weekly-only beside the array — and counting
+# those would let a profile drop an arm and still satisfy the nesting check by
+# mentioning it in a sentence.
+profile_pairs() { # profile_pairs <toml>
+  [[ -f "$1" ]] || return 0
+  awk '
+    { sub(/#.*/, "") }
+    /^[[:space:]]*\[\[/ { id = ""; inarms = 0; next }
+    /^[[:space:]]*id[[:space:]]*=/ {
+      id = $0; sub(/^[^"]*"/, "", id); sub(/".*/, "", id); id = tolower(id); next
+    }
+    /^[[:space:]]*arms[[:space:]]*=/ { inarms = 1; sub(/^[^[]*\[/, "") }
+    inarms {
+      line = $0; closed = (line ~ /\]/); sub(/\].*/, "", line)
+      n = split(line, part, "\"")
+      for (i = 2; i <= n; i += 2) if (id != "") print id "/" part[i]
+      if (closed) inarms = 0
+    }
+  ' "$1" | sort -u
 }
 
 # L5 — the profiles nest, and no drive-skip row names a soak path.
@@ -365,24 +506,24 @@ check_profiles_nest() {
     return "${rc}"
   fi
   local pr nightly weekly missing
-  pr="$(profile_scenarios "${dir}/pr.toml")"
-  nightly="$(profile_scenarios "${dir}/nightly.toml")"
-  weekly="$(profile_scenarios "${dir}/weekly.toml")"
+  pr="$(profile_pairs "${dir}/pr.toml")"
+  nightly="$(profile_pairs "${dir}/nightly.toml")"
+  weekly="$(profile_pairs "${dir}/weekly.toml")"
   if [[ -z "${pr}" || -z "${nightly}" || -z "${weekly}" ]]; then
-    broken "${PROFILE_DIR}: one of pr/nightly/weekly declares no scenario this guard can read, so the nesting below would hold vacuously."
+    broken "${PROFILE_DIR}: one of pr/nightly/weekly declares no (id, arm) pair this guard can read, so the nesting below would hold vacuously."
     return 2
   fi
   missing="$(comm -23 <(printf '%s\n' "${pr}") <(printf '%s\n' "${nightly}") | tr '\n' ' ')"
   if [[ -n "${missing% }" ]]; then
-    fail "${PROFILE_DIR}: pr declares scenario(s) nightly does not (${missing% }). The nightly run would then prove LESS than the per-commit one."
+    fail "${PROFILE_DIR}: pr declares scenario arm(s) nightly does not (${missing% }). The nightly run would then prove LESS than the per-commit one."
     rc=1
   fi
   missing="$(comm -23 <(printf '%s\n' "${nightly}") <(printf '%s\n' "${weekly}") | tr '\n' ' ')"
   if [[ -n "${missing% }" ]]; then
-    fail "${PROFILE_DIR}: nightly declares scenario(s) weekly does not (${missing% })."
+    fail "${PROFILE_DIR}: nightly declares scenario arm(s) weekly does not (${missing% })."
     rc=1
   fi
-  log "L5: pr ($(grep -c . <<<"${pr}")) ⊆ nightly ($(grep -c . <<<"${nightly}")) ⊆ weekly ($(grep -c . <<<"${weekly}"))."
+  log "L5: pr ⊆ nightly ⊆ weekly over (scenario, arm) pairs."
   return "${rc}"
 }
 
@@ -449,6 +590,99 @@ check_deadlines_agree() {
   return "${rc}"
 }
 
+# Two cron fields can fire together: equal numbers, or anything that is not a
+# plain number (`*`, a list, a step), which is read as overlapping on purpose.
+cron_fields_overlap() { # cron_fields_overlap <a> <b>
+  [[ "$1" =~ ^[0-9]+$ && "$2" =~ ^[0-9]+$ ]] || return 0
+  (( 10#$1 == 10#$2 ))
+}
+
+# L8 — the nightly scheduler calls the lane, and its shape holds.
+check_nightly_scheduler() {
+  local root="$1" f="${root}/${NIGHTLY_YML}" rc=0 body crons cron other m h om oh
+  if [[ ! -f "${f}" ]]; then
+    fail "${NIGHTLY_YML} not found. The nightly profile's scenarios then have no lane execution at all — a green PR lane is not coverage of them."
+    return 1
+  fi
+  body="$(uncommented "${f}")"
+
+  crons="$(grep -E "^[[:space:]]*-[[:space:]]*cron:" <<<"${body}" \
+             | sed -E "s/^[^:]*cron:[[:space:]]*['\"]?//; s/['\"][[:space:]]*$//" || true)"
+  if [[ -z "${crons}" ]]; then
+    fail "${NIGHTLY_YML} carries no \`- cron:\`. A scheduler with no schedule runs only when somebody remembers to dispatch it."
+    rc=1
+  fi
+  while read -r m h _; do
+    [[ -n "${m}" ]] || continue
+    if [[ "${m}" =~ ^[0-9]+$ ]] && (( 10#${m} == 0 )); then
+      fail "${NIGHTLY_YML}: its cron fires on the :00 minute. Scheduled runs queue hardest on the hour, where most of this tree's crons already sit."
+      rc=1
+    fi
+    for other in "${root}"/.github/workflows/*.yml; do
+      [[ "${other}" == "${f}" ]] && continue
+      while read -r om oh _; do
+        [[ -n "${om}" ]] || continue
+        if cron_fields_overlap "${m}" "${om}" && cron_fields_overlap "${h}" "${oh}"; then
+          fail "${NIGHTLY_YML}: its cron (${m} ${h}) fires with ${other#"${root}/"}'s (${om} ${oh}). The nightly holds four runners for up to its job cap; it is placed where nothing else starts."
+          rc=1
+        fi
+      done < <(uncommented "${other}" | grep -E "^[[:space:]]*-[[:space:]]*cron:" \
+                 | sed -E "s/^[^:]*cron:[[:space:]]*['\"]?//; s/['\"][[:space:]]*$//" || true)
+    done
+  done <<<"${crons}"
+
+  if ! grep -qE '^[[:space:]]*cancel-in-progress:[[:space:]]*false[[:space:]]*$' <<<"${body}"; then
+    fail "${NIGHTLY_YML}: concurrency is not \`cancel-in-progress: false\`. A cancelled soak publishes no evidence; a queued one is merely late."
+    rc=1
+  fi
+
+  local caller prep cbody pbody
+  caller="$(job_matching "${f}" "uses:[[:space:]]*\\./\\.github/workflows/soak-core\\.yml")" || caller=''
+  prep="$(job_matching "${f}" "${SEED_SH//./\\.}")" || prep=''
+  if [[ -z "${caller}" ]]; then
+    fail "${NIGHTLY_YML} never calls ${LANE_YML}."
+    return 1
+  fi
+  cbody="$(job_body_of "${f}" "${caller}")"
+  if ! grep -qE '^[[:space:]]*profile:[[:space:]]*nightly[[:space:]]*$' <<<"${cbody}"; then
+    fail "${NIGHTLY_YML}:${caller} calls ${LANE_YML} without \`profile: nightly\`, so the nightly job never runs."
+    rc=1
+  fi
+  if [[ -z "${prep}" ]]; then
+    fail "${NIGHTLY_YML}: no job runs ${SEED_SH}, so no slot is handed a seed from the one definition."
+    return 1
+  fi
+  pbody="$(job_body_of "${f}" "${prep}")"
+  if ! grep -qE "^[[:space:]]*needs:.*(\\[|[[:space:],])${prep}([],[:space:]]|$)" <<<"${cbody}"; then
+    fail "${NIGHTLY_YML}:${caller}'s \`needs:\` does not reach \`${prep}\`, the job that derives the seeds; its outputs are unreadable without it."
+    rc=1
+  fi
+  if ! grep -qE "^[[:space:]]*seed:.*needs\\.${prep}\\.outputs\\.seeds" <<<"${cbody}"; then
+    fail "${NIGHTLY_YML}:${caller} does not pass \`seed:\` from needs.${prep}.outputs.seeds. Every slot would run one seed, or the rig default."
+    rc=1
+  fi
+  if ! grep -qE "^[[:space:]]*[A-Za-z0-9_-]+:[[:space:]]*\\$\\{\\{[[:space:]]*fromJSON\\(needs\\.${prep}\\.outputs\\.slot_list\\)" <<<"${cbody}"; then
+    fail "${NIGHTLY_YML}:${caller}'s matrix does not read needs.${prep}.outputs.slot_list. A static list silently ignores the \`slots\` input."
+    rc=1
+  fi
+  local j
+  for j in "${prep}" "${caller}"; do
+    if ! grep -qE '^[[:space:]]*contents:[[:space:]]*read[[:space:]]*$|permissions:.*contents:[[:space:]]*read' <<<"$(job_body_of "${f}" "${j}")"; then
+      fail "${NIGHTLY_YML}:${j} is not granted \`contents: read\`. Under the file-level \`permissions: {}\` its checkout fails$( [[ "${j}" == "${caller}" ]] && printf ' — the reusable inherits this job'"'"'s grant')."
+      rc=1
+    fi
+  done
+
+  local lane_nightly
+  lane_nightly="$(job_body_of "${root}/${LANE_YML}" e2e_soak_core_nightly || true)"
+  if ! grep -qE '^[[:space:]]*name:[[:space:]]*soak-core-nightly-.*inputs\.slot' <<<"${lane_nightly}"; then
+    fail "${LANE_YML}: the nightly job's artifact name does not carry \`inputs.slot\`. Four slots in one run then upload one name, and since upload-artifact v4 the second upload is a 409 that reds a slot for a reason unrelated to the soak."
+    rc=1
+  fi
+  (( rc == 0 )) && log "L8: ${NIGHTLY_YML} calls the nightly profile with per-slot seeds, off every other cron, non-cancelling, with each checkout granted."
+  return "${rc}"
+}
+
 run_all() {
   local root="$1"
   check_ci_calls_the_lane "${root}" || true
@@ -458,6 +692,7 @@ run_all() {
   check_scan_step_survives_the_reaper "${root}" || true
   check_profiles_nest "${root}" || true
   check_deadlines_agree "${root}" || true
+  check_nightly_scheduler "${root}" || true
 }
 
 # ---------------------------------------------------------------------------
@@ -529,6 +764,82 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           path: ${{ runner.temp }}/soak-upload/
+  e2e_soak_core_nightly:
+    name: e2e_soak_core_nightly
+    if: ${{ inputs.profile == 'nightly' }}
+    runs-on: ubuntu-latest
+    env:
+      HAVEN_SOAK_SEED: ${{ inputs.seed }}
+    steps:
+      - name: Checkout
+        id: checkout
+        uses: actions/checkout@v6
+      - name: Run the soak (nightly profile)
+        id: soak
+        run: bash tooling/e2e/ci/run-with-deadline.sh 90m "soak-core nightly" -- bash tooling/e2e/ci/run-soak-core.sh nightly
+      - name: Scan the soak evidence before upload
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/run-soak-core.sh --scan-only nightly
+      - name: Upload soak evidence
+        uses: actions/upload-artifact@v6
+        with:
+          name: soak-core-nightly-${{ inputs.slot }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/soak-upload/
+YAML
+    cat > "${r}/${NIGHTLY_YML}" <<'YAML'
+name: Soak Nightly
+on:
+  schedule:
+    - cron: '23 0 * * 1-6'
+  workflow_dispatch:
+permissions: {}
+concurrency:
+  group: soak-nightly-${{ github.event_name == 'schedule' && 'schedule' || github.run_id }}
+  cancel-in-progress: false
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      seeds: ${{ steps.seeds.outputs.seeds }}
+      slot_list: ${{ steps.seeds.outputs.slot_list }}
+    steps:
+      - uses: actions/checkout@v6
+      - id: seeds
+        run: bash scripts/ci/soak_seed.sh --prepare nightly
+  core:
+    needs: [prepare]
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: ${{ fromJSON(needs.prepare.outputs.slot_list) }}
+    name: Soak Core (nightly, ${{ matrix.slot }})
+    permissions:
+      contents: read
+    uses: ./.github/workflows/soak-core.yml
+    with:
+      profile: nightly
+      slot: ${{ matrix.slot }}
+      seed: ${{ fromJSON(needs.prepare.outputs.seeds)[matrix.slot] }}
+  file-issue:
+    needs: [prepare, core]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Download the night's soak verdicts
+        run: gh run download "${GITHUB_RUN_ID}" -p "soak-core-nightly-*" -D "${RUNNER_TEMP}/soak-artifacts"
+      - name: Compose, scan and file
+        run: bash scripts/ci/file_soak_issue.sh --profile nightly --tree "${RUNNER_TEMP}/soak-artifacts"
+YAML
+    cat > "${r}/.github/workflows/e2e-nightly.yml" <<'YAML'
+name: E2E Nightly
+on:
+  schedule:
+    - cron: '0 3 * * *'
+jobs: {}
 YAML
     cat > "${r}/${RUST_YML}" <<'YAML'
 name: Rust Check
@@ -556,9 +867,46 @@ YAML
 source "${DIR}/logscan-gate.sh"
 logscan_gate host "${SOAK_NEEDLE_DIR}" -- --sink "soak=${spec}"
 SH
-    printf 'scenarios = ["s01", "s06"]\ndeadline = "6m"\n'  > "${r}/${PROFILE_DIR}/pr.toml"
-    printf 'scenarios = ["s01", "s06", "s17"]\ndeadline = "90m"\n' > "${r}/${PROFILE_DIR}/nightly.toml"
-    printf 'scenarios = ["s01", "s06", "s17", "s19"]\ndeadline = "300m"\n' > "${r}/${PROFILE_DIR}/weekly.toml"
+    # The real shape: `[[scenarios]]` tables, an array over two lines and a
+    # trailing comment, because that is what the pair parser must read.
+    cat > "${r}/${PROFILE_DIR}/pr.toml" <<'TOML'
+# S17 is not here: its bound starts at the silence window.
+deadline = "6m"
+[[scenarios]]
+id = "S01"
+arms = ["single-relay-outage"]
+[[scenarios]]
+id = "S06"
+arms = ["stuck-row-sweep"]
+TOML
+    cat > "${r}/${PROFILE_DIR}/nightly.toml" <<'TOML'
+deadline = "90m"
+[[scenarios]]
+id = "S01"
+arms = ["all-relay-outage",
+        "single-relay-outage", "rolling-outage"]  # every S01 arm
+[[scenarios]]
+id = "S06"
+arms = ["stuck-row-sweep"]
+[[scenarios]]
+id = "S17"
+arms = ["closed-prefixes"]  # full-intake is weekly-only
+TOML
+    cat > "${r}/${PROFILE_DIR}/weekly.toml" <<'TOML'
+deadline = "300m"
+[[scenarios]]
+id = "S01"
+arms = ["single-relay-outage", "all-relay-outage", "rolling-outage"]
+[[scenarios]]
+id = "S06"
+arms = ["stuck-row-sweep"]
+[[scenarios]]
+id = "S17"
+arms = ["closed-prefixes", "full-intake"]
+[[scenarios]]
+id = "S19"
+arms = ["duplicate-replay"]
+TOML
     printf '# declared drive hatches\nsome/dart/path.dart|reason\n' > "${r}/${DRIVE_SKIPS}"
   }
 
@@ -572,6 +920,7 @@ SH
   _case "a wired lane passes L7" 0 check_scan_step_survives_the_reaper "${ok}"
   _case "nesting profiles pass L5" 0 check_profiles_nest "${ok}"
   _case "agreeing deadlines pass L6" 0 check_deadlines_agree "${ok}"
+  _case "a wired nightly scheduler passes L8" 0 check_nightly_scheduler "${ok}"
 
   # --- L1.
   local uncalled="${tmp}/uncalled"; _mk "${uncalled}"
@@ -595,6 +944,16 @@ SH
   local badname="${tmp}/badname"; _mk "${badname}"
   sed -i 's/^  e2e_soak_core_pr:/  soak_core_pr:/' "${badname}/${LANE_YML}"
   _case "a job name outside the flakiness pattern fails" 1 check_job_names_are_counted "${badname}"
+
+  # The slot must reach the row name, or four slots are one monitor row.
+  local slotless="${tmp}/slotless"; _mk "${slotless}"
+  sed -i '/^    name: Soak Core (nightly/d' "${slotless}/${NIGHTLY_YML}"
+  _case "a matrix caller with no name: fails" 1 check_job_names_are_counted "${slotless}"
+
+  local slotnotnamed="${tmp}/slotnotnamed"; _mk "${slotnotnamed}"
+  sed -i 's/^    name: Soak Core (nightly, ${{ matrix.slot }})/    name: Soak Core (nightly)/' \
+    "${slotnotnamed}/${NIGHTLY_YML}"
+  _case "a matrix caller whose name: drops the matrix key fails" 1 check_job_names_are_counted "${slotnotnamed}"
 
   local nore="${tmp}/nore"; _mk "${nore}"
   sed -i 's/test(".*")/select(.name)/' "${nore}/${FLAKINESS_YML}"
@@ -644,6 +1003,49 @@ YAML
   rm -f "${norunner}/${RUNNER_SH}"
   _case "a missing runner is BROKEN, not clean" 2 check_scan_precedes_upload "${norunner}"
 
+  # --- L4/L7 over every soak-*.yml: a scheduler job that runs the rig itself
+  # is read like a lane job, and the file count is pinned.
+  local rogue="${tmp}/rogue"; _mk "${rogue}"
+  cat >> "${rogue}/${NIGHTLY_YML}" <<'YAML'
+  rogue:
+    runs-on: ubuntu-latest
+    steps:
+      - run: cargo run --profile soak --manifest-path tooling/soak/Cargo.toml -- --profile nightly
+YAML
+  _case "a scheduler job driving the rig without the runner fails L4" 1 check_scan_precedes_upload "${rogue}"
+
+  local roguescan="${tmp}/roguescan"; _mk "${roguescan}"
+  cat >> "${roguescan}/${NIGHTLY_YML}" <<'YAML'
+  rogue:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run the soak
+        id: soak
+        run: bash tooling/e2e/ci/run-with-deadline.sh 90m "soak" -- bash tooling/e2e/ci/run-soak-core.sh nightly
+      - name: Upload soak evidence
+        uses: actions/upload-artifact@v6
+        with:
+          path: ${{ runner.temp }}/soak-upload/
+YAML
+  _case "a scheduler job uploading with no scan step of its own fails L7" 1 check_scan_step_survives_the_reaper "${roguescan}"
+
+  # The keyword hole: the rig driven through the LOCAL wrapper names none of
+  # the words a keyword classifier looked for, and uploads nothing. Only a
+  # structural skip reads it.
+  local localdrive="${tmp}/localdrive"; _mk "${localdrive}"
+  cat >> "${localdrive}/${NIGHTLY_YML}" <<'YAML'
+  extra:
+    runs-on: ubuntu-latest
+    steps:
+      - run: bash scripts/run_soak_local.sh core --profile nightly
+YAML
+  _case "a scheduler job running run_soak_local.sh with no upload fails L4" 1 check_scan_precedes_upload "${localdrive}"
+  _case "...and fails L7" 1 check_scan_step_survives_the_reaper "${localdrive}"
+
+  local third="${tmp}/third"; _mk "${third}"
+  cp "${third}/${NIGHTLY_YML}" "${third}/.github/workflows/soak-weekly.yml"
+  _case "a third soak-*.yml without moving the pin fails" 1 check_scan_precedes_upload "${third}"
+
   # --- L7: the four ways a scan step stops standing between a REAPED drive and
   # the upload. Each is a shape that looks right in a diff.
   local noscan="${tmp}/noscan"; _mk "${noscan}"
@@ -688,8 +1090,19 @@ YAML
 
   # --- L5.
   local notnested="${tmp}/notnested"; _mk "${notnested}"
-  printf 'scenarios = ["s01", "s06", "s13"]\ndeadline = "6m"\n' > "${notnested}/${PROFILE_DIR}/pr.toml"
+  printf '[[scenarios]]\nid = "S13"\narms = ["hydration-quarantine"]\n' >> "${notnested}/${PROFILE_DIR}/pr.toml"
   _case "a pr scenario missing from nightly fails" 1 check_profiles_nest "${notnested}"
+
+  # §3.4's subject: the SCENARIO is in both, one of pr's arms is not.
+  local armmissing="${tmp}/armmissing"; _mk "${armmissing}"
+  sed -i 's/^arms = \["all-relay-outage",$/arms = ["all-relay-outage", "rolling-outage"]/; /^        "single-relay-outage", "rolling-outage"\]/d' \
+    "${armmissing}/${PROFILE_DIR}/nightly.toml"
+  _case "a pr arm missing from nightly fails, the scenario present in both" 1 check_profiles_nest "${armmissing}"
+
+  local armcomment="${tmp}/armcomment"; _mk "${armcomment}"
+  sed -i 's/^        "single-relay-outage", "rolling-outage"\]  # every S01 arm/        # "single-relay-outage",\n        "rolling-outage"]/' \
+    "${armcomment}/${PROFILE_DIR}/nightly.toml"
+  _case "an arm commented out inside a multi-line array is not declared" 1 check_profiles_nest "${armcomment}"
 
   local soakskip="${tmp}/soakskip"; _mk "${soakskip}"
   printf 'tooling/soak/scenarios/s01.rs|because\n' >> "${soakskip}/${DRIVE_SKIPS}"
@@ -711,6 +1124,58 @@ YAML
   local nodecl="${tmp}/nodecl"; _mk "${nodecl}"
   printf 'scenarios = ["s01", "s06"]\n' > "${nodecl}/${PROFILE_DIR}/pr.toml"
   _case "a profile declaring no deadline at all fails" 1 check_deadlines_agree "${nodecl}"
+
+  # --- L8: every property of the scheduler, broken in turn.
+  local nonightly="${tmp}/nonightly"; _mk "${nonightly}"
+  rm -f "${nonightly}/${NIGHTLY_YML}"
+  _case "no nightly scheduler fails" 1 check_nightly_scheduler "${nonightly}"
+
+  local wrongprofile="${tmp}/wrongprofile"; _mk "${wrongprofile}"
+  sed -i 's/^      profile: nightly$/      profile: weekly/' "${wrongprofile}/${NIGHTLY_YML}"
+  _case "a scheduler calling a profile other than nightly fails" 1 check_nightly_scheduler "${wrongprofile}"
+
+  local nocron="${tmp}/nocron"; _mk "${nocron}"
+  sed -i "/^  schedule:$/d; /cron: '23 0/d" "${nocron}/${NIGHTLY_YML}"
+  _case "a scheduler with no cron fails" 1 check_nightly_scheduler "${nocron}"
+
+  local onthehour="${tmp}/onthehour"; _mk "${onthehour}"
+  sed -i "s/cron: '23 0 \* \* 1-6'/cron: '0 1 * * 1-6'/" "${onthehour}/${NIGHTLY_YML}"
+  _case "a cron on the :00 minute fails" 1 check_nightly_scheduler "${onthehour}"
+
+  # Derived from the tree: a sibling on the soak's own tick reds, whatever day.
+  local collide="${tmp}/collide"; _mk "${collide}"
+  printf "name: Other\non:\n  schedule:\n    - cron: '23 0 * * 0'\njobs: {}\n" \
+    > "${collide}/.github/workflows/other.yml"
+  _case "a cron sharing another workflow's (minute, hour) fails" 1 check_nightly_scheduler "${collide}"
+
+  local cancelling="${tmp}/cancelling"; _mk "${cancelling}"
+  sed -i 's/cancel-in-progress: false/cancel-in-progress: true/' "${cancelling}/${NIGHTLY_YML}"
+  _case "a cancelling concurrency group fails" 1 check_nightly_scheduler "${cancelling}"
+
+  local unchained="${tmp}/unchained"; _mk "${unchained}"
+  sed -i '/^    needs: \[prepare\]$/d' "${unchained}/${NIGHTLY_YML}"
+  _case "a caller whose needs: does not reach the seed job fails" 1 check_nightly_scheduler "${unchained}"
+
+  local fixedseed="${tmp}/fixedseed"; _mk "${fixedseed}"
+  sed -i 's/^      seed: .*/      seed: 0x0123456789abcdef/' "${fixedseed}/${NIGHTLY_YML}"
+  _case "a seed not read from the seed job fails" 1 check_nightly_scheduler "${fixedseed}"
+
+  local staticmatrix="${tmp}/staticmatrix"; _mk "${staticmatrix}"
+  sed -i 's/^        slot: .*/        slot: [s1, s2, s3, s4]/' "${staticmatrix}/${NIGHTLY_YML}"
+  _case "a static matrix that ignores slot_list fails" 1 check_nightly_scheduler "${staticmatrix}"
+
+  local prepgrant="${tmp}/prepgrant"; _mk "${prepgrant}"
+  sed -i '0,/^      contents: read$/{/^      contents: read$/d}' "${prepgrant}/${NIGHTLY_YML}"
+  _case "a seed job without contents: read fails" 1 check_nightly_scheduler "${prepgrant}"
+
+  local coregrant="${tmp}/coregrant"; _mk "${coregrant}"
+  awk '/^      contents: read$/ { if (++k == 2) next } { print }' "${coregrant}/${NIGHTLY_YML}" \
+    > "${coregrant}/n.yml" && mv "${coregrant}/n.yml" "${coregrant}/${NIGHTLY_YML}"
+  _case "a caller without contents: read fails" 1 check_nightly_scheduler "${coregrant}"
+
+  local oneartifact="${tmp}/oneartifact"; _mk "${oneartifact}"
+  sed -i 's/soak-core-nightly-${{ inputs.slot }}-/soak-core-nightly-/' "${oneartifact}/${LANE_YML}"
+  _case "a nightly artifact name without the slot fails" 1 check_nightly_scheduler "${oneartifact}"
 
   # --- the landing window.
   local absent="${tmp}/absent"; _mk "${absent}"

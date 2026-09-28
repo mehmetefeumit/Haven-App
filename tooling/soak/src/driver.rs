@@ -38,6 +38,7 @@ use std::time::Duration;
 use haven_logscan::manifest::{Manifest, MANIFEST_SUFFIX};
 
 use crate::banner::{Banner, Measured, Provenance};
+use crate::coverage::{Coverage, PROBE_ROUND, SETTLED_ROUND};
 use crate::logsink::{self, Needles, SinkError, SoakLogs};
 use crate::nemesis::types::{Op, Schedule, ScheduledOp};
 use crate::oracle::{bounds, vacuity, Invariant, Reach, Recovery, Round, Verdict};
@@ -137,6 +138,12 @@ async fn run_inner(plan: &RunPlan) -> Result<Rc, Refusal> {
         // provably renders a fixed sentence and never a value.
         eprintln!("haven-soak: {}", VerdictError::Unvalidated);
     }
+    // Beside the verdict, from literals alone: nothing in it can fail to
+    // validate, so the only failure is the tree's, which is the rig's.
+    outcome
+        .coverage
+        .write_to(&dir)
+        .map_err(|_| Refusal::Artifact)?;
 
     let measured = Measured::new(
         started.elapsed(),
@@ -251,6 +258,8 @@ async fn drive(plan: &RunPlan, timeline: &Timeline, dir: &Path) -> Result<Outcom
 struct Outcome {
     verdicts: Verdicts,
     violation: Option<Violation>,
+    /// Every (scenario, nemesis, invariant) triple the run graded.
+    coverage: Coverage,
     /// The largest session store any world reached, in bytes. Raw: it is
     /// compared against the ceiling in process and reaches the banner only as
     /// a quarter of it.
@@ -286,6 +295,7 @@ async fn drive_with(
         phase_started: tokio::time::Instant::now(),
         active: Vec::new(),
         session_store_peak: 0,
+        coverage: Coverage::new(plan.spec.name, plan.seed),
     };
 
     run.nemesis_phase(&plan.spec.world, plan.schedule.clone(), timeline)
@@ -296,6 +306,7 @@ async fn drive_with(
     Ok(Outcome {
         verdicts: run.verdicts,
         violation: run.first_violation,
+        coverage: run.coverage,
         session_store_peak: run.session_store_peak,
     })
 }
@@ -419,6 +430,8 @@ struct Run {
     /// as each world ends. A `SQLite` file never shrinks without a vacuum, so
     /// the end-of-world reading is the world's peak.
     session_store_peak: u64,
+    /// What `coverage.log` will say.
+    coverage: Coverage,
 }
 
 impl Run {
@@ -619,7 +632,7 @@ impl Run {
             forward_secrecy: &[],
         };
         let verdict = Invariant::LocationRoundTrip.check(world, &round).await?;
-        self.report_oracle(world, Invariant::LocationRoundTrip, verdict)
+        self.report_oracle(world, PROBE_ROUND, Invariant::LocationRoundTrip, verdict)
     }
 
     /// Grades the world the schedule left behind.
@@ -658,7 +671,7 @@ impl Run {
             Invariant::Quiescence,
         ] {
             let verdict = invariant.check(world, &round).await?;
-            self.report_oracle(world, invariant, verdict)?;
+            self.report_oracle(world, SETTLED_ROUND, invariant, verdict)?;
         }
 
         // The schedule's own floor, DECLARED by the schedule and OBSERVED from
@@ -806,8 +819,15 @@ impl Run {
             "over"
         };
         println!("{rendered} bound={within}");
+        let faults = applied_faults(world);
         for (invariant, verdict) in &report.graded {
             self.verdicts.fold_invariant(verdict.rc());
+            self.coverage.note(
+                report.scenario.id(),
+                &faults,
+                *invariant,
+                world.current_tick(),
+            );
             let rendered = format!("{invariant}: {verdict}");
             println!("{rendered}");
         }
@@ -914,7 +934,8 @@ impl Run {
     }
 
     /// Prints one oracle's answer and folds it, taking the first-violation
-    /// snapshot if this is the first thing that broke.
+    /// snapshot if this is the first thing that broke. `round` is the
+    /// background phase's coverage literal for this grading.
     ///
     /// The snapshot is owed wherever the violation happened: a schedule that
     /// broke the world before any arm ran is exactly the case a reader has the
@@ -926,10 +947,17 @@ impl Run {
     fn report_oracle(
         &mut self,
         world: &RunWorld,
+        round: &'static str,
         invariant: Invariant,
         verdict: Verdict,
     ) -> Result<(), Refusal> {
         self.verdicts.fold_invariant(verdict.rc());
+        self.coverage.note(
+            round,
+            &applied_faults(world),
+            invariant,
+            world.current_tick(),
+        );
         // The oracle's own rendering: a classification and the rig's handles.
         let rendered = format!("{invariant}: {verdict}");
         println!("{rendered}");
@@ -966,6 +994,29 @@ impl Run {
         }
         Ok(())
     }
+}
+
+/// Every fault label the world's planes recorded taking and every device
+/// operation its devices recorded taking, each once, planes first.
+///
+/// From the LEDGERS, never the schedule: a triple says an invariant was graded
+/// under a fault the world really took.
+fn applied_faults(world: &RunWorld) -> Vec<&'static str> {
+    let mut labels = Vec::new();
+    let planes = world
+        .relays()
+        .iter()
+        .flat_map(|plane| plane.ledger().faults());
+    let devices = world
+        .devices()
+        .iter()
+        .flat_map(|device| device.applied_ops().iter().copied());
+    for label in planes.chain(devices) {
+        if !labels.contains(&label) {
+            labels.push(label);
+        }
+    }
+    labels
 }
 
 /// Whether a scan verdict ends the run.
@@ -1070,6 +1121,7 @@ mod tests {
         RunPlan, VerdictError, MANIFEST_SUFFIX,
     };
     use crate::banner::Provenance;
+    use crate::coverage::Coverage;
     use crate::logsink::SoakLogs;
     use crate::nemesis::types::{Fault, Op, Schedule, ScheduledOp};
     use crate::profiles::{ProfileName, ProfileSpec, ScenarioSelection, WorldShape};
@@ -1189,6 +1241,7 @@ mod tests {
             phase_started: tokio::time::Instant::now(),
             active: Vec::new(),
             session_store_peak: 0,
+            coverage: Coverage::new(ProfileName::Pr, 7),
         }
     }
 
@@ -1327,6 +1380,30 @@ mod tests {
             crate::rig::SessionStoreUse::of(running.session_store_peak).rc() == Rc::Clean
                 && running.verdicts.invariant() == Rc::Clean,
             "the guard folded nothing into a run that stayed under the ceiling"
+        );
+        // Neither arm breaks a relay: every fault they take is a device's own,
+        // and a coverage record that read the relay planes alone would give
+        // both arms no triple at all.
+        let written = serde_json::to_value(&running.coverage).expect("coverage serialises");
+        let pairs = |scenario: &str| -> std::collections::BTreeSet<String> {
+            written["triples"]
+                .as_array()
+                .expect("a triple list")
+                .iter()
+                .filter(|triple| triple["scenario"] == scenario)
+                .filter_map(|triple| triple["nemesis"].as_str().map(str::to_owned))
+                .collect()
+        };
+        assert!(
+            pairs("S06")
+                == ["come-online", "go-offline", "step-policy-offset"]
+                    .map(str::to_owned)
+                    .into(),
+            "S06 pauses, steps its policy clock and resumes, and coverage names all three"
+        );
+        assert!(
+            pairs("S11") == ["step-policy-offset"].map(str::to_owned).into(),
+            "S11 only steps its policy clock"
         );
         drop(running);
         drop(dir);

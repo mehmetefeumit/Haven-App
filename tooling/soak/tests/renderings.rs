@@ -231,6 +231,7 @@ fn add(into: &mut BTreeMap<String, Vec<String>>, key: &str, rendered: String) {
 fn static_samples() -> BTreeMap<String, Vec<String>> {
     use haven_soak::banner::{Banner, Measured, Provenance};
     use haven_soak::clock::{ClockError, PolicyNow, WallNow};
+    use haven_soak::coverage::Coverage;
     use haven_soak::driver::Refusal;
     use haven_soak::logsink::{ScanReport, SinkError};
     use haven_soak::nemesis::types::{
@@ -767,6 +768,16 @@ fn static_samples() -> BTreeMap<String, Vec<String>> {
             format!("{error:?} {error}"),
         );
     }
+
+    // coverage.rs
+    let mut coverage = Coverage::new(ProfileName::Nightly, 0x5eed);
+    coverage.note("nemesis", &["down"], Invariant::LocationRoundTrip, 3);
+    add(
+        &mut out,
+        "coverage.rs::Triple",
+        format!("{:?}", coverage.triples()[0]),
+    );
+    add(&mut out, "coverage.rs::Coverage", format!("{coverage:?}"));
 
     // oracle/vacuity.rs
     // A floor is the arm's own DECLARATION, checked into a profile: it is a

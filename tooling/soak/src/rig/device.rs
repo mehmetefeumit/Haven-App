@@ -30,6 +30,7 @@ use tokio::sync::broadcast::Receiver;
 use zeroize::Zeroizing;
 
 use crate::clock::{PolicyNow, WallNow};
+use crate::nemesis::types::DeviceOp;
 use crate::rig::auto_commit::endpoint_map;
 use crate::rig::{CircleTag, DeviceTag, RigError, SimCircle, Step};
 
@@ -160,6 +161,10 @@ pub struct SimDevice {
     /// (`rig/auto_commit.rs`).
     stored_relays: Vec<String>,
     ledger: DeviceLedger,
+    /// Every [`DeviceOp::label`] this device took, in the order it took them:
+    /// what `coverage.log` reads, so a triple names an operation that really
+    /// happened rather than one a schedule or an arm meant to apply.
+    applied_ops: Vec<&'static str>,
 }
 
 impl SimDevice {
@@ -203,6 +208,7 @@ impl SimDevice {
             inbox_relays: own.to_vec(),
             stored_relays: stored.to_vec(),
             ledger: DeviceLedger::default(),
+            applied_ops: Vec::new(),
         })
     }
 
@@ -325,8 +331,22 @@ impl SimDevice {
     /// Steps this device's policy clock. Only ever called between quiescent
     /// phases: stepping under in-flight work would age out rows the world is
     /// still converging.
-    pub const fn step_policy_offset(&mut self, secs: i64) {
+    pub fn step_policy_offset(&mut self, secs: i64) {
         self.policy_offset_secs = self.policy_offset_secs.saturating_add(secs);
+        self.record_op(DeviceOp::StepPolicyOffset { secs });
+    }
+
+    /// Records that this device took `op`. Called only once the op has
+    /// succeeded.
+    pub(crate) fn record_op(&mut self, op: DeviceOp) {
+        self.applied_ops.push(op.label());
+    }
+
+    /// Every operation this device took, as [`DeviceOp::label`]s, first taken
+    /// first.
+    #[must_use]
+    pub fn applied_ops(&self) -> &[&'static str] {
+        &self.applied_ops
     }
 
     /// Starts the engine over `specs`, subscribing to this device's inbox.
@@ -395,6 +415,7 @@ impl SimDevice {
             .await
             .map_err(|_| RigError::Core(Step::PauseEngine))?;
         self.offline = true;
+        self.record_op(DeviceOp::GoOffline);
         Ok(())
     }
 
@@ -410,6 +431,7 @@ impl SimDevice {
             .await
             .map_err(|_| RigError::Core(Step::ResumeEngine))?;
         self.offline = false;
+        self.record_op(DeviceOp::ComeOnline);
         Ok(())
     }
 
@@ -601,5 +623,21 @@ mod tests {
         assert_eq!(device.policy_offset_secs, 576);
         device.step_policy_offset(i64::MAX);
         assert_eq!(device.policy_offset_secs, i64::MAX);
+    }
+
+    #[test]
+    fn a_device_records_each_op_it_took_by_label_and_nothing_more() {
+        let mut device = device(0);
+        assert!(
+            device.applied_ops().is_empty(),
+            "a device that took nothing reaches no coverage triple"
+        );
+        device.step_policy_offset(288);
+        device.step_policy_offset(288);
+        assert_eq!(
+            device.applied_ops(),
+            ["step-policy-offset", "step-policy-offset"],
+            "every op taken, by its label alone: the seconds stepped are not kept"
+        );
     }
 }

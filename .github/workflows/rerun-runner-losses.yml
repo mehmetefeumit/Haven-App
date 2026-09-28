@@ -8,16 +8,22 @@
 # can disagree with itself, so nothing here restates one; not even the signature
 # string, which the script writes into the run summary itself.
 #
-# Scope is deliberately the CI orchestrator alone. Widening it to a nightly or
-# release workflow is a one-line addition to `workflows:` below and needs no
-# change to the classifier — but it should be a decision someone takes, not a
-# default that crept in.
+# Scope is the CI orchestrator and Soak Nightly, each a decision someone took,
+# never a default that crept in. Soak Nightly was owner decision OD-C1: a slot
+# the runner lost is re-run (a lost `prepare` re-runs the whole run, with the
+# same seeds, because they come from the run's created_at), and a slot the rig
+# itself failed never is. The classifier needed no change for it — it reads the
+# runner's line, never a job name — and the script's header records what a
+# re-run drags along (`file-issue` is the first dependent job in this repo).
+# `workflow_run` fires for a scheduled run like any other: it keys on the run
+# completing, not on how it started. Widening further is a one-line addition
+# below, and should be taken the same way.
 
 name: Re-run Runner Losses
 
 on:
   workflow_run:
-    workflows: [CI]
+    workflows: [CI, "Soak Nightly"]
     types: [completed]
 
 permissions: {}

@@ -73,7 +73,8 @@
 #      The ban is keyed on WHAT THE FILE IS — its extension — and on the
 #      soak root, for the reason recorded in check 3: a location-keyed ban on
 #      the MLS sidecar was defeated twice by callers moving the path. It covers
-#      five exposure shapes, in workflows and in tooling/e2e/ci runners alike:
+#      five exposure shapes, in workflows, in tooling/e2e/ci runners and in
+#      scripts/ci/file_soak_issue.sh alike:
 #      an upload-artifact `path:` (check 3); a reading command on the file —
 #      `cat`/`tee`/`head`/`tail`/`base64`/`less`/`more`/`awk`/`sed`/`jq`/`od`/
 #      `xxd`/`strings`/`cut`/`nl` — at a command position; a redirection that
@@ -84,6 +85,11 @@
 #      untouched: `seal --out`, `rm`, `shred` and `mkdir` are how the lane
 #      legitimately handles these files, and a guard that forbade them would
 #      forbid the cleanup too.
+#
+#      That last script composes a PUBLIC issue body from downloaded soak
+#      artifacts under `${RUNNER_TEMP}`, outside the soak root, which is legal;
+#      it lives in scripts/ci/, outside both directories above, so it is named
+#      here — the day it is repointed at the soak root, the ban reaches it.
 #
 #      What a per-line grep cannot see, stated so nobody reads more into a
 #      green run than it proves: an INDIRECT read — `f=…/x.needles.decl` on
@@ -129,7 +135,9 @@ readonly SUMMARIZE_SH='tooling/e2e/ci/summarize-wire-journal.sh'
 # Lane runners. Scanned beside the workflows because a `cat` in a runner reaches
 # the same job log an `echo` in a workflow step does.
 readonly E2E_CI_DIR='tooling/e2e/ci'
-readonly SELF_TEST_FIXTURES=78
+# Check 6's one scanned file outside both directories: it writes issue bodies.
+readonly FILE_SOAK_ISSUE='scripts/ci/file_soak_issue.sh'
+readonly SELF_TEST_FIXTURES=80
 
 # Trees that ship. `haven/integration_test` is deliberately absent: that is the
 # harness, and it is where the sentinel emitter belongs.
@@ -379,7 +387,8 @@ check_needle_files_are_not_exposed() {
   local -a scanned=()
   local dir="${root}/.github/workflows"
   [[ -d "${dir}" ]] || { fail ".github/workflows not found"; return 1; }
-  for file in "${dir}"/*.yml "${dir}"/*.yaml "${root}/${E2E_CI_DIR}"/*.sh; do
+  for file in "${dir}"/*.yml "${dir}"/*.yaml "${root}/${E2E_CI_DIR}"/*.sh \
+              "${root}/${FILE_SOAK_ISSUE}"; do
     [[ -f "${file}" ]] || continue
     scanned+=("${file}")
   done
@@ -1190,6 +1199,29 @@ YAML
   printf '#!/usr/bin/env bash\n# never cat /tmp/haven-soak/needles/*.needles.decl or pass --disclose-values\ntrue\n' \
     > "${commented_ban}/${E2E_CI_DIR}/run-single-avd-scenario.sh"
   _case "documenting the ban is allowed" 0 check_needle_files_are_not_exposed "${commented_ban}"
+
+  # The issue-filing script is in scope although it lives in scripts/ci/: as
+  # written it reads the downloaded artifacts under ${RUNNER_TEMP}, which is
+  # legal, and repointed at the soak root it composes a public body from a
+  # needle file — the gh-body shape this check exists for.
+  local issue_ok="${tmp}/issueok"; _mk "${issue_ok}"
+  mkdir -p "${issue_ok}/scripts/ci"
+  printf '#!/usr/bin/env bash
+jq -c .seed "${RUNNER_TEMP}/soak-artifacts/s1/verdict.log"
+gh issue create --title t --body-file "${RUNNER_TEMP}/soak-issue/k.body.log"
+' \
+    > "${issue_ok}/${FILE_SOAK_ISSUE}"
+  _case "the issue script reading the downloaded artifacts is allowed" 0 \
+    check_needle_files_are_not_exposed "${issue_ok}"
+
+  local issue_repointed="${tmp}/issuerepointed"; _mk "${issue_repointed}"
+  mkdir -p "${issue_repointed}/scripts/ci"
+  printf '#!/usr/bin/env bash
+gh issue create --title t --body-file /tmp/haven-soak/needles/run.needles.json
+' \
+    > "${issue_repointed}/${FILE_SOAK_ISSUE}"
+  _case "the issue script repointed at the soak root fails" 1 \
+    check_needle_files_are_not_exposed "${issue_repointed}"
 
   local disclose="${tmp}/disclose"; _mk "${disclose}"
   cat > "${disclose}/.github/workflows/e2e.yml" <<'YAML'

@@ -14,6 +14,7 @@
 use std::path::Path;
 
 use haven_soak::banner::Provenance;
+use haven_soak::coverage::COVERAGE_FILE;
 use haven_soak::driver::{self, RunPlan};
 use haven_soak::nemesis::types::{Fault, Op, Schedule, ScheduledOp};
 use haven_soak::profiles::{ProfileName, ProfileSpec, WorldShape};
@@ -144,6 +145,32 @@ async fn a_violated_invariant_leaves_its_marker_and_its_snapshot() {
             .all(|handle| handle.as_str().is_some_and(is_handle)),
         "every handle is one the rig minted"
     );
+
+    // Coverage is read from what the PLANE took: the swallowed ack fired at
+    // tick 1 and O1 graded it at the tick-2 probe. The teardown round grades
+    // O1, O2 and O6 at the schedule's last tick (the heal, tick 3) under its
+    // OWN literal: filed under the probe literal, it would make every night's
+    // knee the schedule's length. The heal is not a fault, so no triple names
+    // it. The whole array, so a stray or a missing triple fails as surely as a
+    // wrong first one.
+    let swallowed = Fault::SwallowOk.label();
+    assert!(
+        read_coverage(dir)["triples"]
+            == serde_json::json!([
+                {"scenario": "nemesis", "nemesis": swallowed, "invariant": "INV-O1", "first_tick": 2},
+                {"scenario": "settled", "nemesis": swallowed, "invariant": "INV-O1", "first_tick": 3},
+                {"scenario": "settled", "nemesis": swallowed, "invariant": "INV-O2", "first_tick": 3},
+                {"scenario": "settled", "nemesis": swallowed, "invariant": "INV-O6", "first_tick": 3},
+            ]),
+        "one probe triple at the probe that followed the fault, and the teardown round's three \
+         under their own literal"
+    );
+}
+
+/// The coverage record the run left, parsed.
+fn read_coverage(dir: &Path) -> serde_json::Value {
+    let text = std::fs::read_to_string(dir.join(COVERAGE_FILE)).expect("a run leaves coverage");
+    serde_json::from_str(&text).expect("the coverage record is JSON")
 }
 
 /// The verdict the run left, parsed.
@@ -190,4 +217,8 @@ async fn a_clean_run_leaves_neither_marker() {
             "a clean run has no violation to describe, and a half-filled one would be filed"
         );
     }
+    assert!(
+        read_coverage(dir)["triples"] == serde_json::json!([]),
+        "a world that took no fault reached no triple, and a clean run still says so"
+    );
 }

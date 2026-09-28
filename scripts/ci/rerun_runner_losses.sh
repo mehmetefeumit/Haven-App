@@ -64,8 +64,20 @@
 # (https://docs.github.com/en/rest/actions/workflow-runs). Dependents exist only
 # for a job something `needs:` — in ci.yml that is `rust`, `coverage` and
 # `guards`. Whatever needed them was skipped when they failed, so re-running
-# those too is the correct result rather than collateral. Every E2E lane, this
-# incident included, has no dependents at all.
+# those too is the correct result rather than collateral. No ci.yml E2E lane,
+# this incident included, has a dependent.
+#
+# Soak Nightly does, and both of its cases are intended. `file-issue` needs
+# `core`, and runs INSIDE the soak run while this workflow fires only once the
+# whole run has completed — so a slot the runner lost has already been filed
+# as `no-verdict` by the time its re-run exists, and attempt 2 re-runs the slot
+# AND `file-issue` (PLAN §8 OQ-I: such an issue may be stale on a re-run night).
+# A lost `prepare` re-runs the WHOLE run, since every slot and `file-issue`
+# need it; that is safe because `prepare` derives each slot's seed from the
+# run's `created_at`, which a re-run keeps, so attempt 2 repeats the same
+# experiment under the same run id. A soak slot's own red — any rc the rig
+# returns — ends `Process completed with exit code N` like every genuine
+# failure and is never re-run: a 135-minute schedule is never re-rolled.
 #
 # UNMEASURED, and left that way on purpose: what a SECOND `…/rerun` POST does
 # once an earlier one in the same pass has already opened attempt 2. Either it
@@ -320,7 +332,7 @@ main() {
 
 # Pinned by equality against the fixtures that actually ran, because a fixture
 # that stops running is the one way a deleted fixture reports success.
-readonly SELF_TEST_FIXTURES=39
+readonly SELF_TEST_FIXTURES=42
 
 # The shutdown line below is the ONLY re-typed copy of the signature in this
 # repository, and it is re-typed on purpose: these are the bytes CI run
@@ -748,6 +760,40 @@ JSON
   _drive 1 "${logs}" "STUB_JOBS_JSON=${tmp}/jobs-paged.json" || rc=$?
   _check "$([[ "${rc}" == 0 && "$(cat "${reruns}")" == '97275651481' ]] && echo 0 || echo 1)" \
          '(O7) a runner loss on the second page is still judged and re-run'
+
+  # (S1-S3) SOAK NIGHTLY, the second workflow this watches. Two matrix slots
+  #      that differ ONLY in their slot — same caller, same inner job id — one
+  #      whose runner was shut down mid-drive and one the rig itself failed
+  #      (rc 1, a finding). The verdict must come from the logs alone.
+  cat >"${tmp}/jobs-soak.json" <<'JSON'
+[{"total_count":6,"jobs":[
+  {"id":98100000001,"run_id":36300000000,"run_attempt":1,"workflow_name":"Soak Nightly","status":"completed","conclusion":"success","name":"Derive the slot seeds"},
+  {"id":98100000011,"run_id":36300000000,"run_attempt":1,"workflow_name":"Soak Nightly","status":"completed","conclusion":"success","name":"Soak Core (nightly, s1) / e2e_soak_core_nightly"},
+  {"id":98100000012,"run_id":36300000000,"run_attempt":1,"workflow_name":"Soak Nightly","status":"completed","conclusion":"failure","name":"Soak Core (nightly, s2) / e2e_soak_core_nightly"},
+  {"id":98100000013,"run_id":36300000000,"run_attempt":1,"workflow_name":"Soak Nightly","status":"completed","conclusion":"failure","name":"Soak Core (nightly, s3) / e2e_soak_core_nightly"},
+  {"id":98100000014,"run_id":36300000000,"run_attempt":1,"workflow_name":"Soak Nightly","status":"completed","conclusion":"success","name":"Soak Core (nightly, s4) / e2e_soak_core_nightly"},
+  {"id":98100000021,"run_id":36300000000,"run_attempt":1,"workflow_name":"Soak Nightly","status":"completed","conclusion":"success","name":"file-issue"}
+]}]
+JSON
+  local soaklogs="${tmp}/soaklogs"
+  mkdir -p "${soaklogs}"
+  printf '%s\n' \
+    '2026-10-03T00:58:11.1000000Z ##[group]Run bash tooling/e2e/ci/run-with-deadline.sh 90m "soak-core nightly" -- bash tooling/e2e/ci/run-soak-core.sh nightly' \
+    "2026-10-03T01:12:40.7050585Z ${RUNNER_SHUTDOWN_SIGNATURE}. This can happen when the runner service is stopped, or a manually started runner is canceled." \
+    '2026-10-03T01:12:42.8622575Z ##[error]The operation was canceled.' \
+    >"${soaklogs}/98100000012.log"
+  printf '%s\n' \
+    '2026-10-03T00:58:11.1000000Z ##[group]Run bash tooling/e2e/ci/run-with-deadline.sh 90m "soak-core nightly" -- bash tooling/e2e/ci/run-soak-core.sh nightly' \
+    '2026-10-03T02:21:07.2000000Z ##[error]Process completed with exit code 1.' \
+    >"${soaklogs}/98100000013.log"
+  rc=0
+  _drive 1 "${soaklogs}" "STUB_JOBS_JSON=${tmp}/jobs-soak.json" || rc=$?
+  _check "$([[ "${rc}" == 0 && "$(cat "${reruns}")" == '98100000012' ]] && echo 0 || echo 1)" \
+         '(S1) the soak slot whose runner was shut down is re-run, its name playing no part'
+  _check "$(! grep -qx '98100000013' "${reruns}" && echo 0 || echo 1)" \
+         '(S2) the soak slot the rig itself failed stays red — a soak is never re-rolled'
+  _check "$(grep -qF 'Soak Core (nightly, s3) / e2e_soak_core_nightly — no runner-shutdown line' "${sum}" && echo 0 || echo 1)" \
+         '(S3) the annotation names the soak slot it left alone'
 
   return "${fails}"
 }

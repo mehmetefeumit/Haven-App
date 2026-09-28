@@ -15,6 +15,9 @@ subject is `haven-core`.
 
 - The lane: `.github/workflows/soak-core.yml`, called from `ci.yml` stage 4
   with `profile: pr`, `needs: [rust]`.
+- The scheduler: `.github/workflows/soak-nightly.yml` (`Soak Nightly`), which
+  calls the same lane with `profile: nightly` on four matrix slots, 00:23 UTC
+  Monday to Saturday, each slot with its own seed from `scripts/ci/soak_seed.sh`.
 - The crate's own job: `rust-check.yml`'s `soak-tooling`.
 - The runner: `tooling/e2e/ci/run-soak-core.sh` (Linux only).
 - Locally: `scripts/run_soak_local.sh core [--profile P] [--count N] [--seed S]`.
@@ -51,7 +54,8 @@ Five more, specific to this tier and listed here so nobody has to infer them:
   therefore says nothing about KeyPackage *discovery*, and it does say that the
   rotation policy, the stable slot and the monotonic replacement stamp behave
   over a relay — but only where S12 RUNS, which is not the PR lane: it is a
-  nightly scenario and no scheduler dispatches one yet. `kp_rotation_e2e` still
+  nightly scenario, so a green PR lane says nothing about it and only a
+  scheduled night does. `kp_rotation_e2e` still
   owns the shipped tick that drives them. S12's second arm,
   `kp-expired-rejected`, reaches the cliff itself as BYTES: it mints an expired
   package in the device's own production shape (capabilities and extensions
@@ -138,32 +142,46 @@ cannot peel without the new epoch's exporter secret). **O4 is also in the
 registry**, and S04's `offline-past-retention` is the arm that produces the
 state it grades.
 
-## Which scenarios have no lane execution yet
+## Which scenarios have lane execution, and where
 
 Twenty-one scenarios exist: **S01, S02, S03, S04, S05, S06, S08, S09, S10, S11,
 S12, S13, S14, S16, S17, S18, S19, S20, S21, S22, S23**.
 
-* `pr` (the only profile CI dispatches) runs **S01's single-relay outage arm,
-  S06, S11 and S13**.
-* **S02, S03, S04, S05, S08, S09, S10, S12, S14, S16, S17, S18, S19, S20, S21,
-  S22 and S23 have NO lane execution yet.** The nightly and weekly scheduler workflows are still to come;
-  `soak-core.yml` carries their jobs so there is something to call, and nothing
-  calls them. Those seventeen run in `tests/oracles.rs` and under
-  `scripts/run_soak_local.sh core --profile nightly`.
+* `pr` (the profile `ci.yml` calls on every push) runs **S01's single-relay
+  outage arm, S06, S11 and S13**.
+* `nightly` runs every other nightly arm — **S02, S03, S04, S05, S08, S09, S10,
+  S12, S14, S16, S17, S18, S19, S20, S21 and S22** beside the PR set (S05's
+  three swept arms and S08's `unpacked-control` only) — and has LANE execution
+  in `soak-nightly.yml` alone: its schedule, four slots a night Monday to
+  Saturday, or a dispatch of it; never on a pull request.
+* `weekly`'s own arms have **NO lane execution** until Phase 4 adds
+  `soak-weekly.yml`; `soak-core.yml` carries the weekly job so there is
+  something to call, and nothing calls it. They are S03's
+  `lost-commit-unnamed` and S17's `full-intake` — outside the crate's own
+  sweep, because their bounds start at the 684-second silence window, so they
+  run under `scripts/run_soak_local.sh core --profile weekly` alone — and the
+  three EXPECTED-RED arms (S23 `chained-commit-backlog`, S08
+  `buried-past-the-cap`, S05 `kill-receive-auto-commit`), which
+  `tests/oracles.rs` asserts red on every commit (`cargo test`, the
+  `soak-tooling` job) and which have no scheduled execution at all until then.
+  They are kept out of the nightly on purpose ("When a night goes red").
 
 A green `soak-core-pr` therefore says nothing about a receiver partitioned
 behind a second publisher (S02), a commit a relay forgot before a paused member
 returned (S03), the member-absence spans and
-the retention window (S04), the publish→confirm window (S05), a commit buried
-on the live plane past a relay's replay cap (S08), the
+the retention window (S04), the publish→confirm window (S05), the live
+plane serving a commit under a page of forgeries (S08's control), the
 cursor-poisoning adversary and the two anchors (S09), the ten-circle roster
 under one outage (S10), the KeyPackage rotation slot (S12), a same-epoch commit
 race (S14), the three durable stores a flood can grow (S16), the CLOSED-prefix
 behaviour (S17), the three swallowed-OK Rule-13 arms (S18), duplicate/reorder
 delivery and the commit-gap fold (S19), the catch-up sweep under clamped,
 refused, cold and forged pages (S20), post-removal unreadability and the
-removal lag (S21), the oversized commit, Welcome and removal wedge (S22) or the
-chained-commit backlog C7 records (S23) beyond what a unit test proves.
+removal lag (S21) or the oversized commit, Welcome and removal wedge (S22)
+beyond what a unit test proves — those are the nightly's, and only a night's
+verdict speaks for them. The three expected-red defects — the chained-commit
+backlog (S23, C7), the burial past the replay cap (S08, C8) and the
+receive-plane kill (S05, C9) — are spoken for by `cargo test` alone.
 
 ### The first recorded expectation, and what makes it stale
 
@@ -356,7 +374,7 @@ shape (eight circles built by the arm): under 16 s including the world build.
 
 ### Expected red: S23, and the promotion rule
 
-One arm in the nightly is REQUIRED to be red. S23's `chained-commit-backlog`
+One arm is REQUIRED to be red. S23's `chained-commit-backlog`
 grades C7 (`docs/BACKGROUND_SHARING_FAILURE_ANALYSIS.md`): a member paused
 across TWO confirmed commits is served them newest-first on its resume — the
 page order is pinned by waiting the wall second out between the commits, read
@@ -369,7 +387,11 @@ recorded silences are decided and not built (OD-1), this is a PRODUCT DEFECT
 that nobody decided, so it is GRADED rather than recorded: the closing round —
 witness leading, so the victim's first probe is a receive — reports
 `epoch-diverged` (O2) and `probe-not-delivered` towards the victim (O1) at
-**rc 1**, and the nightly carries that red until the fix lands.
+**rc 1**. The arm has **no scheduled execution** until Phase 4's weekly: it is
+asserted red on every commit in `cargo test`, and it is NOT in the nightly,
+because `verdict.log` keeps a run's first violation only and a required red
+early in the walk would hide every later finding ("When a night goes red").
+It returns to the nightly in the change that fixes C7.
 
 What the arm ALSO measured, 2026-09-25: the stranded device's OWN next seal
 (`encrypt_location`, nothing published) drains the retained commit — the send
@@ -422,7 +444,9 @@ this is the product's or the rig's is OPEN** (C9 in
 reproduction and every hypothesis ruled out are in the 2c S05 implementation
 notes of the Phase-2 plan). The promotion rule is S23's: its own test asserts rc
 1 with O2's `removal-owed` for the killed device, and the day it grades rc 0 it
-is promoted to `SWEPT` in the same change. Its mis-configuration control
+is promoted to `SWEPT` in the same change. Like S23's, the arm is asserted in
+`cargo test` only and has no scheduled execution until Phase 4's weekly; it
+is not in the nightly, and returns there when C9 is resolved. Its mis-configuration control
 swallows nothing, so the eviction is acknowledged before the kill and nothing is
 left to orphan: rc 3.
 
@@ -480,14 +504,18 @@ that sweep with two pages of forgeries, no commit and no truncation reported,
 which is the sweep's one-second pile-up residual reaching further than
 `catchup.rs` says, and why the seed is spread. Its mis-configuration control
 runs the arm over a seed BELOW the cap: the commit is on the page, the victim
-converges, and the capped-page canary goes unmet — rc 3.
+converges, and the capped-page canary goes unmet — rc 3. As for S23 and S05's
+kill, the burial is asserted in `cargo test` only, has no scheduled execution
+until Phase 4's weekly, and returns to the nightly when C8 is fixed.
 
 `unpacked-control` is the same world with sixteen forgeries: the commit is
 served on every plane, the victim applies it live, its cursor moves past it,
-and `relay_health()` reports every expected REQ live. It is swept, and runs in
-`weekly` only, for the nightly's budget: the burial alone brings the priced
-nightly to 4 798.75 s of 4 800, both would be 4 895.50 (`tests/budget.rs` is
-the gate). Measured 2026-09-27 in `cargo test`: about 78 s of wall for the
+and `relay_health()` reports every expected REQ live. It is swept, and it runs
+in the NIGHTLY as the burial arm's control — the same world and every step but
+the cap, so a night that holds it says the live plane serves a commit under
+forgeries at all, which is the premise the burial's red rests on. With the
+three expected-red arms out, the priced nightly plus its margin is
+4 670.25 s of 4 800 (`tests/budget.rs` is the gate). Measured 2026-09-27 in `cargo test`: about 78 s of wall for the
 burial and 71 s for the control, each against a 96.75 s bound — the 61 s
 lookback is most of both, and the burial's failing O1 probe pays its whole
 round-trip bound.
@@ -949,7 +977,9 @@ haven-soak profile=pr seed=0x…  commit=<short sha, <=12 hex> rustc=<version> s
 scheduler seed is public repository metadata, and the `pr` seed is the
 `DEFAULT_SEED` constant in `tooling/soak/src/main.rs`: the PR lane passes no
 `--seed` and no profile TOML carries a seed at all, so a PR run is reproducible
-from the repository alone. Neither identifies a user, a circle or a device: they
+from the repository alone. A scheduled slot's seed is
+`scripts/ci/soak_seed.sh --seed nightly <run date> <slot>`, every input of which
+is public run metadata. Neither identifies a user, a circle or a device: they
 identify a SHAPE, and that shape is in the repo.
 
 **Why both are truncated.** The banner is scanned as a `soak` sink like every
@@ -1024,7 +1054,8 @@ than resolved silently (owner decision Q4).
 | `scripts/ci/check_soak_test_only.sh` | The rig stays out of the app and out of every build path; `test-utils` stays a DEV edge of `rust_builder` and is in no `[features]` alias of any manifest, `default` included (that one word would open the probe seams on every DEBUG build, where the `compile_error!` never fires); no shipped manifest sets `debug-assertions = true` under any `[profile.*]` (that one line disarms haven-core's `compile_error!`); no `{:?}` of a foreign type in the rig; the timeline field-class test exists and pins its count |
 | `scripts/ci/check_soak_clock_partition.sh` | The two clocks do not convert, and neither reaches the other's seams. Its seam vocabulary is derived from `haven-core`, so a rename is BROKEN rather than clean |
 | `scripts/ci/check_no_kp_lifetime_override.sh` | No shipped Rust path (`haven-core/src`, `haven/rust_builder/src`, comments included) names `key_package_lifetime`: S12's `kp-expired-rejected` sets the lifetime on purpose, and the same call in the product could lengthen `not_after` past the rotation (OD-8) |
-| `scripts/ci/check_soak_lane_reachable.sh` | Something RUNS the rig: `ci.yml` calls the `pr` profile on `needs: [rust]`, the job names are inside the pattern `e2e-flakiness.yml` counts, `rust-check.yml` self-tests the shipped binary, every job drives through the gated runner under an inner deadline and uploads only after it, every job also scans in a step of its own whose condition the drive's outcome cannot switch off (L7), the profiles nest, and the TOML's deadline equals the workflow's literal |
+| `scripts/ci/check_soak_lane_reachable.sh` | Something RUNS the rig: `ci.yml` calls the `pr` profile on `needs: [rust]`, the job names are inside the pattern `e2e-flakiness.yml` counts and a scheduler's matrix caller carries its slot in its name, `rust-check.yml` self-tests the shipped binary, every job in every `soak-*.yml` (the count pinned) drives through the gated runner under an inner deadline and uploads only after it — in a scheduler the skip is structural (the job that `uses:` the reusable, and `prepare`/`file-issue` by id with their reasons), so a job running `run_soak_local.sh` or the bare rig is read and fails — every such job also scans in a step of its own whose condition the drive's outcome cannot switch off (L7), the profiles nest over (scenario, arm) pairs, the TOML's deadline equals the workflow's literal, and `soak-nightly.yml` calls the nightly with per-slot seeds, off every other cron, non-cancelling, each checkout granted, one artifact name per slot (L8) |
+| `scripts/ci/soak_seed.sh` (`--self-test`) | The one seed definition the scheduler and the monitor share: `0x` + 16 hex of `sha256("<profile>\|<date>\|<slot>")`, the date the RUN's `created_at`; a known vector from an independent hash, every refusal printing no seed, and a recording `gh` that reds if `/attempts/<n>` is ever read |
 | `check_e2e_step_timeout_ordering.sh` + `check_e2e_lane_budget.sh` | Extended with `is_soak_body()` (excluding `--self-test`). Before it, a plain `ubuntu-latest` `run:` step got C3 alone: the lane could have driven the rig with no inner deadline at all and both guards would have reported it compliant |
 | `check_no_identifier_logging.sh`, `check_no_key_logging.sh` | `tooling/soak` as its own root with its own floor in each |
 | `check_logscan_policy.sh` | `DECLARED_PLANTS_OFF['soak']` — the rig has no Dart channel, so a declared Dart plant would be a control nothing could satisfy; its `rust` shape plant is what proves the sink was reached |
@@ -1055,6 +1086,93 @@ than resolved silently (owner decision Q4).
 
 ---
 
+## When a night goes red
+
+A night is the four slots of one scheduled `Soak Nightly` run. Each slot's
+`verdict.log` (and banner) carries the RIG's rc. The lane's own scans are
+folded with it by the runner (**1 > 2 > 3 > 4 > 0**) into the slot JOB's
+result, not into the file: a slot can therefore be red with a `verdict.log`
+that says rc 0, and `file-issue` reads the slot jobs' conclusions to catch
+exactly that (`lane-red`, below). The artifact is
+`soak-core-nightly-<slot>-<run id>`, kept 14 days.
+
+| rc | What it means for a night | What to do |
+|---|---|---|
+| 1 | A **violation** (`VIOLATION.marker`: an invariant broke; the first-violation snapshot is uploaded) or a **leak** (`LEAK.marker`: a capture carried a declared identifier; the tree was emptied and only the fact of containment is published) | A violation is a finding about `haven-core`: reproduce it from the seed. A leak is a Rule-15 breach in the product or the rig, and outranks everything else in the night |
+| 2 | **The rig is broken**, not the subject | A rig bug. Fix the rig; a night with an rc 2 slot proves nothing about the product |
+| 3 | **The night proves nothing**: a scheduled fault never fired, an expectation floor was unmet, or a recorded expectation (S03, S14, S22) went stale | Read the banner and the schedule, not the app. A stale recorded expectation is replaced by a graded one in the same commit (see "The first recorded expectation") |
+| 4 | **Proves too little**: an intact run with an ungraded verdict — typically reaped before its first world was built | Treat as infrastructure until shown otherwise |
+| — | **No verdict**: the slot uploaded nothing (the build failed, so the drive never started) or its artifact is empty | Read the job log; a runner loss is re-run once by `rerun-runner-losses.yml` |
+| — | **Lane red** (`lane-red`): the rig said rc 0 but the slot's job is red — the lane's own scan (a leak is rc 1, an unusable or ungraded capture 3 or 4) or a step after the drive reddened it | Read that slot's scan step and job log; the verdict has nothing to say about it |
+
+**The issue that is filed.** After the four slots finish, `file-issue`
+(`scripts/ci/file_soak_issue.sh`) files ONE issue per distinct key — the
+invariant id for a violation, else its finding class, else
+`violation-or-leak`, `leak-contained`, `rig-broken`, `no-faults-fired`,
+`ungraded`, `no-verdict` or `lane-red` — titled `soak(nightly): <key>` and
+labelled `soak` and `soak:core`, never assigned. Four slots red on one
+invariant are one issue with four slot blocks; a later night red on the same
+key comments on the open issue rather than opening another. The body is the
+nineteen allowlisted keys and nothing else (profile, slot, run URL and
+attempt, commit, toolchain, seed, schedule tag, rc, scenario, arm, invariant,
+tick, the bound and the observed seconds, the rig's own handles, its finding
+class, the repro command and the artifact name) — no log line, no path, no
+host, no name; a synthetic key carries only the profile, slot, run URL,
+attempt and artifact. Only a SCHEDULED run files; a `workflow_dispatch` repro
+runs the same script with nothing sent. A runner-loss re-run re-runs
+`file-issue` too: a slot re-run GREEN is no longer red, so attempt 2 files
+nothing for it and the `no-verdict` issue attempt 1 filed stays uncommented
+and stale until a person closes it; attempt 2 re-comments on every key still
+red.
+
+**Reproducing it.** The seed is in the issue body and on the slot's banner:
+
+```
+scripts/run_soak_local.sh core --profile nightly --seed <s> --count 3
+```
+
+3/3 red is a defect; anything less is a race in the rig, which is a rig bug
+("Reproducing a failure", below). To re-run the whole night on demand, dispatch
+`Soak Nightly` with that `seed` (every slot then runs it, and no API call or
+date is involved) and `slots` 1–4.
+
+**The promotion rule.** An arm moves between tiers only in a commit that cites
+at least fourteen consecutive green nights — consecutive SCHEDULED nights,
+since there is no Sunday run, and green meaning ALL FOUR slots green, read from
+the four `core` jobs rather than from the run's conclusion — with zero rc 3 for
+that scenario (an rc 3 reds its slot, so a green night already has none).
+PR-gated ⊆ nightly-gated stays enforced by L5; nothing from Phase 2 moves to
+the PR lane before then.
+
+**The expected-red arms are not in the nightly.** Three arms are REQUIRED to
+be red until their product fixes land — S23 `chained-commit-backlog` (C7), S08
+`buried-past-the-cap` (C8) and S05 `kill-receive-auto-commit` (C9, attribution
+open) — and `verdict.log` records a run's FIRST violation only. In the nightly,
+one of them early in the walk would be the violation every night reported:
+every later defect would be masked from the issue path and the monitor, no
+night could be all-slot green, and the fourteen-night count could never start.
+So they run in `weekly` (no scheduled execution until Phase 4) and are
+asserted red on every commit by `tests/oracles.rs` `EXPECTED_RED` in
+`cargo test` (the `soak-tooling` job). A red night is therefore a finding.
+Each arm's own test fails its first assertion the day it grades rc 0, which is
+the commit that promotes it to `SWEPT`, removes it from `EXPECTED_RED` and
+returns it to the nightly.
+
+**Owner items for the commit that closes the fourteen-night gate** (none is
+done yet, because each needs measured runs):
+
+* the C6 `# job-uncapped-minutes: <m> (<N> runs, worst <run id>)` declaration
+  for the three `soak-core.yml` jobs, citing real slot runs;
+* `is_soak_body` OR-ed into `check_e2e_step_timeout_ordering.sh`'s C6 branch,
+  so C6 covers the soak jobs as C1–C5 already do;
+* any job-cap change that measurement forces;
+* the measured per-slot minutes written here in place of the plan's
+  ≈ 22-minute estimate — and the night-one checkpoint: a warm slot measuring
+  over 40 minutes cuts a scheduled night to two slots, the one line
+  `DEFAULT_SLOTS` in `scripts/ci/soak_seed.sh`.
+
+---
+
 ## Reproducing a failure
 
 ```
@@ -1069,3 +1187,73 @@ be flaky, so the fix is the race, never a retry or a loosened bound
 `--stop-at-step <n>` takes the same first-violation snapshot a real violation
 would, with rc 0, which is how you walk a schedule up to the tick before the
 break.
+
+---
+
+## The monitor
+
+The weekly flakiness report (`e2e-flakiness.yml`, Mondays) carries a **Soak
+Nightly** section written by `scripts/ci/soak_monitor_section.sh`. It reads the
+scheduled `Soak Nightly` runs of the last 30 days (a `workflow_dispatch` repro
+is not a night) and prints one row per slot, grouped by the full job name
+`Soak Core (nightly, <slot>) / e2e_soak_core_nightly`: decided nights, red
+nights, the slot's streak, the seed of the latest night and of the last red
+one — each DERIVED with `soak_seed.sh --seed nightly <run date> <slot>` from the
+run's `created_at`, so it names exactly the seed the slot ran — and the median
+minutes; then one row per night with each slot's outcome and EVERY issue that
+names its run — in the body that created it, or in a comment, because a key
+already open is commented on rather than filed again (an issue at gh's
+100-comment page is refused, exit 2, since a night past it could not be
+linked). The line **`consecutive all-slot-green nights: N`** is the promotion
+rule's count: read from the slot jobs, never from the run, and ended by any
+slot that is red, cancelled, skipped or absent. The nightly is not in the
+report's fail-rate table — that table reads `ci.yml`, `e2e-nightly.yml` and the
+stress loop, and a red night is a finding, not a wobble — and the section
+prints no rate. The PR-profile soak lane IS in the table, like any lane: it
+runs one fixed seed, so a red on main that comes and goes is rig
+non-determinism, which the 1 % target exists to catch. It also states when the **30-night cost review** is due
+— once thirty scheduled nights have completed, about the fifth Monday — and
+prints what that review reads: the per-slot median minutes and the coverage
+knee (the lower median, over each slot-night of the last 14 days — the artifact
+retention — of the first probe after the last new fault label: the largest
+`first_tick` among its `coverage.log`'s probe-round triples; neither the
+teardown round's `settled` triples, graded at the schedule's last tick every
+night, nor an arm's, which carry that arm's own world's tick, are read). The
+review is one commit changing `duration_secs` or the slot count
+and citing both. If the section's API reads fail (exit 3) or it refuses an input
+(exit 2) it writes nothing, the report's summary gets one fixed line saying
+which, and the step fails with that code, so a missing section never reads as
+a quiet week; before the first scheduled night it says "No nights yet" and
+stays green. The slots a night is expected to hold come from
+`soak_seed.sh --default-slots`, the list `--prepare` derives for a schedule.
+
+## coverage.log
+
+Written beside `verdict.log` at the end of every run (`tooling/soak/src/coverage.rs`),
+one JSON object on one line and nothing else:
+`{"triples":[{"scenario","nemesis","invariant","first_tick"}],"profile","seed"}`.
+A triple is an invariant GRADED under a fault the world had really taken:
+`scenario` is a registry id, or one of the background phase's two literals —
+`nemesis` for a probe round the schedule asked for, `settled` for the teardown
+round graded after its last tick; `nemesis` is a `Fault::label` read from the
+relay planes' own ledgers or a `DeviceOp::label` (`restart-soft`,
+`restart-hard`, `go-offline`, `come-online`, `step-policy-offset`) a device
+recorded taking — what was recorded taken, never what the schedule or an arm
+said it would apply, so a device-only arm (S06, S11) has triples too;
+`invariant` is the `INV-` id `verdict.log` spells, and `first_tick` the grading
+world's tick when that triple first appeared — a count from the world's
+origin, never an instant. A world that took no fault reaches no triple, so a
+clean empty schedule writes `"triples":[]`, and S13 — whose fault is a lost
+store, not a device operation or a relay fault — writes none. An arm's world
+is not ticked by the schedule, so its triples carry that world's own tick.
+**The knee is the first probe after the last new fault label**: the largest
+`first_tick` among the `nemesis` triples. The teardown round has its own
+literal because it is graded at the schedule's last tick every night; under
+`nemesis` the knee would be the schedule's length, a constant. The key sets
+are pinned by equality and every value is checked against its closed
+vocabulary in `tooling/soak/tests/coverage_fields.rs` (a wildcard-free match
+over `Fault` and over `DeviceOp`), and `tests/run_markers.rs` drives a real run
+and pins its WHOLE triple array. It is a
+`.log` in the upload tree, so the lane's two scans read it as a `soak` sink like
+every other file there. It renders no count of circles, members, relays or
+events and no instant.

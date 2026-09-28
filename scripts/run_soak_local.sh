@@ -8,10 +8,11 @@
 # and the harness is not allowed to have any (CLAUDE.md, test reliability).
 #
 # Subcommands:
-#   core        Run one soak profile. The only subcommand this phase has; the
-#               nightly/weekly SCHEDULERS are Phase 2, but their profiles run
-#               here today, which is the only way S17/S18/S19 execute at all
-#               outside `cargo test` (docs/SOAK_LANE.md says so).
+#   core        Run one soak profile. The only subcommand this phase has. The
+#               nightly runs in CI only on soak-nightly.yml's schedule and the
+#               weekly not at all until Phase 4, so this is how either runs on
+#               demand, and how a night's red is reproduced from its seed
+#               (docs/SOAK_LANE.md, "When a night goes red").
 #
 # Options:
 #   --profile <pr|nightly|weekly>   default: pr

@@ -3,9 +3,10 @@
 # Superset of `nightly`. Two of the arms that appear only here — S17's full
 # intake and S03's unnamed strand — each wait out the 684-second
 # delivery-silence window as an absence, and an absence cannot share a run
-# with anything shorter. The third, S08's `unpacked-control`, is here for the
-# nightly's budget alone: `tests/budget.rs` has no room for it beside its
-# expected-red sibling there.
+# with anything shorter. The other three — S23 `chained-commit-backlog`, S08
+# `buried-past-the-cap` and S05 `kill-receive-auto-commit` — are the
+# expected-red arms (C7, C8, C9), kept out of the nightly because
+# `verdict.log` records a run's first violation only (nightly.toml says why).
 name = "weekly"
 run_budget_secs = 16200
 deadline_secs = 18000

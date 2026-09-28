@@ -21,6 +21,7 @@
 
 pub mod banner;
 pub mod clock;
+pub mod coverage;
 pub mod driver;
 pub mod logsink;
 pub mod nemesis;

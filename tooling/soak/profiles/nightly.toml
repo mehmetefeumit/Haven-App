@@ -3,9 +3,20 @@
 # Superset of `pr` — every PR arm runs here too, so a nightly red is never
 # something the PR lane silently stopped covering. The scenarios that appear
 # only here (S02, S03, S04, S05, S08, S09, S10, S12, S14, S16, S17, S18, S19,
-# S20, S21, S22, S23) have NO scheduled lane execution yet: the scheduler workflow lands
-# with the rest of Phase 2, and until then they run under `run_soak_local.sh`
-# and in the crate's own oracle tests.
+# S20, S21, S22) have lane execution only in `soak-nightly.yml` — its schedule
+# (four slots, Monday to Saturday) or a dispatch of it — never on a pull
+# request.
+#
+# # The expected-red arms are NOT here
+#
+# S23 `chained-commit-backlog` (C7), S08 `buried-past-the-cap` (C8) and S05
+# `kill-receive-auto-commit` (C9) are required to be red, and `verdict.log`
+# records a run's FIRST violation only: an expected-red arm early in the walk
+# would mask every later defect from the issue path and the monitor, and no
+# night could ever be all-slot green, so the fourteen-night gate could never
+# start. They stay asserted red on every commit by `tests/oracles.rs`
+# `EXPECTED_RED` (`cargo test`, the `soak-tooling` job) and run in `weekly`;
+# each returns here in the same change that fixes its defect.
 #
 # `run_budget_secs` is the work: the ARMS and the background nemesis phase the
 # driver walks before them, both priced at the product's own worst-case
@@ -15,9 +26,8 @@
 # the arm set moves or a product constant does; the slack it leaves is what an
 # added arm spends, and a plain arm (undisturbed recovery, two probe rounds, a
 # resubscribe) costs 48.75 s of it. Raise the budget rather than loosen a bound.
-# That slack is now 1.25 s: S08's `buried-past-the-cap` (96.75 s, its lookback
-# included) brings the priced run to 4 798.75 s, so its `unpacked-control`
-# sibling runs weekly only — both would be 4 895.50 s.
+# With the three expected-red arms out and S08's `unpacked-control` back, the
+# priced run plus the margin is 4 670.25 s of 4 800: 129.75 s of slack.
 #
 # `deadline_secs` is the timeout the lane arms above it: the budget plus twice
 # the margin, as every profile here does. `check_soak_lane_reachable.sh` L6 ties
@@ -54,8 +64,8 @@ arms = ["offline-quiet", "offline-across-commits", "offline-past-retention",
 
 [[scenarios]]
 id = "S05"
-arms = ["confirm-err-is-not-a-failure", "kill-send-plane", "kill-receive-auto-commit",
-        "negative-gates-silent"]  # kill-receive-auto-commit EXPECTED RED (C9, attribution OPEN)
+arms = ["confirm-err-is-not-a-failure", "kill-send-plane", "negative-gates-silent"]
+# kill-receive-auto-commit is weekly: expected red (C9), see the header
 
 [[scenarios]]
 id = "S06"
@@ -63,7 +73,7 @@ arms = ["stuck-row-sweep"]
 
 [[scenarios]]
 id = "S08"
-arms = ["buried-past-the-cap"]  # EXPECTED RED (C8); unpacked-control is weekly (budget, above)
+arms = ["unpacked-control"]  # the burial arm's control; buried-past-the-cap is weekly (C8, header)
 
 [[scenarios]]
 id = "S09"
@@ -107,9 +117,7 @@ arms = ["oversized-commit", "refusal-is-relay-count-invariant", "oversized-welco
 id = "S10"
 arms = ["ten-circle-roster"]
 
-[[scenarios]]
-id = "S23"
-arms = ["chained-commit-backlog"]  # EXPECTED RED (C7) until the deferred-peel sweep lands
+# S23's one arm, `chained-commit-backlog`, is weekly: expected red (C7), see the header.
 
 [[scenarios]]
 id = "S16"

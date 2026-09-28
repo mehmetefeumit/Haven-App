@@ -175,7 +175,7 @@ impl Violation {
         Self {
             scenario,
             arm,
-            invariant: invariant.map(|invariant| format!("{INVARIANT_PREFIX}{}", invariant.id())),
+            invariant: invariant.map(namespaced),
             tick,
             bound_secs,
             observed_secs,
@@ -249,6 +249,12 @@ impl RunVerdict {
         std::fs::write(&path, format!("{body}\n")).map_err(|_| VerdictError::Unwritable)?;
         Ok(path)
     }
+}
+
+/// `invariant`'s id as every machine-readable file spells it: `INV-O1`.
+#[must_use]
+pub(crate) fn namespaced(invariant: Invariant) -> String {
+    format!("{INVARIANT_PREFIX}{}", invariant.id())
 }
 
 /// Whether `text` is one of the rig's own handles.
