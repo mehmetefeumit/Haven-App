@@ -147,7 +147,13 @@ jobs:
   #
   # A slot is red by its JOB, not only by its verdict: the lane folds its own
   # scan into the job's result, so a rig rc 0 under a scan that reddened the
-  # slot is filed as `lane-red` from the job conclusions read here.
+  # slot is filed as `lane-red` from the run's job listing, which the script
+  # parses itself (`--jobs-json`).
+  #
+  # No step here transforms data inline: every listing is saved raw and read by
+  # the script, whose --self-test holds a fixture for each shape it accepts or
+  # refuses. Inline jq with no fixture of its own is how run 36375782567's
+  # compose step died on a program that does not compile.
   #
   # A runner-loss re-run of a slot (rerun-runner-losses.yml) re-runs this job
   # too, since it depends on `core`; attempt 1 may already have filed that slot
@@ -193,8 +199,8 @@ jobs:
       # into the path), which would file every slot of a one-upload night as
       # `no-verdict`. gh exits 1 when nothing matched — the commonest cause is
       # a night whose every build failed — and that is an empty tree only once
-      # the run's own artifact listing agrees; any other failure is a refusal
-      # to file from a partial tree.
+      # the run's own artifact listing agrees (`--assert-no-artifacts`); any
+      # other failure is a refusal to file from a partial tree.
       - name: Download the night's soak verdicts
         id: download
         timeout-minutes: 5
@@ -209,38 +215,30 @@ jobs:
                -D "${dest}" > "${RUNNER_TEMP}/soak-download.log" 2>&1; then
             exit 0
           fi
-          matched="$(gh api "repos/${GH_REPO}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100" \
-            --jq "if .total_count >= 100 then error(\"page\") else [.artifacts[]
-                  | select(.expired == false and (.name | test(\"^soak-core-nightly-.*-${GITHUB_RUN_ID}\$\")))]
-                  | length end")"
-          if [[ "${matched}" != 0 ]]; then
-            echo 'The download failed although slot artifacts exist; nothing is filed from a partial tree.' >&2
-            exit 1
-          fi
-          echo 'No slot uploaded an artifact: every slot is filed as no-verdict.'
+          gh api "repos/${GH_REPO}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100" \
+            > "${RUNNER_TEMP}/soak-artifact-list.json"
+          bash scripts/ci/file_soak_issue.sh \
+            --assert-no-artifacts "${RUNNER_TEMP}/soak-artifact-list.json" --profile nightly
 
       # Gated on the download: a tree it could not vouch for is never composed.
-      # The slot jobs' conclusions come from the run's latest attempt; a slot
-      # whose job is absent or anything but `success` is red.
+      # The job listing is the run's latest attempt, saved raw; the script reads
+      # a slot whose job is absent or anything but `success` as red, and refuses
+      # a listing that fills its page. The slot list reaches it through an
+      # expression join, never a shell parse: each slot is validated there.
       - name: Compose, scan and file
         if: ${{ !cancelled() && steps.download.outcome == 'success' }}
         timeout-minutes: 10
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          SOAK_SLOT_LIST: ${{ needs.prepare.outputs.slot_list }}
+          SOAK_SLOTS: ${{ join(fromJSON(needs.prepare.outputs.slot_list), ' ') }}
           SOAK_FILE: ${{ github.event_name == 'schedule' && '--file' || '' }}
         run: |
           set -euo pipefail
-          mapfile -t slots < <(jq -r '.[]' <<<"${SOAK_SLOT_LIST}")
           gh api "repos/${GH_REPO}/actions/runs/${GITHUB_RUN_ID}/jobs?filter=latest&per_page=100" \
             > "${RUNNER_TEMP}/soak-jobs.json"
-          red="$(jq -r --argjson slots "${SOAK_SLOT_LIST}" '
-            if .total_count >= 100 then error("page") else .jobs end as $jobs
-            | [$slots[] as $s
-               | select(([$jobs[] | select(.name == "Soak Core (nightly, \($s)) / e2e_soak_core_nightly")
-                          | .conclusion] | first) != "success") | $s]
-            | join(",")' "${RUNNER_TEMP}/soak-jobs.json")"
+          # shellcheck disable=SC2086 # SOAK_SLOTS and SOAK_FILE split into their words by design.
           bash scripts/ci/file_soak_issue.sh --profile nightly \
             --tree "${RUNNER_TEMP}/soak-artifacts" --out "${RUNNER_TEMP}/soak-issue" \
-            --slots "${slots[@]}" --red-slots "${red}" ${SOAK_FILE} > "${RUNNER_TEMP}/file-soak-issue.log"
+            --slots ${SOAK_SLOTS} --jobs-json "${RUNNER_TEMP}/soak-jobs.json" ${SOAK_FILE} \
+            > "${RUNNER_TEMP}/file-soak-issue.log"

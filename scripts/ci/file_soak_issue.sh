@@ -20,6 +20,15 @@
 # the reader names its members. Nothing else in the tree is opened: not the
 # timeline, not the banner, not a snapshot, not the containment note.
 #
+# And the run's job listing, `--jobs-json`: the raw response of
+# `GET /repos/<r>/actions/runs/<id>/jobs?filter=latest&per_page=100`, saved by
+# the caller and parsed HERE, because a slot is red by its JOB as well as by its
+# verdict. A slot whose job `Soak Core (<profile>, <slot>) /
+# e2e_soak_core_<profile>` is absent, or did not conclude `success`, is red. A
+# listing that fills its page is refused (exit 2): the slot's job may be on the
+# next page, and reading it as absent would file a green slot. Only a job's
+# `name` and `conclusion` are read.
+#
 # ## The allowlist is the control; the scan is a BACKSTOP
 #
 # Two key sets, named separately (PLAN_PHASE2 decision 0.42): VERDICT_KEYS is
@@ -56,7 +65,7 @@
 # (rc 2), `no-faults-fired` (rc 3), `ungraded` (rc 4), `leak-contained` (the
 # runner contained the tree), `no-verdict` (no directory, or no `verdict.log`
 # in it), `lane-red` (the rig's verdict is rc 0 but the slot's JOB is red —
-# `--red-slots` — because the lane's own scan or a later step reddened it; the
+# `--jobs-json` — because the lane's own scan or a later step reddened it; the
 # verdict is the rig's rc, never the lane's). Every key is either an
 # allowlisted field or a literal of this file.
 # The title is `soak(<profile>): <key>`: the seed is NOT in it — it rotates
@@ -72,12 +81,21 @@
 # (PLAN_PHASE2 OQ-N). The two labels must exist in the repository: `gh` refuses
 # to create an issue carrying a label it cannot resolve.
 #
+# ## `--assert-no-artifacts`: may a failed download be read as an empty tree?
+#
+# `gh run download` exits 1 when no artifact matched — the commonest cause is a
+# night whose every build failed — and also when a download broke. The caller
+# hands the run's artifact listing (`GET .../runs/<id>/artifacts?per_page=100`)
+# to this mode, which answers 0 only when no unexpired
+# `soak-core-<profile>-*-<run_id>` artifact exists; a match, a full page or a
+# malformed listing is exit 2, and nothing is composed from a partial tree. It
+# lives here rather than in a script of its own because the artifact name it
+# matches is compose_slot's, and one self-test keeps the two from drifting.
+#
 # Usage:
 #   file_soak_issue.sh --profile <pr|nightly|weekly> --tree <dir> --out <dir> \
-#                      --slots <s1> [<s2> ...] [--red-slots <s1,s3>] [--file]
-#
-#   --red-slots is the comma-joined slots whose JOB did not conclude success
-#   (empty = none), read by the caller from the run's job list.
+#                      --slots <s1> [<s2> ...] --jobs-json <file> [--file]
+#   file_soak_issue.sh --assert-no-artifacts <listing.json> --profile <pr|nightly|weekly>
 #   file_soak_issue.sh --self-test
 #
 #   GITHUB_SERVER_URL, GITHUB_REPOSITORY, GITHUB_RUN_ID, GITHUB_RUN_ATTEMPT —
@@ -86,8 +104,9 @@
 # Exit codes:
 #   0  nothing red, or every body composed (and, with --file, filed)
 #   2  REFUSED or broken: a value off its shape, an unknown verdict key, a
-#      flattened tree, the backstop scan not clean, a broken dedup, a `gh`
-#      failure, a usage error.
+#      flattened tree, a job or artifact listing that is malformed or fills its
+#      page, a slot artifact behind a failed download, the backstop scan not
+#      clean, a broken dedup, a `gh` failure, a usage error.
 #      Never 1: a filed issue is not a CI failure — the slot that failed has
 #      already reddened the run.
 
@@ -110,6 +129,8 @@ readonly BODY_FIELDS=(profile slot run_url run_attempt commit toolchain seed sch
   artifact)
 readonly LABELS=(soak soak:core)
 readonly LIST_LIMIT=100
+# The REST page the caller asks for (`per_page=100`, the API's maximum).
+readonly API_PAGE=100
 readonly VERDICT_LOG='verdict.log'
 # run-soak-core.sh's SOAK_CONTAINED_LOG: its PRESENCE is the fact; it is never read.
 readonly CONTAINED_LOG='soak-contained.log'
@@ -159,7 +180,7 @@ refuse() { # refuse <what>
 }
 
 usage() {
-  echo "usage: ${SCRIPT_NAME} --profile <pr|nightly|weekly> --tree <dir> --out <dir> --slots <s1> [<s2> ...] [--red-slots <s1,s3>] [--file] | --self-test" >&2
+  echo "usage: ${SCRIPT_NAME} --profile <pr|nightly|weekly> --tree <dir> --out <dir> --slots <s1> [<s2> ...] --jobs-json <file> [--file] | --assert-no-artifacts <listing.json> --profile <pr|nightly|weekly> | --self-test" >&2
   exit 2
 }
 
@@ -318,6 +339,44 @@ compose_slot() { # compose_slot <slot>
   add_block "${key}" "${lines[@]}"
 }
 
+# One REST listing page, validated before a member is read: exactly one JSON
+# object whose `total_count` is a count and whose <member> is a list of objects
+# each carrying the string <field>. Sets TOTAL. A page the listing fills is a
+# refusal: what it did not return may be exactly the entry being looked for.
+listing_page() { # listing_page <file> <member> <field> <what>
+  [[ -f "$1" ]] || refuse "$4 is not a file"
+  TOTAL="$(jq -s --arg m "$2" --arg f "$3" '
+      if length == 1 and (.[0] | type == "object" and (.total_count | type) == "number"
+          and (.[$m] | type) == "array" and all(.[$m][]; type == "object" and (.[$f] | type) == "string"))
+      then .[0].total_count else error end' "$1" 2>/dev/null)" \
+    && [[ "${TOTAL}" =~ ${RE_UINT} ]] || refuse "$4 is not one page of the API's listing"
+  (( TOTAL < API_PAGE )) || refuse "$4 filled its page of ${API_PAGE}, so what it did not return cannot be read as absent"
+}
+
+# RED from the run's job listing: a slot is red unless its job exists and every
+# row of it concluded success.
+read_red_slots() { # read_red_slots <jobs.json>
+  local slots_json red_out slot
+  listing_page "$1" jobs name "the --jobs-json job listing"
+  slots_json="$(printf '%s\n' "${SLOTS[@]}" | jq -R . | jq -sc .)"
+  red_out="$(jq -r --arg p "${PROFILE}" --argjson slots "${slots_json}" '
+      .jobs as $jobs | $slots[] | . as $s
+      | [$jobs[] | select(.name == "Soak Core (\($p), \($s)) / e2e_soak_core_\($p)")] as $m
+      | select(($m | length) == 0 or any($m[]; .conclusion != "success")) | $s' "$1")"
+  while IFS= read -r slot; do
+    [[ -z "${slot}" ]] || RED[${slot}]=1
+  done <<<"${red_out}"
+}
+
+assert_no_artifacts() { # assert_no_artifacts <listing.json>
+  local matched
+  listing_page "$1" artifacts name "the artifact listing"
+  matched="$(jq --arg re "^soak-core-${PROFILE}-.*-${RUN_ID}\$" \
+    '[.artifacts[] | select(.expired == false and (.name | test($re)))] | length' "$1")"
+  [[ "${matched}" == 0 ]] || refuse "the download failed although slot artifacts exist; nothing is composed from a partial tree"
+  say "no slot uploaded an artifact: every slot is filed as no-verdict"
+}
+
 # The composed files, and the backstop over exactly those bytes.
 write_and_scan() { # write_and_scan <key>
   local key="$1" title body scanned
@@ -365,7 +424,7 @@ file_all() {
 }
 
 main() {
-  local red_csv=''
+  local jobs_json=''
   [[ $# -gt 0 ]] || usage
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -373,7 +432,7 @@ main() {
       --tree) [[ $# -ge 2 ]] || usage; TREE="$2"; shift 2 ;;
       --out) [[ $# -ge 2 ]] || usage; OUT="$2"; shift 2 ;;
       --file) FILE_MODE=1; shift ;;
-      --red-slots) [[ $# -ge 2 ]] || usage; red_csv="$2"; shift 2 ;;
+      --jobs-json) [[ $# -ge 2 ]] || usage; jobs_json="$2"; shift 2 ;;
       --slots)
         shift
         while [[ $# -gt 0 && "$1" != --* ]]; do SLOTS+=("$1"); shift; done
@@ -382,7 +441,7 @@ main() {
     esac
   done
   [[ "${PROFILE}" =~ ${RE_PROFILE} ]] || refuse "--profile is not pr, nightly or weekly"
-  [[ -n "${TREE}" && -n "${OUT}" ]] || usage
+  [[ -n "${TREE}" && -n "${OUT}" && -n "${jobs_json}" ]] || usage
   (( ${#SLOTS[@]} >= 1 && ${#SLOTS[@]} <= 4 )) || refuse "--slots takes one to four slots"
   local slot seen=' '
   for slot in "${SLOTS[@]}"; do
@@ -390,15 +449,6 @@ main() {
     [[ "${seen}" != *" ${slot} "* ]] || refuse "--slots names a slot twice"
     seen+="${slot} "
   done
-  local -a red_list=()
-  [[ -z "${red_csv}" ]] || IFS=, read -r -a red_list <<<"${red_csv}"
-  for slot in "${red_list[@]+"${red_list[@]}"}"; do
-    [[ "${slot}" =~ ${RE_SLOT} && "${seen}" == *" ${slot} "* ]] \
-      || refuse "--red-slots names a slot --slots does not"
-    [[ -z "${RED[${slot}]+x}" ]] || refuse "--red-slots names a slot twice"
-    RED[${slot}]=1
-  done
-
   local server="${GITHUB_SERVER_URL:-}" repo="${GITHUB_REPOSITORY:-}"
   RUN_ID="${GITHUB_RUN_ID:-}"
   RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-}"
@@ -407,6 +457,7 @@ main() {
   [[ "${RUN_ID}" =~ ${RE_RUN_ID} ]] || refuse "GITHUB_RUN_ID is not a run id"
   [[ "${RUN_ATTEMPT}" =~ ${RE_ATTEMPT} ]] || refuse "GITHUB_RUN_ATTEMPT is not an attempt number"
   RUN_URL="${server}/${repo}/actions/runs/${RUN_ID}"
+  read_red_slots "${jobs_json}"
 
   # An emptied or fresh directory only: a body left by an earlier invocation
   # would be filed as this run's.
@@ -436,7 +487,7 @@ main() {
 
 # Pinned by equality against the fixtures that actually ran: a fixture that
 # stops running is the one way a deleted fixture reports success.
-readonly SELF_TEST_FIXTURES=84
+readonly SELF_TEST_FIXTURES=98
 
 self_test() {
   local tmp n=0 fails=0
@@ -542,18 +593,42 @@ STUB
     printf '%s\n' "$2" >"${tree}/soak-core-nightly-$1-${run_id}/${VERDICT_LOG}"
   }
   _mut() { jq -c "$1" <<<"${good}"; }
-  _run() { # _run [--file] [--red <csv>] [NAME=VALUE ...] -- <slot>...
-    local file_flag=() kv red_flag=()
-    local -a envs=()
+  # A job listing in the shape `gh api .../runs/<id>/jobs?filter=latest` answered
+  # for Soak Nightly run 36375782567: per slot the called job plus its two
+  # skipped siblings, `prepare`, and this job itself still running. Each
+  # argument is <slot>=<conclusion>; a slot not named is absent.
+  _jobs() { # _jobs <file> [<slot>=<conclusion> ...]
+    local out="$1" pair
+    shift
+    {
+      printf '{"id":1,"name":"Derive the slot seeds","status":"completed","conclusion":"success","runner_name":"GitHub Actions 1000000001"}\n'
+      for pair in "$@"; do
+        printf '{"id":2,"name":"Soak Core (nightly, %s) / e2e_soak_core_nightly","status":"completed","conclusion":"%s","runner_name":"GitHub Actions 1000000002"}\n' "${pair%%=*}" "${pair#*=}"
+        printf '{"id":3,"name":"Soak Core (nightly, %s) / e2e_soak_core_pr","status":"completed","conclusion":"skipped"}\n' "${pair%%=*}"
+        printf '{"id":4,"name":"Soak Core (nightly, %s) / e2e_soak_core_weekly","status":"completed","conclusion":"skipped"}\n' "${pair%%=*}"
+      done
+      printf '{"id":5,"name":"File the night'"'"'s soak issue","status":"in_progress","conclusion":null}\n'
+    } | jq -sc '{total_count: length, jobs: .}' >"${out}"
+  }
+  _run() { # _run [--file] [--red <csv> | --jobs <file>] [NAME=VALUE ...] -- <slot>...
+    local file_flag=() kv jobs="${tmp}/jobs.json" red='' pair
+    local -a envs=() pairs=()
     while [[ $# -gt 0 && "$1" != -- ]]; do
       case "$1" in
         --file) file_flag=(--file) ;;
-        --red) red_flag=(--red-slots "$2"); shift ;;
+        --red) red="$2"; shift ;;
+        --jobs) jobs="$2"; shift ;;
         *) envs+=("$1") ;;
       esac
       shift
     done
     shift
+    if [[ "${jobs}" == "${tmp}/jobs.json" ]]; then
+      for pair in s1 s2 s3 s4; do
+        if [[ ",${red}," == *",${pair},"* ]]; then pairs+=("${pair}=failure"); else pairs+=("${pair}=success"); fi
+      done
+      _jobs "${jobs}" "${pairs[@]}"
+    fi
     rc=0
     ( export PATH="${bin}:${PATH}" HAVEN_LOGSCAN_BIN="${bin}/haven-logscan" \
              STUB_GH_CALLS="${calls}" STUB_GH_BODIES="${bodies}" STUB_GH_OPEN="${open}" \
@@ -562,7 +637,7 @@ STUB
              GITHUB_RUN_ID="${run_id}" GITHUB_RUN_ATTEMPT=1
       for kv in "${envs[@]+"${envs[@]}"}"; do export "${kv?}"; done
       main --profile nightly --tree "${tree}" --out "${out}" --slots "$@" \
-        "${red_flag[@]+"${red_flag[@]}"}" "${file_flag[@]+"${file_flag[@]}"}"
+        --jobs-json "${jobs}" "${file_flag[@]+"${file_flag[@]}"}"
     ) >"${stdout}" 2>"${stderr}" || rc=$?
   }
   _no_gh() { [[ ! -s "${calls}" ]]; }
@@ -717,7 +792,8 @@ EOF
   _reset
   _slot s1 "${clean}"
   _run --red s2 -- s1
-  _ok "$([[ "${rc}" == 2 ]] && _no_gh && echo 0 || echo 1)" '(R34) --red-slots naming a slot --slots does not refuses'
+  _ok "$([[ "${rc}" == 0 ]] && _no_gh && [[ -z "$(find "${out}" -mindepth 1)" ]] && echo 0 || echo 1)" \
+    '(R34) a red job for a slot --slots does not name files nothing: the slot list decides which slots were run'
   # No refusal line ever carries a VALUE: each run plants one and reads the
   # public stderr back for it. A slot literal, a field name, or a key the
   # title already makes public is all a refusal may say.
@@ -812,6 +888,86 @@ PLANTS
   _ok "$([[ "${rc}" == 0 && -f "${out}/INV-O1.body.log" && -f "${out}/no-verdict.body.log" && ! -e "${out}/lane-red.body.log" ]] && echo 0 || echo 1)" \
     '(K11) a red slot with a verdict files under its key and one with none under no-verdict — never also lane-red'
 
+  printf -- '--- the job listing: a slot is red by its job, read here ---\n'
+  local jobs="${tmp}/sample-jobs.json"
+  _reset
+  for d in s1 s2 s3 s4; do _slot "${d}" "${clean}"; done
+  _jobs "${jobs}" s1=success s2=failure s3=success
+  _run --jobs "${jobs}" -- s1 s2 s3 s4
+  _ok "$([[ "${rc}" == 0 && "$(grep '^slot: ' "${out}/lane-red.body.log" | tr '\n' ' ')" == 'slot: s2 slot: s4 ' ]] \
+      && [[ "$(find "${out}" -name '*.body.log' | wc -l)" == 1 ]] && echo 0 || echo 1)" \
+    '(J1) a job listing with one failed slot job and one absent slot job files exactly those two as lane-red, and nothing else'
+  _reset
+  for d in s1 s2 s3 s4; do _slot "${d}" "${clean}"; done
+  _jobs "${jobs}" s1=cancelled s2=skipped s3=success s4=success
+  jq -c '.jobs |= map(if .name == "Soak Core (nightly, s3) / e2e_soak_core_nightly" then .conclusion = null else . end)' \
+    "${jobs}" >"${jobs}.next" && mv "${jobs}.next" "${jobs}"
+  _run --jobs "${jobs}" -- s1 s2 s3 s4
+  _ok "$([[ "${rc}" == 0 && "$(grep '^slot: ' "${out}/lane-red.body.log" | tr '\n' ' ')" == 'slot: s1 slot: s2 slot: s3 ' ]] && echo 0 || echo 1)" \
+    '(J2) cancelled, skipped and not-yet-concluded are red: only success is green'
+  # A refusal: rc 2, named, no gh call, no body, and no byte of the listing on
+  # the public streams (each listing plants a name).
+  _jobs_refuses() { # _jobs_refuses <label> <jobs-file> <message>
+    _reset
+    _slot s1 "${good}"
+    _run --file --jobs "$2" -- s1
+    _ok "$([[ "${rc}" == 2 ]] && _no_gh && grep -qF -- "$3" "${stderr}" \
+        && ! grep -qF 'Saturday Ride' "${stdout}" "${stderr}" \
+        && [[ -z "$(find "${out}" -name '*.body.log' 2>/dev/null)" ]] && echo 0 || echo 1)" "$1"
+  }
+  jq -nc '{total_count: 100, jobs: [range(0; 100) | {name: "Saturday Ride \(.)", conclusion: "success"}]}' >"${jobs}"
+  _jobs_refuses '(J3) a job listing that fills its page of 100 refuses, named: a slot job past it would read as absent' \
+    "${jobs}" 'filled its page of 100'
+  jq -nc '{total_count: 250, jobs: [range(0; 100) | {name: "Saturday Ride \(.)", conclusion: "success"}]}' >"${jobs}"
+  _jobs_refuses '(J4) ...and so does a first page of a longer listing' "${jobs}" 'filled its page of 100'
+  _jobs "${jobs}" s1=success
+  head -c 90 "${jobs}" >"${jobs}.cut"
+  printf '"Saturday Ride"\n' >>"${jobs}.cut"
+  _jobs_refuses '(J5) a truncated job listing refuses, named' "${jobs}.cut" 'is not one page of the API'"'"'s listing'
+  printf '{"total_count":1,"jobs":{"name":"Saturday Ride"}}\n' >"${jobs}"
+  _jobs_refuses '(J6) a job listing whose jobs member is not a list refuses' "${jobs}" 'is not one page'
+  printf '{"total_count":1,"jobs":[{"name":"Saturday Ride"}]}\n{"total_count":0,"jobs":[]}\n' >"${jobs}"
+  _jobs_refuses '(J7) two JSON values in one listing refuse' "${jobs}" 'is not one page'
+  _jobs_refuses '(J8) an absent listing file refuses' "${tmp}/no-such-jobs.json" 'is not a file'
+  _reset
+  _slot s1 "${good}"
+  ( export GITHUB_SERVER_URL='https://github.com' GITHUB_REPOSITORY='o/r' GITHUB_RUN_ID="${run_id}" GITHUB_RUN_ATTEMPT=1
+    main --profile nightly --tree "${tree}" --out "${out}" --slots s1 ) >"${stdout}" 2>"${stderr}" && rc=0 || rc=$?
+  _ok "$([[ "${rc}" == 2 && ! -e "${out}" ]] && echo 0 || echo 1)" \
+    '(J9) no --jobs-json is a usage error: a slot is never read as green for want of its job'
+
+  printf -- '--- --assert-no-artifacts: a failed download is an empty night only if the listing agrees ---\n'
+  local listing="${tmp}/artifacts.json"
+  _assert() { # _assert <listing> — runs the mode as the download step does
+    rc=0
+    ( export GITHUB_RUN_ID="${run_id}"
+      "${BASH_SOURCE[0]}" --assert-no-artifacts "$1" --profile nightly ) >"${stdout}" 2>"${stderr}" || rc=$?
+  }
+  jq -nc --arg r "${run_id}" '{total_count: 3, artifacts: [
+      {name: "soak-core-nightly-s1-\($r)", expired: true},
+      {name: "soak-core-nightly-s1-99", expired: false},
+      {name: "soak-core-pr-s1-\($r)", expired: false}]}' >"${listing}"
+  _assert "${listing}"
+  _ok "$([[ "${rc}" == 0 ]] && grep -qF 'every slot is filed as no-verdict' "${stdout}" && echo 0 || echo 1)" \
+    '(D1) no unexpired slot artifact of this run and profile: the empty tree is honest, rc 0'
+  jq -nc --arg r "${run_id}" '{total_count: 2, artifacts: [
+      {name: "Saturday Ride", expired: false}, {name: "soak-core-nightly-s3-\($r)", expired: false}]}' >"${listing}"
+  _assert "${listing}"
+  _ok "$([[ "${rc}" == 2 ]] && grep -qF 'slot artifacts exist' "${stderr}" && ! grep -qF 'Saturday Ride' "${stdout}" "${stderr}" && echo 0 || echo 1)" \
+    '(D2) one unexpired slot artifact behind a failed download refuses, named, printing no artifact name'
+  jq -nc '{total_count: 100, artifacts: [range(0; 100) | {name: "Saturday Ride", expired: false}]}' >"${listing}"
+  _assert "${listing}"
+  _ok "$([[ "${rc}" == 2 ]] && grep -qF 'filled its page of 100' "${stderr}" && echo 0 || echo 1)" \
+    '(D3) an artifact listing that fills its page refuses: a slot artifact past it would read as absent'
+  printf '{"total_count":0,"artifacts":\n' >"${listing}"
+  _assert "${listing}"
+  _ok "$([[ "${rc}" == 2 ]] && grep -qF 'is not one page' "${stderr}" && echo 0 || echo 1)" '(D4) a malformed artifact listing refuses'
+  printf '{"total_count":0,"artifacts":[]}\n' >"${listing}"
+  rc=0
+  ( export GITHUB_RUN_ID='Saturday Ride'
+    "${BASH_SOURCE[0]}" --assert-no-artifacts "${listing}" --profile nightly ) >"${stdout}" 2>"${stderr}" || rc=$?
+  _ok "$([[ "${rc}" == 2 ]] && ! grep -qF 'Saturday' "${stderr}" && echo 0 || echo 1)" '(D5) a run id off its shape refuses without printing it'
+
   printf -- '--- filing: one per key, dedup, labels, the gate ---\n'
   _reset
   for d in s1 s2 s3 s4; do _slot "${d}" "${good}"; done
@@ -898,5 +1054,14 @@ if [[ "${1:-}" == --self-test ]]; then
   [[ $# -eq 1 ]] || usage
   self_test
   exit $?
+fi
+if [[ "${1:-}" == --assert-no-artifacts ]]; then
+  [[ $# -eq 4 && "$3" == --profile ]] || usage
+  PROFILE="$4"
+  RUN_ID="${GITHUB_RUN_ID:-}"
+  [[ "${PROFILE}" =~ ${RE_PROFILE} ]] || refuse "--profile is not pr, nightly or weekly"
+  [[ "${RUN_ID}" =~ ${RE_RUN_ID} ]] || refuse "GITHUB_RUN_ID is not a run id"
+  assert_no_artifacts "$2"
+  exit 0
 fi
 main "$@"

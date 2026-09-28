@@ -89,6 +89,11 @@ source "${SOAK_CI_DIR}/logscan-gate.sh"
 readonly SOAK_NEEDLE_DIR=/tmp/haven-soak/needles
 readonly SOAK_MANIFEST_SUFFIX='-soak.needles.json'
 readonly SOAK_CONTAINED_LOG='soak-contained.log'
+# The rig truncates its commit to banner.rs `COMMIT_MAX_HEX` itself, but cargo's
+# `Running` line echoes the argv into the run log before the rig starts, so the
+# cut has to happen HERE: a full 40-hex sha there is a structural S2 hit.
+# Self-test fixture (20c) pins this to `COMMIT_MAX_HEX`.
+readonly SOAK_COMMIT_HEX=12
 
 soak_log() { printf '\033[1;34m[soak]\033[0m %s\n' "$*"; }
 soak_err() { printf '\033[1;31m[soak] ERROR:\033[0m %s\n' "$*" >&2; }
@@ -321,16 +326,17 @@ soak_main() { # soak_main <profile>
   mkdir -p "${upload}"
 
   # Provenance for the banner and verdict.log, which a filed issue carries: the
-  # commit from the Actions environment (empty locally, which the rig reads as
-  # `unknown`) and the version of the rustc that builds the rig, asked from the
+  # short commit from the Actions environment (empty locally, which the rig
+  # reads as `unknown`) and the version of the rustc that builds the rig, asked from the
   # crate's own directory so a toolchain file there is honoured.
+  local commit="${GITHUB_SHA:-}"
   local rustc_version=''
   rustc_version="$(cd "${SOAK_REPO_ROOT}/tooling/soak" && rustc --version 2>/dev/null | cut -d' ' -f2)" \
     || rustc_version=''
   local -a rig_args=(
     --profile "${profile}"
     --timeline-out "${upload}/soak-timeline.log"
-    --commit "${GITHUB_SHA:-}"
+    --commit "${commit:0:${SOAK_COMMIT_HEX}}"
     --rustc "${rustc_version}"
   )
   # CI only (owner decision Q5): the scan below is the manifest's reader and
@@ -366,7 +372,7 @@ soak_self_test() {
   local tmp fails=0 cases=0
   # Equality pin: a fixture added or removed without moving this line is a
   # self-test that no longer says what it runs.
-  local -r want_cases=31
+  local -r want_cases=34
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
   trap "rm -rf '${tmp}'" RETURN
@@ -702,12 +708,20 @@ soak_self_test() {
     bash "${BASH_SOURCE[0]}" pr >/dev/null 2>&1 || rc=$?
   _case "a violation the rig proved is not demoted to the scan's milder code" 1 "${rc}"
 
-  # (20) Provenance reaches the rig: the commit from GITHUB_SHA and the
+  # (20) Provenance reaches the rig: the SHORT commit from GITHUB_SHA and the
   #      rustc's version, and with no GITHUB_SHA an EMPTY commit, which the
   #      rig's Provenance::new reads as `unknown` (its own unit test pins that).
+  #      The fake echoes its argv on stderr the way cargo's `Running` line does
+  #      (measured: run 36375782567, `soak-pr-run.log:2`), so (20b) reads the
+  #      run log a real cargo would have left.
   local prov="${tmp}/prov" provbin="${tmp}/prov-bin"
   mkdir -p "${prov}" "${provbin}"
-  printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" "$@" > "${SOAK_ARGV_OUT}"' 'exit 0' > "${provbin}/cargo"
+  cat > "${provbin}/cargo" <<'FAKE'
+#!/usr/bin/env bash
+printf '     Running `target/soak/haven-soak %s`\n' "${*:7}" >&2
+printf '%s\n' "$@" > "${SOAK_ARGV_OUT}"
+exit 0
+FAKE
   printf '%s\n' '#!/usr/bin/env bash' 'echo "rustc 1.98.0 (0f0e0d0c0 2026-08-01)"' > "${provbin}/rustc"
   chmod +x "${provbin}/cargo" "${provbin}/rustc"
   _argv_after() { # _argv_after <argv-file> <flag>: the value after <flag>, or ABSENT
@@ -716,8 +730,8 @@ soak_self_test() {
   PATH="${provbin}:${PATH}" HAVEN_LOGSCAN='' GITHUB_SHA=269b46c1a2b3c4d5e6f708192a3b4c5d6e7f8091 \
     SOAK_ARGV_OUT="${tmp}/argv-ci" SOAK_UPLOAD_DIR="${prov}/ci" SOAK_REPORT_DIR="${tmp}/prov-reports" \
     bash "${BASH_SOURCE[0]}" pr >/dev/null 2>&1 || true
-  _eq "in CI the rig is handed the commit and the rustc version" \
-    "269b46c1a2b3c4d5e6f708192a3b4c5d6e7f8091 1.98.0" \
+  _eq "in CI the rig is handed the 12-hex commit and the rustc version" \
+    "269b46c1a2b3 1.98.0" \
     "$(_argv_after "${tmp}/argv-ci" --commit) $(_argv_after "${tmp}/argv-ci" --rustc)"
   ( unset GITHUB_SHA
     PATH="${provbin}:${PATH}" HAVEN_LOGSCAN='' \
@@ -726,6 +740,23 @@ soak_self_test() {
   _eq "with no GITHUB_SHA the commit is passed EMPTY, never guessed" \
     "[] 1.98.0" \
     "[$(_argv_after "${tmp}/argv-local" --commit)] $(_argv_after "${tmp}/argv-local" --rustc)"
+
+  # (20b) Cargo echoes that argv into the run log before the rig can truncate
+  #       anything, so a full sha there is an S2 hit the rig never wrote
+  #       (run 36375782567). The control first: the echo IS in the log, so the
+  #       absence of a long hex run below is read, not assumed.
+  local provlog="${prov}/ci/soak-pr-run.log" hexrun=0
+  rc=0
+  grep -qF -- '--commit 269b46c1a2b3 ' "${provlog}" 2>/dev/null || rc=1
+  _case "the run log carries cargo's echo of the rig's argv" 0 "${rc}"
+  grep -qE '[0-9a-fA-F]{20,}' "${provlog}" 2>/dev/null && hexrun=1
+  _case "...and no run of 20 or more hex characters" 0 "${hexrun}"
+
+  # (20c) The runner's cut is the rig's, by the constant's own spelling.
+  _eq "the runner's commit cut equals banner.rs COMMIT_MAX_HEX" \
+    "${SOAK_COMMIT_HEX}" \
+    "$(sed -n 's/^const COMMIT_MAX_HEX: usize = \([0-9]\+\);.*/\1/p' \
+        "${SOAK_REPO_ROOT}/tooling/soak/src/banner.rs" | head -n 1)"
 
   # (21) And none of the above went near the real needle directory. Its
   #      contents are another run's, so a fixture that reads them passes or

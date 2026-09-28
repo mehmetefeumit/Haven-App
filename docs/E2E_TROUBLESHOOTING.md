@@ -1612,9 +1612,11 @@ How the filing works, so the issue itself is read correctly:
   reproduce, download the night's artifacts with
   `gh run download <run> -p 'soak-core-nightly-*' -D <dir>` (one directory per
   artifact, which the script requires: a slot's files at the top of the tree
-  are refused as a flattened download) and run
-  `GITHUB_SERVER_URL=https://github.com GITHUB_REPOSITORY=<owner/repo> GITHUB_RUN_ID=<run> GITHUB_RUN_ATTEMPT=<n> bash scripts/ci/file_soak_issue.sh --profile nightly --tree <dir> --out <empty dir> --slots s1 s2 s3 s4 --red-slots <the red slots, comma-joined>`
-  — without `--file` it makes no API call.
+  are refused as a flattened download), save the run's job listing with
+  `gh api 'repos/<owner/repo>/actions/runs/<run>/jobs?filter=latest&per_page=100' > <jobs.json>`
+  and run
+  `GITHUB_SERVER_URL=https://github.com GITHUB_REPOSITORY=<owner/repo> GITHUB_RUN_ID=<run> GITHUB_RUN_ATTEMPT=<n> bash scripts/ci/file_soak_issue.sh --profile nightly --tree <dir> --out <empty dir> --slots s1 s2 s3 s4 --jobs-json <jobs.json>`
+  — without `--file` it makes no API call of its own.
 * Only a SCHEDULED night files. A `workflow_dispatch` repro composes and scans
   the same body and files nothing.
 * `gh` cannot label an issue with a label the repository does not have, so
@@ -1650,6 +1652,46 @@ relying on the nightly issues:
 5. Cite the run id and the issue number in the commit that closes the Phase-2
    issue path, then close the issue and delete the scratch branch. The change
    to the `--file` condition must never reach `main`.
+
+## Failure mode 24 — a soak slot is rc 1 on `LEAK: …soak-<profile>-run.log:2 [S2]`
+
+A structural S2 hit (a run of 32–63 hex) at LINE 2 of the run transcript is a
+value echoed by cargo, never by the rig: line 2 is cargo's own `Running
+\`target/soak/haven-soak …\`` line, which prints the rig's argv into the
+redirected capture before the rig has run a single instruction, so nothing the
+rig truncates can reach it. The first `Soak Nightly` dispatch (run 36375782567)
+went red in all four slots this way, because the runner handed the rig the
+40-hex `GITHUB_SHA`; every local verification ran with `GITHUB_SHA` unset and
+passed `--commit ''`. The control is the runner's cut, not the rig's:
+`run-soak-core.sh` passes `${GITHUB_SHA:0:SOAK_COMMIT_HEX}` (12, equal to
+`tooling/soak/src/banner.rs` `COMMIT_MAX_HEX` and pinned to it by the runner's
+self-test fixture 20c), and fixtures 20/20b drive a fake `cargo` that echoes its
+argv the way cargo does and assert the run log carries no 20-hex run. Any new
+rig argument must obey the same rule: cargo publishes the argv verbatim.
+Reproduce locally with a 40-hex `GITHUB_SHA` set and `HAVEN_LOGSCAN=true`
+(`RUNNER_TEMP=<dir> bash tooling/e2e/ci/run-soak-core.sh pr`).
+
+## Failure mode 25 — `File the night's soak issue` red with `jq: error: syntax error, unexpected as`
+
+The first `Soak Nightly` dispatch (run 36375782567) reached the compose step and
+died at exit 3 before the filing script ran: the step's inline jq bound an
+`if … end` with `as $jobs`, which the runner's jq rejects ("unexpected as,
+expecting end of file"). jq 1.8 accepts the same program — it printed
+`s1,s2,s3,s4` for that run's job listing on a workstation — so a local run would
+not have caught it. The review had already flagged that the step's red-slot read,
+the download fallback's artifact count and the summary line had no fixture of
+their own; this was the consequence.
+
+The rule, for every workflow: **no inline workflow shell that transforms data
+without a fixture.** A listing is saved raw by the step and parsed by a
+checked-in script whose `--self-test` holds a fixture for each shape it accepts
+or refuses. `file_soak_issue.sh` now reads the job listing itself
+(`--jobs-json`: a slot whose job is absent or not `success` is red, a full page
+or a malformed file is exit 2, fixtures J1–J9) and decides whether a failed
+download is an empty night (`--assert-no-artifacts`, D1–D5). And in any jq that
+remains: **a bound expression that is not a simple term is parenthesised** —
+`(if … end) as $x | …`, never `if … end as $x`. A step red at exit 3 with a jq
+compile error is this class; re-running cannot help.
 
 ## What these lanes do NOT cover
 
