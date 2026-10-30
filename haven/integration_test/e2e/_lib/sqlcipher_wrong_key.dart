@@ -24,15 +24,22 @@ import 'package:haven/src/rust/api.dart';
 
 /// Printed once the wrong-key open has failed as it must.
 const String kSqlcipherWrongKeyMarker =
-    '[sqlcipher-wrong-key] a circles.db the device key cannot decrypt was '
+    '[sqlcipher-wrong-key] a circle store the device key cannot decrypt was '
     'refused';
 
-/// Opens a `circles.db` under a key that cannot decrypt it, and throws unless
-/// that open is refused.
+/// The live circle store's file name, `CIRCLES_DB_FILENAME` in
+/// `haven-core/src/circle/manager.rs` (held equal by
+/// `check_sqlcipher_logger_omitted.sh`). Never a pre-migration name such as
+/// `circles.db`: the storage reset deletes those before the store opens, so
+/// the open would create a fresh store and never decrypt a page.
+const String _circleStoreFilename = 'circles-v2.db';
+
+/// Opens the circle store under a key that cannot decrypt it, and throws
+/// unless that open is refused.
 ///
 /// Two managers over two fresh directories with one throwaway identity: the
 /// control opens cleanly, so the keyring and the MLS session work in this
-/// process; the stimulus differs only by a `circles.db` of random pages, which
+/// process; the stimulus differs only by a circle store of random pages, which
 /// to the codec is indistinguishable from one written under another key.
 /// Separate directories, never a reopen, so no MLS database file ever has two
 /// sessions (Security Rule 14).
@@ -50,7 +57,7 @@ Future<void> provokeSqlcipherWrongKeyOpen() async {
     );
     controlManager.dispose();
 
-    File('${stimulus.path}/circles.db').writeAsBytesSync(
+    File('${stimulus.path}/$_circleStoreFilename').writeAsBytesSync(
       List<int>.generate(2 * 4096, (_) => rng.nextInt(256)),
     );
     var refused = false;
@@ -67,7 +74,7 @@ Future<void> provokeSqlcipherWrongKeyOpen() async {
     }
     if (!refused) {
       throw StateError(
-        '[sqlcipher-wrong-key] a circles.db of random pages OPENED under the '
+        '[sqlcipher-wrong-key] a circle store of random pages OPENED under the '
         'device key, so SQLCipher never ran its wrong-key path and the '
         "lane's S-SQLC scan has nothing to catch. Harness failure.",
       );

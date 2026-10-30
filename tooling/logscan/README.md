@@ -710,7 +710,9 @@ continues into `::`, `_`, `(` or another letter is a code path, not a cell**) ·
 default pool included — owner-directed) · `S8` `secret|nsec|seed|key` within 24
 characters of a blob that looks ENCODED (two digits, base64 punctuation or S4's
 entropy floor) and that no letter runs into, so `KeyPackageMaintenanceFailed`
-and `KeyCipherImplementationRSA18` are identifiers rather than key material ·
+and `KeyCipherImplementationRSA18` are identifiers rather than key material;
+**a blob inside the source location that ends a Dart stack frame — `#N <member>
+(package:…​.dart:L:C)` or `(file://…​.dart:L:C)` — is a path, not a blob** ·
 `S9` 32-element decimal array · `S10`
 `display_name=|petname=|circle_name=|name=` followed by non-placeholder text ·
 `S11` a bare Unix second in the current epoch window on a
@@ -797,9 +799,9 @@ other rule still reads it — a value printed after the host is reported by
 whichever rule its shape belongs to — while S7 keeps its stricter exemption, so
 `ws://10.0.2.2:7777/<anything>` is still a hit.
 
-Six things narrow what the scanner catches — three rule qualifiers, one
+Seven things narrow what the scanner catches — four rule qualifiers, one
 sink-class rule exemption, one per-emitter NEEDLE scope and one property of the
-escape stripper — so all six are written down as **declared residuals**, the
+escape stripper — so all seven are written down as **declared residuals**, the
 same discipline the ledger's `not_gaps` follow: a boundary stated in one
 sentence beats a boundary discovered by an adversarial reader later.
 
@@ -807,12 +809,17 @@ sentence beats a boundary discovered by an adversarial reader later.
 |---|---|---|
 | **S4** | a base64 run of 32 or more characters with no `=` padding whose digits are absent or all in ONE contiguous run (roughly one random 44-character blob in a hundred and sixty) | S1/S2 for the hex spellings, S8 when a key word is within 24 characters, the needle search for every value the run declared, and `scan-logs-for-secrets.sh`'s keyword-anchored patterns |
 | **S6** | a geohash cell immediately followed by `_`, `(` or `::` | the needle search for a declared coordinate's `geohash` renderings; an undeclared cell in that position is a code path in every capture this tree has produced |
+| **S8** | a blob next to a key word that sits inside the source location ending a Dart stack frame line: `#<n>`, a member, then `(package:` or `(file://` up to `.dart:<line>[:<column>])` with no space or parenthesis inside | every other rule and the needle search, which still read the whole line, and `scan-logs-for-secrets.sh`; what is inside is a source path compiled into the app, and a value anywhere else on a frame line is read by S8 as before |
 | **S13** | an `https?://` URL sitting mid-line with neither a dial-failure marker nor solitude — a Haven line that printed a host inside prose of its own composition | the needle search for a declared `relay_url` (whose `scheme-alt`, `host-only` and `with-port` labels are searched), S7 for the `wss?://` spellings, S12 when the host is an address, and the source guards, which are what keep Haven's own code from composing such a line at all |
 | **cargo's crate-build line** (`rust-test` and `soak` only) | **S2 and S6 only**, and only on a `Compiling\|Checking\|Downloaded <name> v<semver> [(<source>)]` line: a 32–63-hex run or a geohash-shaped token in the crate-name or source-URL slot. Every other rule still fires on that line, and cargo's other status lines are not exempt at all | the needle search, which reads those lines byte for byte like any other; S1 for a 64-hex run; and the shape itself, which has to be produced deliberately |
 | **`locationd` / `com.apple.locationd.Position`** (`ios` only) | the `coordinate` NEEDLE, on records whose process AND emitter are exactly those: a lane injects the fix into that daemon, so it holds the value by construction | every other program (Haven's own included, and that same subsystem inside Haven's process), every other class on the same records, every structural rule, and the other sinks — the same coordinate in a logcat, a drive transcript or a relay log is reported as before |
 | **escaped value** | a value the app printed immediately after a LITERAL `ESC [` it emitted itself: the CSI consumer eats the parameter bytes (digits, `;`, `:`, `<=>?`) up to the first `@`–`~`, so the head of such a value is removed before matching | `tooling/e2e/ci/scan-logs-for-secrets.sh`, which runs FIRST and over raw bytes; and the fact that nothing in this tree emits a bare `ESC [` — the app's own log backends do not colour |
 
-S4, S6 and the cargo line were each paid for by a real transcript and are in
+S8's frame location was paid for by the three Android lanes of CI run
+41108434005, whose failures unwound through `withFreshSecret`, and its control is
+`s8_reads_past_a_dart_frame_location_and_nowhere_else`, which pins the
+blob-outside-the-location and not-a-location shapes as hits; S4, S6 and the
+cargo line were each paid for by a real transcript and are in
 `furniture.rust-test.log` / `furniture.flutter-test.log` now; S13's is the price
 of not reddening the deliberate URLs above, and its controls are the VM-service
 and plugin-notice lines in `s13_reads_a_failed_dials_rescheme_and_not_a_deliberate_url`

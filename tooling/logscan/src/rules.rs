@@ -167,6 +167,20 @@ const DIAL_FAILURE: &str = concat!(
     r"websocket\.connect|handshake",
 );
 
+/// A Dart stack frame, its source location captured:
+/// `#1      withFreshSecret (package:haven/src/services/fresh_secret.dart:61:12)`.
+///
+/// S8 reads the location as a blob: a member named for a `secret` or a `key`
+/// sits within 24 characters of a path, and `/` is base64 punctuation. That
+/// frame, in every harness failure that unwound through `withFreshSecret`, made
+/// three Android lanes of CI run 41108434005 delete the transcript that said why
+/// they failed. The location must be the frame's last token, opened by
+/// `package:` or `file://` and closed by `.dart:<line>[:<column>]`, with no
+/// space or parenthesis inside: a value anywhere else on the line is read as
+/// before.
+const DART_FRAME: &str =
+    r"(?:^|\s)#\d+\s+\S[^\n]*?\s(\((?:package:|file://)[^\s()]+\.dart:\d+(?::\d+)?\))\s*$";
+
 /// The ONE cargo status line that trips a structural rule: a crate being built,
 /// with its version and, for a git or path dependency, its source.
 ///
@@ -335,6 +349,7 @@ pub struct RuleSet {
     set: RegexSet,
     cargo_status: Regex,
     dial_failure: Regex,
+    dart_frame: Regex,
     sqlcipher_record: Regex,
     entropy_bits: f64,
     epoch_window: (u64, u64),
@@ -389,6 +404,8 @@ impl RuleSet {
                 .map_err(|e| format!("the cargo status shape does not compile: {e}"))?,
             dial_failure: Regex::new(DIAL_FAILURE)
                 .map_err(|e| format!("the dial-failure markers do not compile: {e}"))?,
+            dart_frame: Regex::new(DART_FRAME)
+                .map_err(|e| format!("the Dart stack-frame shape does not compile: {e}"))?,
             sqlcipher_record: Regex::new(SQLCIPHER_RECORD)
                 .map_err(|e| format!("the SQLCipher record prefix does not compile: {e}"))?,
             entropy_bits,
@@ -504,6 +521,7 @@ impl RuleSet {
             "S8" => capture.get(1).is_some_and(|blob| {
                 !runs_into_a_word(line, blob.start())
                     && looks_encoded(blob.as_str(), self.entropy_bits)
+                    && !self.is_dart_frame_location(line, blob.range())
             }),
             "S10" => capture.get(1).is_some_and(|m| !is_placeholder(m.as_str())),
             "S11" => capture.get(1).is_some_and(|m| {
@@ -539,6 +557,15 @@ impl RuleSet {
             }
             _ => true,
         }
+    }
+
+    /// Whether `span` lies inside the source location of a Dart stack frame
+    /// ([`DART_FRAME`]).
+    fn is_dart_frame_location(&self, line: &str, span: std::ops::Range<usize>) -> bool {
+        self.dart_frame
+            .captures(line)
+            .and_then(|frame| frame.get(1))
+            .is_some_and(|location| location.start() <= span.start && span.end <= location.end())
     }
 
     /// Whether `matched` is one of the endpoints the run declared exempt.
@@ -893,8 +920,8 @@ fn glob_matches(glob: &str, text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        glob_matches, parse_date, resolve_proof, shannon_bits, validate_allowlist, AllowEntry,
-        AllowScope, RuleSet,
+        glob_matches, looks_encoded, parse_date, resolve_proof, runs_into_a_word, shannon_bits,
+        validate_allowlist, AllowEntry, AllowScope, RuleSet,
     };
 
     fn engine() -> RuleSet {
@@ -1345,6 +1372,52 @@ mod tests {
             "Detected non-biometric migration: FROM=com.it_nomads.fluttersecurestorage.ciphers.KeyCipherImplementationRSA18@727ec4, TO=AES_GCM_NoPadding",
         ] {
             assert!(!hits(clean).contains(&"S8"), "must not fire on {clean:?}");
+        }
+    }
+
+    /// A Dart stack frame's source location is a path, not a blob, however its
+    /// member is named; the same blob anywhere else on a frame line still fires.
+    ///
+    /// The `withFreshSecret` frames are the shape that reddened three Android
+    /// lanes of CI run 41108434005, in the drive and the logcat framings.
+    #[test]
+    fn s8_reads_past_a_dart_frame_location_and_nowhere_else() {
+        let rules = engine();
+        let s8 = &rules.regexes[rules
+            .ids
+            .iter()
+            .position(|id| *id == "S8")
+            .expect("S8 exists")];
+        for clean in [
+            "#1      withFreshSecret (package:haven/src/services/fresh_secret.dart:61:12)",
+            "I/flutter ( 4663): #1      withFreshSecret (package:haven/src/services/fresh_secret.dart:61:12)",
+            "#3      NostrIdentityService.getSecretBytes (package:haven/src/services/nostr_identity_service.dart:210:7)",
+            "#0      _readKeyring (file:///home/runner/work/Haven-App/Haven-App/haven/integration_test/keyring_test.dart:41:5)",
+        ] {
+            // Each is a line S8 reads without the frame test, so the test is
+            // what keeps it clean.
+            let blob = s8
+                .captures(clean)
+                .and_then(|c| c.get(1))
+                .expect("S8 matches the frame");
+            assert!(
+                !runs_into_a_word(clean, blob.start()) && looks_encoded(blob.as_str(), 4.2),
+                "{clean:?} does not exercise the frame test"
+            );
+            assert!(!hits(clean).contains(&"S8"), "must not fire on {clean:?}");
+        }
+        for dirty in [
+            // The blob outside the location, before and after it.
+            "#1      withFreshSecret secret=7mK4pQz9XbR2vT8yLwN3cJ5hD6gF0aSe (package:haven/src/services/fresh_secret.dart:61:12)",
+            "#1      withFreshSecret (package:haven/src/services/fresh_secret.dart:61:12) nsec 3mK/9xQ+aZv2tRlPqW8nEuY1hCdG7bFs=",
+            // A location that is not one: no `.dart:<line>`, another scheme, a
+            // space inside, or no frame number.
+            "#1      readSecret (package:3mK/9xQ+aZv2tRlPqW8nEuY1hCdG7bFs=)",
+            "#1      readSecret (http:3mK/9xQ+aZv2tRlPqW8nEuY1hCdG7bFs=.dart:1)",
+            "#1      readSecret (package:3mK/9xQ+aZv2tRlPqW8nEuY1hCdG7bFs= x.dart:1)",
+            "readSecret (package:3mK/9xQ+aZv2tRlPqW8nEuY1hCdG7bFs=.dart:1)",
+        ] {
+            assert!(hits(dirty).contains(&"S8"), "must fire on {dirty:?}");
         }
     }
 

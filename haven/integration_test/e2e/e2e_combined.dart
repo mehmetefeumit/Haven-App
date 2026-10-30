@@ -2110,9 +2110,14 @@ void main() {
         try {
           container = await _m11PumpAliceLiveEngine(tester, generation);
 
-          // Alice's KeyPackage must be on the relay (published by
-          // keyPackagePublisherProvider on mount) so Bob can invite her.
+          // Alice's KeyPackage and inbox relay list must be on the relay
+          // (keyPackagePublisherProvider publishes both on mount) so Bob can
+          // invite her.
           await waitForKeyPackage(
+            relay: m11Relay,
+            authorPubkeyHex: _alicePubkeyHex(),
+          );
+          await waitForInboxRelayList(
             relay: m11Relay,
             authorPubkeyHex: _alicePubkeyHex(),
           );
@@ -2625,6 +2630,10 @@ void main() {
 
           // ---- welcome dedup ----
           await waitForKeyPackage(
+            relay: m11Relay,
+            authorPubkeyHex: _alicePubkeyHex(),
+          );
+          await waitForInboxRelayList(
             relay: m11Relay,
             authorPubkeyHex: _alicePubkeyHex(),
           );

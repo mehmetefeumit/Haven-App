@@ -49,12 +49,23 @@ const Duration _maxDriveWait = Duration(seconds: 60);
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
+  // Once per process: the relay overrides are install-once, so a second
+  // bootstrap throws "already installed".
+  late ScenarioContext ctx;
+
+  setUpAll(() async {
+    ctx = await ScenarioHarness.bootstrap();
+  });
+
+  tearDownAll(() async {
+    await ctx.relay.dispose();
+  });
+
   testWidgets(
     'a founding Welcome made while its inbox relay is down is sent again, '
     'the same event, by the next foreground drive',
     (tester) async {
       installThrowTimeErrorLogging();
-      final ctx = await ScenarioHarness.bootstrap();
       final gate = await _RelayGate.start(upstream: ctx.relay.url);
       final alice = await TestUser.alice();
       // A seed of its own, so no earlier scenario's wrap waits for it.
@@ -124,7 +135,6 @@ void main() {
         await gate.close();
         await bob.dispose();
         await alice.dispose();
-        await ctx.relay.dispose();
       }
     },
     // Two of these stay inside the lane's 10 min drive bound.
@@ -136,7 +146,6 @@ void main() {
     'the same event, by the next foreground drive',
     (tester) async {
       installThrowTimeErrorLogging();
-      final ctx = await ScenarioHarness.bootstrap();
       final gate = await _RelayGate.start(upstream: ctx.relay.url);
       final alice = await TestUser.alice();
       final bob = await SyntheticUser.bob(ctx.relay, seedOffset: 32);
@@ -224,7 +233,6 @@ void main() {
         await carol.dispose();
         await bob.dispose();
         await alice.dispose();
-        await ctx.relay.dispose();
       }
     },
     // Two of these stay inside the lane's 10 min drive bound.

@@ -112,7 +112,8 @@ class SyntheticUser {
   SyntheticUser._({required this.user, required this.keyPackageRelays});
 
   /// Constructs a synthetic identity from [seed] and publishes its
-  /// KeyPackage to [relay] before returning.
+  /// KeyPackage and its relay lists (kind 10050 inbox, kind 10002) to
+  /// [relay] before returning.
   ///
   /// The published event is the canonical kind 30443 (addressable,
   /// Marmot v2) ONLY — the legacy kind 443 twin is retired under Dark
@@ -126,7 +127,7 @@ class SyntheticUser {
   /// (action=seededD, nothing published) instead of publishing this
   /// instance's KeyPackage — see the `relaysHealed` gate below.
   ///
-  /// Throws if the relay rejects the event (an indicator of a
+  /// Throws if the relay rejects an event (an indicator of a
   /// strfry misconfiguration or a malformed event).
   static Future<SyntheticUser> bootstrap({
     required String role,
@@ -150,6 +151,13 @@ class SyntheticUser {
       await user.circleManager.addUserRelay(
         url: relay.url,
         relayType: RelayTypeFfi.nip65,
+      );
+      // A Welcome is delivered only to the invitee's kind-10050 inbox list
+      // (haven-core `welcome_route`): a peer that publishes none cannot be
+      // invited, and the driven create refuses with `missingWelcomeRelays`.
+      await user.circleManager.addUserRelay(
+        url: relay.url,
+        relayType: RelayTypeFfi.inbox,
       );
 
       final secret = await user.getSecretBytes();
@@ -211,6 +219,30 @@ class SyntheticUser {
           '[SyntheticUser:$role] KeyPackage published '
           '(action=${outcome.action.name})',
         );
+
+        // The relay-list tick a real install runs: it publishes the inbox
+        // list (10050) and the NIP-65 list (10002) to the account's own
+        // relays, here the hermetic one alone. A list the relay already
+        // serves for this pubkey is as good as a fresh one — unlike a
+        // KeyPackage it holds no private material — but `alreadyCurrent`
+        // with no responder is a dead network, not a published list.
+        final lists = await relayManager.maintainRelayList(
+          circle: user.circleManager,
+          identitySecretBytes: secret,
+        );
+        final inbox = lists.inbox;
+        final inboxServed = inbox.action == RelayListActionFfi.republished ||
+            (inbox.action == RelayListActionFfi.alreadyCurrent &&
+                inbox.respondersProbed > 0);
+        if (!inboxServed) {
+          throw StateError(
+            "$role's inbox relay list did not reach the hermetic relay "
+            '(action=${inbox.action.name}, '
+            'responders=${magnitudeBucket(inbox.respondersProbed)}, '
+            'errors=${magnitudeBucket(inbox.relayErrors)}), so no Welcome '
+            'can be routed to this peer.',
+          );
+        }
 
         return SyntheticUser._(
           user: user,

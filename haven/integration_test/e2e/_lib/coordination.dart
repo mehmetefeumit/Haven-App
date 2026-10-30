@@ -67,3 +67,23 @@ Future<TestRelayEvent> waitForKeyPackage({
   },
   timeout: timeout,
 );
+
+/// Waits until the relay reports a kind-10050 inbox relay list authored by
+/// [authorPubkeyHex].
+///
+/// A Welcome goes only to its invitee's 10050 list, so an invitee is
+/// invitable once this AND [waitForKeyPackage] hold. The app publishes the
+/// list only after its KeyPackage (`keyPackagePublisherProvider`), so seeing
+/// the KeyPackage alone leaves a window in which a driven create is refused.
+Future<TestRelayEvent> waitForInboxRelayList({
+  required TestRelay relay,
+  required String authorPubkeyHex,
+  Duration timeout = const Duration(seconds: 30),
+}) => relay.firstWhere(
+  filter: <String, dynamic>{
+    'kinds': <int>[10050],
+    'authors': <String>[authorPubkeyHex],
+    'limit': 1,
+  },
+  timeout: timeout,
+);

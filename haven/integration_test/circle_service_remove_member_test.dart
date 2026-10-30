@@ -55,6 +55,7 @@ import 'package:haven/src/utils/log_alias.dart' show magnitudeBucket;
 import 'package:haven/src/widgets/circles/circles_bottom_sheet.dart';
 import 'package:integration_test/integration_test.dart';
 
+import 'e2e/_lib/app_lifecycle.dart';
 import 'e2e/_lib/circle_creation.dart'
     show createCircleDelivered, joinDeliveredWelcome;
 import 'e2e/_lib/driven_location.dart';
@@ -186,6 +187,9 @@ class _RecordingRelayService implements RelayService {
 
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
+  // Every test after the first starts with the lifecycle unset, and the
+  // service asks for a removal in the foreground only when it reads `resumed`.
+  resumeAppBeforeEachTest();
 
   setUpAll(() async {
     // Full hermetic process bootstrap, shared with the e2e lanes
@@ -768,9 +772,13 @@ void main() {
         final circles = await service.getVisibleCircles();
         expect(circles, hasLength(1));
         final circle = circles.single;
+        // Every roster check below is a bool: a failing matcher prints its
+        // operands, and these are pubkeys (Security Rule 15).
         expect(
-          circle.members.map((m) => m.pubkey.toLowerCase()),
-          contains(bobPubkeyHex.toLowerCase()),
+          circle.members.any(
+            (m) => m.pubkey.toLowerCase() == bobPubkeyHex.toLowerCase(),
+          ),
+          isTrue,
           reason: 'the roster the UI renders must start with Bob in it',
         );
         expect(
@@ -839,12 +847,15 @@ void main() {
           WidgetKeys.memberRemoveButton(bobPubkeyHex),
         );
         expect(
-          removeButton.evaluate(),
-          hasLength(1),
+          removeButton.evaluate().length,
+          equals(1),
           reason: 'an admin looking at a co-member must be offered the '
               'removal — this is the wiring that did not exist before',
         );
 
+        // The service reads the lifecycle when the confirm lands, and a
+        // removal is asked for in the foreground only.
+        expectAppResumed();
         await tester.tap(removeButton);
         await tester.pumpAndSettle();
         await tester.tap(find.byKey(WidgetKeys.memberRemoveConfirm));
@@ -860,16 +871,18 @@ void main() {
         // unacked (publish-before-apply, Rule 13 — owned by
         // `haven-core/tests/security_rule_gates.rs`).
         expect(
-          after!.members.map((m) => m.pubkey.toLowerCase()),
-          isNot(contains(bobPubkeyHex.toLowerCase())),
+          after!.members.any(
+            (m) => m.pubkey.toLowerCase() == bobPubkeyHex.toLowerCase(),
+          ),
+          isFalse,
           reason: 'a tap on the row must have staged, published, acked and '
               'applied a real Remove commit',
         );
 
         // And the list the admin is looking at agrees.
         expect(
-          find.byKey(WidgetKeys.memberTile(bobPubkeyHex)).evaluate(),
-          isEmpty,
+          find.byKey(WidgetKeys.memberTile(bobPubkeyHex)).evaluate().isEmpty,
+          isTrue,
         );
       } finally {
         for (final dir in [aliceDir, bobDir]) {

@@ -60,7 +60,8 @@ class ScenarioContext {
   final TestRelay relay;
 }
 
-/// Per-process bootstrap. Idempotent.
+/// Per-process bootstrap: once per process (a `setUpAll`), because the relay
+/// overrides are install-once and a second call throws "already installed".
 abstract final class ScenarioHarness {
   /// Initialises the integration-test binding, the Rust bridge, the
   /// in-memory keyring backend, the relay override, and opens a probe

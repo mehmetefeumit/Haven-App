@@ -722,6 +722,19 @@ wlan0	0002000A	00000000	0000	0	0	0	00FFFFFF	0	0	0" 10.0.2.2; then
          "unbuilt scanner would be skipped, not fatal" >&2
     fail=1
   fi
+  # The containment mark a multi-target orchestrator's segment claim reads:
+  # cleared with the captures, and written only when the gate contained a leak
+  # and the transcript is gone — nothing else may lower a claim.
+  if ! grep -qxF 'rm -f /tmp/adb-logcat.log /tmp/flutter-drive*.log "${LOGSCAN_CONTAINED_MARK}"' \
+         "${BASH_SOURCE[0]}" \
+     || (( "$(grep -cxF '    : > "${LOGSCAN_CONTAINED_MARK}"' "${BASH_SOURCE[0]}")" != 1 )) \
+     || ! grep -B1 -xF '    : > "${LOGSCAN_CONTAINED_MARK}"' "${BASH_SOURCE[0]}" \
+          | grep -qxF '  if (( scan_rc == 1 )) && [[ ! -e /tmp/flutter-drive.log ]]; then'; then
+    echo "SELF-TEST FAIL (9b): the containment mark must be cleared with the" \
+         "captures and written once, only for a contained leak whose transcript" \
+         "is gone" >&2
+    fail=1
+  fi
 
   # ---------------------------------------------------------------
   # (9c) This runner's OWN call site into the gate: the SHARED fake
@@ -938,7 +951,7 @@ fi
 # empty capture — but as "a log was unreadable", never as "that target never
 # drove". Absent is the state that is both true and legible, and the callers'
 # `cp … || true` deliberately leaves it absent.
-rm -f /tmp/adb-logcat.log /tmp/flutter-drive*.log
+rm -f /tmp/adb-logcat.log /tmp/flutter-drive*.log "${LOGSCAN_CONTAINED_MARK}"
 
 if [[ $# -lt 1 ]]; then
   echo "Usage: $0 <scenario-file>  |  $0 --self-test" >&2
@@ -1600,6 +1613,9 @@ echo "Scanning E2E logs for secret material and declared identifiers..."
 scan_rc=0
 log_privacy_gate /tmp/haven-soak/needles /tmp/adb-logcat.log "${FINAL_ATTEMPT_LOG}" /tmp/flutter-drive.log || scan_rc=$?
 if (( scan_rc != 0 )); then
+  if (( scan_rc == 1 )) && [[ ! -e /tmp/flutter-drive.log ]]; then
+    : > "${LOGSCAN_CONTAINED_MARK}"
+  fi
   echo "ERROR: log-privacy gate failed (rc ${scan_rc}) — see the line(s) above." >&2
   exit 1
 fi

@@ -122,6 +122,11 @@ readonly LOGSCAN_MANIFEST_SUFFIX='.needles.json'
 # job that builds it. Declared here rather than in each self-test because the
 # runners already source this library.
 readonly LOGSCAN_FAKE_BIN="${LOGSCAN_GATE_DIR}/fixtures/fake-haven-logscan.sh"
+# Written by run-single-avd-scenario.sh when its gate contained a leak and so
+# DELETED the target's transcript. A multi-target orchestrator's `--segments`
+# claim drops a target's drive log on this mark and on nothing else: an absent
+# transcript without it is still the short walk the claim exists to catch.
+readonly LOGSCAN_CONTAINED_MARK=/tmp/logscan-contained.mark
 
 # shellcheck source=tooling/e2e/ci/host-needles.sh
 source "${LOGSCAN_GATE_DIR}/host-needles.sh"

@@ -29,7 +29,13 @@ A new Flutter FFI plugin project.
   s.script_phase = {
     :name => 'Build Rust library',
     # First argument is relative path to the rust crate (containing Cargo.toml), second is name of rust library
-    :script => 'sh "$PODS_TARGET_SRCROOT/../cargokit/build_pod.sh" .. rust_lib_haven',
+    # -force_load below links every member of the archive, and MDK turns on
+    # rusqlite's `trace` wrappers, which call the tracer SQLITE_OMIT_TRACE
+    # compiles out (Security Rule 15). LTO drops every function the library's C
+    # exports cannot reach, so the unused wrappers never reach the link; thin,
+    # because fat LTO of the debug build was killed at a 10 GB memory cap.
+    # scripts/ci/check_sqlcipher_logger_omitted.sh holds this line.
+    :script => 'CARGO_PROFILE_DEV_LTO=thin CARGO_PROFILE_RELEASE_LTO=thin sh "$PODS_TARGET_SRCROOT/../cargokit/build_pod.sh" .. rust_lib_haven',
     :execution_position => :before_compile,
     :input_files => ['${BUILT_PRODUCTS_DIR}/cargokit_phony'],
     # Let XCode know that the static library referenced in -force_load below is

@@ -180,7 +180,8 @@ run_self_test() {
   fi
   # The segment claim, and that it is DERIVED: the aggregate gate says how many
   # drive transcripts must be under LOG_DIR, and the number is the argument
-  # list's own length taken before the loop. Without it a target whose log
+  # list's own length taken before the loop, less the transcripts a per-target
+  # gate deleted to contain a leak. Without it a target whose log
   # never reached the directory is invisible — the files that did land still
   # clear the summed floor and still carry the reporter's proof_of_run. The
   # mutation below is why the pin is worth having: a constant satisfies the
@@ -191,13 +192,28 @@ run_self_test() {
   loop_at="$(grep -n -m1 '^for spec in "$@"; do' "${BASH_SOURCE[0]}" || true)"
   loop_at="${loop_at%%:*}"
   if [[ -z "${count_line}" || -z "${loop_at}" ]] || (( count_line > loop_at )) \
-     || (( "$(grep -cF -- '--segments "drive=${TARGET_COUNT}"' <<<"${real_run}")" != 1 )); then
+     || (( "$(grep -cF -- '--segments "drive=$(( TARGET_COUNT - CONTAINED_DRIVES ))"' <<<"${real_run}")" != 1 )); then
     echo "SELF-TEST FAIL (wiring): the aggregate gate must claim one drive transcript per target spec, from a count taken before the loop (count='${count_line:-none}', loop='${loop_at:-none}')" >&2
     fail=1
   fi
-  if (( "$(grep -cF -- '--segments "drive=${TARGET_COUNT}"' \
-            <<<"$(sed 's/--segments "drive=${TARGET_COUNT}"/--segments "drive=7"/' "${BASH_SOURCE[0]}")")" != 0 )); then
+  if (( "$(grep -cF -- '--segments "drive=$(( TARGET_COUNT - CONTAINED_DRIVES ))"' \
+            <<<"$(sed 's/--segments "drive=$(( TARGET_COUNT - CONTAINED_DRIVES ))"/--segments "drive=7"/' "${BASH_SOURCE[0]}")")" != 0 )); then
     echo "SELF-TEST FAIL (wiring): a segment count frozen to a literal would still satisfy the pin above, which would then certify whatever landed rather than what this run drove" >&2
+    fail=1
+  fi
+  # The only thing that lowers the claim is the AVD runner's containment mark:
+  # cleared just before each drive, so a stale one cannot drop a target that
+  # never drove, and counted only where it is tested.
+  local clear_line drive_line
+  clear_line="$(grep -n -m1 '^  rm -f "${LOGSCAN_CONTAINED_MARK}"$' "${BASH_SOURCE[0]}" || true)"
+  clear_line="${clear_line%%:*}"
+  drive_line="$(grep -n -m1 '^  bash "${SINGLE_AVD}" "${target}" || rc=$?$' "${BASH_SOURCE[0]}" || true)"
+  drive_line="${drive_line%%:*}"
+  if [[ -z "${clear_line}" || -z "${drive_line}" ]] || (( clear_line + 1 != drive_line )) \
+     || (( "$(grep -cF 'CONTAINED_DRIVES=$(( CONTAINED_DRIVES + 1 ))' <<<"${real_run}")" != 1 )) \
+     || ! grep -A1 -F 'if [[ -e "${LOGSCAN_CONTAINED_MARK}" ]]; then' <<<"${real_run}" \
+          | grep -qF 'CONTAINED_DRIVES=$(( CONTAINED_DRIVES + 1 ))'; then
+    echo "SELF-TEST FAIL (wiring): the segment claim may drop a target only on the containment mark its own drive left, cleared just before that drive (clear='${clear_line:-none}', drive='${drive_line:-none}')" >&2
     fail=1
   fi
   if grep -qE 'if[[:space:]]+\[\[[[:space:]]+-x[[:space:]]' <<<"${real_run}"; then
@@ -407,6 +423,8 @@ slug() {
 declare -a PASSED=()
 declare -a FAILED=()
 declare -a SKIPPED_BUILD=()
+# Targets whose per-target gate contained a leak, deleting the transcript.
+CONTAINED_DRIVES=0
 
 run_one() {
   local spec="$1"
@@ -472,7 +490,11 @@ run_one() {
   # reporter counts it as passed), so the scenario's drive-log check is
   # what turns a fired hatch red — see `expected_drive_skips.txt`.
   local rc=0
+  rm -f "${LOGSCAN_CONTAINED_MARK}"
   bash "${SINGLE_AVD}" "${target}" || rc=$?
+  if [[ -e "${LOGSCAN_CONTAINED_MARK}" ]]; then
+    CONTAINED_DRIVES=$(( CONTAINED_DRIVES + 1 ))
+  fi
 
   # --- Preserve this target's evidence before the next target
   # overwrites the shared /tmp/*.log paths.
@@ -543,10 +565,12 @@ done
 # drives". Nothing else here does: the class's line floor SUMS its files and
 # its proof_of_run ORs them, so six complete transcripts certify a seventh
 # target that never wrote one. The count is the argument list's own length, so
-# it cannot be satisfied by whatever landed. A short walk is rc 3, and the
-# cases that produce one are all already loud — a target that failed before its
-# drive is in FAILED, and a per-target gate that contained a leak deleted the
-# transcript it flagged and printed the LEAK line above. What this adds is the
+# it cannot be satisfied by whatever landed, less each target whose per-target
+# gate contained a leak: that gate deleted the transcript it flagged, printed
+# the LEAK line above and left the mark run_one counts, so claiming it here
+# would only add an rc 3 that misnames the verdict (CI run 41108434005). A
+# short walk is rc 3, and a target that failed before its drive is already in
+# FAILED. What this adds is the
 # case nothing else covers: a target whose transcript is `cp`'d here out of the
 # shared /tmp path the NEXT target overwrites, so one that died before writing
 # it leaves no file at all — and the lane can still report success.
@@ -555,7 +579,7 @@ echo
 echo "== Log-privacy gate over ${LOG_DIR} (Security Rules 6 and 15) =="
 scan_rc=0
 logscan_gate_dir host /tmp/haven-soak/needles "${LOG_DIR}" "${LOGSCAN_REPORT}" "${SEAL_EXTRA[@]}" \
-  --segments "drive=${TARGET_COUNT}" || scan_rc=$?
+  --segments "drive=$(( TARGET_COUNT - CONTAINED_DRIVES ))" || scan_rc=$?
 
 echo
 echo "============================================================"
@@ -580,10 +604,8 @@ if (( scan_rc != 0 )); then
   echo "ERROR: log-privacy gate failed on ${LOG_DIR} (rc=${scan_rc}) — see the" \
        "line(s) above. rc=1 means key material or a declared identifier reached" \
        "the logs; rc=3 means a target's log was absent, unreadable or empty, or" \
-       "fewer than the ${TARGET_COUNT} transcripts this run drove reached" \
-       "${LOG_DIR} — if a per-target gate contained a leak it deleted the" \
-       "transcript it flagged, and that LEAK line, not this one, is the" \
-       "verdict." >&2
+       "a target's transcript did not reach ${LOG_DIR} although no gate" \
+       "deleted it to contain a leak." >&2
   exit 1
 fi
 

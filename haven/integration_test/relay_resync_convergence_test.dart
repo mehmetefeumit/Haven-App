@@ -7,9 +7,10 @@
 /// (`updateCircleRelaysDriven`, claiming the foreground), the implementation
 /// must:
 ///
-///  1. Publish the `kind:445` relay-update commit to the UNION of the
-///     circle's old relay list and the new one (so members on a relay
-///     being dropped still receive the commit).
+///  1. Publish the `kind:445` relay-update commit to the relays of the
+///     epoch it leaves — the circle's old relay list, where members are
+///     still listening (Marmot `nostr-routing-v1`, "Routing rotation") —
+///     and to no relay the change only adds.
 ///  2. Confirm the commit on the admin side once a relay acknowledged it
 ///     (which also re-syncs the admin's `circle.relays` row).
 ///  3. Allow a member to converge: when the member's MDK processes the
@@ -138,8 +139,8 @@ void main() {
   // receives the commit and converges; Alice's subsequent 445 lands on R2
   // =========================================================================
   testWidgets(
-    'CONV-1: relay-update commit published to union, Alice and Bob '
-    'converge to [R1,R2], subsequent 445 routed to R2',
+    'CONV-1: relay-update commit published to the old relays only, Alice '
+    'and Bob converge to [R1,R2], subsequent 445 routed to R2',
     (tester) async {
       installThrowTimeErrorLogging();
       // Skip when the platform keyring is unavailable.
@@ -260,17 +261,10 @@ void main() {
               // Step 3: Alice changes the circle's relays through the fanout
               // driver, claiming the foreground.
               //
-              // Register relay observers on BOTH relays BEFORE calling the
-              // service so we do not race the relay's ingestion.
+              // Register the R1 observer BEFORE calling the service so we do
+              // not race the relay's ingestion.
               // -----------------------------------------------------------
               final r1CommitFuture = r1.firstWhere(
-                filter: <String, dynamic>{
-                  'kinds': <int>[445],
-                  '#h': <String>[nostrGroupIdHex],
-                },
-                timeout: const Duration(seconds: 60),
-              );
-              final r2CommitFuture = r2.firstWhere(
                 filter: <String, dynamic>{
                   'kinds': <int>[445],
                   '#h': <String>[nostrGroupIdHex],
@@ -292,13 +286,13 @@ void main() {
               );
 
               // -----------------------------------------------------------
-              // Step 4: Assert the relay-update commit reached R1.
+              // Step 4: Assert the relay-update commit reached R1, and only
+              // R1.
               //
-              // The commit must land on R1 because R1 is in the union of
-              // (current = [R1]) and (new = [R1, R2]). R2 is also in the
-              // union, so the commit SHOULD reach R2 as well — but the
-              // primary protocol invariant is that members on the OLD relay
-              // set can still receive the commit.
+              // The commit is frozen for the relays of the epoch it leaves
+              // ([R1]): that is where members are listening until they apply
+              // it. R2 joins the routing only once the change applies, so
+              // it is owed none of the circle's traffic before then.
               // -----------------------------------------------------------
               final commitOnR1 = await r1CommitFuture;
               debugPrint(
@@ -306,13 +300,27 @@ void main() {
                 'id=${logAliasHandle(LogAliasClass.event, commitOnR1.id)}',
               );
 
-              // ORACLE: the commit must also have been sent to R2 (the new
-              // relay) because R2 is in the publish union. Members who
-              // exclusively subscribe to R2 must also receive it.
-              final commitOnR2 = await r2CommitFuture;
-              debugPrint(
-                '[CONV-1] relay-update commit on R2: '
-                'id=${logAliasHandle(LogAliasClass.event, commitOnR2.id)}',
+              // ORACLE: R2 holds no kind 445 for the circle. The change has
+              // returned applied and its record is finished, so nothing will
+              // send it later: this reads what R2 stored and listens on for
+              // a late send. The location in Step 9 is the circle's first 445
+              // on R2.
+              final r2BeforeLocation = await r2.collectN(
+                count: 1,
+                filter: <String, dynamic>{
+                  'kinds': <int>[445],
+                  '#h': <String>[nostrGroupIdHex],
+                },
+                timeout: const Duration(seconds: 12),
+              );
+              expect(
+                r2BeforeLocation,
+                isEmpty,
+                reason:
+                    'The relay-update commit must go only to the relays of '
+                    'the epoch it leaves ([R1]); a kind 445 for the circle '
+                    'on R2 before any post-update send means it reached a '
+                    'relay the change only adds.',
               );
 
               // -----------------------------------------------------------
@@ -486,7 +494,7 @@ void main() {
               );
 
               debugPrint(
-                '[CONV-1] PASS: relay-update commit on R1+R2; '
+                '[CONV-1] PASS: relay-update commit on R1 only; '
                 'Alice and Bob converged to the same relay set (never '
                 'logged); post-update 445 reached R2 and Bob decrypted it.',
               );
@@ -735,14 +743,14 @@ void main() {
   // the rotation commit still lands on R1 so Bob (on R1) can converge;
   // subsequent 445 routing no longer targets R1.
   //
-  // CONV-3 proves the relay-REMOVAL safety property the union(old∪new)
-  // publish exists for: the rotation commit reaches the relay being
-  // removed so members on it converge, after which 445 routing no longer
-  // targets the dropped relay.
+  // CONV-3 proves the relay-REMOVAL safety property publishing to the
+  // epoch's old relays exists for: the rotation commit reaches the relay
+  // being removed so members on it converge, after which 445 routing no
+  // longer targets the dropped relay.
   // =========================================================================
   testWidgets(
-    'CONV-3: relay-REMOVAL — rotation commit reaches dropped R1 via '
-    'union publish; Bob converges to [R2] only; subsequent 445 routes '
+    'CONV-3: relay-REMOVAL — rotation commit reaches dropped R1, the '
+    'old relay; Bob converges to [R2] only; subsequent 445 routes '
     'to R2 and does NOT newly arrive on R1',
     (tester) async {
       installThrowTimeErrorLogging();
@@ -854,10 +862,9 @@ void main() {
 
               // -----------------------------------------------------------
               // Step 3: Register a TestRelay observer on R1 BEFORE Alice calls
-              // updateCircleRelays. The union of (old=[R1]) ∪ (new=[R2]) = [R1,
-              // R2], so the rotation commit MUST still land on R1 even though
-              // R1 is being dropped — this is the whole point of the union
-              // publish.
+              // updateCircleRelays. The rotation commit is frozen for the
+              // relays of the epoch it leaves ([R1]), so it MUST land on R1
+              // even though R1 is being dropped.
               // -----------------------------------------------------------
               final r1CommitFuture = r1.firstWhere(
                 filter: <String, dynamic>{
@@ -883,7 +890,7 @@ void main() {
 
               // -----------------------------------------------------------
               // Step 4: ASSERT the rotation commit landed on R1 — the relay
-              // being dropped. Without the union(old∪new) publish, members
+              // being dropped. Published only to the new relays, members
               // exclusively on R1 would never receive this commit and could
               // not converge to the new relay set.
               // -----------------------------------------------------------
@@ -897,10 +904,10 @@ void main() {
                 isNotNull,
                 reason:
                     'The rotation commit must reach R1 even though R1 is '
-                    'being dropped. The union(old∪new)={R1}∪{R2}=[R1,R2] '
-                    'publish guarantees this; if the commit did not land on '
-                    'R1, the union publish is not being performed and '
-                    'members on the dropped relay cannot converge.',
+                    'being dropped: a routing change is published to the '
+                    'relays of the epoch it leaves. If the commit did not '
+                    'land on R1, members on the dropped relay cannot '
+                    'converge.',
               );
 
               // -----------------------------------------------------------

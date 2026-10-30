@@ -405,7 +405,9 @@
 #     filenames beneath every Haven log filter. The root cargo config and
 #     cargokit.yaml must both force -DSQLCIPHER_OMIT_LOG into every build, and
 #     the device lanes must keep making the wrong-key open the runtime
-#     scanner's S-SQLC rule scans for. The built-artifact probe runs in
+#     scanner's S-SQLC rule scans for, over the circle store's live file name
+#     (a pre-migration name is deleted by the storage reset before the open,
+#     so SQLCipher never decrypts it). The built-artifact probe runs in
 #     build-check.yml and release-build.yml.
 #
 #   SQLCipher first-use gate          scripts/ci/check_sqlcipher_first_use_gate.sh
@@ -1364,8 +1366,9 @@ jobs:
         run: bash scripts/ci/check_sqlcipher_logger_omitted.sh
 
       # Plants a drifted, unforced or flagless source, a build configuration
-      # without the flag, a commented-out wrong-key open, a lane that stopped
-      # driving it or scanning its logs, and each logger literal in an artifact.
+      # without the flag, a commented-out wrong-key open, one planted under a
+      # file name the product does not open, a lane that stopped driving it or
+      # scanning its logs, and each logger literal in an artifact.
       - name: SQLCipher logger guard self-test
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_sqlcipher_logger_omitted.sh --self-test

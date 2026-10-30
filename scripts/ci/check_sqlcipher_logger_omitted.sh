@@ -19,16 +19,28 @@
 #     is not discovered. Proved on a host build from outside the tree: the root
 #     config's value did not reach the build script, the `--config` flags did.
 #
+# The Apple pods link the Rust staticlib with `-force_load`, which links every
+# member; MDK enables rusqlite's `trace` wrappers, which call `sqlite3_trace`,
+# `sqlite3_trace_v2` and `sqlite3_profile`, and SQLITE_OMIT_TRACE removes all
+# three, so the link fails (CI run 41108434005). Both podspecs therefore build
+# with thin LTO, which drops the unreachable wrappers; this guard holds that
+# line rather than let anyone define the tracer's symbols back.
+#
 # The device lanes provide the stimulus the runtime scanner's S-SQLC rule needs:
 # `e2e_combined.dart` makes a wrong-key SQLCipher open inside the app
 # (`_lib/sqlcipher_wrong_key.dart`), and the Android and iOS lanes that drive it
 # run their captured device logs through the log-privacy gate, where one
-# SQLCipher line from Haven's process is a finding no allowlist can name.
+# SQLCipher line from Haven's process is a finding no allowlist can name. The
+# helper plants its undecryptable pages under the live circle store's name
+# (`CIRCLES_DB_FILENAME`): under any other name the open never reads them —
+# under a pre-migration one the storage reset deletes them first (CI run
+# 41108434005) — and SQLCipher's wrong-key path never runs.
 #
 # Modes:
 #   (no arguments)   the two sources carry the same value, with `force`, and
-#                    it holds both flags; the drive target makes the wrong-key open; both lanes drive
-#                    that target with the log-privacy gate on.
+#                    it holds both flags; the drive target makes the wrong-key open, over the
+#                    file the product opens; both lanes drive that target with the log-privacy
+#                    gate on; both podspecs build the Rust library with thin LTO.
 #   <path>...        one built artifact (files and/or directories, searched
 #                    whole): the pragma name `cipher_log_level`, which lives
 #                    outside the omit guards, must be present somewhere — it
@@ -41,7 +53,8 @@
 #
 # Exit codes:
 #   0  clean (or the self-test passed)
-#   1  a flag is missing or differs, or an artifact carries the logger or tracer
+#   1  a flag is missing or differs, a pod builds without LTO, or an artifact
+#      carries the logger or tracer
 #   2  a path is missing, or an artifact holds no SQLCipher (a vacuous scan)
 
 set -euo pipefail
@@ -50,7 +63,11 @@ REPO_ROOT="${REPO_ROOT_OVERRIDE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && 
 CARGO_CONFIG="${REPO_ROOT}/.cargo/config.toml"
 CARGOKIT_YAML="${REPO_ROOT}/haven/rust_builder/cargokit.yaml"
 STIMULUS_TARGET="${REPO_ROOT}/haven/integration_test/e2e/e2e_combined.dart"
+STIMULUS_HELPER="${REPO_ROOT}/haven/integration_test/e2e/_lib/sqlcipher_wrong_key.dart"
+CIRCLE_MANAGER="${REPO_ROOT}/haven-core/src/circle/manager.rs"
 STIMULUS_LANES=("${REPO_ROOT}/.github/workflows/e2e-android.yml" "${REPO_ROOT}/.github/workflows/e2e-ios.yml")
+PODSPECS=("${REPO_ROOT}/haven/rust_builder/ios/rust_lib_haven.podspec" "${REPO_ROOT}/haven/rust_builder/macos/rust_lib_haven.podspec")
+POD_SCRIPT="    :script => 'CARGO_PROFILE_DEV_LTO=thin CARGO_PROFILE_RELEASE_LTO=thin sh \"\$PODS_TARGET_SRCROOT/../cargokit/build_pod.sh\" .. rust_lib_haven',"
 FLAGS=('-DSQLCIPHER_OMIT_LOG' '-DSQLITE_OMIT_TRACE')
 POSITIVE_CONTROL='cipher_log_level'
 # A call-site format (removed with the `sqlcipher_log` macro), the logger
@@ -76,12 +93,20 @@ if [[ "${1:-}" == "--self-test" ]]; then
 
   value='-DSQLCIPHER_OMIT_LOG -DSQLCIPHER_OMIT_DEFAULT_LOGGING -DSQLITE_OMIT_TRACE'
   write_tree() { # <root> <config value> <cargokit value> <cargokit force>
-    mkdir -p "$1/.cargo" "$1/haven/rust_builder" "$1/haven/integration_test/e2e" "$1/.github/workflows"
+    mkdir -p "$1/.cargo" "$1/haven/rust_builder" "$1/haven/integration_test/e2e/_lib" "$1/.github/workflows" \
+      "$1/haven-core/src/circle"
+    printf 'pub const CIRCLES_DB_FILENAME: &str = "circles-v2.db";\n' > "$1/haven-core/src/circle/manager.rs"
+    printf "const String _circleStoreFilename = 'circles-v2.db';\n    File('\${stimulus.path}/\$_circleStoreFilename').writeAsBytesSync(\n" \
+      > "$1/haven/integration_test/e2e/_lib/sqlcipher_wrong_key.dart"
     printf 'void main() {\n  setUpAll(() async {\n    await provokeSqlcipherWrongKeyOpen();\n  });\n}\n' \
       > "$1/haven/integration_test/e2e/e2e_combined.dart"
     for lane in e2e-android e2e-ios; do
       printf 'jobs:\n  lane:\n    env:\n      HAVEN_LOGSCAN: "true"\n    steps:\n      - run: drive integration_test/e2e/e2e_combined.dart\n' \
         > "$1/.github/workflows/${lane}.yml"
+    done
+    for os in ios macos; do
+      mkdir -p "$1/haven/rust_builder/${os}"
+      printf '  s.script_phase = {\n%s\n  }\n' "${POD_SCRIPT}" > "$1/haven/rust_builder/${os}/rust_lib_haven.podspec"
     done
     printf '[env]\nLIBSQLITE3_FLAGS = { value = "%s", force = true }\n' "$2" > "$1/.cargo/config.toml"
     printf 'cargo:\n' > "$1/haven/rust_builder/cargokit.yaml"
@@ -111,12 +136,29 @@ if [[ "${1:-}" == "--self-test" ]]; then
   write_tree "${tmp}/nocall" "${value}" "${value}" true
   sed -i 's#^    await provokeSqlcipherWrongKeyOpen();#    // await provokeSqlcipherWrongKeyOpen();#' "${tmp}/nocall/haven/integration_test/e2e/e2e_combined.dart"
   [[ "$(rc_of wiring "${tmp}/nocall")" == 1 ]] || fail "self-test: a drive target whose wrong-key open is commented out must exit 1"
+  write_tree "${tmp}/oldname" "${value}" "${value}" true
+  sed -i "s/'circles-v2.db'/'circles.db'/" "${tmp}/oldname/haven/integration_test/e2e/_lib/sqlcipher_wrong_key.dart"
+  [[ "$(rc_of wiring "${tmp}/oldname")" == 1 ]] || fail "self-test: a helper planting under a name the product does not open must exit 1"
+  write_tree "${tmp}/literal" "${value}" "${value}" true
+  sed -i 's|/\$_circleStoreFilename|/circles.db|' "${tmp}/literal/haven/integration_test/e2e/_lib/sqlcipher_wrong_key.dart"
+  [[ "$(rc_of wiring "${tmp}/literal")" == 1 ]] || fail "self-test: a helper writing a file other than the pinned name must exit 1"
   write_tree "${tmp}/noscan" "${value}" "${value}" true
   sed -i 's/HAVEN_LOGSCAN: "true"/HAVEN_LOGSCAN: "false"/' "${tmp}/noscan/.github/workflows/e2e-ios.yml"
   [[ "$(rc_of wiring "${tmp}/noscan")" == 1 ]] || fail "self-test: a lane that does not scan its logs must exit 1"
   write_tree "${tmp}/nodrive" "${value}" "${value}" true
   sed -i 's|^      - run: drive integration_test/e2e/e2e_combined.dart|      # - run: drive integration_test/e2e/e2e_combined.dart|' "${tmp}/nodrive/.github/workflows/e2e-android.yml"
   [[ "$(rc_of wiring "${tmp}/nodrive")" == 1 ]] || fail "self-test: a lane that no longer drives the stimulus target must exit 1"
+  for os in ios macos; do
+    write_tree "${tmp}/nolto" "${value}" "${value}" true
+    sed -i 's/CARGO_PROFILE_DEV_LTO=thin CARGO_PROFILE_RELEASE_LTO=thin //' "${tmp}/nolto/haven/rust_builder/${os}/rust_lib_haven.podspec"
+    [[ "$(rc_of wiring "${tmp}/nolto")" == 1 ]] || fail "self-test: a ${os} pod built without LTO must exit 1"
+    write_tree "${tmp}/devlto" "${value}" "${value}" true
+    sed -i 's/ CARGO_PROFILE_RELEASE_LTO=thin//' "${tmp}/devlto/haven/rust_builder/${os}/rust_lib_haven.podspec"
+    [[ "$(rc_of wiring "${tmp}/devlto")" == 1 ]] || fail "self-test: a ${os} pod whose release build has no LTO must exit 1"
+    write_tree "${tmp}/podcomment" "${value}" "${value}" true
+    sed -i 's/^    :script/    # :script/' "${tmp}/podcomment/haven/rust_builder/${os}/rust_lib_haven.podspec"
+    [[ "$(rc_of wiring "${tmp}/podcomment")" == 1 ]] || fail "self-test: a ${os} pod whose LTO line is commented out must exit 1"
+  done
   rm "${tmp}/ok/haven/rust_builder/cargokit.yaml"
   [[ "$(rc_of wiring "${tmp}/ok")" == 2 ]] || fail "self-test: a missing source must exit 2"
 
@@ -133,7 +175,7 @@ if [[ "${1:-}" == "--self-test" ]]; then
   [[ "$(rc_of self "${tmp}/art/vacuous.so")" == 2 ]] || fail "self-test: an artifact without the pragma name is vacuous (exit 2)"
   [[ "$(rc_of self "${tmp}/art/absent.so")" == 2 ]] || fail "self-test: a missing artifact must exit 2"
 
-  log "OK: self-test passed — wiring drift, each missing flag or force, a missing stimulus or lane scan, and each probe fail; a vacuous or missing artifact is a misconfiguration."
+  log "OK: self-test passed — wiring drift, each missing flag or force, a missing or misdirected stimulus or lane scan, a pod built without LTO, and each probe fail; a vacuous or missing artifact is a misconfiguration."
   exit 0
 fi
 
@@ -153,7 +195,7 @@ if [[ $# -gt 0 ]]; then
   exit 0
 fi
 
-for source in "${CARGO_CONFIG}" "${CARGOKIT_YAML}" "${STIMULUS_TARGET}" "${STIMULUS_LANES[@]}"; do
+for source in "${CARGO_CONFIG}" "${CARGOKIT_YAML}" "${STIMULUS_TARGET}" "${STIMULUS_HELPER}" "${CIRCLE_MANAGER}" "${STIMULUS_LANES[@]}" "${PODSPECS[@]}"; do
   [[ -f "${source}" ]] || { echo "ERROR: ${source} not found" >&2; exit 2; }
 done
 config_value="$(sed -nE 's/^LIBSQLITE3_FLAGS = \{ value = "([^"]*)", force = true \}$/\1/p' "${CARGO_CONFIG}")"
@@ -172,6 +214,12 @@ for configuration in debug profile release; do
 done
 grep -qxE '[[:space:]]+await provokeSqlcipherWrongKeyOpen\(\);' "${STIMULUS_TARGET}" \
   || fail "e2e_combined.dart no longer makes the wrong-key SQLCipher open, so S-SQLC scans a log that never exercised SQLCipher's failure path"
+store_name="$(sed -nE 's/^pub const CIRCLES_DB_FILENAME: &str = "([^"]+)";$/\1/p' "${CIRCLE_MANAGER}")"
+[[ -n "${store_name}" ]] || fail "haven-core/src/circle/manager.rs no longer defines CIRCLES_DB_FILENAME as a literal"
+grep -qxF "const String _circleStoreFilename = '${store_name}';" "${STIMULUS_HELPER}" \
+  || fail "sqlcipher_wrong_key.dart does not plant its pages under '${store_name}', the file the product opens, so the open never decrypts them"
+grep -qxE "[[:space:]]+File\\('\\\$\\{stimulus\\.path\\}/\\\$_circleStoreFilename'\\)\\.writeAsBytesSync\\(" "${STIMULUS_HELPER}" \
+  || fail "sqlcipher_wrong_key.dart no longer writes its pages to the pinned circle store name"
 for lane in "${STIMULUS_LANES[@]}"; do
   code="$(grep -vE '^[[:space:]]*#' "${lane}")"
   grep -qF 'integration_test/e2e/e2e_combined.dart' <<<"${code}" \
@@ -179,4 +227,8 @@ for lane in "${STIMULUS_LANES[@]}"; do
   grep -qxE '[[:space:]]+HAVEN_LOGSCAN: "true"' <<<"${code}" \
     || fail "${lane#"${REPO_ROOT}/"} does not run its captured logs through the log-privacy gate"
 done
-log "OK: .cargo/config.toml and cargokit.yaml both force '${config_value}'; e2e_combined.dart makes the wrong-key open and both lanes scan it."
+for podspec in "${PODSPECS[@]}"; do
+  grep -qxF -- "${POD_SCRIPT}" "${podspec}" \
+    || fail "${podspec#"${REPO_ROOT}/"} does not build the Rust library with thin LTO in both cargo profiles, so -force_load links rusqlite's trace wrappers and the link needs the tracer SQLITE_OMIT_TRACE removed"
+done
+log "OK: .cargo/config.toml and cargokit.yaml both force '${config_value}'; e2e_combined.dart makes the wrong-key open over '${store_name}' and both lanes scan it; both pods build with thin LTO."
