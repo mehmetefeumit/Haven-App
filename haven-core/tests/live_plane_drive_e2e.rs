@@ -44,7 +44,10 @@ use haven_core::relay::live_sync::{
 };
 use haven_core::relay::retick::MAX_CONVERGENCE_RETICKS;
 use haven_core::relay::{allow_ws_loopback_for_test, RelayManager};
-use helpers::{assert_no_needles, capture_haven_log, setup_circle, CircleFixture, CircleMember};
+use helpers::{
+    assert_no_needles, capture_haven_log, capture_haven_log_here, setup_circle, CircleFixture,
+    CircleMember,
+};
 use nostr::{Event, JsonUtil as _, Kind};
 use nostr_relay_builder::MockRelay;
 
@@ -1607,7 +1610,7 @@ async fn an_eviction_neither_recorded_nor_undone_is_owed_to_nobody_and_undone_at
 /// not from the call: the commit is gone, so nothing is kept as "still
 /// staged", no dead ref is remembered, and its circle is not told a change
 /// could not be recorded. What the failed call had emitted is taken in.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn a_rollback_that_errors_after_its_rewind_landed_is_read_as_rolled_back() {
     let fx = setup_circle(3, &[RELAY]).await;
     let admin = fx.admin();
@@ -1617,7 +1620,7 @@ async fn a_rollback_that_errors_after_its_rewind_landed_is_read_as_rolled_back()
     set_engine_write_fault_for_test(&db, &key, EngineWrite::FanoutPut, true).expect("arm");
     admin.session().fail_next_rollback_for_test(true);
     let said = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let lines = Box::pin(capture_haven_log(async {
+    let lines = Box::pin(capture_haven_log_here(async {
         let id = ngid(admin, &fx.group).await;
         let proposal = fx.members[1]
             .circle

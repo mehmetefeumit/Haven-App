@@ -389,6 +389,9 @@ pub struct LogLine {
     pub target: String,
     /// The rendered message.
     pub message: String,
+    /// The thread that emitted it, so [`capture_haven_log_here`] can keep a
+    /// window to its own test's lines.
+    pub thread: std::thread::ThreadId,
 }
 
 /// Records every log line this process emits, for tests that assert what a
@@ -421,6 +424,7 @@ impl log::Log for LogSink {
             level: record.level(),
             target: record.target().to_owned(),
             message: record.args().to_string(),
+            thread: std::thread::current().id(),
         });
     }
 
@@ -429,8 +433,48 @@ impl log::Log for LogSink {
 
 /// Runs `body` and returns the log lines emitted during it — a superset of
 /// `body`'s own if another test logs alongside it, which is why assertions on
-/// the result look for a line rather than count them.
+/// the result look for a line rather than count them, and an assertion that a
+/// line is absent uses [`capture_haven_log_here`].
 pub async fn capture_haven_log(body: impl std::future::Future<Output = ()>) -> Vec<LogLine> {
+    install_log_sink();
+    // The window starts at the current end of the buffer, so the lines returned
+    // are the ones `body` emitted.
+    let from = lock(&CAPTURED).len();
+    body.await;
+    lock(&CAPTURED)[from..].to_vec()
+}
+
+/// Runs `body` and returns exactly the log lines it emitted, with no other
+/// test's among them — for an assertion that a line is ABSENT, which a
+/// superset can fail for a sibling test's line. On a current-thread runtime
+/// every task the test spawns runs on this thread, and haven-core hands no
+/// work to another, while every other test runs on threads of its own.
+///
+/// # Panics
+///
+/// On a multi-thread runtime, where `body` may resume on another worker and
+/// the lines it emitted there would be missed.
+pub fn capture_haven_log_here(
+    body: impl std::future::Future<Output = ()>,
+) -> impl std::future::Future<Output = Vec<LogLine>> {
+    // Boxed here, so the future each caller awaits is not as large as its body.
+    let body = Box::pin(body);
+    async move {
+        assert!(
+            tokio::runtime::Handle::current().runtime_flavor()
+                == tokio::runtime::RuntimeFlavor::CurrentThread,
+            "a multi-thread runtime runs the body on other threads too; use capture_haven_log"
+        );
+        let here = std::thread::current().id();
+        let mut lines = capture_haven_log(body).await;
+        lines.retain(|line| line.thread == here);
+        lines
+    }
+}
+
+/// Installs [`LogSink`] once per process, and fails if another logger holds
+/// the slot.
+fn install_log_sink() {
     static INSTALL: Once = Once::new();
     /// Whether OUR logger won the process-wide slot. `log` permits exactly one
     /// per process and reports the loser only through an `Err` that a `let _ =`
@@ -452,11 +496,6 @@ pub async fn capture_haven_log(body: impl std::future::Future<Output = ()>) -> V
          at all. `log` permits exactly one; whoever installed the other one has \
          to route through LogSink instead."
     );
-    // The window starts at the current end of the buffer, so the lines returned
-    // are the ones `body` emitted.
-    let from = lock(&CAPTURED).len();
-    body.await;
-    lock(&CAPTURED)[from..].to_vec()
 }
 
 /// The subset of `lines` this crate itself emitted.
@@ -982,6 +1021,7 @@ mod log_capture_self_tests {
             level: log::Level::Debug,
             target: target.to_owned(),
             message: message.to_owned(),
+            thread: std::thread::current().id(),
         }
     }
 

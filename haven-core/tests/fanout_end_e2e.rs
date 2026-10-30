@@ -40,8 +40,8 @@ use haven_core::relay::fanout::{
     MDK_CALL_CEILING_SECS, ROW_BUDGET_MS,
 };
 use helpers::{
-    assert_no_needles, capture_haven_log, setup_circle, BalkyNotes, CircleFixture, CircleMember,
-    LogLine,
+    assert_no_needles, capture_haven_log, capture_haven_log_here, setup_circle, BalkyNotes,
+    CircleFixture, CircleMember, LogLine,
 };
 
 const ONE: &str = "wss://one.end-canary9b2d.example.com";
@@ -663,7 +663,7 @@ async fn a_possibly_exposed_pending_commit_is_never_bounded() {
     for hours in [0, 24, 25, 24 * 30] {
         clock.set(hours * HOUR_MS);
         let mut status = None;
-        let lines = capture_haven_log(async {
+        let lines = capture_haven_log_here(async {
             status = Some(drive(admin, &transport, &clock, &id).await.status);
         })
         .await;
@@ -972,7 +972,7 @@ async fn a_never_exposed_pending_commit_is_rolled_back_through_the_engine_after_
 
     clock.set(DAY_MS);
     let mut outcome = None;
-    let lines = capture_haven_log(async {
+    let lines = capture_haven_log_here(async {
         outcome = Some(drive(admin, &transport, &clock, &id).await);
     })
     .await;
@@ -2700,7 +2700,7 @@ async fn reopen_after(member: CircleMember, edit: StoreEdit<'_>) -> (CircleMembe
     );
     edit_closed_store_for_test(&db, &key, edit).expect("the closed store is edited");
     let mut reopened = None;
-    let lines = capture_haven_log(async {
+    let lines = capture_haven_log_here(async {
         reopened = Some(std::sync::Arc::new(
             CircleManager::new_unencrypted(dir.path(), &keys).expect("the stores reopen"),
         ));
@@ -3264,7 +3264,7 @@ async fn a_removal_no_relay_can_be_reached_for_is_never_undone_at_the_bound() {
             clock.set(at);
             let mut outcome = None;
             lines.extend(
-                capture_haven_log(async {
+                capture_haven_log_here(async {
                     outcome = Some(drive(&admin, &transport, &clock, &id).await);
                 })
                 .await,
@@ -3812,7 +3812,7 @@ async fn a_stored_record_flagged_as_exposed_is_never_bounded_whatever_its_status
 
     clock.set(DAY_MS);
     let mut status = None;
-    let lines = capture_haven_log(async {
+    let lines = capture_haven_log_here(async {
         status = Some(drive(&admin, &transport, &clock, &id).await.status);
     })
     .await;
@@ -3946,7 +3946,7 @@ async fn an_eviction_every_relay_refuses_is_staged_again_on_a_doubling_schedule_
         // and each time it is undone unsent.
         clock.set(rolled_back_at + wait - 1);
         let mut recorded = None;
-        let lines = capture_haven_log(async {
+        let lines = capture_haven_log_here(async {
             recorded = restage_eviction(&admin, &group, clock.now_ms()).await;
         })
         .await;
@@ -4444,7 +4444,7 @@ async fn a_commit_a_relay_may_hold_that_ends_for_good_leaves_its_circle_told_it_
                 .expect("disarm");
             assert!(probe(&admin, &id).await.is_some(), "premise: still stored");
             let mut status = None;
-            let lines = capture_haven_log(async {
+            let lines = capture_haven_log_here(async {
                 status = Some(drive(&admin, &transport, &clock, &id).await.status);
             })
             .await;
@@ -4480,7 +4480,7 @@ async fn a_commit_a_relay_may_hold_that_ends_for_good_leaves_its_circle_told_it_
         Some(MessageState::Failed)
     );
     let mut status = None;
-    let lines = capture_haven_log(async {
+    let lines = capture_haven_log_here(async {
         status = Some(
             drive(&admin, &ScriptedFanout::default(), &Clock::at(0), &id)
                 .await

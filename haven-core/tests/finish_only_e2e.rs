@@ -33,7 +33,9 @@ use helpers::drive::{
     stored_fix, through, wait_out_the_engine, within, ManualClock, NarrowsWhenHeld, Recorder,
     HOUR_MS, SECOND_MS,
 };
-use helpers::{assert_no_needles, capture_haven_log, setup_circle, CircleFixture, CircleMember};
+use helpers::{
+    assert_no_needles, capture_haven_log_here, setup_circle, CircleFixture, CircleMember,
+};
 
 const ONE: &str = "wss://one.finishonly-canary5b9e.example.com";
 const TWO: &str = "wss://two.finishonly-canary5b9e.example.com";
@@ -2463,12 +2465,12 @@ async fn the_next_eviction_of_a_cascade_is_left_due_by_the_narrow_confirm_that_b
 /// The one way a commit reaches a finish-only hold is a preflight that raced
 /// the departure check. It is undone in that hold, unsent and unrecorded,
 /// its circle named as waiting, and the line that says so names nothing.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn a_commit_found_staged_by_a_finish_only_hold_is_undone_unsent_and_said() {
     let (admin, others, group, transport) = a_departure_due_in_a_finish_only_plane().await;
     wait_out_the_engine(&admin, &group).await;
     let mut staged = None;
-    let lines = capture_haven_log(async {
+    let lines = capture_haven_log_here(async {
         staged = Some(
             admin
                 .session()
