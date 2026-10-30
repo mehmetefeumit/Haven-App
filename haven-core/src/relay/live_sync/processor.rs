@@ -343,13 +343,20 @@ impl EoseCoverage {
     /// NOT reset here — that happens per endpoint in
     /// [`EngineProcessor::open_delivery_window`], because an answer landing
     /// between the two calls is a real answer to this generation.
-    fn expect(&self, sub_id: &SubscriptionId, issued: &[RelayUrl], owing: &[RelayUrl]) {
+    ///
+    /// Whether this call completed the REQ: it was owed an `EOSE`, and now
+    /// every relay it still expects, at least one, has answered. No further
+    /// `EOSE` will redeem that advance, so the caller does.
+    fn expect(&self, sub_id: &SubscriptionId, issued: &[RelayUrl], owing: &[RelayUrl]) -> bool {
         let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
         let coverage = inner.entry(sub_id.clone()).or_default();
+        let was_complete = coverage.complete();
         coverage.expected.retain(|relay| !issued.contains(relay));
         coverage.expected.extend(owing.iter().cloned());
         coverage.issued = Instant::now();
+        let completed = !was_complete && !coverage.expected.is_empty() && coverage.complete();
         drop(inner);
+        completed
     }
 
     /// Forgets one endpoint's answer: its REQ is being re-issued, so the
@@ -928,6 +935,22 @@ impl EngineProcessor {
     ) {
         self.eose_coverage.expect(sub_id, issued, owing);
         self.coverage_changed.notify_waiters();
+    }
+
+    /// [`Self::expect_eose_from`], narrowing `issued` to `covering`, the relays
+    /// that accepted the REQ while connected. Whether that completed the REQ:
+    /// an `EOSE` that landed before the narrowing then redeems nothing by
+    /// itself, and the caller redeems its circles' advance.
+    #[must_use]
+    pub fn narrow_eose_to(
+        &self,
+        sub_id: &SubscriptionId,
+        issued: &[RelayUrl],
+        covering: &[RelayUrl],
+    ) -> bool {
+        let completed = self.eose_coverage.expect(sub_id, issued, covering);
+        self.coverage_changed.notify_waiters();
+        completed
     }
 
     /// When the first group REQ still owed an `EOSE` will have waited out
@@ -1680,8 +1703,8 @@ impl EngineProcessor {
         self.drive_wanted.notify_one();
     }
 
-    /// Says an open — a burst, or a foreground re-anchor — has happened: the
-    /// worker comes back, once, for the advance a convergence drain handed
+    /// Says an open — a burst, or a foreground re-anchor — is issuing its
+    /// REQs: the worker comes back, once, for the advance a convergence drain handed
     /// back when it ran out of deadlines it may wait out
     /// ([`Self::come_back_if_owed`]), so a circle whose engine still owes a
     /// deadline is not left deaf until its next send, ingest or start.
@@ -2692,6 +2715,42 @@ mod tests {
              expectation already recorded — dropping it would leave the cursor waiting \
              for a second EOSE the relay will never send"
         );
+    }
+
+    #[test]
+    fn a_narrowing_onto_relays_that_have_all_answered_completes_the_req_once() {
+        // The live relay's EOSE lands while the subscribe call is still
+        // returning, against the wider expectation; no second EOSE follows.
+        // The narrowing has to say the REQ is complete, or nothing redeems it.
+        let coverage = EoseCoverage::default();
+        let sub = SubscriptionId::new("s_group_0");
+        let live = RelayUrl::parse("wss://live.example").expect("url");
+        let issued = [
+            live.clone(),
+            RelayUrl::parse("wss://dead.example").expect("url"),
+        ];
+        assert!(!coverage.expect(&sub, &issued, &issued));
+        assert!(!coverage.note(&key("wss://live.example", &sub)));
+        assert!(
+            coverage.expect(&sub, &issued, std::slice::from_ref(&live)),
+            "a narrowing that leaves every relay still covering answered completes the REQ"
+        );
+        assert!(
+            !coverage.expect(&sub, &issued, std::slice::from_ref(&live)),
+            "a REQ already complete is not completed again"
+        );
+
+        // Narrowed before the answer: the worker's EOSE completes it, not the
+        // narrowing.
+        let coverage = EoseCoverage::default();
+        assert!(!coverage.expect(&sub, &issued, &issued));
+        assert!(!coverage.expect(&sub, &issued, std::slice::from_ref(&live)));
+        assert!(coverage.note(&key("wss://live.example", &sub)));
+
+        // Narrowed to nobody: no relay answered, so nothing is complete.
+        let coverage = EoseCoverage::default();
+        assert!(!coverage.expect(&sub, &issued, &issued));
+        assert!(!coverage.expect(&sub, &issued, &[]));
     }
 
     #[test]

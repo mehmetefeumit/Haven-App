@@ -151,8 +151,8 @@ use crate::location::LocationMessage;
 use crate::nostr::mls::types::LocationMessageResult;
 use crate::nostr::mls::types::{
     AppliedCommit, FanoutEndpointFailure, FanoutId, FanoutStanding, GroupId, MessageId,
-    StoredFanout, TransportMessage, WelcomeEnd, WelcomeFate, WelcomeRecord, WithdrawnChange,
-    WithdrawnOutcome,
+    MessageState, StoredFanout, TransportMessage, WelcomeEnd, WelcomeFate, WelcomeRecord,
+    WithdrawnChange, WithdrawnOutcome,
 };
 use crate::nostr::mls::types::{RequeueOutcome, RequeuedRemoval};
 use crate::nostr::mls::AwayHold;
@@ -4860,6 +4860,13 @@ impl<T: FanoutSend + ?Sized> Publishing<'_, T> {
         // What the circle had not been told before this change was driven
         // is an earlier change's, and stays untold.
         let untold_before = circle.session().peek_change_notes(group_id);
+        // Read while the record is stored: another drive may end it before
+        // this call's own drive reads it, and then only the commit's own row
+        // says how it ended.
+        let origin = match &commit {
+            Some(id) => circle.session().fanout_origin(id).await,
+            None => None,
+        };
         #[cfg(any(test, feature = "test-utils"))]
         if let Some(id) = commit.as_ref() {
             let hook = {
@@ -4904,6 +4911,16 @@ impl<T: FanoutSend + ?Sized> Publishing<'_, T> {
                     .or(own);
             }
         }
+        // Another drive ended the record first: the commit's own row is
+        // `Processed` once applied here (`cgka-engine/src/publish.rs`
+        // 226-237), and `Failed` once retired rewound (`retire_commit`) — or,
+        // in a chain no change call reaches in practice, set aside by MDK's
+        // canonicalisation, which that drive notes as out of step. Anything
+        // else proves neither.
+        let ended = match (&origin, own.as_ref().map(|own| own.status)) {
+            (Some(origin), Some(FanoutStatus::Gone)) => circle.session().commit_state(origin).await,
+            _ => None,
+        };
         // The row decides, never an error beside it: a commit applied
         // beside an error is applied, and one not yet resolved is awaiting
         // relays, not failed.
@@ -4914,7 +4931,11 @@ impl<T: FanoutSend + ?Sized> Publishing<'_, T> {
             (Some(_), Some(FanoutStatus::Confirmed)) => EvolutionStatus::Confirmed,
             (Some(_), Some(FanoutStatus::RolledBack)) => EvolutionStatus::RolledBack,
             (Some(_), Some(FanoutStatus::Stale)) => EvolutionStatus::Stale,
-            (Some(_), _) => EvolutionStatus::Unresolved,
+            (Some(_), _) => match ended {
+                Some(MessageState::Processed) => EvolutionStatus::Confirmed,
+                Some(MessageState::Failed) => EvolutionStatus::RolledBack,
+                _ => EvolutionStatus::Unresolved,
+            },
         };
         // This call is the one being told, here: what its own drive noted
         // need not wait to be read.

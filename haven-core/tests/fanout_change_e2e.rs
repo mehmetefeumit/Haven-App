@@ -725,6 +725,123 @@ async fn a_change_whose_row_another_drive_holds_is_driven_again_when_it_lets_go(
     );
 }
 
+/// What a relay update's call and another drive — the live plane's, say —
+/// each left when that drive took the update's row first and ended its
+/// record before the call was let back in.
+struct EndedBeside {
+    /// What the update's call answered.
+    status: EvolutionStatus,
+    /// What the other drive did with the record.
+    beside: FanoutStatus,
+    /// The record was gone when the other drive let go of it.
+    ended: bool,
+    /// Relays the update's call itself sent to.
+    own_calls: usize,
+    /// The engine's relays for the circle afterwards include the update's.
+    routed_to_new: bool,
+}
+
+/// A relay update whose row another drive holds when the update's call first
+/// drives it, which every relay answers `answer` in that other drive. The
+/// row is let go and taken by the other drive in one step, so the call's own
+/// drive is let back in only once the record is resolved and ended; the
+/// clock never moves, so the call waits on the row and on nothing else.
+async fn a_relay_update_another_drive_ends(answer: Answer) -> EndedBeside {
+    use haven_core::relay::fanout::{
+        a_row_is_waited_for_test, before_next_change_drive_for_test, hold_fanout_row_for_test,
+    };
+    let fx = setup_circle(2, &[ONE, TWO]).await;
+    let (admin, _others, group) = split(fx);
+    let own = answering(&[(ONE, &[Answer::Accepted]), (TWO, &[Answer::Accepted])]);
+    let other = answering(&[(ONE, &[answer]), (TWO, &[answer])]);
+    let outbox = Outbox::default();
+    let clock = helpers::drive::ManualClock::at(0);
+    let (hand_over, handed) = tokio::sync::oneshot::channel();
+    before_next_change_drive_for_test(&group, move |id| {
+        let hold = hold_fanout_row_for_test(id).expect("premise: nothing drives the row yet");
+        let _ = hand_over.send((id.clone(), hold));
+    });
+    let changes = Publishing {
+        fanout: &own,
+        publisher: &outbox,
+        clock: &*clock,
+        deadline_ms: None,
+        mode: &DriveMode::Full,
+    };
+    let beside = async {
+        let (id, hold) = handed.await.expect("the change reaches its drive");
+        a_row_is_waited_for_test().await;
+        drop(hold);
+        let driven = drive_one(&admin.circle, &other, &*clock, &id, &DriveMode::Full)
+            .await
+            .unwrap_or_else(|_| panic!("the other drive runs"));
+        (driven.status, probe(&admin, &id).await.is_none())
+    };
+    let new_relays = [THREE.to_string()];
+    let (outcome, (beside, ended)) = tokio::join!(
+        changes.update_relays(&admin.circle, &group, &new_relays),
+        beside,
+    );
+    let status = outcome
+        .unwrap_or_else(|_| panic!("the update is accepted"))
+        .status;
+    let (_, routed) = admin
+        .session()
+        .group_routing(&group)
+        .await
+        .expect("the routing reads");
+    EndedBeside {
+        status,
+        beside,
+        ended,
+        own_calls: own.calls().len(),
+        routed_to_new: routed
+            .iter()
+            .any(|relay| relay.trim_end_matches('/') == THREE),
+    }
+}
+
+/// A change another drive confirmed and ended before its own call could
+/// drive it is applied, and the call says so: the record is gone, and the
+/// commit's own stored row says it was applied.
+#[tokio::test]
+async fn a_change_another_drive_confirms_and_ends_is_answered_applied() {
+    let ended = a_relay_update_another_drive_ends(Answer::Accepted).await;
+
+    assert!(
+        ended.beside == FanoutStatus::Confirmed
+            && ended.ended
+            && ended.own_calls == 0
+            && ended.routed_to_new,
+        "premise: the other drive applied the update and ended its record",
+    );
+    assert_eq!(
+        ended.status,
+        EvolutionStatus::Confirmed,
+        "a change another drive applied was answered as still awaiting relays",
+    );
+}
+
+/// A change another drive rolled back and ended before its own call could
+/// drive it is undone, and the call says so, never "awaiting relays".
+#[tokio::test]
+async fn a_change_another_drive_rolls_back_and_ends_is_answered_undone() {
+    let ended = a_relay_update_another_drive_ends(Answer::Refused).await;
+
+    assert!(
+        ended.beside == FanoutStatus::RolledBack
+            && ended.ended
+            && ended.own_calls == 0
+            && !ended.routed_to_new,
+        "premise: the other drive rolled the update back and ended its record",
+    );
+    assert_eq!(
+        ended.status,
+        EvolutionStatus::RolledBack,
+        "a change another drive undid was answered as still awaiting relays",
+    );
+}
+
 /// Saving the relay list a circle already has — in any order, in any of its
 /// spellings — stages nothing: no commit, no relay called, the epoch where
 /// it was.

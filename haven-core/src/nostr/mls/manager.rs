@@ -7502,6 +7502,31 @@ impl SessionManager {
         Ok(FanoutStanding::Stale { bound })
     }
 
+    /// The commit the stored record `id` names: what [`Self::commit_state`]
+    /// reads once another drive has ended the record. `None` when the record
+    /// is not stored or names none.
+    pub(crate) async fn fanout_origin(&self, id: &FanoutId) -> Option<MessageId> {
+        let rows = self
+            .reading()
+            .await
+            .outbound_fanouts_for_group(id.group())
+            .ok()?;
+        rows.iter()
+            .find(|row| row.message_id() == id.message())?
+            .pending_origin_message_id()
+            .cloned()
+    }
+
+    /// How this device's commit `origin` is stored; `None` when it cannot be
+    /// read.
+    pub(crate) async fn commit_state(&self, origin: &MessageId) -> Option<MessageState> {
+        self.reading()
+            .await
+            .stored_message_state(origin)
+            .ok()
+            .flatten()
+    }
+
     /// Whether `group_id` is finished on this device: its copy is removed or
     /// disbanded, or the engine holds no record of it. A quarantined group
     /// and one not yet hydrated are not: they are halted, and a retry brings

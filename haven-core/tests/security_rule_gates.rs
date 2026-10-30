@@ -2110,11 +2110,12 @@ fn the_live_planes_foreground_is_the_one_product_driver_and_the_open_repairs_a_r
         // once a minute and only in a lifecycle that drives on a timer
         // (`network_back`). In the session: the start's
         // tail; the one place a claim is taken; a stop, a pause and a failed
-        // open; the one open; the six who ask for a drive — a start, a start
+        // open; the one open; the seven who ask for a drive — a start, a start
         // into a burst, a session served as the foreground's, a background
         // open, a health tick whose claim promoted nothing, and a release of
-        // relays silent past `EOSE_WAIT` that completes a circle's coverage as
-        // an `EOSE` does; and the drive task. In
+        // relays silent past `EOSE_WAIT` or a narrowing to the relays that
+        // took a REQ connected, either completing a circle's coverage as an
+        // `EOSE` does; and the drive task. In
         // the worker: the drive asked for once every relay of a group
         // subscription has sent its end of stored events, which is when an
         // eviction left due may first be staged.
@@ -2128,7 +2129,7 @@ fn the_live_planes_foreground_is_the_one_product_driver_and_the_open_repairs_a_r
             ("processor.rs", "set_background_burst", 1),
             ("session.rs", "set_background_burst", 1),
             ("processor.rs", "request_drive", 3),
-            ("session.rs", "request_drive", 6),
+            ("session.rs", "request_drive", 7),
             ("supervisor.rs", "request_drive", 1),
             ("processor.rs", "drive_due", 1),
             ("session.rs", "drive_due", 1),
@@ -2331,10 +2332,14 @@ fn the_live_planes_foreground_is_the_one_product_driver_and_the_open_repairs_a_r
         fn_body(&core, "async fn release_silent_relays(\n")
             .expect("session.rs defines release_silent_relays"),
     );
+    // A narrowing to the relays that took a REQ connected, when every one of
+    // them had already answered: no later `EOSE` asks for that drive.
+    let cover = squash(fn_body(&core, "async fn cover(").expect("session.rs defines cover"));
     assert_eq!(
         (
             core_flat.matches(".request_drive()").count(),
             release.matches(".request_drive()").count(),
+            cover.matches(".request_drive()").count(),
             begin.matches(".request_drive()").count(),
             serve.matches(".request_drive()").count(),
             resume.matches(".request_drive()").count(),
@@ -2344,7 +2349,7 @@ fn the_live_planes_foreground_is_the_one_product_driver_and_the_open_repairs_a_r
             take_claim.matches(".prove_foreground()").count(),
             core_flat.matches(".set_background_burst(").count(),
         ),
-        (6, 1, 1, 1, 1, 1, 1, 1, 1, 1),
+        (7, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1),
         "a drive is asked for, or the foreground entered, somewhere this gate does not \
          name",
     );
@@ -2507,9 +2512,25 @@ fn the_live_planes_foreground_is_the_one_product_driver_and_the_open_repairs_a_r
         "the health tick claims the foreground for a paused session, or outside the lock \
          a pause takes",
     );
+    // The come-back an open owes is owed before its first REQ: the worker
+    // takes it at the open's first relay EOSE, which can beat the subscribe.
+    assert!(
+        start
+            .find("ifburst{self.processor.owe_come_back();}")
+            .zip(start.find("self.register_and_subscribe("))
+            .is_some_and(|(owed, issued)| owed < issued)
+            && resume
+                .find("self.processor.owe_come_back();")
+                .zip(resume.find("self.register_and_subscribe("))
+                .is_some_and(|(owed, issued)| owed < issued)
+            && start.matches("owe_come_back").count() == 1
+            && resume.matches("owe_come_back").count() == 1,
+        "an open owes its come-back after its REQs went out: a relay's EOSE that comes \
+         first finds none owed, and the circle is not come back for",
+    );
     assert!(
         start.ends_with(
-            "ifburst{self.processor.owe_come_back();self.processor.request_drive();}\
+            "ifburst{self.processor.request_drive();}\
              elseif!self.shutdown.load(Ordering::Acquire){self.begin_started();}Ok(())}"
         )
             // A start into a burst is in the burst from before its first socket.

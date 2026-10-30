@@ -499,7 +499,7 @@ where
 struct SubscribeCtx<'a> {
     client: &'a Client,
     circle: &'a CircleManager,
-    processor: &'a EngineProcessor,
+    processor: &'a Arc<EngineProcessor>,
     router: &'a RwLock<Router>,
     shutdown: &'a AtomicBool,
     own_pubkey: PublicKey,
@@ -731,7 +731,17 @@ impl SubscribeCtx<'_> {
                 });
             }
         }
-        self.processor.expect_eose_from(sub_id, issued, &covering);
+        if self.processor.narrow_eose_to(sub_id, issued, &covering) {
+            // Every relay still covering had answered before the narrowing, so
+            // no further EOSE redeems the advance: redeemed here, as a release
+            // redeems one, once what the REQ's replay still held is taken in.
+            flush_stored(self.processor, Some(sub_id)).await;
+            for hex in group_ids_hex {
+                self.processor.note_caught_up(hex);
+                let _ = self.processor.note_end_of_stored_events(hex);
+            }
+            self.processor.request_drive();
+        }
         covering
     }
 
@@ -1308,6 +1318,10 @@ impl LiveSyncCore {
         // CLEANLY-STOPPED engine, not a half-started one (orphaned tasks, stale
         // router entries, un-CLOSEd REQs); so on any error we tear down before
         // returning, and the caller can retry with a fresh `new_local`.
+        if burst {
+            // Before any REQ goes out, as in `resume_burst`.
+            self.processor.owe_come_back();
+        }
         let issued_inbox =
             if burst && !self.issues_inbox(BurstKind::Background, INBOX_BURSTS_PER_REQ) {
                 InboxSubscription {
@@ -1380,7 +1394,6 @@ impl LiveSyncCore {
         // A start into a burst drives as a burst open does: in the mode that
         // only finishes what is stored.
         if burst {
-            self.processor.owe_come_back();
             self.processor.request_drive();
         } else if !self.shutdown.load(Ordering::Acquire) {
             self.begin_started();
@@ -2198,6 +2211,10 @@ impl LiveSyncCore {
             return Err(LiveSyncError::NoSession);
         }
 
+        // Owed before any REQ goes out: the worker comes back at this open's
+        // first relay `EOSE`, which a fast relay sends before the subscribe
+        // returns.
+        self.processor.owe_come_back();
         if let Some(active) = active {
             let now = i64::try_from(nostr::Timestamp::now().as_secs()).unwrap_or(i64::MAX);
             // Re-anchor the STORED live set (base buckets + any dynamic singletons)
@@ -2287,7 +2304,6 @@ impl LiveSyncCore {
         // lifecycle gives: the full one in the foreground; in a burst the one
         // that only finishes what a relay has already decided. On the drive
         // task, never here: this holds the lifecycle lock.
-        self.processor.owe_come_back();
         if matches!(kind, BurstKind::Foreground) {
             self.serve_the_foreground();
         } else {
@@ -4107,10 +4123,9 @@ impl RepairPlane {
             }
             let ctx = self.ctx();
             let since = ctx.remove_reissue_since(&remaining_vec, now);
-            let asked: Vec<RelayUrl> = relays
-                .iter()
-                .filter_map(|relay| RelayUrl::parse(relay).ok())
-                .collect();
+            // A new REQ under the old sub-id: an answer the replaced one got
+            // must not count towards it.
+            let asked = ctx.open_delivery_windows(&relays, &sub_id, now);
             self.processor.expect_eose_from(&sub_id, &asked, &asked);
             let accepted = ctx
                 .subscribe_group(&relays, &sub_id, &remaining_vec, since)

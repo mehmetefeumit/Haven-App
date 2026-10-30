@@ -23,6 +23,7 @@
 
 mod helpers;
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -282,8 +283,8 @@ fn group_req(filter: &Filter) -> bool {
         .is_some_and(|kinds| kinds.contains(&Kind::Custom(445)))
 }
 
-/// Carol's live engine over `relays`, started and settled on relays that
-/// hold nothing yet, then paused: the next open is a background burst.
+/// Carol's live engine over `relays`, started and settled, then paused: the
+/// next open is a background burst.
 async fn paused_engine(fx: &CircleFixture, relays: &[&str]) -> LiveSyncCore {
     let carol = &fx.members[CAROL];
     let core = LiveSyncCore::new_local(
@@ -300,6 +301,21 @@ async fn paused_engine(fx: &CircleFixture, relays: &[&str]) -> LiveSyncCore {
     )
     .await
     .expect("carol's engine starts");
+    // `start` follows the circle's routing before it returns: a REQ issued
+    // anywhere else is moved off at once, racing that relay's EOSE, and what
+    // a test scripts there is never asked.
+    let wanted: HashSet<RelayUrl> = relays
+        .iter()
+        .map(|relay| RelayUrl::parse(relay).expect("a relay url"))
+        .collect();
+    assert!(
+        core.relays_in_pool_for_test()
+            .await
+            .into_iter()
+            .collect::<HashSet<_>>()
+            == wanted,
+        "the harness starts carol's engine on the relays her circle routes to"
+    );
     assert_eq!(
         core.wait_backlog_settled().await,
         BacklogOutcome::Settled,
@@ -800,24 +816,15 @@ async fn halted_with_the_eviction_held() -> (SeededRelay, CircleFixture, Departu
     (relay, fx, departure, refusing)
 }
 
-/// Another plane taking the held commit in ends the hold: the live plane
-/// serves the leave and its eviction, and the seal that follows is allowed
-/// and unreadable by the member removed, although no pager pass of the
-/// circle has completed since.
+/// Another plane taking the held commit in ends the hold: the live plane,
+/// on the circle's relay, serves the leave and its eviction as the session
+/// starts, and the seal that follows is allowed and unreadable by the member
+/// removed, although no pager pass of the circle has completed since.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_held_commit_the_live_plane_takes_in_ends_the_hold() {
-    let (_relay, fx, departure, _refusing) = halted_with_the_eviction_held().await;
+    let (relay, fx, _departure, _refusing) = halted_with_the_eviction_held().await;
     let (alice, bob, carol) = (&fx.members[ALICE], &fx.members[BOB], &fx.members[CAROL]);
-    let live = ScriptedRelay::start();
-    let core = paused_engine(&fx, &[live.url()]).await;
-    live.answer(
-        group_req,
-        vec![
-            Frame::Event(departure.eviction.clone()),
-            Frame::Event(departure.leave.clone()),
-            Frame::Eose,
-        ],
-    );
+    let core = paused_engine(&fx, &[relay.url.as_str()]).await;
     core.open_background_burst().await.expect("burst opens");
     assert_eq!(
         core.wait_backlog_settled().await,
